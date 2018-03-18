@@ -1,0 +1,405 @@
+drop program bb_auto_ecode_import1 go
+create program bb_auto_ecode_import1
+ 
+free record add_upd
+ 
+/****************Create Record Structures******************************/
+record add_upd
+(
+  1 product_type_list[*] ;upd/add to bb_isbt_product_type
+    2 ref_num 							 = f8
+    2 product_cd 						 = f8
+    2 isbt_barcode 						 = c15
+    2 primary_mnemonic					 = vc
+	2 bb_isbt_product_type_id			 = f8
+	2 new_bb_isbt_product_type_id		 = f8
+	2 insrt_upd_ind						 = i2
+	2 no_attr_ind						 = i2
+	2 validate_ind						 = i2
+  1 add_info_list[*] ;upd/add to bb_isbt_add_info
+    2 ref_num							 = f8
+	2 product_cd						 = f8
+	2 attribute_cd						 = f8
+	;2 bb_isbt_product_type_id			 = f8
+;	2 new_bb_isbt_product_type_id		 = f8
+	2 insrt_upd_ind						 = i2
+	2 no_attr_ind						 = i2
+  1 err[*]
+     2 primary_mnemonic    				 = vc
+     2 isbt_barcode						 = c15
+	 2 attribute						 = vc
+	 2 msg								 = vc
+)
+ 
+/*
+record requestin
+(
+   1 list_0[*]
+     2 primary_mnemonic    				 = vc
+     2 isbt_barcode						 = vc
+     2 attribute				    	 = vc
+)
+*/
+/********variable declaration*********/
+declare dtCur							 = q8 with nonconstant (cnvtdatetime(curdate,curtime3))
+declare err_msg 						 = vc
+declare err_size 						 = i2
+declare err_flag						 = i2
+declare bipteFileName					 = vc with noconstant("")
+declare biptsFileName					 = vc with noconstant("") ;concat("bipterror", fotmat(dtCur
+declare bipafeFileName					 = vc with noconstant("")
+declare bipafsFileName					 = vc with noconstant("")
+ 
+ 
+declare insrt_size						 = i2
+declare insrt_size2						 = i2
+declare upd_size						 = i2 ;bb_isbt_product_type
+declare temp_upd_size					 = i2
+declare temp_insrt_size					 = i2
+declare insrt_upd_size					 = i2 ;bb_isbt_product_type
+declare insrt_ind						 = i2
+declare cur_primary_mnemonic			 = vc
+declare prev_product_cd					 = f8
+declare no_attr_ind						 = i2
+declare cur_product_cd					 = f8
+declare cur_attribute_cd				 = f8
+declare cur_aliquot_ind					 = i2
+declare cur_autologous_ind				 = i2
+declare cur_directed_ind				 = i2
+declare cur_isbt_barcode				 = c5
+declare existing_bb_isbt_product_type_id = f8
+declare i_idx					   	 	 = i2
+declare j_idx							 = i2
+ 
+set bipteFileName						 = concat("d:bipterror", format(dtCur, "YYMMDDHHMMSSCC;;d"), ".txt")
+set biptsFileName						 = concat("d:biptsuccess", format(dtCur, "YYMMDDHHMMSSCC;;d"), ".txt")
+set bipafeFileName						 = concat("d:bipaferror", format(dtCur, "YYMMDDHHMMSSCC;;d"), ".txt")
+set bipafsFileName						 = concat("d:bipafsuccess", format(dtCur, "YYMMDDHHMMSSCC;;d"), ".txt")
+ 
+set err_size = 0
+set upd_size = 0
+set insrt_size = 0
+set insrt_upd_size = 0
+set prev_product_cd = 1;so first row doesn't match
+set cur_primary_mnemonic = ""
+ 
+;call echorecord(requestin)
+ 
+/*** Process input ***/
+for (i_idx = 1 to size(requestin->list_0,5))
+ 
+	set no_attr_ind = 0
+	set cur_product_cd = 0
+	set cur_attribute_cd = 0
+	set cur_aliquot_ind = 0
+	set cur_autologous_ind = 0
+	set cur_directed_ind = 0
+	set existing_bb_isbt_product_type_id = 0
+	set cur_primary_mnemonic = ""
+	set cur_isbt_barcode = ""
+ 	set insrt_ind = 0
+ 
+	set temp_insrt_size = 0
+	set temp_upd_size = 0
+ 
+	set err_flag = 0 ;false
+	set err_msg = ""
+ 
+/*** Validate product exists ***/
+	SELECT into 'nl:'
+		pi.product_cd
+		, primary_mnemonic = uar_get_code_display(pi.product_cd)
+		, pi.aliquot_ind
+		, pi.autologous_ind
+		, pi.directed_ind
+	FROM
+		product_index pi
+		, code_value cv
+	Plan pi where pi.active_ind = 1
+		and pi.product_cd > 0
+	Join cv where cv.code_value = pi.product_cd
+		and cv.code_set = 1604
+		and trim(cnvtupper(cv.display)) = trim(cnvtupper(requestin->list_0[i_idx].primary_mnemonic))
+	head report
+		match_cnt = 0
+	detail
+		match_cnt = match_cnt + 1
+	foot report
+		if (match_cnt = 1)
+			cur_product_cd = pi.product_cd
+			cur_primary_mnemonic = primary_mnemonic
+			cur_aliquot_ind = pi.aliquot_ind
+			cur_autologous_ind = pi.autologous_ind
+			cur_directed_ind = pi.directed_ind
+		else
+			err_flag = 1
+		endif
+	with nullreport
+ 
+	if (err_flag = 1) set err_msg = "No valid product exists in the database." endif
+ 
+/*** Validate attribute exists ***/
+	if (err_flag = 0)
+		if (requestin->list_0[i_idx].attribute > "")
+			SELECT into 'nl:'
+				cv.code_value
+			FROM
+				bb_isbt_attribute bia
+				, bb_isbt_attribute_r biar
+				, code_value cv
+			Plan bia where bia.active_ind = 1
+			;no convert functions used because data should be entered with macro
+				and bia.standard_display = requestin->list_0[i_idx].attribute
+			Join biar where biar.bb_isbt_attribute_id = bia.bb_isbt_attribute_id
+				and biar.active_ind = 1
+				and biar.attribute_cd > 0
+			Join cv where cv.code_value = biar.attribute_cd
+				and cv.code_set = 1612
+				and cv.cdf_meaning = "SPTYP"
+			head report
+				match_cnt = 0
+			detail
+				match_cnt = match_cnt + 1
+			foot report
+				if (match_cnt = 1)
+					cur_attribute_cd = cv.code_value
+				else
+					err_flag = 1
+				endif
+			with nullreport
+		else
+			;checks to see if product has > 1 attribute and sets no_attr_ind appropriately
+			if (cnvtupper(cur_primary_mnemonic) = trim(cnvtupper(requestin->list_0[i_idx+1].primary_mnemonic)))
+				set no_attr_ind = 0
+			else
+				set no_attr_ind = 1
+			endif
+		endif
+ 
+		if (err_flag = 1) set err_msg = "No valid attribute exists in the database." endif
+ 
+	endif
+ 
+	call echo(err_flag)
+ 
+/*** Write error or write to request ***/
+	if (err_flag = 1)
+		call ErrorHandler(err_msg, i_idx)
+	else
+ 
+	;call echo(cur_aliquot_ind)
+	;call echo(cur_autologous_ind)
+	;call echo(cur_directed_ind)
+		if (cur_product_cd != prev_product_cd)
+/*** Determine if row already exists or will be inserted ***/
+			select into 'nl:'
+				bipt.bb_isbt_product_type_id
+			from
+				product_index pi
+				, bb_isbt_product_type bipt
+			plan pi where pi.active_ind = 1
+				and pi.product_cd > 0
+				and pi.aliquot_ind = cur_aliquot_ind
+				and pi.autologous_ind = cur_autologous_ind
+				and pi.directed_ind = cur_directed_ind
+			join bipt where bipt.product_cd = pi.product_cd
+				and bipt.product_cd = cur_product_cd
+				and bipt.active_ind = 1
+			head report
+				match_cnt = 0
+			detail
+				match_cnt = match_cnt + 1
+			foot report
+				if (match_cnt = 1)
+					temp_upd_size = temp_upd_size + 1
+					upd_size = upd_size + 1
+					existing_bb_isbt_product_type_id = bipt.bb_isbt_product_type_id
+				endif
+			with nullreport
+ 
+			if (temp_upd_size < 1)
+				select into 'nl:'
+					bipt.bb_isbt_product_type_id
+				from
+					product_index pi
+					, bb_isbt_product_type bipt
+				plan pi where pi.active_ind = 1
+					and pi.aliquot_ind = cur_aliquot_ind
+					and pi.autologous_ind = cur_autologous_ind
+					and pi.directed_ind = cur_directed_ind
+				join bipt where bipt.product_cd = pi.product_cd
+					and bipt.isbt_barcode = requestin->list_0[i_idx].isbt_barcode
+					and bipt.active_ind = 1
+				head report
+					match_cnt = 0
+				detail
+					match_cnt = match_cnt + 1
+				foot report
+					if (match_cnt > 0)
+						call ErrorHandler("Duplicate ecode found.", i_idx)
+					else
+						insrt_size = insrt_size + 1
+						insrt_ind = 1
+					endif
+				with nullreport
+			endif
+ 
+			set insrt_upd_size = insrt_upd_size + 1
+ 
+			set stat = alterlist(add_upd->product_type_list,insrt_upd_size) ;potential optimization
+ 
+			set add_upd->product_type_list[insrt_upd_size].ref_num = insrt_upd_size
+			set add_upd->product_type_list[insrt_upd_size].isbt_barcode = requestin->list_0[i_idx].isbt_barcode
+			set add_upd->product_type_list[insrt_upd_size].product_cd = cur_product_cd
+			set add_upd->product_type_list[insrt_upd_size].insrt_upd_ind = insrt_ind
+			set add_upd->product_type_list[insrt_upd_size].no_attr_ind = no_attr_ind 
+			set add_upd->product_type_list[insrt_upd_size].bb_isbt_product_type_id = existing_bb_isbt_product_type_id ;0 if insert
+ 
+		endif
+ 
+	endif
+ 
+	set prev_product_cd = cur_product_cd
+ 
+endfor
+ 
+call echorecord(add_upd)
+;call echo(insrt_size)
+;call echo(
+;call echo(build("insrt_size",insrt_size)
+;call echo(build("insrt_upd_size", insrt_upd_size)
+;call echo(build("upd_size", upd_size)
+ 
+/*** Get new bb_product_type_id's ***/
+if (insrt_size > 0)
+	set next_pathnet_seq = 0.0
+	for (index = 1 to insrt_upd_size)
+		if (add_upd->product_type_list[index].insrt_upd_ind = 1)
+    		select into "nl:"
+        		seqn = seq(pathnet_seq, nextval)
+    		from
+        		dual
+    		detail
+        		add_upd->product_type_list[index].new_bb_isbt_product_type_id = cnvtreal(seqn)
+    		with nocounter
+    	endif
+	endfor
+ 
+endif
+ 
+set cACTIVE = uar_get_code_by("MEANING",48,"ACTIVE")
+ 
+update into bb_isbt_product_type bipt,
+            (dummyt d1 with seq = value(size(add_upd->product_type_list, 5)))
+    set
+            ;bipt.active_ind              	= 0,
+            ;bipt.active_status_cd           = cINACTIVE,
+            bipt.active_status_dt_tm        = cnvtdatetime(curdate,curtime3),
+            bipt.active_status_prsnl_id 	= reqinfo->updt_id,
+            bipt.updt_cnt           	    = bipt.updt_cnt + 1,
+            bipt.updt_dt_tm         	    = cnvtdatetime(curdate,curtime3),
+            bipt.updt_id            	    = reqinfo->updt_id,
+            bipt.updt_task          	    = reqinfo->updt_task,
+            bipt.updt_applctx       	    = reqinfo->updt_applctx,
+            bipt.isbt_barcode				= add_upd->product_type_list[d1.seq].isbt_barcode
+    plan d1
+	   where add_upd->product_type_list[d1.seq].insrt_upd_ind = 0
+	   and add_upd->product_type_list[d1.seq].bb_isbt_product_type_id > 0
+    join bipt
+	   where add_upd->product_type_list[d1.seq].bb_isbt_product_type_id = bipt.bb_isbt_product_type_id
+    with nocounter
+ 
+INSERT
+  into bb_isbt_product_type bipt,
+    (dummyt d1 WITH seq = VALUE(SIZE(add_upd->product_type_list, 5)))
+  SET
+        bipt.bb_isbt_product_type_id 	   = add_upd->product_type_list[d1.seq].new_bb_isbt_product_type_id,
+        bipt.product_cd 				   = add_upd->product_type_list[d1.seq].product_cd,
+        bipt.isbt_barcode 				   = add_upd->product_type_list[d1.seq].isbt_barcode,
+        bipt.active_ind        			   = 1,
+        bipt.active_status_cd   		   = cACTIVE,
+        bipt.active_status_dt_tm 		   = cnvtdatetime(curdate,curtime3),
+        bipt.active_status_prsnl_id		   = reqinfo->updt_id,
+        bipt.updt_cnt           		   = 0,
+        bipt.updt_dt_tm         	       = cnvtdatetime(curdate,curtime3),
+        bipt.updt_id            		   = reqinfo->updt_id,
+        bipt.updt_task          		   = reqinfo->updt_task,
+        bipt.updt_applctx       		   = reqinfo->updt_applctx
+ 
+PLAN d1
+	where add_upd->product_type_list[d1.seq].insrt_upd_ind = 1
+	and add_upd->product_type_list[d1.seq].new_bb_isbt_product_type_id > 0
+JOIN bipt
+	where bipt.bb_isbt_product_type_id = add_upd->product_type_list[d1.seq].new_bb_isbt_product_type_id ;how?
+WITH
+    NOCOUNTER
+ 
+commit
+ 
+/*****************************************************************************/
+/* Validate results written to table                                         */
+/*****************************************************************************/
+select into "nl:"
+from
+	(dummyt d with seq = value(size(add_upd->product_type_list,5)))
+	, bb_isbt_product_type bipt
+where bipt.product_cd = add_upd->product_type_list[d.seq].product_cd
+	and bipt.isbt_barcode = add_upd->product_type_list[d.seq].isbt_barcode
+	and bipt.product_cd = add_upd->product_type_list[d.seq].product_cd
+	and bipt.active_ind = 1
+detail
+	add_upd->product_type_list[d.seq].validate_ind = 1
+	add_upd->product_type_list[d.seq].primary_mnemonic = uar_get_code_display(bipt.product_cd)
+with
+	nullreport
+ 
+/*****************************************************************************/
+/* Move attributes from requestin to add_upd->add_info_list                  */
+/*****************************************************************************/
+for (x_idx = 1 to size(add_upd->product_type_list,5))
+	if (add_upd->product_type_list[x_idx].validate_ind = 1)
+		for (y_idx = 1 to size(requestin->list_0,5))
+			if (cnvtupper(trim(add_upd->product_type_list[x_idx].primary_mnemonic)) = cnvtupper(trim(requestin->list_0.
+			primary_mnemonic)))
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+/*****************************************************************************/
+/* Write errors and success to file                                          */
+/*****************************************************************************/
+if (err_size > 1)
+	select into value(bipteFileName)
+		primary_mnemonic = substring(1,50,add_upd->err[d.seq].primary_mnemonic
+		, isbt_barcode = substring(1,50,add_upd->err[d.seq].isbt_barcode
+		, attribute = substring(1,50,add_upd->err[d.seq].attribute
+		, error_msg = substring(1,50,add_upd->err[d.seq].msg
+	from
+		(dummyt d with seq = value(size(add_upd->err,5)))
+	plan d
+	with
+		nullreport
+ 
+/*****************************************************************************/
+/* ReturnStatus subroutine                                                   */
+/*****************************************************************************/
+declare ErrorHandler(ErrorMsg = vc, ErrorPos = i2) = NULL
+ 
+subroutine ErrorHandler(ErrorMsg, ErrorPos)
+	set err_size = err_size + 1
+	set stat = alterlist(add_upd->err, err_size)
+ 
+	set add_upd->err[err_size].primary_mnemonic = requestin->list_0[ErrorPos].primary_mnemonic
+	set add_upd->err[err_size].isbt_barcode = requestin->list_0[ErrorPos].isbt_barcode
+	set add_upd->err[err_size].attribute = requestin->list_0[ErrorPos].attribute
+	set add_upd->err[err_size].msg = ErrorMsg
+ 
+end
+ 
+#EXIT_SCRIPT
+ 
+end
+go

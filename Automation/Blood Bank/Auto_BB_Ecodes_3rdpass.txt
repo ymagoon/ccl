@@ -1,0 +1,514 @@
+ /*~bb~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1998 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Request #:
+ 
+        Product:                PathNet
+        Product Team:           BloodBank
+ 
+        Program purpose:        Add product type data supplied by .csv file to the
+                                bb_isbt_product_type table and bb_isbt_add_info
+                                table or re-alias products based on user input
+ 
+        Executing from:
+        Special Notes:          NONE
+ 
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod   Date       Engineer             Comment                         *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 01/27/14   Yitzhak Magoon       Initial Release                   *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+;1 initiate record structures
+;2 write data from the csv file to the request_valid record structure
+;3 ensure the product and attribute supplied are built in the system
+;4 ensure product/ecode combination is valid
+;5 write data to BB_ISBT_PRODUCT_TYPE table
+;6 write data to BB_ISBT_ADD_INFO table
+;7 re-alias products
+;8 if program fails out, log the data to the log file
+ 
+set trace backdoor p30ins go
+ 
+/****************Free Record Structures for multiple use******************************/
+free record request_product_type go ;running these multiple times in a row I found the log files weren't accurate
+free record request_add_info go
+free record request_valid go
+ 
+drop program Auto_BB_Ecodes go
+create program Auto_BB_Ecodes
+ 
+;begin 1
+record request_product_type ;request structure for bb_isbt_product_type table
+(
+  1 product_type_list[*]
+    2 ref_num                 = f8
+    2 product_cd              = f8
+    2 isbt_barcode            = c15
+)
+ 
+record request_add_info ;request structure for bb_isbt_add_info table
+(
+  1 add_info_list[*]
+    2 ref_num                 = f8
+    ;2 product_cd             = f8
+    2 bb_isbt_product_type_id = f8
+    2 attribute_cd            = f8
+)
+ 
+record request_valid ;all data from csv file is written to this record structure
+(
+   1 qual[*]
+     2 product_cd_mnemonic    = vc
+     2 product_cd_valid       = i2 ;3
+     2 product_cd					    = f8
+     2 autologous_ind       	= i2
+     2 directed_ind			      = i2
+     2 aliquot_ind            = i2
+ 
+     2 isbt_barcode					  = vc
+     ;2 isbt_barcode_valid    = i2
+ 
+     2 attribute_cd_mnemonic  = vc
+     2 attribute_cd 				  = f8
+     2 attribute_valid				= i2 ;3
+ 
+     2 add_upd_ind					  = i2
+)
+ 
+record request_temp ;based on the way the data will populate the excel sheet a temp record structure is necessary
+(
+   1 qual[*]
+     2 ref_num                = i2
+     2 product_cd					    = f8
+     2 isbt_barcode					  = vc
+     2 autologous_ind       	= i2
+     2 directed_ind			      = i2
+     2 aliquot_ind            = i2
+)
+ 
+record duplicate_barcode ;used in bb_isbt_get_duplicate_isbt_alias might be able to remove
+(
+  1 product_list[*]
+    2 product_cd           = f8
+    2 duplicate_list[*]
+      3 isbt_barcode       = c15
+)
+ 
+;SET STAT = MOVEREC(requestin,REQUEST_Process)
+ 
+;begin 2
+declare Seq1 = i2
+set stat = alterlist(request_valid->qual,size(requestin->list_0,5))
+ 
+for (Seq1=1 to size(requestin->List_0,5))
+    set request_valid->qual[Seq1].product_cd_mnemonic = requestin->List_0[Seq1].primary_mnemonic ;name of first excel column
+    set request_valid->qual[Seq1].isbt_barcode = requestin->List_0[Seq1].ecode ;name of second excel column
+    set request_valid->qual[Seq1].attribute_cd_mnemonic = requestin->list_0[Seq1].attribute ;name of third excel column
+ 
+    ;determines whether products will be added to the database or whether they need to be re-aliased
+    ;it would probably be best to have a separate script to re-alias ecodes, but leaving in here for now
+    if (request_valid->qual[Seq1].isbt_barcode = "" and request_valid->qual[Seq1].attribute_cd_mnemonic = "")
+        set request_valid->qual[Seq1].add_upd_ind = 1
+    else
+        set request_valid->qual[Seq1].add_upd_ind = 0
+    endif
+endfor
+ 
+;begin 3
+declare Seq2 = i2
+declare CountRows = i4
+declare CountInvalidRows = i4
+ 
+set CountRows =0
+set CountInvalidRows = 0
+ 
+set stat = alterlist(request_valid->qual,size(request_valid->qual,5))
+ 
+for (Seq2 = 1 to size(request_valid->qual,5))
+    set CountRows = CountRows +1
+ 
+    /***************************Validate products exist*******************************************/
+    set request_valid->qual[Seq2].product_cd_valid = 0
+    SELECT distinct into 'nl:'
+        product_cd = pi.product_cd
+        , autologous_ind = pi.autologous_ind
+        , directed_ind = pi.directed_ind
+        , aliquot_ind = pi.aliquot_ind
+    FROM
+        product_index pi
+        , code_value cv
+        /*if product exists on bb_isbt_product_type this will consider it a duplicate. While it is possible to have more than one 
+        ecode associated with a product, it is Cerner's recommendation that a 1 to 1 product to ecode relationship is made. This 
+        script will not update more than one ecode to a product. That will have to be done manually. */
+    Plan pi where not exists (SELECT 
+                                  pi.product_cd
+                              FROM
+                                  bb_isbt_product_type bipt
+                              Where bipt.product_cd = pi.product_cd
+                                  and bipt.active_ind = 1)
+    and pi.active_ind = 1
+    Join cv where cv.code_value = pi.product_cd
+	     and cnvtupper(cv.display) = cnvtupper(request_valid->qual[Seq2].product_cd_mnemonic)
+ 
+    Detail
+        request_valid->qual[Seq2].product_cd_valid = 1
+        request_valid->qual[Seq2].product_cd = product_cd
+        request_valid->qual[Seq2].autologous_ind = autologous_ind
+        request_valid->qual[Seq2].directed_ind = directed_ind
+        request_valid->qual[Seq2].aliquot_ind = aliquot_ind
+    with nocounter
+ 
+    if(request_valid->qual[Seq2].product_cd_valid = 0)
+        set CountInvalidRows = CountInvalidRows + 1
+    endif
+ 
+    /******************************Validate attributes exist*******************************/
+    ;if (request_valid->qual[Seq2].add_upd_ind = 0)
+    ;i was going to add attribute_valid = 1 here for just re-aliasing but realized if prod is valid and add_upd_ind = 1
+    ;then I can ignore what is in the attribute_valid alltogether
+    set request_valid->qual[Seq2].attribute_valid = 0
+    SELECT into 'nl:'
+        attribute_cd = cv.code_value
+    FROM
+        bb_isbt_attribute bia
+        , bb_isbt_attribute_r biar
+        , code_value cv
+    Plan bia where bia.active_ind = 1
+        ;cnvtupper may need to be implemented. Validated process to include attributes with excel macro front-end in progress
+        and bia.standard_display = request_valid->qual[Seq2].attribute_cd_mnemonic
+    Join biar where biar.bb_isbt_attribute_id = bia.bb_isbt_attribute_id
+        and biar.active_ind = 1
+    Join cv where cv.code_value = biar.attribute_cd
+        and cv.cdf_meaning = "SPTYP"
+ 
+    Detail
+        request_valid->qual[Seq2].attribute_valid = 1
+        request_valid->qual[Seq2].attribute_cd = attribute_cd
+    with nocounter
+ 
+    if (request_valid->qual[Seq2].attribute_valid = 0)
+        set CountInvalidRows = CountInvalidRows + 1
+    endif
+ 
+endfor ;end of initial input and data validation
+ 
+;call echorecord (request_valid)
+ 
+/*populate temp record with each product one time - this ensures only one row written to bb_isbt_product_type. This also ensures 
+that the record structure is accurate with the data for logging purposes. If request was sent during the first iteration, 1 
+product would be updated. If request was populated a second time, it would be sent and the first product would be written a second
+time. */
+SELECT
+    ref_num = d.seq
+    , product_cd = request_valid->qual[d.seq].product_cd
+    , isbt_barcode = request_valid->qual[d.seq].isbt_barcode
+ 
+FROM (DUMMYT D WITH SEQ = size(request_valid->qual,5))
+ 
+Plan D where request_valid->qual[d.seq].product_cd_valid = 1
+and request_valid->qual[d.seq].attribute_valid = 1
+ 
+ORDER BY
+    product_cd
+ 
+Head Report
+    rec_cnt = 0
+Head product_cd
+    dummy = 0
+Head isbt_barcode
+    rec_cnt = rec_cnt + 1
+ 
+if(size(request_temp->qual,5) <= rec_cnt)
+  stat = alterlist(request_temp->qual,rec_cnt + 5)
+endif
+		request_temp->qual[rec_cnt].ref_num = rec_cnt
+		request_temp->qual[rec_cnt].product_cd = CNVTINT(request_valid->qual[d.seq].product_cd)
+		request_temp->qual[rec_cnt].isbt_barcode = request_valid->qual[d.seq].isbt_barcode
+		request_temp->qual[rec_cnt].autologous_ind = request_valid->qual[d.seq].autologous_ind
+		request_temp->qual[rec_cnt].directed_ind = request_valid->qual[d.seq].directed_ind
+		request_temp->qual[rec_cnt].aliquot_ind = request_valid->qual[d.seq].aliquot_ind
+ 
+Foot product_cd
+  stat = alterlist(request_temp->qual,rec_cnt)
+ 
+Foot isbt_barcode
+    dummy=1
+with nocounter
+ ;call echorecord (request_valid)
+ 
+;begin 4
+if (CountInvalidRows=0)
+
+    declare Seq3 = i2
+    declare CountDuplicateRows = i4
+ 
+    set CountDuplicateRows = 0
+    declare count1 = i2
+    declare count2 = i2
+ 
+    set count1 = 0
+    set count2 = 0
+ /*data re-validation must occur before every write to the database. Two duplicate products can be included in the record 
+ structure and pass the initial data validation. This secondary check ensures that each additional product written to the tables 
+ are not duplicates of each other. If this returns a row then there is a duplicate. This code isn't currently working 
+ and needs modification. */
+    for (Seq3 = 1 to size(request_temp->qual,5)) 
+       
+        SELECT into 'nl:'
+            product_cd = pi.product_cd
+        FROM
+            product_index pi
+        Plan pi where not exists (SELECT
+                                      pi.product_cd
+                                  FROM
+                                      bb_isbt_product_type bipt
+                                  Where bipt.product_cd = pi.product_cd
+                                      and bipt.active_ind = 1)
+            ;removed code_value because we now have the product_cd
+            and pi.active_ind = 1 
+            and pi.product_cd = request_temp->qual[Seq3].product_cd
+        
+        if (curqual > 0) ;if record returned skip further validation, write to log and go through the next iteration of the loop
+            ;insert logging here
+            go to next_record
+        endif
+ 
+ ;bb_isbt_get_duplicate_isbt_alias - slightly modified
+        /*If the product does not exist on the bb_isbt_product_type table we need to validate that the ecode 
+        being passed by the csv file is not already associated to a product unless certain parameters are met
+        per product. If this returns a row there is a duplicate */
+        SELECT into "nl:"
+	         b.isbt_barcode,
+	         b.product_cd,
+	         pi.autologous_ind,
+	         pi.directed_ind,
+	         pi.product_cd
+ 
+        FROM
+	         bb_isbt_product_type  b,
+	         product_index  pi
+ 
+        Plan b where b.isbt_barcode = request_temp->qual[Seq3].isbt_barcode and b.active_ind = 1
+        Join pi where pi.product_cd = b.product_cd
+		                and ((pi.autologous_ind = request_temp->qual[Seq3].autologous_ind
+				            and pi.directed_ind  = request_temp->qual[Seq3].directed_ind
+				            and pi.aliquot_ind = request_temp->qual[Seq3].aliquot_ind)
+				    or	(pi.aliquot_ind = request_temp->qual[Seq3].aliquot_ind
+				            and ((pi.autologous_ind = 1
+				            and request_temp->qual[Seq3].autologous_ind = 1)
+				    or (pi.directed_ind = 1
+					          and request_temp->qual[Seq3].directed_ind = 1))))
+					          
+/*four different products can exist in the system and not be duplicates. These are defined by the auto_ind, dir_ind and 
+aliquot_ind. If a isbt_barcode = "E1234" where auto,dir,aliquot_ind = 0 and the product in request_temp has an isbt_barcode = "
+E1234" AND auto,dir,aliquot_ind = 0 then it is a duplicate product. However, if auto=1 and dir,aliquot = 0 it is not duplicate. 
+The four patterns that are valid to be in the system at one time are as follows (auto,dir,aliquot ind respectively) 
+0 0 0 
+0 0 1
+0 1 0
+1 0 1
+The join structure above tries to imitate that, but it is not necessarily right at the moment. As another example, if "E1234" 1 0 
+0 exists in the system and "E1234" 0 1 0 is sent in the record structure, the product is valid and should be allowed to be written
+
+*/
+				
+				if (curqual > 0) ;if row is returned go to next iteration of loop and write to log
+            ;insert logging here
+            go to next_record
+        endif	
+        
+/*Need to create a new record structure to actually write to the table. request_product_type can be used as a record to log all 
+rows written, but it cannot be used to write! The reason is on the first pass it will pass one record. The second pass it will 
+pass the first record AND the second and so forth. Therefore, we need a record structure that only sends one record at a time*/
+
+        set request_product_type->product_type_list[Seq3].ref_num = request_temp->qual[Seq3].ref_num
+        set request_product_type->product_type_list[Seq3].product_cd = request_temp->qual[Seq3].product_cd
+        set request_product_type->product_type_list[Seq3].isbt_barcode = request_temp->qual[Seq3].isbt_barcode
+        
+        call echorecord (request_product_type)
+
+execute BB_ADD_ISBT_PRODUCT_TYPE with REPLACE("REQUEST",REQUEST_PRODUCT_TYPE)  ;replace with new record structure                
+ 
+ /* existing part of bb script but I'm not sure it's needed if logging is happening in the curqual if statements
+ 
+        ORDER BY
+            b.product_cd,
+            b.isbt_barcode
+ 
+        Head
+            b.product_cd
+            count1 = count1 + 1
+ 
+            stat = alterlist (duplicate_barcode->product_list, count1)
+            duplicate_barcode->product_list[count1].product_cd = b.product_cd
+            count2 = 0
+ 
+        Head
+            b.isbt_barcode
+            count2 = count2 + 1
+ 
+            stat = alterlist(duplicate_barcode->product_list[count1].duplicate_list, count2 )
+            duplicate_barcode->product_list[count1].duplicate_list[count2].isbt_barcode = b1.isbt_barcode
+ 
+        Foot
+            b.isbt_barcode
+            row + 1
+        Foot
+            b.product_cd
+                row + 1
+        with  nocounter
+ 
+        ;If the size of the request = 0, then there are no duplicates.
+        if (size(duplicate_barcode->product_list,5) = 0)
+            set CountDuplicateRows = 0
+        else
+            set CountDuplicateRows = 1
+        endif
+ */
+        call echo(CountDuplicateRows)
+       ; call echorecord(request_temp)
+       
+    #next_record
+
+    endfor
+endif
+call echo(CountDuplicateRows)
+call echorecord(request_temp)
+ ;call echo (size(request_temp->qual,5))
+;call echorecord (request_temp)
+ 
+ ;after bb_isbt_product_type is updated bb_isbt_add_info needs to be updated. Everything below is old code. Need to return data 
+ ;from reply record structure after executing each record and write it to a record structure to be used to update this next table.
+ 
+/***************If all data is valid write it to BB_ISBT_PRODUCT_TYPE***************************
+SELECT
+  TxtRefNum = d.seq
+  , TxtProductCd = Request_valid->qual[d.seq].product_cd
+  , TxtISBTBarcode = Request_valid->qual[d.seq].isbt_barcode
+  , TxtAttribute = Request_valid->qual[d.seq].attribute_cd
+ 
+FROM (DUMMYT D WITH SEQ = SIZE(REQUEST_valid->qual,5))
+ 
+PLAN D where Request_valid->qual[d.seq].product_cd_valid = 1
+and Request_valid->qual[d.seq].isbt_barcode_valid = 1 and Request_valid->qual[d.seq].attribute_valid = 1
+ 
+order by TxtProductCd
+ 
+head report
+  x2=0
+head TxtProductCd
+  dummy = 0
+head TxtISBTBarcode
+  x2=x2+1
+ ;detail - attribute needs to be loaded in detail section (may be more than one)
+if(size(request_1->product_type_list,5)<=x2)
+  stat = alterlist(request_1->product_type_list,x2+5)
+  ;stat = alterlist(request_2->add_info_list,x2+5)
+endif
+		request_1->product_type_list[x2].ref_num = d.seq
+		request_1->product_type_list[x2].product_cd = CNVTINT(request_valid->qual[d.seq].product_cd)
+		request_1->product_type_list[x2].isbt_barcode = request_valid->qual[d.seq].isbt_barcode
+ 
+		;request_2->add_info_list[x2].ref_num = d.seq
+		;request_2->add_info_list[x2].product_cd = CNVTINT(request_valid->qual[d.seq].product_cd)
+		;request_2->add_info_list[x2].attribute_cd = CNVTINT(request_valid->qual[d.seq].attribute_cd)
+ 
+foot TxtProductCd
+  stat = alterlist(request_1->product_type_list,x2)
+  ;stat = alterlist(request_2->add_info_list,x2)
+foot TxtISBTBarcode
+dummy=1
+with nocounter
+ 
+;call echorecord(request_1)
+execute BB_ADD_ISBT_PRODUCT_TYPE with REPLACE("REQUEST",REQUEST_1)
+ 
+/***************If all data is valid write it to BB_ISBT_ADD_INFO***************************
+SELECT
+  TxtRefNum = d.seq
+  , TxtProductCd = Request_valid->qual[d.seq].product_cd
+  , TxtISBTBarcode = Request_valid->qual[d.seq].isbt_barcode
+  , TxtAttribute = Request_valid->qual[d.seq].attribute_cd
+ 
+FROM (DUMMYT D WITH SEQ = SIZE(REQUEST_valid->qual,5))
+      , bb_isbt_product_type bipt
+ 
+PLAN D where Request_valid->qual[d.seq].product_cd_valid = 1
+and Request_valid->qual[d.seq].isbt_barcode_valid = 1 and Request_valid->qual[d.seq].attribute_valid = 1
+Join bipt where bipt.product_cd = Request_valid->qual[d.seq].product_cd
+    and bipt.isbt_barcode = Request_valid->qual[d.seq].isbt_barcode
+    and bipt.active_ind = 1
+    and bipt.product_cd != 0
+ 
+order by TxtProductCd
+ 
+head report
+  x2=0
+ 
+detail
+  x2=x2+1
+if (mod(x2,5) = 1)
+  stat = alterlist(request_2->add_info_list,x2+4)
+endif
+ 
+		request_2->add_info_list[x2].ref_num = request_1->product_type_list[d.seq].ref_num
+		request_2->add_info_list[x2].product_cd = CNVTINT(request_valid->qual[d.seq].product_cd)
+		request_2->add_info_list[x2].attribute_cd = CNVTINT(request_valid->qual[d.seq].attribute_cd)
+		request_2->add_info_list[x2].bb_isbt_product_type_id = bipt.bb_isbt_product_type_id
+ 
+foot report
+  stat = alterlist(request_2->add_info_list,x2)
+with nocounter
+ 
+call echorecord(request_2)
+execute BB_ADD_ISBT_ADD_INFO with REPLACE("REQUEST",REQUEST_2)
+ 
+call echo("///////////////////////////////////////////////////////////////////////////////////////")
+call echo("/////////////////////////////////////Importing Done////////////////////////////////////")
+call echo("///////////////////////////////////////////////////////////////////////////////////////")
+ 
+/***************If data is not valid error out and write data to log file***************************
+else
+ 
+#log_file
+call clear(1,1)
+call video(i)
+call text(2, 4, "Importing has stopped because due to an error in the csv file.")
+call text(3, 4, "Please check the log file Auto_BB_Ecodes_log and try again")
+ 
+select into "Auto_BB_Ecodes_log"
+  primary_synonym = request_valid->qual[d.seq].product_cd_mnemonic
+  , primary_synonym_valid = if(request_valid->qual[d.seq].product_cd_valid = 1) "Yes" else "No" endif
+  , ecode = request_valid->qual[d.seq].isbt_barcode
+  , ecode_valid = if(request_valid->qual[d.seq].isbt_barcode_valid = 1) "Yes" else "No" endif
+ 
+FROM (DUMMYT D WITH SEQ = SIZE(request_valid->qual,5))
+PLAN D
+with nocounter, version
+ 
+endif
+ */
+end
+go

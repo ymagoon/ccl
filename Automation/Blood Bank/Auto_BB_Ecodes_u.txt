@@ -1,0 +1,265 @@
+ set trace backdoor p30ins go
+ 
+/****************Free Record Structures for multiple use******************************/
+ free record request go
+ free record request_valid go
+ 
+drop program Auto_BB_Ecodes go
+create program Auto_BB_Ecodes
+ 
+/****************Create Record to be sent to program******************************/
+RECORD request_1
+(
+  1 product_type_list[*]
+    2 ref_num = f8
+    2 product_cd = f8
+    2 isbt_barcode = c15
+)
+
+RECORD request_2
+(
+  1 add_info_list[*]
+    2 ref_num = f8
+    2 product_cd = f8
+    2 bb_isbt_product_type_id = f8
+    2 attribute_cd = f8
+) 
+/********************Create another record to do the validation*****************************/
+ 
+RECORD REQUEST_valid
+(
+   1 qual[*]
+     2 product_cd_mnemonic    		= vc
+     2 product_cd_valid             = I2
+     2 product_cd					= f8
+ 
+     2 isbt_barcode					= vc
+     2 isbt_barcode_valid           = I2
+     2 isbt_add_ind					= I2 ;future functionality
+     2 isbt_upd_ind					= I2 ;future functionality
+ 
+     2 attribute_cd_mnemonic = vc
+     2 attribute_cd 				= f8
+     2 attribute_valid				= I2
+)
+ 
+;SET STAT = MOVEREC(requestin,REQUEST_Process)
+ 
+/*****************Copy the requestin (csv) into the request_valid***********************/
+declare Seq1 = I2
+set stat = alterlist(request_valid->qual,size(requestin->list_0,5))
+ 
+for (Seq1=1 to size(requestin->List_0,5))
+	set Request_valid->qual[Seq1].product_cd_mnemonic = requestin->List_0[Seq1].primary_mnemonic ;name first excel column this
+	set Request_valid->qual[Seq1].isbt_barcode = requestin->List_0[Seq1].ecode ;name second excel column this
+	set Request_valid->qual[Seq1].attribute_cd_mnemonic = requestin->list_0[Seq1].attribute ;name third excel column this
+endfor
+ 
+/*********************Loop through second record*************************/
+declare Seq2 = I2
+ 
+declare CountRows = I4
+declare CountInvalidRows = I4
+ 
+set stat = alterlist(request_valid->qual,size(request_valid->qual,5))
+ 
+set CountRows =0
+set CountInvalidRows = 0
+ 
+for (Seq2 = 1 to size(request_valid->qual,5))
+set CountRows = CountRows +1
+ 
+/************************************Get invalid products *******************************************/
+set request_valid->qual[Seq2].product_cd_valid = 0
+SELECT distinct into 'nl:'
+	TxtProductCd = pi.product_cd
+ 
+FROM
+	product_index pi
+	, code_value cv
+Plan pi where not exists (select
+                              pi.product_cd
+                          from bb_isbt_product_type bipt
+                          where bipt.product_cd = pi.product_cd
+                              and bipt.active_ind = 1)
+    and pi.active_ind = 1
+Join cv where cv.code_value = pi.product_cd
+	  and cnvtupper(cv.display) = cnvtupper(REQUEST_valid->qual[Seq2].product_cd_mnemonic)
+ 
+detail
+	request_valid->qual[Seq2].product_cd_valid = 1
+	request_valid->qual[Seq2].product_cd = TxtProductCd
+with nocounter
+ 
+if(request_valid->qual[Seq2].product_cd_valid = 0)
+	set CountInvalidRows = CountInvalidRows + 1
+endif
+ 
+/************************************Get invalid ecodes*******************************/
+;future functionality to add and or update. First pass will simply update ecodes that do not exist in system
+set request_valid->qual[Seq2].isbt_barcode_valid = 1
+SELECT into 'nl:'
+	TxtISBTBarcode = bipt.isbt_barcode
+FROM
+	bb_isbt_product_type bipt
+Where bipt.active_ind = 1 and bipt.isbt_barcode = request_valid->qual[Seq2].isbt_barcode
+ 
+detail
+	request_valid->qual[Seq2].isbt_barcode_valid = 0
+with nocounter
+ 
+if (request_valid->qual[Seq2].isbt_barcode_valid = 0)
+	set CountInvalidRows = CountInvalidRows + 1
+endif
+ 
+/************************************Get invalid attributes*******************************/
+set request_valid->qual[Seq2].attribute_valid = 0
+SELECT into 'nl:'
+  TxtAttribute = cv.code_value
+FROM
+  bb_isbt_attribute bia
+  , bb_isbt_attribute_r biar
+  , code_value cv
+Plan bia where bia.active_ind = 1
+    and bia.standard_display = request_valid->qual[Seq2].attribute_cd_mnemonic
+Join biar where biar.bb_isbt_attribute_id = bia.bb_isbt_attribute_id
+    and biar.active_ind = 1
+Join cv where cv.code_value = biar.attribute_cd
+    and cv.cdf_meaning = "SPTYP"
+ 
+detail
+	request_valid->qual[Seq2].attribute_valid = 1
+	request_valid->qual[Seq2].attribute_cd = TxtAttribute
+with nocounter
+ 
+if (request_valid->qual[Seq2].attribute_valid = 0)
+	set CountInvalidRows = CountInvalidRows + 1
+endif
+ 
+endfor
+ 
+call echorecord (request_valid)
+ 
+/***************If all data is valid write it to BB_ISBT_PRODUCT_TYPE***************************/
+if (CountInvalidRows=0)
+SELECT
+  TxtRefNum = d.seq
+  , TxtProductCd = Request_valid->qual[d.seq].product_cd
+  , TxtISBTBarcode = Request_valid->qual[d.seq].isbt_barcode
+  , TxtAttribute = Request_valid->qual[d.seq].attribute_cd
+ 
+FROM (DUMMYT D WITH SEQ = SIZE(REQUEST_valid->qual,5))
+ 
+PLAN D where Request_valid->qual[d.seq].product_cd_valid = 1
+and Request_valid->qual[d.seq].isbt_barcode_valid = 1 and Request_valid->qual[d.seq].attribute_valid = 1
+ 
+order by TxtProductCd
+ 
+head report
+  x2=0
+head TxtProductCd
+  dummy = 0
+head TxtISBTBarcode
+  x2=x2+1
+ ;detail - attribute needs to be loaded in detail section (may be more than one)
+if(size(request_1->product_type_list,5)<=x2)
+  stat = alterlist(request_1->product_type_list,x2+5)
+  ;stat = alterlist(request_2->add_info_list,x2+5)
+endif
+		request_1->product_type_list[x2].ref_num = d.seq
+		request_1->product_type_list[x2].product_cd = CNVTINT(request_valid->qual[d.seq].product_cd)
+		request_1->product_type_list[x2].isbt_barcode = request_valid->qual[d.seq].isbt_barcode
+ 
+		;request_2->add_info_list[x2].ref_num = d.seq
+		;request_2->add_info_list[x2].product_cd = CNVTINT(request_valid->qual[d.seq].product_cd)
+		;request_2->add_info_list[x2].attribute_cd = CNVTINT(request_valid->qual[d.seq].attribute_cd)
+ 
+foot TxtProductCd
+  stat = alterlist(request_1->product_type_list,x2)
+  ;stat = alterlist(request_2->add_info_list,x2)
+foot TxtISBTBarcode
+dummy=1
+with nocounter
+
+;call echorecord(request_1)
+execute BB_ADD_ISBT_PRODUCT_TYPE with REPLACE("REQUEST",REQUEST_1)
+
+/***************If all data is valid write it to BB_ISBT_ADD_INFO***************************/
+SELECT
+  TxtRefNum = d.seq
+  , TxtProductCd = Request_valid->qual[d.seq].product_cd
+  , TxtISBTBarcode = Request_valid->qual[d.seq].isbt_barcode
+  , TxtAttribute = Request_valid->qual[d.seq].attribute_cd
+ 
+FROM (DUMMYT D WITH SEQ = SIZE(REQUEST_valid->qual,5))
+      , bb_isbt_product_type bipt
+ 
+PLAN D where Request_valid->qual[d.seq].product_cd_valid = 1
+and Request_valid->qual[d.seq].isbt_barcode_valid = 1 and Request_valid->qual[d.seq].attribute_valid = 1
+Join bipt where bipt.product_cd = Request_valid->qual[d.seq].product_cd
+    and bipt.active_ind = 1
+ 
+order by TxtProductCd
+ 
+head report
+  x2=0
+detail
+
+if(size(request_2->add_info_list,5)<=x2)
+  stat = alterlist(request_2->add_info_list,x2+5)
+endif
+ 
+		request_2->add_info_list[x2].ref_num = request_1->product_type_list[d.seq].ref_num
+		request_2->add_info_list[x2].product_cd = CNVTINT(request_valid->qual[d.seq].product_cd)
+		request_2->add_info_list[x2].attribute_cd = CNVTINT(request_valid->qual[d.seq].attribute_cd)
+		request_2->add_info_list[x2].bb_isbt_product_type_id = bipt.bb_isbt_product_type_id
+ 
+;foot
+;  stat = alterlist(request_2->add_info_list,x2)
+with nocounter
+/*
+set stat = alterlist(request_2->add_info_list,x2)
+
+for (Seq1 = 1 to size(request_2->add_info_list,5))
+
+SELECT into 'nl:'
+	TxtISBTBarcode = bipt.bb_isbt_product_type_id
+FROM
+	bb_isbt_product_type bipt
+Where bipt.active_ind = 1 and bipt.product_cd = request_2->add_info_list[Seq1].product_cd
+ 
+detail
+	request_2->add_info_list[Seq1].bb_isbt_product_type_id = bipt.bb_isbt_product_type_id
+with nocounter
+
+endfor
+*/
+call echorecord(request_2)
+execute BB_ADD_ISBT_ADD_INFO with REPLACE("REQUEST",REQUEST_2)
+
+call echo("///////////////////////////////////////////////////////////////////////////////////////")
+call echo("/////////////////////////////////////Importing Done////////////////////////////////////")
+call echo("///////////////////////////////////////////////////////////////////////////////////////")
+ 
+/***************If data is not valid error out and write data to log file***************************/
+else
+ 
+call clear(1,1)
+call video(i)
+call text(2, 4, "Importing has stopped because due to an error in the csv file.")
+call text(3, 4, "Please check the log file Auto_BB_Ecodes_log and try again")
+ 
+select into "Auto_BB_Ecodes_log"
+  primary_synonym = request_valid->qual[d.seq].product_cd_mnemonic
+  , primary_synonym_valid = if(request_valid->qual[d.seq].product_cd_valid = 1) "Yes" else "No" endif
+  , ecode = request_valid->qual[d.seq].isbt_barcode
+  , ecode_valid = if(request_valid->qual[d.seq].isbt_barcode_valid = 1) "Yes" else "No" endif
+ 
+FROM (DUMMYT D WITH SEQ = SIZE(request_valid->qual,5))
+PLAN D
+with nocounter, version
+ 
+endif
+ 
+end
+go

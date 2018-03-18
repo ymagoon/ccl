@@ -1,0 +1,197 @@
+ set trace backdoor p30ins go
+ 
+drop program Auto_MIC_PanelsAb go
+create program Auto_MIC_PanelsAb
+ 
+/****************Create Record to be sent to program******************************/
+record request
+ (
+     1   qual[*]
+         2   task_group_cd    = f8
+         2   task_detail_cd   = f8
+         2   suppress_ind     = i2
+         2   display_order    = i4
+         2   pending_ind      = i2
+ )
+ 
+ 
+ 
+/********************Create another record to do the validation*****************************/
+RECORD REQUEST_valid
+(
+   1 qual[*]
+     2 task_group_mnemonic    		= vc
+     2 task_group_valid                	= I2
+     2 task_group_cd			= f8
+ 
+     2 task_detail_mnemonic		= vc
+     2 task_detail_valid            	= I2
+     2 task_detail_cd         		= f8
+ 
+     2 suppress_ind     		= i2
+     2 pending_ind      		= i2
+     2 indicators_valid			= i2
+ 
+     2 display_order    		= i4
+ )
+ 
+;SET STAT = MOVEREC(requestin,REQUEST_Process)
+ 
+/*****************Copy the requestin into the request_valid*************************************/
+declare Seq1 = I2
+set stat = alterlist(request_valid->qual,size(requestin->list_0,5))
+for (Seq1=1 to size(requestin->List_0,5))
+set Request_valid->qual[Seq1].task_group_mnemonic = requestin->List_0[Seq1].panel
+set Request_valid->qual[Seq1].task_detail_mnemonic = requestin->List_0[Seq1].ab
+set Request_valid->qual[Seq1].suppress_ind = cnvtint(requestin->List_0[Seq1].suppress_ind)
+set Request_valid->qual[Seq1].pending_ind = cnvtint(requestin->List_0[Seq1].pending_ind)
+set Request_valid->qual[Seq1].display_order = cnvtint(requestin->List_0[Seq1].display_order)
+ 
+endfor
+ 
+ 
+/*********************Loop through second record*************************/
+declare Seq2 = I2
+ 
+declare CountRows = I4
+declare CountInvalidRows = I4
+ 
+set stat = alterlist(request_valid->qual,size(request_valid->qual,5))
+ 
+set CountRows =0
+set CountInvalidRows = 0
+ 
+for (Seq2 = 1 to size(request_valid->qual,5))
+set CountRows = CountRows +1
+ 
+/************************************Get invalid task group *******************************************/
+set request_valid->qual[Seq2].task_group_valid = 0
+select into 'NL:'
+TxtPanelCd = m.task_assay_cd
+from mic_task m, code_value cv
+plan m where m.task_type_flag = 12
+join cv where cv.code_value = m.task_assay_cd
+and cnvtupper(cv.display) = cnvtupper(request_valid->qual[Seq2].task_group_mnemonic)
+detail
+request_valid->qual[Seq2].task_group_valid = 1
+request_valid->qual[Seq2].task_group_cd = TxtPanelCd
+with nocounter
+ 
+if(request_valid->qual[Seq2].task_group_valid = 0)
+set CountInvalidRows = CountInvalidRows +1
+endif
+ 
+ 
+/************************************Get invalid antibiotics*******************************/
+set request_valid->qual[Seq2].task_detail_valid = 0
+select into 'NL:'
+TxtAbCd = m.task_assay_cd
+from mic_task m
+plan m where m.task_type_flag = 13
+and cnvtupper(m.mnemonic) = cnvtupper(request_valid->qual[Seq2].task_detail_mnemonic)
+detail
+request_valid->qual[Seq2].task_detail_valid = 1
+request_valid->qual[Seq2].task_detail_cd = TxtAbCd
+with nocounter
+ 
+if(request_valid->qual[Seq2].task_detail_valid = 0)
+set CountInvalidRows = CountInvalidRows +1
+endif
+ 
+ 
+/***********************************************
+Get invalid indicators
+***********************************************/
+set Request_valid->qual[Seq2].indicators_valid = 0
+ 
+if (Request_valid->qual[Seq2].pending_ind in (0,1))
+set Request_valid->qual[Seq2].indicators_valid = 1
+endif
+ 
+ 
+if (Request_valid->qual[Seq2].suppress_ind in (0,1))
+set Request_valid->qual[Seq2].indicators_valid = 1
+endif
+ 
+if(Request_valid->qual[Seq2].indicators_valid = 0
+or Request_valid->qual[Seq2].task_detail_valid = 0 or Request_valid->qual[Seq2].task_group_valid = 0)
+set CountInvalidRows = CountInvalidRows+1
+endif
+endfor
+ 
+;call echorecord (request_valid)
+ 
+ 
+if (CountInvalidRows=0)
+ 
+SELECT distinct INTO 'NL:'
+txt_task_group_cd = Request_valid->qual[d.seq].task_group_cd,
+txt_task_detail_cd = Request_valid->qual[d.seq].task_detail_cd,
+txt_suppress_ind = Request_valid->qual[d.seq].suppress_ind,
+txt_pending_ind = Request_valid->qual[d.seq].pending_ind,
+txt_display_order = Request_valid->qual[d.seq].display_order
+ 
+ 
+FROM (DUMMYT D WITH SEQ = SIZE(REQUEST_valid->qual,5))
+ 
+PLAN D where Request_valid->qual[d.seq].indicators_valid = 1
+and Request_valid->qual[d.seq].task_detail_valid = 1 and Request_valid->qual[d.seq].task_group_valid = 1
+ 
+order by txt_task_group_cd, txt_task_detail_cd
+ 
+head report
+x2=0
+ 
+head txt_task_group_cd
+dummy = 0
+head txt_task_detail_cd
+x2=x2+1
+ 
+if(size(request->QUAL,5)<=x2)
+stat = alterlist(request->qual,x2+5)
+endif
+		request->QUAL[x2].task_group_cd = CNVTINT(request_valid->qual[d.seq].task_group_cd)
+		request->QUAL[x2].task_detail_cd = CNVTINT(request_valid->qual[d.seq].task_detail_cd)
+		request->QUAL[x2].suppress_ind = CNVTINT(request_valid->qual[d.seq].suppress_ind)
+		request->QUAL[x2].pending_ind = CNVTINT(request_valid->qual[d.seq].pending_ind)
+		request->QUAL[x2].display_order = CNVTINT(request_valid->qual[d.seq].display_order)
+ 
+foot txt_task_detail_cd
+stat = alterlist(request->qual,x2)
+foot txt_task_group_cd
+dummy=1
+with nocounter
+ 
+;call echorecord(request)
+execute MIC_ADD_TASK_DETAIL_R
+ 
+ 
+call echo("///////////////////////////////////////////////////////////////////////////////////////")
+call echo("/////////////////////////////////////Importing Done////////////////////////////////////")
+call echo("///////////////////////////////////////////////////////////////////////////////////////")
+else
+ 
+call clear(1,1)
+call video(i)
+call text(2, 4, "Importing have stopped because some of the entities in the csv file is invalid")
+call text(3, 4, "kindly check the log file Auto_MIC_PanelsAb_log")
+ 
+select into "Auto_MIC_PanelsAb_log"
+task_group_mnemonic 			= request_valid->qual[d.seq].task_group_mnemonic
+,task_group_valid	  			= if(request_valid->qual[d.seq].task_group_valid) "Yes" else "No" endif
+,task_detail_mnemonic 			= request_valid->qual[d.seq].task_detail_mnemonic
+,task_detail_valid	  			= if(request_valid->qual[d.seq].task_detail_valid) "Yes" else "No" endif
+,suppress_ind 			= request_valid->qual[d.seq].suppress_ind
+,pending_ind 			= request_valid->qual[d.seq].pending_ind
+,indicators_valid	  			= if(request_valid->qual[d.seq].indicators_valid) "Yes" else "No" endif
+,display_order 			= request_valid->qual[d.seq].display_order
+ 
+FROM (DUMMYT D WITH SEQ = SIZE(request_valid->qual,5))
+PLAN D
+with nocounter, version
+endif
+ 
+end
+go
+ 
+ 
