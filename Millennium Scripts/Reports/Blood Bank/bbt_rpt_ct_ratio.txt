@@ -1,0 +1,627 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/bbt_rpt_ct_ratio/bbt_rpt_ct_ratio.prg Turn on black mode
+
+/*~BB~***************************************************************************
+  *                                                                             *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &               *
+  *                              Technology, Inc.                               *
+  *       Revision      (c) 1984-2001 Cerner Corporation                        *
+  *                                                                             *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.                *
+  *  This material contains the valuable properties and trade secrets of        *
+  *  Cerner Corporation of Kansas City, Missouri, United States of              *
+  *  America (Cerner), embodying substantial creative efforts and               *
+  *  confidential information, ideas and expressions, no part of which          *
+  *  may be reproduced or transmitted in any form or by any means, or           *
+  *  retained in any storage or retrieval system without the express            *
+  *  written permission of Cerner.                                              *
+  *                                                                             *
+  *  Cerner is a registered mark of Cerner Corporation.                         *
+  *                                                                             *
+  ~BE~***************************************************************************/
+/********************************************************************************
+ 
+        Source file name:       bbt_rpt_ct_ratio.prg
+        Object name:            bbt_rpt_ct_ratio
+        Request #:              225013
+ 
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+ 
+        Program purpose:        Export file containing prodcut category, product
+        						type, Units XM, Units Transfused, C/T Ratio,
+        						Ordering Physician Physician and medical Service
+ 
+        Tables read:            Crossmatch, product_event, product, orders, prsnl
+ 
+        Tables updated:         none 
+ 
+        Executing from:         CCL, Ops, ReportSelection
+ 
+        Special Notes:          none
+ 
+******************************************************************************/
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 03/03/10 Sachin Yadav         Initial Release                     *
+;    *001 07/04/12 Satish Joshi         Modified the script to execute the  * 
+;                                       EKS_GET_SOURCE and return the export*
+;                                       file content                        *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+DROP PROGRAM BBT_RPT_CT_RATIO:dba GO
+CREATE PROGRAM BBT_RPT_CT_RATIO:dba
+ 
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+/*
+record request
+(
+   1  beg_dt_tm = di8
+   1  end_dt_tm = di8
+   1  batch_selection = c100
+   1  output_dist = c100
+   1  ops_date = dq8
+   1  cur_owner_area_cd = f8
+   1  cur_inv_area_cd   = f8
+   1  provider_id = f8
+   1  debug_ind = i2
+)
+*/
+ 
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+record reply
+    (
+        1 file_name  = vc
+        1 rpt_list[*]
+          2 rpt_filename = vc
+		  2 data_blob                 = gvc
+		  2 data_blob_size            = i4
+ 
+%i cclsource:status_block.inc
+    )
+ 
+set sLine = fillstring(125, "-")
+ 
+ 
+DECLARE CROSSMATCH_EVENT_CD = F8
+DECLARE DISPENSE_EVENT_CD = F8
+DECLARE TRANSFUSE_EVENT_CD = F8
+declare prod_xm_cnt = f8
+declare prod_disp_cnt = f8
+declare prod_xm_trans_cnt = f8
+declare prod_perc = f8
+declare DEFAULT_START_DATE = dq8 with constant (cnvtdatetime("01-JAN-1900 00:00:00.00"))
+declare owner_disp = vc with protected, noconstant(" ")
+declare inventory_disp = vc with protected, noconstant(" ")
+declare dtBegin       = dq8 with noconstant(cnvtdatetime(DEFAULT_START_DATE))
+declare dtEnd       = dq8 with noconstant(cnvtdatetime(DEFAULT_START_DATE))
+declare dtCur         = dq8 with noconstant (cnvtdatetime(curdate, curtime3))
+declare sErrMsg       = c132 with noconstant(fillstring(132, " "))
+declare iErrCode      = i4   with noconstant(Error(sErrMsg, 1))
+declare iStatusBlkCnt = i4   with noconstant(0)
+declare iStat         = i2   with noconstant(0)
+declare ALL           = vc with constant("All")
+declare cur_owner_area_disp     = c40 with protected, noconstant(" ")
+declare Provider_disp           = c40 with protected, noconstant(" ")
+declare cur_inv_area_disp       = c40 with protected, noconstant(" ")
+declare DM_DOMAIN          = vc with constant ("PATHNET_BBT")
+declare DM_NAME            = vc with noconstant ("LAST_CT_REPORT_DT_TM")
+declare prod_cnt           = i4 with noconstant(0)
+ 
+SET STAT = uar_get_meaning_by_codeset(1610,"3",1,CROSSMATCH_EVENT_CD)
+SET STAT = uar_get_meaning_by_codeset(1610,"4",1,DISPENSE_EVENT_CD)
+SET STAT = uar_get_meaning_by_codeset(1610,"7",1,TRANSFUSE_EVENT_CD)
+ 
+ 
+ 
+%i cclsource:bbt_ops_parm_passed.inc
+%i cclsource:bbt_read_report_file.inc
+ 
+SET prod_cnt = 0
+ 
+ record xm
+( 1 prod_qual[*]
+    2 product_id            = f8
+    2 product_cd            = f8  ;product_type i.e. red cells adsol
+    2 product_disp          = vc
+    2 product_cat_cd        = f8
+    2 product_cat_disp	    = vc
+    2 order_provider_id     = f8
+    2 order_provider_name   = vc
+    2 bb_result_id          = f8
+    2 xm_cnt                = i4
+    2 transfuse_cnt         = i4
+    2 owner_area_disp       = vc
+    2 inv_area_disp         = vc
+    2 med_service_cd        = f8
+)
+ 
+ 
+ 
+/**/
+ 
+/** BEGIN main program
+Determine if we are running through OPS
+*/
+if (textlen(trim(request->batch_selection)) = 0)
+    /* we are running through ReportSelection*/
+    call echo("ReportSelection")
+else
+    /* we are running through OPS */
+    call echo("OPS")
+    set temp_string = cnvtupper(trim(request->batch_selection))
+	call CHECK_OWNER_CD("bbt_rpt_ct_ratio")
+    call CHECK_INVENTORY_CD("bbt_rpt_ct_ratio")
+    set begday = request->ops_date
+    set endday = request->ops_date
+    set temp_string = cnvtupper(trim(request->batch_selection))
+    CALL CHECK_OPT_DATE_PASSED("bbt_rpt_ct_ratio")
+    if (reply->status_data->status != "F")
+         set request->beg_dt_tm = begday
+         set request->end_dt_tm = endday
+    endif
+endif
+ 
+set dtBegin      = cnvtdatetime(request->beg_dt_tm)
+set dtEnd        = cnvtdatetime(request->end_dt_tm)
+/* Retrieve display values for requested Owner Area and Inventory Area */
+     if (request->cur_owner_area_cd = 0.0)
+       set cur_owner_area_disp = ALL
+     else
+        set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+     endif
+ 
+     if (request->cur_inv_area_cd = 0.0)
+        set cur_inv_area_disp = ALL
+     else
+       set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+     endif
+ 
+/* validate data */
+if (dtBegin < dtEnd)
+    set iStat = ReadCrossmatch(null)
+    if (iStat = 1)
+        if (ReadTransfusion(null))
+            if (GenerateReport(null))
+            	if (UpdateDMInfo(null))
+            		if (textlen(trim(request->batch_selection)) = 0)
+            			call ReadExportFile(reply->file_name)
+            			if (EKSREPLY->status_data[1].status = "S")
+			                call AddToStatusBlock("S", "SCRIPT", "S", "SCRIPT", "Success")
+						else
+							call AddToStatusBlock("F", "SCRIPT", "F", "BBT_RPT_CT_RATIO", "Error reading report")
+						endif
+					 else
+		                call AddToStatusBlock("S", "SCRIPT", "S", "SCRIPT", "Success")
+            		 endif
+	            else
+	            	call AddToStatusBlock("F", "SCRIPT", "F", "SUpdateDMInfo", "Failed in DM_INFO")
+	            endif
+            else
+                call AddToStatusBlock("F", "SCRIPT", "F", "BBT_RPT_CT_RATIO", "Error generating export")
+            endif
+        else
+            call AddToStatusBlock("F", "SCRIPT", "F", "SELECT", "Failed in ReadTranfusion")
+        endif
+    elseif (iStat = 0)
+            call AddToStatusBlock("F", "SCRIPT", "F", "SELECT", "Failed in ReadCrossmatch")
+    endif
+else
+    call AddToStatusBlock("F", "DATA", "F", "VALIDATION", "Export data not valid")
+    call AddToStatusBlock("F", "DATA", "F", "BEGINDTTM",  format(dtBegin, ";;q"))
+    call AddToStatusBlock("F", "DATA", "F", "ENDDTTM",    format(dtEnd, ";;q"))
+endif
+/** END main program
+ 
+/** FUNCTION - AddToStatusBlock(sStatus, sOpName, sOpsStatus, sTargetObjName, sTargetObjValue) = null
+    Add the given information to the status block
+    PARAMS
+        Items to match structure members of the status block
+*/
+declare    AddToStatusBlock(sStatus=vc, sOpName=vc, sOpStatus=vc, sTargetObjName=vc, sTargetObjValue=vc) = null
+subroutine AddToStatusBlock(sStatus, sOpName, sOpStatus, sTargetObjName, sTargetObjValue)
+ 
+    if (sStatus > "")
+        set reply->status_data->status = sStatus
+    endif
+    set iStatusBlkCnt = iStatusBlkCnt + 1
+    if (iStatusBlkCnt > 1)
+        set iStat = alter(reply->status_data->subeventstatus, iStatusBlkCnt)
+    endif
+    set reply->status_data->subeventstatus[iStatusBlkCnt].OperationName     = sOpName
+    set reply->status_data->subeventstatus[iStatusBlkCnt].OperationStatus   = sOpStatus
+    set reply->status_data->subeventstatus[iStatusBlkCnt].TargetObjectName  = sTargetObjName
+    set reply->status_data->subeventstatus[iStatusBlkCnt].TargetObjectValue = sTargetObjValue
+ 
+end /* subroutine AddToStatusBlock */
+ 
+/** FUNCTION - CheckForError(sStatus, sOpName, sOpStatus, sTargetObjName) = i2
+    Check for a CCL error and add each to the Status Block
+    PARAMS
+        Items to match structure members of the status block to use in case of an error.
+    RETURNS
+        1   => Error(s) found
+        0   => No errors
+*/
+declare    CheckForError(sStatus=vc, sOpName=vc, sOpStatus=vc, sTargetObjName=vc) = i2
+subroutine CheckForError(sStatus, sOpName, sOpStatus, sTargetObjName)
+ 
+    set iErrCode = Error(sErrMsg, 0)
+    if (iErrCode > 0)
+        while (iErrCode)
+            call AddToStatusBlock(sStatus, sOpName, sOpStatus, sTargetObjName, sErrMsg)
+            set iErrCode = Error(sErrMsg, 0)
+        endwhile
+        return (1)
+    endif
+    return (0)
+ 
+end /* subroutine CheckForError */
+/** SUROUTINE UpdateDMInfo(0)
+    Update the dm_info row with our end date/time (if needed)
+    RETURN
+        0 : Failed
+        1 : Success
+*/
+declare    UpdateDMInfo() = I2
+subroutine UpdateDMInfo(null)
+ 
+    ;set iStat = ReadLastReportDtTm(1)
+    select into "nl:"
+            dm.info_date
+        from
+            dm_info dm
+        plan dm
+            where dm.info_domain = DM_DOMAIN
+              and dm.info_name   = DM_NAME
+    with nocounter
+ 
+    if (curqual >= 1)
+ 
+        update
+        into
+            dm_info dm
+        set
+            dm.info_date    =   cnvtdatetime(curdate,curtime3)
+           ,dm.updt_dt_tm   = cnvtdatetime(curdate,curtime3)
+           ,dm.updt_id      = reqinfo->updt_id
+           ,dm.updt_cnt     = dm.updt_cnt + 1
+           ,dm.updt_task    = reqinfo->updt_task
+           ,dm.updt_applctx = 0
+        plan dm
+            where dm.info_domain = DM_DOMAIN
+              and dm.info_name   = DM_NAME
+        with nocounter
+ 
+        if (CheckForError("F", "UPDATE", "F", "DM_INFO"))
+            call AddToStatusBlock("F", "UPDATE", "F", "DM_INFO", "Failed to update DM_INFO row")
+            return (0)
+        endif
+ 
+    elseif (curqual = 0)
+ 
+        insert
+        into
+            dm_info dm
+        set
+            dm.info_domain  = DM_DOMAIN
+           ,dm.info_name    = DM_NAME
+           ,dm.info_date    = cnvtdatetime(curdate,curtime3)
+           ,dm.updt_dt_tm   = cnvtdatetime(curdate,curtime3)
+           ,dm.updt_id      = reqinfo->updt_id
+           ,dm.updt_cnt     = 0
+           ,dm.updt_task    = reqinfo->updt_task
+           ,dm.updt_applctx = 0
+        plan dm
+        with nocounter
+ 
+        if (CheckForError("F", "INSERT", "F", "DM_INFO"))
+            call AddToStatusBlock("F", "INSERT", "F", "DM_INFO", "Failed to insert DM_INFO row")
+            return (0)
+        endif
+ 
+    else
+        call AddToStatusBlock("F", "SELECT", "F", "DM_INFO", "Failed to lock DM_INFO row")
+        return (0)
+    endif
+    return (1)
+ 
+end /* subroutine UpdateDMInfo */
+ 
+declare    ReadCrossmatch() = i2
+subroutine ReadCrossmatch(null)
+;This select qualifies the rows and finds the parent product crossmatched
+select into "nl"
+/*
+    p.product_nbr,
+    p.product_id,
+    pe_alt.product_id,
+    pe.bb_result_id,
+    pe_alt.bb_result_id,
+    pe.product_event_id,
+    pe_alt.product_event_id
+*/
+from   crossmatch xm,
+       product_event pe,
+       product p,
+       orders o,
+       prsnl pl,
+       product_event pe_alt,
+       encounter en
+plan xm where  xm.crossmatch_exp_dt_tm    >= cnvtdatetime(request->beg_dt_tm)
+                AND xm.crossmatch_exp_dt_tm    <= cnvtdatetime(request->end_dt_tm)
+join pe where pe.product_event_id = xm.product_event_id
+join p   where p.product_id = pe.product_id
+		and ((request->cur_owner_area_cd > 0.0
+             and request->cur_owner_area_cd = p.cur_owner_area_cd)
+             or (request->cur_owner_area_cd = 0.0))
+        and ((request->cur_inv_area_cd > 0.0
+             and request->cur_inv_area_cd = p.cur_inv_area_cd)
+             or (request->cur_inv_area_cd = 0.0))
+join o   where o.order_id = pe.order_id
+		and ((request->provider_id > 0.0
+			 and o.last_update_provider_id = request->provider_id)
+			 or(request->provider_id = 0.0))
+join pl where pl.person_id = o.last_update_provider_id
+join pe_alt where pe_alt.bb_result_id = pe.bb_result_id
+    and pe_alt.event_type_cd = CROSSMATCH_EVENT_CD
+join en where en.encntr_id = o.encntr_id
+order pe.bb_result_id, pe_alt.product_id, pe_alt.product_event_id DESC
+head report
+   xm_found = 0
+   first_product_cd = 0.0
+head pe.bb_result_id
+   xm_found = 0
+ 
+   first_product_id = pe_alt.product_id
+ 
+detail
+   if (xm_found = 0 and pe_alt.product_id = first_product_id) ;if it isn't the first, it isn't the parent
+    if (p.product_id = pe_alt.product_id) ;product who's xm expiration qualified is the parent, skip children
+        if (xm.product_event_id = pe_alt.product_event_id) ;qualify latest xm product_event, skip the rest
+            xm_found = 1
+            ;increment prod_cnt
+            prod_cnt = prod_cnt + 1
+ 
+            if (size(XM->prod_qual, 5) < prod_cnt)
+                STAT = ALTERLIST(XM->prod_qual,prod_cnt + 10)
+            endif
+ 
+ 
+            xm->prod_qual[prod_cnt].product_id = p.product_id
+            xm->prod_qual[prod_cnt].product_cd = p.product_cd
+            if  (request->debug_ind = 1)
+                xm->prod_qual[prod_cnt].product_disp = build(p.product_nbr, "_", pe.product_event_id)
+            else
+                xm->prod_qual[prod_cnt].product_disp = uar_get_code_display(p.product_cd)  ;prod_disp
+            endif
+            xm->prod_qual[prod_cnt].bb_result_id = pe.bb_result_id
+            xm->prod_qual[prod_cnt].order_provider_id = o.last_update_provider_id
+            xm->prod_qual[prod_cnt].order_provider_name = trim(pl.name_full_formatted)
+            xm->prod_qual[prod_cnt].product_cat_cd = p.product_cat_cd
+            xm->prod_qual[prod_cnt].product_cat_disp = uar_get_code_display(p.product_cat_cd)
+            xm->prod_qual[prod_cnt].xm_cnt = 1
+            xm->prod_qual[prod_cnt].owner_area_disp = uar_get_code_display(p.cur_owner_area_cd)
+            xm->prod_qual[prod_cnt].inv_area_disp = uar_get_code_display(p.cur_inv_area_cd)
+            xm->prod_qual[prod_cnt].med_service_cd = en.med_service_cd
+        endif
+    endif
+   endif
+foot report
+    ;resize list to actual size
+    STAT = ALTERLIST(XM->prod_qual,prod_cnt)
+    row + 1
+ 
+with nocounter
+ 
+call echo (prod_cnt)
+ 
+if (prod_cnt = 0)
+	call AddToStatusBlock("Z", "SCRIPT", "Z", "BBT_RPT_CT_RATIO", "No Crossmatches Found")
+    go to EXIT_SCRIPT
+endif
+if (CheckForError ("F", "SELECT", "F", "Crossmatch"))
+	    return (0)
+	else
+	    return (1)
+	endif
+ 
+end /* subroutine ReadCrossmatch */
+ 
+declare    ReadTransfusion() = i2
+subroutine ReadTransfusion(null)
+;This select looks for a transfusion on ANY product for the bb_result_id
+;Only one should count per bb_result_id
+	set idx1 = 0
+	select into "nl:"
+	from  (dummyt d1 with seq =value(prod_cnt)),
+	        product_event pe_xm,
+	        product_event pe_disp,
+	        product_event pe_tx
+	plan d1
+	join pe_xm where pe_xm.bb_result_id = xm->prod_qual[d1.seq].bb_result_id
+	    and pe_xm.event_type_cd = CROSSMATCH_EVENT_CD
+	join pe_disp where pe_disp.related_product_event_id = pe_xm.product_event_id
+	    and pe_disp.event_type_cd = DISPENSE_EVENT_CD
+	join pe_tx where pe_tx.related_product_event_id = pe_disp.product_event_id
+	    and pe_tx.event_type_cd = TRANSFUSE_EVENT_CD
+	    and pe_tx.active_ind = 1
+	order by pe_xm.bb_result_id
+	head pe_xm.bb_result_id
+	     if (pe_tx.product_event_id != 0)
+	         xm->prod_qual[d1.seq].transfuse_cnt = 1
+	     endif
+	with nocounter
+ 
+	if (CheckForError ("F", "SELECT", "F", "Transfusion"))
+	    return (0)
+	else
+	    return (1)
+	endif
+ 
+end /* subroutine ReadTransfusion */
+ 
+ 
+/** SUBROUTINE GenerateReport()
+    Routine to generate report based on stored person id's
+    RETURN
+        0 : Error
+        1 : Success
+*/
+declare    GenerateReport() = i2
+subroutine GenerateReport(null)
+ 	declare res_count = i4 with noconstant(0)
+	declare sFileName = vc with noconstant("")
+	set formatDtCur = format(dtCur,"DD-MMM-YYYY HH:MM:SS;;D")
+	set formatDtBegin = format(dtBegin,"DD-MMM-YYYY HH:MM:SS;;D")
+	set formatDtEnd = format(dtEnd,"DD-MMM-YYYY HH:MM:SS;;D")
+	set logical D    value(trim(logical("CER_PRINT")))
+	set sFileName        = concat("d:bbt_rpt_ct_ratio", format(dtCur, "YYMMDDHHMMSSCC;;d"), ".xml")
+	set reply->file_name = concat("cer_print:bbt_rpt_ct_ratio", format(dtCur, "YYMMDDHHMMSSCC;;d"), ".xml")
+ 
+	set res_count = prod_cnt
+	;Third select sorts and groups by provider, formats report, and calculates counts
+	select into value(sFileName)
+		provider_name = xm->prod_qual[d1.seq].order_provider_name "#####################################",
+		provider_id = xm->prod_qual[d1.seq].order_provider_id,
+	    prod_disp = xm->prod_qual[d1.seq].product_disp "########################################", ;was prod_qual
+	    product_cat_disp = trim(xm->prod_qual[d1.seq].product_cat_disp) "#################################",
+	    owner_area_disp = trim(xm->prod_qual[d1.seq].owner_area_disp) "####################################",
+	    inv_area_disp = trim(xm->prod_qual[d1.seq].inv_area_disp) "########################################",
+	    med_service = trim(uar_get_code_display(xm->prod_qual[d1.seq].med_service_cd)) "########################################"
+	from  (dummyt d1 with seq =value(prod_cnt))
+	plan d1
+	order by provider_name, provider_id, prod_disp, med_service
+	head report
+ 
+		/* print report information at the top of the file */
+ 
+	    col 0 "<?xml version='1.0'?>",row + 1
+	    col 0 "<CT_report>", row + 1
+	    	col 2 "<Filter_criteria>",row + 1
+				col 4 "<Export_dt_tm_filter>",formatDtCur, "</Export_dt_tm_filter>", row + 1
+		    	col 4 "<Begin_date_filter>", formatDtBegin, "</Begin_date_filter>", row + 1
+		    	col 4 "<End_date_filter>", formatDtEnd, "</End_date_filter>", row + 1
+		    	col 4 "<cur_owner_area_disp_filter>",cur_owner_area_disp,"</cur_owner_area_disp_filter>",row + 1
+		   		col 4 "<cur_inv_area_disp_filter>",cur_inv_area_disp,"</cur_inv_area_disp_filter>",row + 1
+		   		;If the report needs to be filter on a Provider name.
+		          if(request->provider_id > 0)
+		              col 4, "<Provider_disp_filter>",provider_name, "</Provider_disp_filter>", row + 1
+		          elseif(request->provider_id = 0)
+		          	  col 4, "<Provider_disp_filter>",ALL, "</Provider_disp_filter>", row + 1
+		          endif
+	   		col 2 "</Filter_criteria>",row + 1
+ 
+		prev_med_serv_cd = xm->prod_qual[d1.seq].med_service_cd
+		prev_inv_area_disp = inv_area_disp
+		prev_provider_disp = provider_name
+		prev_prod_disp = prod_disp
+ 		prev_med_service_disp = med_service
+ 		prev_owner_area_disp = owner_area_disp
+ 		prev_product_cat_disp = product_cat_disp
+ 		prod_xm_cnt = 0
+    	prod_xm_trans_cnt = 0
+    	prod_perc = 0.0
+ 
+	detail
+ 
+		if ((prod_xm_cnt >= 1) and ((xm->prod_qual[d1.seq].med_service_cd != prev_med_serv_cd)
+			or (xm->prod_qual[d1.seq].inv_area_disp != prev_inv_area_disp)
+			or (xm->prod_qual[d1.seq].order_provider_name  != prev_provider_disp)
+			or (xm->prod_qual[d1.seq].product_disp != prev_prod_disp)))
+			col 2 "<CT_row>", row + 1
+			    col 4 "<Owner_area>", prev_owner_area_disp, "</Owner_area>", row + 1
+			    col 4 "<Inventory_area>", prev_inv_area_disp, "</Inventory_area>", row + 1
+			    col 4 "<Product_category>", prev_product_cat_disp, "</Product_category>", row + 1
+			    col 4 "<Product_type>", prev_prod_disp, "</Product_type>", row + 1
+				col 4 "<Number_of_units_crossmatched>",prod_xm_cnt,"</Number_of_units_crossmatched>",row + 1
+				col 4 "<Number_of_units_transfused>", prod_xm_trans_cnt, "</Number_of_units_transfused>", row + 1
+				if (prod_xm_trans_cnt = 0)
+					prod_perc = prod_xm_cnt
+				else
+					prod_perc = (prod_xm_cnt/prod_xm_trans_cnt)
+				endif
+				col 4 "<CT_ratio>", prod_perc, "</CT_ratio>", row + 1
+				col 4 "<Physician>",prev_provider_disp,"</Physician>",row + 1
+				col 4 "<Medical_service>", prev_med_service_disp, "</Medical_service>", row + 1
+		    col 2 "</CT_row>", row + 1
+		    prod_xm_cnt = 0
+			prod_xm_trans_cnt = 0
+			prod_perc = 0.00
+		endif
+ 
+    	prod_xm_cnt = prod_xm_cnt + xm->prod_qual[d1.seq].xm_cnt
+		if (xm->prod_qual[d1.seq].bb_result_id >0)
+		       prod_xm_trans_cnt = prod_xm_trans_cnt + xm->prod_qual[d1.seq].transfuse_cnt
+		endif
+		prev_owner_area_disp = owner_area_disp
+		prev_med_serv_cd = xm->prod_qual[d1.seq].med_service_cd
+		prev_inv_area_disp = inv_area_disp
+		prev_provider_disp = provider_name
+		prev_prod_disp = prod_disp
+		prev_product_cat_disp = product_cat_disp
+		prev_med_service_disp = med_service
+ 
+ 
+	foot report
+	;XML tags for the last records.
+		col 2 "<CT_row>", row + 1
+		    col 4 "<Owner_area>", owner_area_disp, "</Owner_area>", row + 1
+		    col 4 "<Inventory_area>", inv_area_disp, "</Inventory_area>", row + 1
+		    col 4 "<Product_category>", product_cat_disp, "</Product_category>", row + 1
+		    col 4 "<Product_type>", prod_disp, "</Product_type>", row + 1
+			col 4 "<Number_of_units_crossmatched>",prod_xm_cnt,"</Number_of_units_crossmatched>",row + 1
+			col 4 "<Number_of_units_transfused>", prod_xm_trans_cnt, "</Number_of_units_transfused>", row + 1
+			if (prod_xm_trans_cnt = 0)
+				prod_perc = prod_xm_cnt
+			else
+				prod_perc = (prod_xm_cnt/prod_xm_trans_cnt)
+			endif
+			col 4 "<CT_ratio>", prod_perc, "</CT_ratio>", row + 1
+			col 4 "<Physician>",provider_name,"</Physician>",row + 1
+			col 4 "<Medical_service>", med_service, "</Medical_service>", row + 1
+	    col 2 "</CT_row>", row + 1
+		col 0 "</CT_report>",row + 1
+	with nocounter
+		,format=stream
+       ,formfeed=none
+       ,maxcol=35000
+       ,maxrow=1
+ 
+	if (CheckForError ("F", "SELECT", "F", "REPORT"))
+	    return (0)
+	else
+	    return (1)
+	endif
+end /* subroutine GenerateReport */
+ 
+#exit_script
+set stat = alterlist(reply->rpt_list, 1)
+set reply->rpt_list[1].rpt_filename = reply->file_name
+
+/*populate the blob structure*/
+if (textlen(trim(request->batch_selection)) = 0)
+	if (EKSREPLY->status_data[1].status = "S")
+	  set reply->rpt_list[1]->data_blob = EKSREPLY->data_blob
+	  set reply->rpt_list[1]->data_blob_size =EKSREPLY->data_blob_size
+	endif
+endif
+ 
+if (reply->status_data->status = "S")
+    set reqinfo->commit_ind = 1
+endif
+free set xm
+END
+GO
+ 
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,940 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_component.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1994 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), Corporation.                                      *
+      *                                                                      *
+  ~BE~************************************************************************
+      *                   PathNet Blood Bank Transfusion                     *
+      *                           V500 Script                                *
+      *                      bbt_rpt_component                               *
+      *                                                                      *
+      * PURPOSE:          generate a list of all modified products for a     *
+      *                   time frame                                         *
+      * LAST UPDATED BY:  JJ7138                                             *
+      * DATE CREATED:     4-03-97                                            *
+      * LAST MODIFIED:    01-16-04                                           *
+      * TABLES USED:      product_event, product, modification               *
+      * PASSED IN:        record structure "request"                         *
+      * PASSED OUT:       record structure "reply"                           *
+      * ACTION#:                                                             *
+      * ops_request#:                                                        *
+      * APPLICATION#:                                                        *
+      * SPECIAL NOTES:    Operating from the operations environment          *
+      ************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 03/27/97 Martin Olson         Initial Release                     *
+;     002 06/13/97 Doug Saus            Added select of owner and inventory *
+;                                       areas                               *
+;     003 03/30/98 Matt Benson          Modified to retrieve Institution    *
+;                                       name from preferences               *
+;     004 10/28/98 Victoria Savariyar   Removed the hard coded address      *
+;     005 12/18/98 Shellie Ninemire     Added logic to print the location name
+;                                       and address.  Added the address_location_cd to request.
+;                                       Added bbt_get_location_info.inc
+;                                       Added bbt_print_location_info.inc
+;                                       Added uar calls in place of code_value joins
+;                                       (Removed 1 code_value table join)
+;                                       Removed the institution name logic.
+;     006 01/12/99 DOug Saus            changed to display create_dt_tm for modify date
+;                                       of child products
+;     007 05/21/99 Jose Suarez          change cer_temp to cer_print          *
+;     008 09/01/99 Badari Kopparapu     Modified to use bbt_ops_owninvloc.inc*
+;                                       for processing owner area, inventory *
+;                                       area & location address from batch   *
+;                                       selection field in Ops Job Templates *
+;      009 09/01/99 Badari Kopparapu    Modified to include :dba in the object
+;                                       name.                                *
+;      010 09/01/99 Badari Kopparapu    Modified to check if the batch_selection
+;                                       field is not empty to assume printing*
+;                                       from Operations instead of checking for
+;                                       the keyword "OPERATIONS".            *
+;      011 09/02/99 Badari Kopparapu    Modified to use ops_date for computing
+;                                       the date range for the report when run
+;                                       from operations.                     *
+;      012 11/10/99 Jose Suarez         Enhancement when running from ops   *
+;                                       removed bbt_ops_owninvloc.inc and   *
+;                                       added bbt_ops_parm_passed.inc       *
+;      013 08/09/00 Lawrence Dsouza     internationalized date and time     *
+;      014 02/16/01 Chris Noe           Internationalize text               *
+;      015 01/15/02 SD4221              Add order by to corresponding Head  *
+;                                       Use UAR's instead of joining to     *
+;                                       Code_value table.                   *
+;     016 07/24/02 Jason Osborn         Unique RPT filename project         *
+;     017 01/16/04 Jim Jensen           Display correct Tech_id and print 1 *
+;                                       copy from opsview scheduler.        *
+;     018 03/03/04 Jim Jensen           Use UAR's when getting Own/Inv Areas*
+;     019 07/08/04 David Fifer          Rearranged the report to handle a 25*
+;                                       character eurocode product number.  *
+;	  020 02/02/05 Cedric Daniels		If there is a fourth line for the   *
+;	 									address, it won't get over written  *
+;     									by the owner and inventory.         *
+;	  021 03/08/05 Cedric Daniels		Remove the count functionality from *
+;										the detail clause of the detail level*
+;										report and adding it to the head     *
+;										pr2.product_id section.        		*
+;~DE~************************************************************************
+ 
+        drop program bbt_rpt_component:dba go
+        create program bbt_rpt_component:dba
+ 
+        /******************************************************************
+         *****************************************************************/
+ 
+       /*
+           record request
+           (
+           1 start_dt_tm = dq8
+           1 end_dt_tm = dq8
+           1 Output_Dist = c100
+           1 Batch_Selection = c100
+           1 Ops_Date  = dq8
+           1  cur_owner_area_cd  = f8
+           1  cur_inv_area_cd    = f8
+           1 address_location_cd = f8
+         )
+       */
+ 
+        ;structure for containing the counts of modiefied product types for each location
+        record prod_list
+        (
+         1 loc_list[*]
+           2 location_cd = f8       ; location code for modification report
+           2 totals[*]              ; set to the size of the number of elements in the 1604 codeset
+             3 product_cd   = f8    ; product_cd modified
+             3 count        = f8    ; number if product_cd modified
+             3 active_ind   = i2
+        )
+ 
+        ;structure for modified products
+        record num_list
+        (
+          1 parent_list[*]
+            2 product_number       = c20         ;original product number
+            2 product_sub_nbr      = c5          ;original product sub number
+            2 product_id           = f8          ;original product id
+            2 product_disp         = c16         ;product type display
+            2 abo_disp             = c2          ;abo code display
+            2 rh_disp              = c3          ;rh code display
+              2 supplier             = c16          ;modified product supplier id
+            2 orig_vol             = i4          ;the current volume of the modified product
+            2 orig_meas_disp       = c4          ;the measure type code display for modified product
+            2 orig_exp_dt          = dq8         ;expiration date and time for modified product
+            2 nbr_of_states        = i4
+            2 states[*]
+              3 event_type_disp    = c10         ;product event code_display
+            2 nbr_of_mod           = i4          ;number of modified products
+            2 mod_list[*]                        ;array of modified products
+              3 product_id         = f8          ;modified product id
+              3 product_number     = c20         ;modified product number
+              3 product_sub_nbr    = c5          ;modified product sub number
+              3 product_disp       = c16         ;product type display
+              3 abo_disp           = c2          ;abo code display
+              3 rh_disp            = c3          ;rh code display
+                3 nbr_of_states      = i4          ;number of states that
+              3 states[*]                        ;array of active states
+                4 event_type_disp  = c10         ;product event code display
+              3 supplier           = c16          ;modified product supplier id
+              3 drawn_date         = dq8         ;???? date product drawn from patient
+              3 modify_date        = dq8         ;date product modifed (product_event date time)
+              3 mod_tech_id        = c9          ;the modified tech id
+              3 mod_vol            = i4          ;the current volume of the modified product
+              3 mod_meas_disp      = c4          ;the measure type code display for modified product
+              3 mod_exp_dt         = dq8         ;expiration date and time for modified product
+              3 donor_nbr          = f8            ;???? the blood donor person id
+         )
+ 
+        record reply
+        (
+         1 rpt_list[*]
+           2 rpt_filename  = vc
+%i cclsource:status_block.inc
+        )
+ 
+;Begin 014
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+ 
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+record captions
+(
+  1  component_report        = vc
+  1  as_of_date              = vc
+  1  as_of_time              = vc
+  1  bb_owner                = vc
+  1  inventory_area          = vc
+  1  beg_date                = vc
+  1  end_date                = vc
+  1  summary                 = vc
+  1  product                 = vc
+  1  total                   = vc
+  1  report_id               = vc
+  1  page_no                 = vc
+  1  printed                 = vc
+  1  end_of_report           = vc
+  1  rpt_detail              = vc
+  1  product_type            = vc
+  1  draw_modify             = vc
+  1  expire                  = vc
+  1  donor                   = vc
+  1  number                  = vc
+  1  sub                     = vc
+  1  orig_modified           = vc
+  1  aborh                   = vc
+  1  states                  = vc
+  1  supplier                = vc
+  1  date                    = vc
+  1  time                    = vc
+  1  tech                    = vc
+  1  volume                  = vc
+  1  no_modified             = vc
+  1  report_id_det           = vc
+  1  all                     = vc
+  1  unknown                 = vc
+  1  inactive                = vc
+)
+ 
+set captions->component_report = uar_i18ngetmessage(i18nHandle,
+  "component_report", "C O M P O N E N T   R E P O R T")
+set captions->as_of_date = uar_i18ngetmessage(i18nHandle,
+  "as_of_date", "As of Date:")
+set captions->as_of_time = uar_i18ngetmessage(i18nHandle,
+  "as_of_time", "As of Time:")
+set captions->bb_owner = uar_i18ngetmessage(i18nHandle,
+  "bb_owner", "Blood Bank Owner: ")
+set captions->inventory_area = uar_i18ngetmessage(i18nHandle,
+  "inventory_area", "Inventory Area: ")
+set captions->beg_date = uar_i18ngetmessage(i18nHandle,
+  "beg_date", "Beginning Date:")
+set captions->end_date = uar_i18ngetmessage(i18nHandle,
+  "end_date", "Ending Date:")
+set captions->summary = uar_i18ngetmessage(i18nHandle,
+  "summary", "SUMMARY")
+set captions->product = uar_i18ngetmessage(i18nHandle,
+  "product", "Product")
+set captions->total = uar_i18ngetmessage(i18nHandle,
+  "total", "Total")
+set captions->report_id = uar_i18ngetmessage(i18nHandle,
+  "report_id", "Report ID: BBT_COMPONENT_SUM")
+set captions->page_no = uar_i18ngetmessage(i18nHandle,
+  "page_no", "Page:")
+set captions->printed = uar_i18ngetmessage(i18nHandle,
+  "printed", "Printed:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+set captions->rpt_detail = uar_i18ngetmessage(i18nHandle,
+  "rpt_detail", "DETAIL")
+set captions->product_type = uar_i18ngetmessage(i18nHandle,
+  "product_type", "Product Type")
+set captions->draw_modify = uar_i18ngetmessage(i18nHandle,
+  "draw_modify", "Draw/Modify")
+set captions->expire = uar_i18ngetmessage(i18nHandle,
+  "expire", "Expire")
+set captions->donor = uar_i18ngetmessage(i18nHandle,
+  "donor", "Donor ")
+set captions->number = uar_i18ngetmessage(i18nHandle,
+  "number", "Number")
+set captions->sub = uar_i18ngetmessage(i18nHandle,
+  "sub", "Sub")
+set captions->orig_modified = uar_i18ngetmessage(i18nHandle,
+  "orig_modified", "Orig/Modified")
+set captions->aborh = uar_i18ngetmessage(i18nHandle,
+  "aborh", "ABORh")
+set captions->states = uar_i18ngetmessage(i18nHandle,
+  "states", "States")
+set captions->supplier = uar_i18ngetmessage(i18nHandle,
+  "supplier", "Supplier")
+set captions->date = uar_i18ngetmessage(i18nHandle,
+  "date", "Date")
+set captions->time = uar_i18ngetmessage(i18nHandle,
+  "time", "Time")
+set captions->tech = uar_i18ngetmessage(i18nHandle,
+  "tech", "Tech")
+set captions->volume = uar_i18ngetmessage(i18nHandle,
+  "volume", "Volume")
+set captions->no_modified = uar_i18ngetmessage(i18nHandle,
+  "no_modified", " * * * No modified products for time frame * * *")
+set captions->report_id_det = uar_i18ngetmessage(i18nHandle,
+  "report_id_det", "Report ID: BBT_COMPONENT_DET")
+set captions->all = uar_i18ngetmessage(i18nHandle,
+  "all", "(All)")
+set captions->unknown = uar_i18ngetmessage(i18nHandle,
+  "unknown", "unknwn")
+set captions->inactive = uar_i18ngetmessage(i18nHandle,
+  "inactive", "(inactive)")
+;End 014
+ 
+;010
+if (trim(request->batch_selection) > " ")
+  set begday = request->ops_date
+  set endday = request->ops_date
+  set temp_string = cnvtupper(trim(request->batch_selection))
+  CALL CHECK_OPT_DATE_PASSED("bbt_rpt_component")
+  if (reply->status_data->status != "F")
+        set request->start_dt_tm = begday
+        set request->end_dt_tm = endday
+  endif
+call CHECK_OWNER_CD ("bbt_rpt_component")
+call CHECK_INVENTORY_CD ("bbt_rpt_component")
+call CHECK_LOCATION_CD ("bbt_rpt_component")
+endif
+;010
+ 
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+ 
+;005 %I BBT_GET_INST_NAME.INC
+%i cclsource:bbt_get_location_info.inc
+ 
+        /**************************************************************************/
+        /*       variables used in the script                                     */
+        /**************************************************************************/
+        ;declare variables
+        declare count1                 = i4 with protected, noconstant(0)
+        declare count2                 = i4 with protected, noconstant(0)
+        declare count3                 = i4 with protected, noconstant(0)
+        declare qualstep               = i4 with protected, noconstant(0)
+        declare counted                = c1 with protected, noconstant(" ")
+        declare this_cd                = f8 with protected, noconstant(0.0)
+        declare failure_occured        = c1 with protected, noconstant(" ")
+        declare error_process          = vc with protected, noconstant(" ")
+        declare error_message          = vc with protected, noconstant(" ")
+        declare modified_event_type_cd = f8 with protected, noconstant(0.0)
+        declare mod_prod_event_type_cd = f8 with protected, noconstant(0.0)
+        declare modified               = vc with protected, noconstant("8")
+        declare modified_product       = vc with protected, noconstant("24")
+ 
+        ;default reply array to 1
+        set count1 = 0                                       ;count and loop variables
+        set count2 = 0
+        set count3 = 0
+        set qualstep = 0
+        set counted = "F"                                    ;variable to signal if current product type totalled
+        set this_cd = 0.0                                    ;temp variable to hold the current product_cd
+        set reply->status_data->status = "S"                 ;set the status to true as default
+        set failure_occured = "F"                            ;flag to indicate if a failure occured
+        set error_process = "                                "        ;error process that occured
+        set error_message = "                                "        ;description of error
+        set modified_event_type_cd = 0.0                      ;modified event code for product_event table
+        set mod_prod_event_type_cd = 0.0                      ;modified_product event code for product_event table
+ 
+        declare get_cvtext(p1)     = c23
+ 
+        /***********************************************************************************************/
+        /*  Locations - load all the location codes into the prod_list structure                       */
+        /***********************************************************************************************/
+        ;default the loc_list to 1 for now
+        set stat = ALTERLIST(prod_list->loc_list, 1)
+        set prod_list->loc_list[1]->location_cd = 1234
+ 
+set cur_owner_area_disp = fillstring(40," ")
+set cur_inv_area_disp = fillstring(40, " ")
+ 
+/* Retrieve display values for requested Owner Area and Inventory Area */
+if (request->cur_owner_area_cd = 0.0)
+    set cur_owner_area_disp = captions->all
+else
+    set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+endif
+ 
+if (request->cur_inv_area_cd = 0.0)
+    set cur_inv_area_disp = captions->all
+else
+    set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+endif
+ 
+        /***********************************************************************************************/
+        /*  Load the product_event for modified.                                                       */
+        /***********************************************************************************************/
+        set modified_event_type_cd = 0.0
+        set code_cnt = 1
+        set stat = uar_get_meaning_by_codeset(1610, nullterm(modified), code_cnt, modified_event_type_cd)
+        if (modified_event_type_cd = 0.0)
+           set failure_occured = "T"
+           set reply->status_data->status = "F"
+           set error_process = "get codevalues: 1610"
+           set error_message = "could not get Modified event_type_cd"
+        endif
+ 
+        set mod_prod_event_type_cd = 0.0
+        set code_cnt = 1
+        set stat = uar_get_meaning_by_codeset(1610, nullterm(modified_product), code_cnt, mod_prod_event_type_cd)
+        if (mod_prod_event_type_cd = 0.0)
+           set failure_occured = "T"
+           set reply->status_data->status = "F"
+           set error_process = "get codevalues: 1610"
+           set error_message = "could not get Modified_Product event_type_cd"
+        endif
+ 
+        /***********************************************************************************************/
+        /*  Product codes for current location.  All product types will be loaded in the array and the */
+        /*  the count associated with each product type will be incremented as the modified products   */
+        /*  are processed.                                                                             */
+        /***********************************************************************************************/
+ 
+        select into "nl:"
+        cv.code_value
+        from  code_value cv
+        where cv.code_set = 1604
+        head report
+             count1 = 0
+        detail
+             count1 = count1 + 1
+             stat = ALTERLIST(prod_list->loc_list[1]->totals, count1)
+             prod_list->loc_list[1]->totals[count1]->product_cd = cv.code_value
+             prod_list->loc_list[1]->totals[count1]->count = 0
+             prod_list->loc_list[1].totals[count1].active_ind = cv.active_ind
+        with  nocounter
+        if (curqual = 0)
+           set failure_occured = "T"
+           set reply->status_data->status = "F"
+           set error_process = "get codevalues: 1604"
+           set error_message = "could not get product codes"
+        endif
+ 
+        if (failure_occured = "T")
+           ;set reply->status_data->status = "F"
+           ;stat = ALTERLIST(reply->status_data->subeventstatus,1)
+           ;set reply->status_data->subeventstatus[1]->OperationName = error_message
+           GO TO EXIT_SCRIPT
+        endif
+ 
+        set count2 =  SIZE(prod_list->loc_list[1]->totals,5)
+ 
+        /***********************************************************************************************/
+        /*  Load the modified products into the num_list structure.  The totals on the loc_list will be*/
+        /*  will be incremented as the product type for the modified products are processed.           */
+        /*  All modified products are blood products.  This script does not currently support deriv-   */
+        /*  ative products.                                                                            */
+        /***********************************************************************************************/
+        select into "nl:" ;006 removed distint
+          pr1.product_id,
+          pr1.product_cd,
+          pr2.product_id,
+          pr2.product_cd,
+          pr2.cur_unit_meas_cd,
+          b1.product_id,
+          b1.cur_abo_cd,
+          b1.cur_rh_cd,
+          b2.product_id,
+          b2.cur_abo_cd,
+          b2.cur_rh_cd,
+          pe.product_event_id,
+          pnl.username,
+          org1.org_name,
+          org2.org_name,
+          cv_abo1_display = UAR_GET_CODE_DISPLAY(b1.cur_abo_cd),
+          cv_rh1_display = UAR_GET_CODE_DISPLAY(b1.cur_rh_cd),
+          cv_meas1_display = UAR_GET_CODE_DISPLAY(pr1.cur_unit_meas_cd),
+          cv_abo2_display = UAR_GET_CODE_DISPLAY(b2.cur_abo_cd),
+          cv_rh2_display = UAR_GET_CODE_DISPLAY(b2.cur_rh_cd ),
+          cv_meas2_display = UAR_GET_CODE_DISPLAY(pr2.cur_unit_meas_cd),
+          cv_p1_display = UAR_GET_CODE_DISPLAY(pr1.product_cd),
+          cv_p2_display = UAR_GET_CODE_DISPLAY(pr2.product_cd)
+ 
+        from
+          product pr1,
+          product pr2,
+          blood_product b1,
+          blood_product b2,
+          product_event pe,
+          product_event pe2,
+          organization org1,
+          (dummyt d_org1 with seq = 1),
+          organization org2,
+          (dummyt d_org2 with seq = 1),
+          prsnl pnl,
+          (dummyt d_pnl with seq = 1)
+ 
+        plan pe where (pe.event_type_cd = modified_event_type_cd)
+                       and CNVTDATETIME(request->start_dt_tm) <= pe.event_dt_tm
+                       and CNVTDATETIME(request->end_dt_tm) >= pe.event_dt_tm
+        join pr1 where (pr1.modified_product_ind = 1)
+                        and (pe.product_id = pr1.product_id)
+                          and ((request->cur_owner_area_cd > 0.0
+                          and request->cur_owner_area_cd = pr1.cur_owner_area_cd)
+                          or (request->cur_owner_area_cd = 0.0))
+                          and ((request->cur_inv_area_cd > 0.0
+                          and request->cur_inv_area_cd = pr1.cur_inv_area_cd)
+                          or (request->cur_inv_area_cd = 0.0))
+        join b1 where (b1.product_id = pr1.product_id)
+                     and (b1.active_ind = 1)
+        join pr2 where (pr2.modified_product_id = pr1.product_id)
+                      and (pr2.active_ind = 1)
+        join b2 where (b2.product_id = pr2.product_id)
+                     and (b2.active_ind = 1)
+        join pe2 where (pe2.product_id = pr2.product_id
+                     and pe2.event_type_cd = mod_prod_event_type_cd)
+        join (d_pnl where d_pnl.seq = 1
+              join pnl where pnl.person_id = pe2.event_prsnl_id
+                             and pnl.active_ind = 1
+             )
+        join (d_org1 where d_org1.seq = 1
+              join org1 where (org1.organization_id = pr1.cur_supplier_id)
+                             and (org1.organization_id != 0)
+             )
+        join (d_org2 where d_org2.seq = 1
+              join org2 where (org2.organization_id = pr2.cur_supplier_id)
+                             and (org2.organization_id != 0)
+             )
+ 
+        order by pr1.product_id, pr2.product_id
+ 
+        head report
+             count1 = 0
+        head pr1.product_id
+             ;add the new product to the parent_list
+             count1 = count1 + 1
+             stat = ALTERLIST(num_list->parent_list, count1)
+             ;reset the modified product count
+             count2 = 0
+             num_list->parent_list[count1]->product_number  =
+                concat(TRIM(b1.supplier_prefix), TRIM(pr1.product_nbr))  ;BNK - 11/01/97
+             num_list->parent_list[count1]->product_sub_nbr = TRIM(pr1.product_sub_nbr)
+             num_list->parent_list[count1]->product_id      = pr1.product_id
+             num_list->parent_list[count1]->product_disp    = cv_p1_display
+             num_list->parent_list[count1]->abo_disp        = cv_abo1_display
+             num_list->parent_list[count1]->rh_disp         = cv_rh1_display
+             num_list->parent_list[count1]->supplier        = if (org1.seq = 1)
+                                                                 org1.org_name
+                                                              else
+                                                                 captions->unknown
+                                                              endif
+             num_list->parent_list[count1]->orig_vol        = b1.cur_volume
+             num_list->parent_list[count1]->orig_meas_disp  = cv_meas1_display
+             num_list->parent_list[count1]->orig_exp_dt     = CNVTDATETIME(pr1.cur_expire_dt_tm)
+        head pr2.product_id
+            counted = "F"
+            this_cd = pr2.product_cd
+            count3 = 0        
+            ;alter the size of the num_list structure for the modified product
+            count2 = count2 + 1
+            stat = ALTERLIST(num_list->parent_list[count1]->mod_list,count2)
+;006 moved this section from detail to head pr2.product_id
+            num_list->parent_list[count1]->nbr_of_mod                          = count2
+            num_list->parent_list[count1]->mod_list[count2].product_id         = pr2.product_id
+            num_list->parent_list[count1]->mod_list[count2].product_number     =
+                concat(TRIM(b2.supplier_prefix), TRIM(pr2.product_nbr))   ;BNK - 11/01/97 TRIM(pr2.product_nbr)
+            num_list->parent_list[count1]->mod_list[count2].product_sub_nbr    = TRIM(pr2.product_sub_nbr)
+            num_list->parent_list[count1]->mod_list[count2].product_disp       = cv_p2_display
+            num_list->parent_list[count1]->mod_list[count2].abo_disp           = cv_abo2_display
+            num_list->parent_list[count1]->mod_list[count2].rh_disp            = cv_rh2_display
+            num_list->parent_list[count1]->mod_list[count2].supplier           = if (org2.seq = 1)
+                                                                                    org2.org_name
+                                                                                 else
+                                                                                    captions->unknown
+                                                                                 endif
+            num_list->parent_list[count1]->mod_list[count2].drawn_date         = CNVTDATETIME(curdate,curtime3)
+            num_list->parent_list[count1]->mod_list[count2].modify_date        = CNVTDATETIME(pr2.create_dt_tm) ;006
+            num_list->parent_list[count1]->mod_list[count2].mod_tech_id        = if (pnl.seq = 1)
+                                                                                    pnl.username
+                                                                                 else
+                                                                                    captions->unknown
+                                                                                 endif
+            num_list->parent_list[count1]->mod_list[count2].mod_vol            = b2.cur_volume
+            num_list->parent_list[count1]->mod_list[count2].mod_meas_disp      = cv_meas2_display
+            num_list->parent_list[count1]->mod_list[count2].mod_exp_dt         = CNVTDATETIME(pr2.cur_expire_dt_tm)
+            num_list->parent_list[count1]->mod_list[count2].donor_nbr          = 0
+            
+            while (counted = "F")
+               count3 = count3 + 1
+               if (this_cd = prod_list->loc_list[1]->totals[count3]->product_cd)
+                  prod_list->loc_list[1]->totals[count3]->count = prod_list->loc_list[1]->totals[count3]->count + 1
+                  counted = "T"
+               endif
+               ;account for error of product type not being in array
+               if (count3 > SIZE(prod_list->loc_list[1]->totals,5))
+                  counted = "T"
+                  failure_occured = "T"
+                  error_process = "error counting totals"
+                  error_message = "product code not counted"
+               endif
+            endwhile            
+;006 end
+
+        with counter,
+             outerjoin = d_pnl,
+             dontcare  = pnl,
+             outerjoin = d_org1,
+             dontcare  = org1,
+             outerjoin = d_org2,
+             dontcare  = org2
+ 
+        /***********************************************************************************************/
+        /*  Get all the active states                                                                  */
+        /***********************************************************************************************/
+        set count1 = SIZE(num_list->parent_list,5)
+        for (qualstep = 1 to count1)
+           ;states for the original product
+           set count3 = 0
+           select distinct into "nl:"
+              pe.product_event_id,
+              pe.product_id,
+              pe.event_type_cd,
+              cv_state_display = UAR_GET_CODE_DISPLAY(pe.event_type_cd)
+           from product_event pe
+                ;code_value cv_state
+           plan pe where (num_list->parent_list[qualstep]->product_id = pe.product_id)
+                          and (pe.active_ind = 1)
+           ;join cv_state where cv_state.code_value = pe.event_type_cd
+           order by pe.product_event_id
+           detail
+             if (pe.event_type_cd > 0)
+                count3 = count3 + 1
+                stat = ALTERLIST(num_list->parent_list[qualstep]->states,count3)
+                num_list->parent_list[qualstep]->nbr_of_states = count3
+                num_list->parent_list[qualstep]->states[count3].event_type_disp = cv_state_display
+             endif
+           with counter
+           ;states for the modified products
+           for (count2 = 1 to num_list->parent_list[qualstep]->nbr_of_mod)
+              set count3 = 0
+              select distinct into "nl:"
+                   pe.product_event_id,
+                   pe.product_id,
+                   pe.event_type_cd,
+                   cv_state_display = UAR_GET_CODE_DISPLAY(pe.event_type_cd)
+              from product_event pe
+ 
+              plan pe where (num_list->parent_list[qualstep]->mod_list[count2]->product_id = pe.product_id)
+                         and (pe.active_ind = 1)
+ 
+              order by pe.product_event_id
+              detail
+                  if (pe.event_type_cd > 0)
+                     count3 = count3 + 1
+                     stat = ALTERLIST(num_list->parent_list[qualstep]->mod_list[count2]->states,count3)
+                     num_list->parent_list[qualstep]->mod_list[count2]->nbr_of_states = count3
+                     num_list->parent_list[qualstep]->mod_list[count2]->states[count3].event_type_disp =
+                         cv_state_display
+                  endif
+              with nocounter
+           endfor
+        endfor
+ 
+/**********************************************************************************************************************/
+/*  Print out the results of the script in a summary view                                                             */
+/**********************************************************************************************************************/
+  ;variables for fomatting output to make sure it fits on the page
+  set product = "                       "
+  set loc = "               "
+  set count1 = SIZE(prod_list->loc_list[1]->totals, 5)
+  set line = fillstring(130,"_")
+ 
+/* Retrieve Institution Name   */
+;005   Set Institution_name = GET_INST_NAME(0)
+  set rpt_cnt = 0
+ 
+  execute cpm_create_file_name_logical "bbt_cmpnt_sum", "txt", "x"
+ 
+  select into cpm_cfn_info->file_name_logical
+       c_prod.code_value
+ 
+  from
+       code_value c_prod,
+       (dummyt d_ar with seq = value(count1))
+ 
+  plan d_ar
+  join c_prod where (c_prod.code_value = prod_list->loc_list[1]->totals[d_ar.seq].product_cd)
+  order by d_ar.seq , c_prod.code_value
+ 
+  head report
+  prod_display = fillstring(35, " ")
+ 
+  head page
+;005      col   1, Institution_name,
+      col 111, captions->as_of_date,															;014
+      col 123, curdate "@DATECONDENSED;;d",   ;"mm/dd/yy;;d",
+      row + 1
+      col 111, captions->as_of_time,															;014
+      col 123, curtime "@TIMENOSECONDS;;M",   ;"hh:mm;;m",
+      row + 1
+%i cclsource:bbt_print_location_info.inc
+      SAVE_ROW = ROW
+      ROW 1
+      call center(captions->component_report,1,132)										;014
+      ROW SAVE_ROW
+      row + 1
+      col 1,  captions->bb_owner,																;014
+      col 19, cur_owner_area_disp,
+      row + 1
+      col 1,  captions->inventory_area,														;014
+      col 17, cur_inv_area_disp
+      row + 2
+      col  32, captions->beg_date																;014
+      col  48, request->start_dt_tm   "@DATECONDENSED;;d"     ;"ddmmmyy;;d"
+      col  56, request->start_dt_tm   "@TIMENOSECONDS;;M"     ;"hh:mm;;m"
+      col  69, captions->end_date																;014
+      col  82, request->end_dt_tm   "@DATECONDENSED;;d"     ;"ddmmmyy;;d"
+      col  90, request->end_dt_tm   "@TIMENOSECONDS;;M"     ;"hh:mm;;m"
+      row + 2
+      call center(captions->summary,1,132)													;014
+      row + 3
+      ;col 30,"Location:"
+      row + 1
+      call center(captions->product,40,65)													;014
+      call center(captions->total,85,91)														;014
+      row + 1
+      col 40, "--------------------------"
+      col 85, "-------"
+      row + 1
+ 
+  head c_prod.code_value
+      ;make sure there is enough room to print the information
+      if (row > 58)
+         break
+      endif
+      if (prod_list->loc_list[1]->totals[d_ar.seq].count > 0)
+         product = c_prod.display
+         count1 = prod_list->loc_list[1]->totals[d_ar.seq].count
+         if (prod_list->loc_list[1].totals[d_ar.seq].active_ind = 0)
+             prod_display = concat(trim(product), "  ", captions->inactive)
+             col 40, prod_display
+         else
+             col 40, product
+         endif
+         col 80, count1
+         row + 1
+     endif
+ 
+  detail
+     row + 0
+ 
+  foot page
+      row  59
+      col   1, line,
+      row + 1
+      col   1, captions->report_id,																;014
+      col  60, captions->page_no,																;014
+      col  67, curpage "###",
+      col 108, captions->printed,																;014
+      col 117, curdate "@DATECONDENSED;;d"  ;"mm/dd/yy;;d"
+      col 126, curtime "@TIMENOSECONDS;;M"  ;"hh:mm;;m"
+ 
+  foot report
+      row  62
+      col  53, captions->end_of_report															;014
+ 
+  with  nocounter,
+      maxrow = 63,
+      NULLREPORT,
+      compress,
+      nolandscape
+ 
+  set rpt_cnt = rpt_cnt +1
+  set stat = alterlist(reply->rpt_list, rpt_cnt)
+  set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+ 
+/**********************************************************************************************************************/
+/*  Print out the results of the script in a detail view                                                              */
+/**********************************************************************************************************************/
+;procedure declaration for code value conversion
+set parent_id = 0.0                  ;var for joining to num_list->parent_list
+ 
+;get the number of products that were modified
+set count1 = SIZE(num_list->parent_list,5)
+   execute cpm_create_file_name_logical "bbt_cmpnt_det", "txt", "x"
+ 
+   select into cpm_cfn_info->file_name_logical
+      d_ar.seq,
+      parent_id = num_list->parent_list[d_ar.seq]->product_id
+   from
+      (dummyt d_ar with seq = value(count1))
+   plan d_ar
+ 
+order by parent_id
+head page
+;005      col   1, Institution_name     ;"SOUTHWEST MEDICAL CENTER",
+
+      col 111, captions->as_of_date,															;014
+      col 123, curdate "@DATECONDENSED;;d",   ;"mm/dd/yy;;d",
+      row + 1
+      col 111, captions->as_of_time,															;014
+      col 123, curtime "@TIMENOSECONDS;;M",    ;"hh:mm;;m",
+%i cclsource:bbt_print_location_info.inc
+      SAVE_ROW = ROW
+      ROW 1
+      call center(captions->component_report,1,132)										;014
+      ROW SAVE_ROW
+      ROW + 1
+      col 1, captions->bb_owner,																	;014
+      col 19, cur_owner_area_disp,
+      row + 1
+      col 1, captions->inventory_area,															;014
+      col 17, cur_inv_area_disp
+      row + 2
+      col  32, captions->beg_date																;014
+      col  48, request->start_dt_tm   "@DATECONDENSED;;d"     ;"ddmmmyy;;d"
+      col  56, request->start_dt_tm   "@TIMENOSECONDS;;M"     ;"hh:mm;;m"
+      col  69, captions->end_date																;014
+      col  82, request->end_dt_tm   "@DATECONDENSED;;d"     ;"ddmmmyy;;d"
+      col  90, request->end_dt_tm   "@TIMENOSECONDS;;M"     ;"hh:mm;;m"
+      row + 2
+      call center(captions->rpt_detail,1,132)												;014
+      row + 3
+      call center(captions->product,0,27)			;019									;014
+      call center(captions->product_type,28,44)												;014
+      call center(captions->draw_modify,80,92)												;014
+      call center(captions->expire,111,119)													;014
+      call center(captions->donor,120,130)													;014
+      row + 1
+      col  1, captions->number																	;014
+      col 21, captions->sub																		;014
+      call center(captions->orig_modified,28,44)											;014
+      col 45, captions->aborh																		;014
+      col 52, captions->states																	;014
+      col 63, captions->supplier																	;014
+      col 80, captions->date																		;014
+      col 88, captions->time																		;014
+      col 94, captions->tech																		;014
+      col 104, captions->volume																	;014
+      call center(captions->date,112,118)														;014
+      call center(captions->number,120,130)     											;014
+      row + 1
+      col  0, "---------------------------"		;019
+      col 28, "----------------"
+      col 45, "------"
+      col 52, "----------"
+      col 63, "----------------"
+      col 80, "-------------"
+      col 94, "---------"
+      col 104, "-------"
+      col 112, "-------"
+      col 120, "-----------"
+ 
+head parent_id
+     if (num_list->parent_list[d_ar.seq]->product_id > 0.0)
+        ;make sure there is enough room to print the information
+        if (row > 58)
+           break
+        endif
+ 
+        ;make sure there is enough room to print the total list of states without page break
+        if (row + num_list->parent_list[d_ar.seq]->nbr_of_states  > 58)
+            break
+        endif
+ 
+        row + 1
+ 
+        aborh = CONCAT(num_list->parent_list[d_ar.seq].abo_disp," ",num_list->parent_list[d_ar.seq].rh_disp)
+        meas_val = CNVTSTRING(num_list->parent_list[d_ar.seq].orig_vol)
+        meas = BUILD(meas_val,num_list->parent_list[d_ar.seq].orig_meas_disp)
+ 
+        /* print the original product information */
+        col  0, num_list->parent_list[d_ar.seq]->product_number		;019
+        col 20, num_list->parent_list[d_ar.seq]->product_sub_nbr	;019
+        col 28, num_list->parent_list[d_ar.seq]->product_disp
+        col 45, aborh
+        col 63, num_list->parent_list[d_ar.seq].supplier
+        col 104, meas
+        col 112, num_list->parent_list[d_ar.seq].orig_exp_dt "@DATECONDENSED;;d" ;"mm/dd/yy;;d"
+ 
+        if (num_list->parent_list[d_ar.seq].nbr_of_states > 1)
+           for (qualcnt = 1 to num_list->parent_list[d_ar.seq].nbr_of_states)
+              col 52, num_list->parent_list[d_ar.seq]->states[qualcnt].event_type_disp
+              row + 1
+           endfor
+           row - 1
+        else
+           col 52, num_list->parent_list[d_ar.seq]->states[1].event_type_disp
+        endif
+ 
+         /* print the modified product information */
+        for (count2 = 1 to num_list->parent_list[d_ar.seq]->nbr_of_mod)
+           ;make sure there is enough room to print the total list of statest without page break
+           if (row + num_list->parent_list[d_ar.seq]->mod_list[count2]->nbr_of_states  > 58)
+               break
+           endif
+ 
+           row + 1
+ 
+           aborh = CONCAT(num_list->parent_list[d_ar.seq]->mod_list[count2].abo_disp," ",
+                          num_list->parent_list[d_ar.seq]->mod_list[count2].rh_disp)
+           meas_val = CNVTSTRING(num_list->parent_list[d_ar.seq]->mod_list[count2].mod_vol)
+           meas = BUILD(meas_val,num_list->parent_list[d_ar.seq]->mod_list[count2].mod_meas_disp)
+ 
+           col  2, num_list->parent_list[d_ar.seq]->mod_list[count2].product_number		;019
+           col 22, num_list->parent_list[d_ar.seq]->mod_list[count2].product_sub_nbr	;019
+           col 28, num_list->parent_list[d_ar.seq]->mod_list[count2].product_disp
+           col 45, aborh
+           col 63, num_list->parent_list[d_ar.seq]->mod_list[count2].supplier
+           ;col 75, "draw"
+           col 80, num_list->parent_list[d_ar.seq]->mod_list[count2].modify_date "@DATECONDENSED;;d" ;"mm/dd/yy;;d"
+           col 87, " "
+           col 88, num_list->parent_list[d_ar.seq]->mod_list[count2].modify_date "@TIMENOSECONDS;;M";"hh:mm;;m"
+           col 94, num_list->parent_list[d_ar.seq]->mod_list[count2].mod_tech_id
+           col 104, meas
+           col 112, num_list->parent_list[d_ar.seq]->mod_list[count2].mod_exp_dt "@DATECONDENSED;;d";"mm/dd/yy;;d"
+           ;col 124, "numb"
+ 
+           if (num_list->parent_list[d_ar.seq]->mod_list[count2].nbr_of_states > 1)
+              for (qualcnt = 1 to num_list->parent_list[d_ar.seq]->mod_list[count2]->nbr_of_states)
+                 col 52, num_list->parent_list[d_ar.seq]->mod_list[count2]->states[qualcnt].event_type_disp
+                 row + 1
+              endfor
+              row - 1
+           else
+              col 52, num_list->parent_list[d_ar.seq]->mod_list[count2]->states[1].event_type_disp
+           endif
+        endfor
+     elseif (count1 <= 1)
+        ;no crossmatches to release at this time
+        row + 1
+        call center(captions->no_modified,1,131)											;014
+     endif
+ 
+detail
+     row + 1
+ 
+foot page
+      row  59
+      col   1, line,
+      row + 1
+      col   1, captions->report_id_det,														;014
+      col  60, captions->page_no,																;014
+      col  67, curpage "###",
+      col 108, captions->printed,																;014
+      col 117, curdate "@DATECONDENSED;;d" ;"mm/dd/yy;;d"
+      col 126, curtime "@TIMENOSECONDS;;M" ;"hh:mm;;m"
+ 
+foot report
+      row  62
+      col  53, captions->end_of_report															;014
+ 
+with  nocounter,
+      maxrow = 63,
+      compress, nolandscape, ;BNK - 10/31/97
+      NULLREPORT
+ 
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+;print out the report if running from operations
+;if (CNVTUPPER(request->batch_selection) = "OPERATIONS")
+if (trim(request->batch_selection) > " ")
+   set i = 0
+   for (i = 1 to rpt_cnt)
+      set spool value(reply->rpt_list[i].rpt_filename) VALUE(request->Output_Dist) ;WITH NOTIFY
+   endfor
+endif
+ 
+#EXIT_SCRIPT
+end go
+
+;Generated by GNU enscript 1.6.4.

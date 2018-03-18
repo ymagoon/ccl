@@ -1,0 +1,450 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_upd_instr_assgn/glb_upd_instr_assgn.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_UPD_INSTR_ASSGN.PRG
+        Object name:            GLB_UPD_INSTR_ASSGN
+        Request #:
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Update the INSTRUMENT_ASSIGNMENT table with
+                                user logging onto instrument
+
+
+        Tables read:            INSTRUMENT_ASSIGNMENT
+
+        Tables updated:         INSTRUMENT_ASSIGNMENT
+        Executing from:         General Lab Instrument Assignment DLL
+
+        Special Notes:          n/a
+*/
+;    ************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *### 06/19/00 Gary Runde           Initial Release                     *
+;    *001 08/13/01 Gary Runde           Only retrieve active resource_groups*
+;    *002 06/09/11 MP021175             Fix for CR# 1-4875512801	        *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+        drop program GLB_UPD_INSTR_ASSGN:dba go
+        create program GLB_UPD_INSTR_ASSGN:dba
+
+;        record request
+;        (
+;         1 logoff_ind                 = i2
+;         1 applctx                    = i4
+;         1 override_ind               = i2
+;         1 reauth_ind                 = i2
+;         1 person_id                  = f8
+;         1 instruments[*]
+;            2 service_resource_cd     = f8
+;        )
+
+        record reply
+        (
+         1 instruments[*]
+           2 service_resource_cd       = f8
+           2 service_resource_disp     = vc
+           2 person_id                 = f8
+           2 username                  = vc
+           2 failed_ind                = i2
+%i cclsource:status_block.inc
+        )
+
+        record sr
+        (
+          1  sr_list[*]
+             2  service_resource_cd     = f8
+        )
+
+/* Variable initialization */
+        set reply->status_data->status = "F"
+        set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+        set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+        set i_cnt = 0
+        set add_mins = 0.00
+        set add_mins = (12.0 / 1440.00)
+
+/***********************************************************************************/
+/* Check to make sure instruments were passed in                                   */
+/***********************************************************************************/
+        if (value(size(request->instruments, 5)) = 0)
+           go to exit_script
+        endif
+
+/***********************************************************************************/
+/* Check for subsections asd add current instruments     */
+/***********************************************************************************/
+      ;if not logging in, then instruments will not be subsections
+      if ((request->logoff_ind   = 1) or
+          (request->override_ind = 1) or
+          (request->reauth_ind   = 1))
+
+          set num_instruments = 0
+          set num_instruments = value(size(request->instruments,5))
+          set stat = alterlist(sr->sr_list, num_instruments)
+          for (i_cnt = 1 to num_instruments)
+              set sr->sr_list[i_cnt].service_resource_cd =
+                       request->instruments[i_cnt].service_resource_cd
+          endfor
+      else
+         ;logging on so check for subsections
+          set num_req = 0
+          set sr_cnt = 0
+          set num_req = value(size(request->instruments,5))
+          select into "nl:"
+             r.child_service_resource_cd,
+             s.service_resource_cd,
+             r_exists = decode(r.seq, "Y", "N")
+          from
+             (dummyt d1 with seq = value(num_req)),
+             (dummyt d2 with seq = 1),
+             resource_group r,
+             service_resource s
+          plan d1
+          join d2 where d2.seq = 1
+          join r where
+              r.parent_service_resource_cd =
+                       request->instruments[d1.seq].service_resource_cd
+              and r.root_service_resource_cd = 0.0
+              and r.active_ind = 1                                        ;001
+          join s where
+              s.service_resource_cd = r.child_service_resource_cd
+              and s.activity_type_cd in
+              (
+                select
+                  cvat.code_value
+                from
+                  code_value cvat
+                where cvat.cdf_meaning = ("GLB")
+                  and cvat.code_set = 106
+              )
+          order by
+             r.parent_service_resource_cd
+          head report
+             sr_cnt = 0
+          detail
+             sr_cnt = sr_cnt + 1
+             if (mod(sr_cnt, 4) = 1)
+                stat = alterlist(sr->sr_list,sr_cnt + 4)
+             endif
+             if (r_exists = "Y")
+                ;this resource is from a subsection
+                 sr->sr_list[sr_cnt]->service_resource_cd =
+                    r.child_service_resource_cd
+             else
+                ;not a subsection, just instrument
+                 sr->sr_list[sr_cnt]->service_resource_cd =
+                    request->instruments[d1.seq].service_resource_cd
+             endif
+          WITH
+             nocounter,
+             outerjoin = d2
+
+          set stat = alterlist(sr->sr_list, sr_cnt)
+          set num_instruments = value(size(sr->sr_list, 5))
+      endif
+
+/***********************************************************************************/
+/* Check to see if needing to log off this user from the instruments passed in     */
+/***********************************************************************************/
+
+      if (request->logoff_ind = 1)
+         ;if overriding instruments, delete current rows and add new ones
+         for (aCnt = 1 to num_instruments)
+            ;remove the rows
+            delete from instrument_assignment ia
+            where ia.service_resource_cd =
+                      sr->sr_list[aCnt].service_resource_cd
+              and ia.prsnl_id = request->person_id
+         endfor
+
+         set error_check = ERROR(sErrorMsg,0)   ;get error message
+         if (error_check != 0)
+            set reply->status_data->status = "F"
+            set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+            go to exit_script
+         endif
+
+         set reply->status_data->status = "S"
+         go to EXIT_SCRIPT
+      endif
+
+
+/***********************************************************************************/
+/* Check to see if needing to override instruments passed in                       */
+/***********************************************************************************/
+
+      if (request->override_ind = 1)
+         ;if overriding instruments,w delete current rows and add new ones
+         for (aCnt = 1 to num_instruments)
+            ;remove the rows
+            delete from instrument_assignment ia
+            where ia.service_resource_cd =
+                      sr->sr_list[aCnt].service_resource_cd
+
+            set error_check = ERROR(sErrorMsg,0)   ;get error message
+            if (error_check != 0)
+               set reply->status_data->status = "F"
+               set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+               go to exit_script
+            endif
+
+            ;assign this person to the instrument
+            insert into instrument_assignment ia
+            set
+               ia.active_ind          = 1,
+               ia.beg_effective_dt_tm = cnvtdatetime(curdate, curtime3),
+               ia.prsnl_id            = request->person_id,
+               ia.service_resource_cd = sr->sr_list[aCnt].service_resource_cd,
+               ia.end_effective_dt_tm =
+                         cnvtdatetime(datetimeadd(cnvtdatetime(curdate, curtime3), add_mins)),
+               ia.updt_applctx        = reqinfo->updt_applctx,
+               ia.updt_cnt            = 0,
+               ia.updt_dt_tm          = cnvtdatetime(curdate, curtime3),
+               ia.updt_id             = reqinfo->updt_id,
+               ia.updt_task           = reqinfo->updt_task
+            plan ia
+            with nocounter
+
+            set error_check = ERROR(sErrorMsg,0)   ;get error message
+            if (error_check != 0)
+               set reply->status_data->status = "F"
+               set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+               go to exit_script
+            endif
+
+         endfor
+
+         set reply->status_data->status = "S"
+         go to EXIT_SCRIPT
+      endif
+
+/***********************************************************************************/
+/* Check to see if Reauthenticating the instruments                                */
+/***********************************************************************************/
+
+      set stat = alterlist(reply->instruments, num_instruments)
+
+      if (request->reauth_ind = 1)
+        ;if reauth, they will be there on table
+        ;check to make sure that another user did not override
+        select into "nl:"
+            d1.seq,
+            d2.seq,
+            ia.service_resource_cd,
+            ia.prsnl_id,
+            ia_exists = decode(ia.seq, "Y", "N"),
+            p.username
+        from
+            (dummyt d1 with seq = value(num_instruments)),
+            (dummyt d2 with seq = 1),
+            instrument_assignment ia,
+            prsnl p
+        plan d1
+        join d2 where d2.seq = 1
+        join ia where ia.service_resource_cd =
+                         sr->sr_list[d1.seq].service_resource_cd
+                  and ia.active_ind = 1
+                  and cnvtdatetime(curdate,curtime3) between
+                          ia.beg_effective_dt_tm and ia.end_effective_dt_tm
+        join p where p.person_id = ia.prsnl_id
+        head report
+            i_cnt = 0
+        head d1.seq
+            i_cnt = i_cnt + 1
+            reply->instruments[i_cnt].service_resource_cd =
+                     sr->sr_list[d1.seq].service_resource_cd
+            if (ia_exists = "Y")
+               reply->instruments[i_cnt].person_id = ia.prsnl_id
+               reply->instruments[i_cnt].username = p.username
+               if (ia.prsnl_id = request->person_id and
+                   ia.updt_applctx = request->applctx)
+                  ;if the person ID has not changed and the
+                  ;applctx has not changed, do the update
+                  reply->instruments[i_cnt].failed_ind = 0
+               else
+                  ;else someone has overriden the resource
+                  reply->instruments[i_cnt].failed_ind = 1
+               endif
+            else
+               ;if the instrument_assignment table does not exist, someone has
+               ;logged in and then logged out to delete the row
+               reply->instruments[i_cnt].failed_ind = 1
+            endif
+        with nocounter,
+             outerjoin = d2
+
+        set error_check = ERROR(sErrorMsg,0)   ;get error message
+        if (error_check != 0)
+           set reply->status_data->status = "F"
+           set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+           go to exit_script
+        endif
+
+        for (uCnt = 1 to i_cnt)
+          if (reply->instruments[uCnt].failed_ind = 0)
+            ;update the rows that have been reauthenticated
+            update into instrument_assignment ia
+            set
+               ia.end_effective_dt_tm =
+                        cnvtdatetime(datetimeadd(cnvtdatetime(curdate, curtime3), add_mins)),
+               ia.updt_applctx        = reqinfo->updt_applctx,
+               ia.updt_cnt            = ia.updt_cnt + 1,
+               ia.updt_dt_tm          = cnvtdatetime(curdate, curtime3),
+               ia.updt_id             = reqinfo->updt_id,
+               ia.updt_task           = reqinfo->updt_task
+            where ia.service_resource_cd = reply->instruments[uCnt].service_resource_cd
+              and ia.prsnl_id = reply->instruments[uCnt].person_id
+            with nocounter
+
+            set error_check = ERROR(sErrorMsg,0)   ;get error message
+            if (error_check != 0)
+               set reply->status_data->status = "F"
+               set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+               go to exit_script
+            endif
+
+          endif
+        endfor
+
+      elseif (request->reauth_ind = 0)
+
+/***********************************************************************************/
+/* not Reauthenticating the instruments                                            */
+/* check to see what rows we can add                                               */
+/***********************************************************************************/
+
+        select into "nl:"
+            d1.seq,
+            d2.seq,
+            ia.service_resource_cd,
+            ia.prsnl_id,
+            p.username,
+            ia_exists = decode(ia.seq, "Y", "N")
+        from
+            (dummyt d1 with seq = value(num_instruments)),
+            (dummyt d2 with seq = 1),
+            instrument_assignment ia,
+            prsnl p
+        plan d1
+        join d2 where d2.seq = 1
+        join ia where ia.service_resource_cd =
+                         sr->sr_list[d1.seq].service_resource_cd
+                  and ia.active_ind = 1
+                  and cnvtdatetime(curdate,curtime3) between
+                          ia.beg_effective_dt_tm and ia.end_effective_dt_tm
+        join p where ia.prsnl_id = p.person_id
+        head d1.seq
+            i_cnt = i_cnt + 1
+            reply->instruments[i_cnt].service_resource_cd =
+                        sr->sr_list[d1.seq].service_resource_cd
+            if ((ia_exists = "Y") and ((ia.updt_applctx != request->applctx)
+             or (ia.prsnl_id != request->person_id)))
+                ;if the ia row exists, then cannot assign user because
+                ;someone already logged in
+                reply->instruments[i_cnt].failed_ind = 1
+                reply->instruments[i_cnt].person_id = ia.prsnl_id
+                reply->instruments[i_cnt].username = p.username
+            else
+                ;else no one is logged in, assign this user
+                reply->instruments[i_cnt].failed_ind = 0
+            endif
+        with nocounter,
+             outerjoin = d2
+
+        set error_check = ERROR(sErrorMsg,0)   ;get error message
+        if (error_check != 0)
+           set reply->status_data->status = "F"
+           set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+           go to exit_script
+        endif
+
+        for (uCnt = 1 to i_cnt)
+          if (reply->instruments[uCnt].failed_ind = 0)
+            ;remove the rows for clean up in case this service resource was not logged off (or expired)
+            ;and the current date/time is past the end effective date/time
+            delete from instrument_assignment ia
+            where ia.service_resource_cd =
+                      reply->instruments[uCnt].service_resource_cd
+
+            set error_check = ERROR(sErrorMsg,0)   ;get error message
+            if (error_check != 0)
+               set reply->status_data->status = "F"
+               set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+               go to exit_script
+            endif
+
+            ;assign this person to the instrument
+            insert into instrument_assignment ia
+            set
+               ia.active_ind          = 1,
+               ia.beg_effective_dt_tm = cnvtdatetime(curdate, curtime3),
+               ia.prsnl_id           = request->person_id,
+               ia.service_resource_cd = reply->instruments[uCnt].service_resource_cd,
+               ia.end_effective_dt_tm =
+                    cnvtdatetime(datetimeadd(cnvtdatetime(curdate, curtime3), add_mins)),
+               ia.updt_applctx        = reqinfo->updt_applctx,
+               ia.updt_cnt            = 0,
+               ia.updt_dt_tm          = cnvtdatetime(curdate, curtime3),
+               ia.updt_id             = reqinfo->updt_id,
+               ia.updt_task           = reqinfo->updt_task
+            plan ia
+            with nocounter
+
+            set error_check = ERROR(sErrorMsg,0)   ;get error message
+            if (error_check != 0)
+               set reply->status_data->status = "F"
+               set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+               go to exit_script
+            endif
+
+          endif
+        endfor
+
+      endif
+
+      set reply->status_data->status = "S"
+
+/* If no record matching, exit with return
+   status of "F". */
+#EXIT_SCRIPT
+call echorecord(reply)
+   if (reply->status_data->status = "S")
+      commit
+   else
+      rollback
+   endif
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

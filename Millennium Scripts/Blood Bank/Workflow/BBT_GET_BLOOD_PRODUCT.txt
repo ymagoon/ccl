@@ -1,0 +1,762 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bloodbankproductclass/BBT_GET_BLOOD_PRODUCT.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2006 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_blood_product.prg
+        Object name:            bbt_get_blood_product
+        Request #:              225002
+
+        Product:                Pathnet                              
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Get a blood product by product nbr & product
+                                code from live and historical tables.
+
+        Tables read:            product, blood_product, product_event
+                               
+        Tables updated:         NONE
+        Executing from:         CPM Script Server
+
+        Special Notes:          NONE
+******************************************************************************/
+
+ 
+;~DB~************************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              			*
+;    ************************************************************************************
+;    *                                                                      			*
+;    *Mod Date     Engineer             Comment                             			*
+;    *--- -------- -------------------- ------------------------------------------------*
+;    *001 06/15/95 Teresa Davis         Initial Release                     			*
+;    *002 01/29/95 Yvonne Klipfel       Add new CCL standard changes        			*
+;    *003 06/03/96 Martin Olson         Data model changes                  			*
+;    *004 05/03/97 Jon Weekes           Added code to return cur_dispense_device data 	*
+;    *005 06/03/97 Jon Weekes           Added code to return cur_owner_area,			*
+;    *  cur_inv_area and cur_inv_device data											*
+;    *006 10/29/97 Jon Weekes           Removed qualification on product				*
+;    *  table for request->start_prodcd > 0 and p.product_cd = request->start_prodcd	*
+;    *007 10/29/97 Jon Weekes           Added code to search on barcode in				*
+;    *  addition to product_nbr.  Also include prefix as part of product_nbr			*
+;    *008 03/02/98 David Hall           Added indicator to check history upload			*
+;    *                                  tables.											*
+;    *009 07/15/98 David Hall           Added join to recipt table in first scan 		*
+;    *                                  in order to get orig_ship_cond_cd and			*
+;    *                                  orig_vis_insp_cd.								*
+;    *010 10/06/98 Julie Petersen       Added logic to qualify by product cd 			*
+;    *011 11/11/98 Jose Suarez          Added pool otion id in request       			*
+;    *012 11/16/98 Shellie Ninemire     Added logic to test for process_cd 				*
+;    *                                  Added request->process_cdf to use on the		*
+;    *                                  valid_state table if it's passed in.			*
+;    *013 06/15/99 John Rieck           Added new state: Shipment In Process			*
+;    *014 12/07/99 Jon Weekes           Removed CNVTUPPER() on PRODUCT table			*
+;    *  column qualifications to allow access by index									*
+;    *015 02/17/00 John Rieck           Added new state: Verified						*
+;    *016 08/15/00 Jose Suarez          Added condition to see if the product number and* 
+;    *                                  the barcode number are pass in and retrieve all *
+;    *                                  matching product for both numbers				*
+;    *017 09/29/00 Jose Suarez          Added flag chars to the reply 					*
+;	 *018 12/18/01 Chris Noe			Added logic for checking history tables for the *
+;										product number passed in.						*
+;    *019 04/15/05 Cedric Daniels       Added an outerjoin to the orders table.  Added a*
+;                                       check to see if the odrer_only_in = 1 and orders*
+;                                       order_id = 0.  If so, no data will be added to  *
+;                                       the reply.                                      * 
+;    *020 05/09/05 Scott Farrimond      Added NO ORDERS logic                           *
+;    *021 08/09/05 Jim Jensen           Add disease_cd, donation_type_cd to the reply   *
+;                                       structure.                                      *
+;	 *022 08/27/05 Josh Arnold          Added ELECTRONIC_ENTRY_FLAG to reply.           *
+;    *023 02/06/06 Jason Coy            Added req_label_verify_ind to reply.            *
+;    *024 04/27/06 David Fifer          Added modified_prod and intransit states to the *
+;                                       request structure.                              *
+;    *025 10/27/06 Tom Brecht           Added xmatch_required_ind to reply              *
+;    *009 09/28/07 Matt Cummings        Fixed CR 1-1130954391                           *
+; 	 *010 06/30/10 Amy Gum				Add Recon_type_flag								*
+;	 *011 02/17/11 Amy Gum				Add Product_type_barcode						*
+;~DE~************************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_get_blood_product:dba go
+create program bbt_get_blood_product:dba
+
+/*
+record request
+(
+ 1  start_prodnbr       = c20                         ;character string for product number
+ 1  untranslated_prodnbr = c20                    ;character string for barcodeout in the product ocx  ;016
+ 1  start_alt_prodnbr   = c20                     ;character string for alternate number
+ 1  start_prodcd        = f8                           ;product type cd 
+ 1  start_prodid        = f8                           ;product id
+ 1  pool_option_id      = f8                           ;pool option id
+
+ 1  check_history_ind   = i2                      ;check bbhist_product, bbhist_product_event tables
+
+ 1  verify_status       = i2                          ;boolean flag to verify the event status flag on product_event
+
+ 1  active_states       = i2
+ 1  recieved            = i2
+ 1  quarantine          = i2
+ 1  modification        = i2
+ 1  disposed            = i2
+ 1  destruction         = i2
+ 1  directed            = i2
+ 1  assign              = i2
+
+ 1  crossmatch          = i2
+ 1  dispense            = i2
+ 1  transfused          = i2
+ 1  transfer            = i2
+ 1  unconfirmed         = i2
+ 1  autologous          = i2
+ 1  available           = i2
+ 1  in_progress         = i2
+ 1  shipped             = i2
+ 1  pooled              = i2
+ 1  pooled_prod         = 12
+ 1  confirmed           = i2        
+ 1  drawn               = i2
+ 1  tested              = i2
+ 1  shipment_in_process = i2  ;013
+ 1  verified            = i2  ;015
+ 1  debug_ind           = i2
+ 1  process_cdf         = c20 ;012
+ 1	modified_prod		= i2
+ 1	intransit			= i2
+)
+*/
+
+record reply
+(
+ 1  qual[*]
+%i cclsource:bbt_bpc_gbp_rep.inc
+%i cclsource:status_block.inc
+)
+
+/* Initialize Variables */
+set reply->status_data->status = "F"
+set prod_cnt = 0
+set max_event_cnt = 0
+
+; ** Get event_type_cd and collation_seq for requested event_type_mean's
+%i cclsource:bbt_bpc_event_type_cd_seq.inc
+
+
+/* Select Records */
+/* THE DATA BASE IS READ FOUR TIMES.  THE FIRST IS TO READ THE PRODUCT TABLE FOR THE PRODUCT_ID AND 
+   INFORMATION ON THE PRODUCT TABLE. THE SECOND READ IS TO ORJOIN TO THE BLOOD_PRODUCT OR 
+   DERIVATIVE TABLES.  THIS INFORMATION IS STORED AND THE PRODUCT EVENT TABLE IS JOINED TO THE ARRAY FOR 
+   GETTING THE PRODUCT_EVENTS ASSOCIATED WITH THE PRODUCT_ID AND THE NAME FOR THE PERSON_ID ON THE PRODUCT
+   EVEN TABLE.  THE FOURTH READ JOINS THE PRODUCT_EVENT ARRAY TO THE APPROPRIATE CHILD TABLE FOR SPECIFIC 
+   INFORMATION 
+*/
+declare lORDER_STATUS_CS    = i4  with protect , constant(6004)
+declare sCANCELED_CDF       = c12 with protect , constant("CANCELED")
+declare sDISCONTINUED_CDF   = c12 with protect , constant("DISCONTINUED")
+declare dCANCELED_cv        = f8  with protect , noconstant(0.0)
+declare dDISCONTINUED_cv    = f8  with protect , noconstant(0.0)
+declare code_cnt 			= i4 with  protect , noconstant(1)
+declare nNoOrdersInd		= i2  with protect , noconstant(0)
+declare lBLOOD_CLASS_CS    = i4  with protect , constant(1606)
+declare sBLOOD_CDF       = c12 with protect , constant("BLOOD")
+declare BLOOD_PRODUCT_CLASS_CD  = f8  with protect , noconstant(0.0)
+declare nCheckAllStatesInd = i2 with protect, noconstant(0)
+
+set lStat = uar_get_meaning_by_codeset(lORDER_STATUS_CS, nullterm(sCANCELED_CDF), code_cnt, dCANCELED_cv)
+if (dCANCELED_cv = 0)
+	set reply->status_data.status = "F"
+    set reply->status_data.subeventstatus[1].OperationName = "bb_get_prod_ord_by_criteria.prg"
+    set reply->status_data.subeventstatus[1].OperationStatus = "F"
+    set reply->status_data.subeventstatus[1].TargetObjectName = "uar_get_meaning_by_codeset"
+    set reply->status_data.subeventstatus[1].TargetObjectValue =
+       "Unable to retrieve the code_value for the cdf_meaning CANCELED in code_set 6004."
+    set reply->status = "F"
+    go to end_script
+endif
+
+set lStat = uar_get_meaning_by_codeset(lORDER_STATUS_CS, nullterm(sDISCONTINUED_CDF), code_cnt, dDISCONTINUED_cv)
+if (dDISCONTINUED_cv = 0)
+    set reply->status_data.status = "F"
+    set reply->status_data.subeventstatus[1].OperationName = "bb_get_prod_ord_by_criteria.prg"
+    set reply->status_data.subeventstatus[1].OperationStatus = "F"
+    set reply->status_data.subeventstatus[1].TargetObjectName = "uar_get_meaning_by_codeset"
+    set reply->status_data.subeventstatus[1].TargetObjectValue =
+       "Unable to retrieve the code_value for the cdf_meaning DISCONTINUED in code_set 6004."
+    set reply->status = "F"
+    go to end_script
+endif
+
+set lStat = uar_get_meaning_by_codeset(lBLOOD_CLASS_CS, nullterm(sBLOOD_CDF), code_cnt, BLOOD_PRODUCT_CLASS_CD)
+if (BLOOD_PRODUCT_CLASS_CD = 0)
+    set reply->status_data.status = "F"
+    set reply->status_data.subeventstatus[1].OperationName = "bbt_get_blood_product"
+    set reply->status_data.subeventstatus[1].OperationStatus = "F"
+    set reply->status_data.subeventstatus[1].TargetObjectName = "uar_get_meaning_by_codeset"
+    set reply->status_data.subeventstatus[1].TargetObjectValue =
+       "Unable to retrieve the code_value for the cdf_meaning BLOOD in code_set 1606."
+    set reply->status = "F"
+    go to end_script
+endif
+
+/**begin 012**/
+;**********************************************************
+;* Test if the process_cd is passed in.  If it is then    *
+;* select using the valid_state table.                    *
+;**********************************************************
+
+;Writing the dynamic query and using in both if and else conditions of request->process_cdf
+declare where1 = vc
+set where1 = "p.product_id > 0.0 "
+if (request->start_prodcd > 0)
+ 	set where1 = concat(where1, " and request->start_prodcd = p.product_cd")
+endif
+ 	
+declare where2 = vc
+if ((trim(request->start_prodnbr) > "") and (trim(request->untranslated_prodnbr) > ""))
+	set where2 = 
+	    "((CNVTUPPER(request->start_prodnbr) = p.product_nbr) or (CNVTUPPER(request->untranslated_prodnbr) = p.product_nbr))"
+elseif (trim(request->start_prodnbr) > "")
+    set where2 = "CNVTUPPER(request->start_prodnbr) = p.product_nbr"	                        
+endif
+ 	
+if (trim(request->start_alt_prodnbr) > " ")
+	if (trim(where2) > " ")
+		set where2 = concat(where2, " or")
+	endif
+	set where2 = concat(where2, " CNVTUPPER(request->start_alt_prodnbr) = p.alternate_nbr")
+endif
+ 	
+if (trim(request->start_prodnbr) > " ")
+	if (trim(where2) > " ")
+		set where2 = concat(where2, " or")
+	endif
+	set where2 = concat(where2, " CNVTUPPER(request->start_prodnbr) = p.barcode_nbr")
+endif
+ 	
+if (request->start_prodid > 0.0)
+	if (trim(where2) > " ")
+		set where2 = concat(where2, " or")
+	endif
+	set where2 = concat(where2, " request->start_prodid = p.product_id")
+endif
+ 
+if (trim(where2) > " ")
+	set where1 = concat(where1, "and (", where2, ")")
+endif
+
+
+IF (request->process_cdf > " ")
+        ;GET THE APPLICATION CODE SENT IN.  (DISPENSE, ASSIGN, CROSSMATCH ETC.) CODE_SET 1664
+        set code_cnt = 1
+        set app_cd = 0.0
+        set stat = uar_get_meaning_by_codeset(1664, NULLTERM(request->process_cdf), code_cnt, app_cd)
+        if (app_cd = 0.0)
+                set reply->status_data->subeventstatus.OperationName = "bbt_get_blood_product"
+                set reply->status_data->subeventstatus.OperationStatus = "F"
+                set reply->status_data->subeventstatus.TargetObjectName = "uar_get_meaning_by_codeset"
+                set reply->status_data->subeventstatus.TargetObjectName = 
+                "Unable to retrieve the code value from code_set 1664"         
+                go to end_script
+        endif
+
+	;***********************************************************
+	;*  Temporary RECORD to store the product_id's, and states *
+	;*  Used to determin if all the states of the product are  *
+	;*  valid.  If they are then the product is stored in qual2*
+	;*  and used in the select to populate the reply structure.*
+	;***********************************************************
+	RECORD temp
+	(
+	1 qual[*]                       ;array of available products
+	     2 product_id = f8          ;available product ids from the product table
+	     2 category = f8            ;the category of each product(red cells)
+	     2 class_cd = f8			;blood product or derivative (p.product_class_cd)
+	     2 states[*]                ;array to hold the state of each product(available, unconfirmed)
+	        3 state_cd = f8         ;event_type_cd from the product_event table
+	     2 valid_states[*]          ;array to hold the valid states for each product(available, unconfirmed)
+	        3 valid_state_cd = f8   ;state_cd from the valid_state table
+	1 qual2[*]                      ;array to hold the valid products
+	     2 valid_product_id = f8    ;valid product ids from the product table
+	)
+	
+	
+	;***********************************************************
+	;*  SELECT all the available product ids and store the     *
+	;*  information in the temp record.                        *
+	;***********************************************************
+	
+	SELECT
+ 
+	into "nl:"
+	        p.product_id, pe.event_type_cd, p.product_cat_cd
+ 
+	from
+	     product p,
+	     product_event pe
+ 
+	plan p where parser(where1)
+ 
+	join pe where pe.product_id = p.product_id and
+	                pe.active_ind = 1
+	
+	order by p.product_id
+	
+	head report
+	        cnt = 0
+	head p.product_id
+	
+	        cnt = cnt + 1
+	        stat = alterlist(temp->qual, cnt)
+	        temp->qual[cnt].product_id = p.product_id
+	        temp->qual[cnt].category = p.product_cat_cd
+	        temp->qual[cnt].class_cd = p.product_class_cd
+	        cnt1 = 0                
+	
+	detail
+	        cnt1 = cnt1 + 1
+	        stat = alterlist(temp->qual[cnt]->states, cnt1)
+	        temp->qual[cnt].states[cnt1].state_cd = pe.event_type_cd
+	
+	foot p.product_id
+	        row + 0
+	foot report
+	        row + 0
+	
+	with nocounter  
+	
+	set cnt = 0
+	set temp_size = size(temp->qual, 5)
+	;**************************************************************
+	;* SELECT the valid states for each category saved in the temp*
+	;* qual array and save the information in the valid_states    *
+	;* array.                                                     *
+	;**************************************************************
+ 
+	FOR (x = 1 to temp_size)
+
+		set cnt = cnt + 1
+		SELECT into "nl:"
+		
+		from valid_state vs
+		
+		where vs.process_cd = app_cd and
+		        vs.category_cd = temp->qual[cnt].category and
+		        vs.active_ind = 1
+		
+		head report
+		        cnt2 = 0
+		detail
+		        cnt2 = cnt2 + 1
+		        stat = alterlist(temp->qual[cnt].valid_states, cnt2)
+		        temp->qual[cnt].valid_states[cnt2].valid_state_cd = vs.state_cd
+		foot report
+		        row + 0
+		with nocounter
+	endfor
+	
+	;**************************************************************
+	;*  TEST each product's states against the valid states saved *
+	;*  in the valid_states array and store the product_id in     *
+	;*  temp->qual2 if all the states are valid.                  *
+	;**************************************************************
+	set valid_product_count = 0  ;counter for the number of valid products
+
+	for (x = 1 to temp_size)                          ;LOOP for each product found
+		if(temp->qual[x].class_cd = BLOOD_PRODUCT_CLASS_CD)
+			set nCheckAllStatesInd = 0
+		else
+			set nCheckAllStatesInd = 1
+		endif
+	  set state_size = size(temp->qual[x].states, 5)  ;number of states the product is in
+	  set count = 0                                   ;number of valid states 
+	  set valid = 1                                   ;used to skip testing if product is invalid
+	  for (y = 1 to state_size)                       ;LOOP for the states the product is in
+	    if (valid = 1 or nCheckAllStatesInd)                                ;TEST if product already has an invalid state
+	        set valid = 0                                   
+	        set valid_state_size = size(temp->qual[x].valid_states, 5)      ;number of valid states for the category
+	        for (z = 1 to valid_state_size)           ;LOOP for the valid states for each category
+	                if (temp->qual[x].states[y].state_cd = temp->qual[x].valid_states[z].valid_state_cd)
+	                        set count = count + 1 
+	                        set valid = 1
+	                endif
+	        endfor ;valid state LOOP
+	    endif
+	  endfor ;product state LOOP
+	  if(temp->qual[x].class_cd = BLOOD_PRODUCT_CLASS_CD)	 
+		  if (count = state_size) ;test if all states of the product is valid, if they are then save the product_id
+		        set valid_product_count = valid_product_count + 1
+		        set stat = alterlist(temp->qual2, valid_product_count)
+		        set temp->qual2[valid_product_count].valid_product_id = temp->qual[x].product_id
+		  endif
+	  else ;derivative
+	  	  if (count > 0) ;at least one event state need to be valid	  	  	
+		        set valid_product_count = valid_product_count + 1
+		        set stat = alterlist(temp->qual2, valid_product_count)
+		        set temp->qual2[valid_product_count].valid_product_id = temp->qual[x].product_id
+		  endif
+	  endif
+	endfor ;product id LOOP
+	
+	;**************************************************************
+	;*  temp->qual2 is used to select the information to fill the *
+	;*  reply structure.                                          *
+	;**************************************************************
+	
+	;READ THE PRODUCT TABLE FIRST AND GET ALL OF THE RELATED INFORMATION FROM THAT TABLE    
+	set stat = alterlist(reply->qual, 1)
+	select into "nl:"
+	   p.product_id,
+	   r_exists = decode(r.seq, "X", "Y"),
+	   d_bbd.seq,
+	   bbd.bb_inv_device_id,
+	   *
+	
+	from 
+	   product p,
+	   product_category pc,
+	   (dummyt d1 with seq = value(size(temp->qual2,5))),
+	   (dummyt d_bbd with seq = 1),
+	   bb_inv_device bbd,                                                                ; 004
+	   (dummyt d_r with seq = 1),                                                        ; [MOD 009]
+	   receipt r ,                                                                       ; [MOD 009]
+	   (dummyt d2 with seq = 1),
+	   orders o,
+	   bb_mod_option bmo
+	   
+	   
+	
+	plan d1
+	
+	    join p
+	
+	    where   p.product_id = temp->qual2[d1.seq].valid_product_id and p.active_ind = 1
+	    join bmo where bmo.option_id = p.pool_option_id
+	    
+	    join pc  where pc.product_cat_cd = p.product_cat_cd
+	  
+	    join    (d_bbd   where   d_bbd.seq = 1
+	        join    bbd     where   bbd.bb_inv_device_id = p.cur_dispense_device_id        ; 004
+	                                  and bbd.bb_inv_device_id > 0)                        ; 004
+	    join    (d_r     where   d_r.seq = 1
+	        join    r        where   r.product_id = p.product_id) 
+	   join (d2 where d2.seq = 1
+	        join    o         where   o.product_id = p.product_id
+	                            and   o.order_status_cd not in (dCANCELED_cv, dDISCONTINUED_cv))
+	
+	order by p.product_id, cnvtdatetime(r.updt_dt_tm) desc ;this was needed to be added to make sure we get 
+	                                                       ;the last receipt rows data [MOD 009] 
+	
+	head report 
+	    prod_cnt = 0
+	
+	head p.product_id 
+		;If order_only_ind = 1 and order_id = 0, We wont populate the reply since no orders are associated with the product.
+		if (request->order_only_ind = 1 and o.order_id = 0)
+		  nNoOrdersInd = 1
+		  ; DON'T POPULATE THE REPLY  
+	    else  
+	
+    		prod_cnt = prod_cnt + 1
+		    if ((mod(prod_cnt, 5) = 1 and prod_cnt != 1)
+		    or prod_cnt = 2)
+		        if (prod_cnt = 2)
+		            stat = alterlist(reply->qual, 5)
+		        else
+		            stat = alterlist(reply->qual,prod_cnt + 4)
+		        endif
+		    endif
+		    reply->qual[prod_cnt].product_id                  = p.product_id
+	      	reply->qual[prod_cnt].product_nbr                 = cnvtupper(p.product_nbr)                  ; 007 added cnvtupper
+	      	reply->qual[prod_cnt].flag_chars                  = p.flag_chars
+	      	reply->qual[prod_cnt].alternate_nbr               = p.alternate_nbr
+	      	reply->qual[prod_cnt].product_sub_nbr             = p.product_sub_nbr
+	      	reply->qual[prod_cnt].product_cd                  = p.product_cd
+	      	reply->qual[prod_cnt].product_cat_cd              = p.product_cat_cd
+	      	reply->qual[prod_cnt].product_class_cd            = p.product_class_cd
+	      	reply->qual[prod_cnt].cur_supplier_id             = p.cur_supplier_id           
+	      	reply->qual[prod_cnt].cur_inv_locn_cd             = p.cur_inv_locn_cd
+	      	reply->qual[prod_cnt].orig_inv_locn_cd            = p.orig_inv_locn_cd 
+	      	if (r_exists = "Y")
+		      reply->qual[prod_cnt].orig_vis_insp_cd            = p.orig_vis_insp_cd
+    	      reply->qual[prod_cnt].orig_ship_cond_cd           = p.orig_ship_cond_cd
+ 		    else
+    		  reply->qual[prod_cnt].orig_vis_insp_cd            = r.vis_insp_cd ;needs to be taken from the receipt row [MOD 009]
+		      reply->qual[prod_cnt].orig_ship_cond_cd           = r.ship_cond_cd ;needs to be taken from the receipt row [MOD 009]
+    	    endif
+	      	reply->qual[prod_cnt].recv_dt_tm                  = cnvtdatetime(p.recv_dt_tm)
+	      	reply->qual[prod_cnt].recv_prsnl_id               = p.recv_prsnl_id
+	      	reply->qual[prod_cnt].storage_temp_cd             = p.storage_temp_cd
+	      	reply->qual[prod_cnt].cur_unit_meas_cd            = p.cur_unit_meas_cd  
+	      	reply->qual[prod_cnt].pooled_product_ind          = p.pooled_product_ind
+	      	reply->qual[prod_cnt].modified_product_ind        = p.modified_product_ind
+	      	reply->qual[prod_cnt].donated_by_relative_ind     = p.donated_by_relative_ind
+	      	reply->qual[prod_cnt].corrected_ind               = p.corrected_ind
+	      	reply->qual[prod_cnt].pooled_product_id           = p.pooled_product_id
+	      	reply->qual[prod_cnt].modified_product_id         = p.modified_product_id 
+	      	reply->qual[prod_cnt].cur_expire_dt_tm            = cnvtdatetime(p.cur_expire_dt_tm)
+	      	reply->qual[prod_cnt].product_updt_cnt            = p.updt_cnt
+	      	reply->qual[prod_cnt].product_updt_dt_tm          = cnvtdatetime(p.updt_dt_tm)
+	      	reply->qual[prod_cnt].product_updt_id             = p.updt_id
+	      	reply->qual[prod_cnt].product_updt_task           = p.updt_task
+	      	reply->qual[prod_cnt].product_updt_applctx        = p.updt_applctx
+	      	reply->qual[prod_cnt].locked_ind                  = p.locked_ind 
+	      	if (bbd.bb_inv_device_id > 0.0 and bbd.bb_inv_device_id != NULL)
+	          	reply->qual[prod_cnt].cur_device_id           = p.cur_dispense_device_id          ; 004
+	          	reply->qual[prod_cnt].cur_device_desc         = bbd.description                   ; 004
+	      	else                                                                                  ; 004
+	        	reply->qual[prod_cnt].cur_device_id           = 0.0                               ; 004
+	     	endif                                                                                 ; 004
+		    reply->qual[prod_cnt].cur_owner_area_cd           = p.cur_owner_area_cd                   ; 005
+		    reply->qual[prod_cnt].cur_inv_area_cd             = p.cur_inv_area_cd                     ; 005
+		    reply->qual[prod_cnt].cur_inv_device_id           = p.cur_inv_device_id                   ; 005
+		    reply->qual[prod_cnt].barcode_nbr                 = p.barcode_nbr                         ; 007
+		    reply->qual[prod_cnt].disease_cd                  = p.disease_cd
+		    reply->qual[prod_cnt].donation_type_cd            = p.donation_type_cd
+		    reply->qual[prod_cnt].electronic_entry_flag       = p.electronic_entry_flag               ;021
+		    reply->qual[prod_cnt].req_label_verify_ind        = p.req_label_verify_ind
+		    reply->qual[prod_cnt].xmatch_required_ind         = pc.xmatch_required_ind
+		    reply->qual[prod_cnt].intended_use_print_parm_txt = p.intended_use_print_parm_txt
+		    if ((p.pooled_product_ind = 1) and (bmo.recon_rbc_ind = 1))
+		    	reply->qual[prod_cnt].recon_type_flag         = 1
+		    else
+		    	reply->qual[prod_cnt].recon_type_flag         = 0
+		    endif	  
+		    reply->qual[prod_cnt].product_type_barcode		  = p.product_type_barcode  
+		endif
+	
+	foot report
+	    stat = alterlist(reply->qual, prod_cnt)
+	
+	with nocounter, dontcare(bbd), outerjoin(d_r) , outerjoin(d2) , dontcare = o , dontcare = r
+	
+	/**end 012**/
+else ;012	
+
+	;READ THE PRODUCT TABLE FIRST AND GET ALL OF THE RELATED INFORMATION FROM THAT TABLE
+	set stat = alterlist(reply->qual, 1)
+	
+	SELECT
+ 
+	into "nl:"
+	   p.product_id,
+	   r_exists = decode(r.seq, "X", "Y"),
+	   cmp.option_id,
+	   d_bbd.seq,
+	   bbd.bb_inv_device_id,
+	   *
+ 
+	from
+	   product p,
+	   product_category pc,
+	   component cmp,
+	   (dummyt d_bbd with seq = 1),
+	   bb_inv_device bbd,                                                                ; 004
+	   (dummyt d_r with seq = 1),                                                        ; [MOD 009]
+	   receipt r ,                                                                         ; [MOD 009]
+	   (dummyt d3 with seq = 1),
+	   orders o,
+	   bb_mod_option bmo
+ 
+	plan p
+ 
+	    where   parser(where1)
+	    join pc  where pc.product_cat_cd = p.product_cat_cd
+	    join bmo where bmo.option_id = p.pool_option_id
+	    
+	    join cmp where (( request->pool_option_id > 0.0 and 
+	                      cmp.option_id = request->pool_option_id and
+	                      cmp.product_cd = p.product_cd and
+	                      cmp.active_ind = 1)
+	                  or (request->pool_option_id = 0.0 and 
+	                      cmp.option_id = 0.0)) 
+	                     
+	    join    (d_bbd   where   d_bbd.seq = 1
+	        join    bbd     where   bbd.bb_inv_device_id = p.cur_dispense_device_id        ; 004
+	                                  and bbd.bb_inv_device_id > 0)                        ; 004
+	    join    (d_r     where   d_r.seq = 1
+	        join    r        where   r.product_id = p.product_id) 
+	   join (d3 where d3.seq = 1
+	        join    o         where   o.product_id = p.product_id
+        	        			and   o.order_status_cd not in (dCANCELED_cv, dDISCONTINUED_cv))	        
+	
+	order by p.product_id, cnvtdatetime(r.updt_dt_tm) desc ;this was needed to be added to make sure we get 
+	                                                       ;the last receipt rows data [MOD 009] 
+	        
+	head report 
+	    prod_cnt = 0
+	
+	head p.product_id
+	    ;If order_only_ind = 1 and order_id = 0, We wont populate the reply since no orders are associated with the product.
+		if (request->order_only_ind = 1 and o.order_id = 0) 
+		  nNoOrdersInd = 1
+		  ; DON'T POPULATE THE REPLY
+		else 	
+		    prod_cnt = prod_cnt + 1
+		    if ((mod(prod_cnt, 5) = 1 and prod_cnt != 1)
+		    or prod_cnt = 2)
+		        if (prod_cnt = 2)
+		            stat = alterlist(reply->qual, 5)
+		        else
+		            stat = alterlist(reply->qual,prod_cnt + 4)
+		        endif
+		    endif
+		    reply->qual[prod_cnt].product_id                  = p.product_id
+		    reply->qual[prod_cnt].product_nbr                 = cnvtupper(p.product_nbr)                  ; 007 added cnvtupper
+		    reply->qual[prod_cnt].flag_chars                  = p.flag_chars
+		    reply->qual[prod_cnt].alternate_nbr               = p.alternate_nbr
+		    reply->qual[prod_cnt].product_sub_nbr             = p.product_sub_nbr
+		    reply->qual[prod_cnt].product_cd                  = p.product_cd
+		    reply->qual[prod_cnt].product_cat_cd              = p.product_cat_cd
+		    reply->qual[prod_cnt].product_class_cd            = p.product_class_cd
+		    reply->qual[prod_cnt].cur_supplier_id             = p.cur_supplier_id           
+		    reply->qual[prod_cnt].cur_inv_locn_cd             = p.cur_inv_locn_cd
+		    reply->qual[prod_cnt].orig_inv_locn_cd            = p.orig_inv_locn_cd 
+		   	if (r_exists = "Y")
+		      reply->qual[prod_cnt].orig_vis_insp_cd            = p.orig_vis_insp_cd
+    	      reply->qual[prod_cnt].orig_ship_cond_cd           = p.orig_ship_cond_cd
+ 		    else
+    		  reply->qual[prod_cnt].orig_vis_insp_cd            = r.vis_insp_cd ;needs to be taken from the receipt row [MOD 009]
+		      reply->qual[prod_cnt].orig_ship_cond_cd           = r.ship_cond_cd ;needs to be taken from the receipt row [MOD 009]
+    	    endif
+		    reply->qual[prod_cnt].recv_dt_tm                  = cnvtdatetime(p.recv_dt_tm)
+		    reply->qual[prod_cnt].recv_prsnl_id               = p.recv_prsnl_id
+		    reply->qual[prod_cnt].storage_temp_cd             = p.storage_temp_cd
+		    reply->qual[prod_cnt].cur_unit_meas_cd            = p.cur_unit_meas_cd  
+		    reply->qual[prod_cnt].pooled_product_ind          = p.pooled_product_ind
+		    reply->qual[prod_cnt].modified_product_ind        = p.modified_product_ind
+		    reply->qual[prod_cnt].donated_by_relative_ind     = p.donated_by_relative_ind
+		    reply->qual[prod_cnt].corrected_ind               = p.corrected_ind
+		    reply->qual[prod_cnt].pooled_product_id           = p.pooled_product_id
+		    reply->qual[prod_cnt].modified_product_id         = p.modified_product_id 
+		    reply->qual[prod_cnt].cur_expire_dt_tm            = cnvtdatetime(p.cur_expire_dt_tm)
+		    reply->qual[prod_cnt].product_updt_cnt            = p.updt_cnt
+		    reply->qual[prod_cnt].product_updt_dt_tm          = cnvtdatetime(p.updt_dt_tm)
+		    reply->qual[prod_cnt].product_updt_id             = p.updt_id
+		    reply->qual[prod_cnt].product_updt_task           = p.updt_task
+		    reply->qual[prod_cnt].product_updt_applctx        = p.updt_applctx
+		    reply->qual[prod_cnt].locked_ind                  = p.locked_ind 
+	      	if (bbd.bb_inv_device_id > 0.0 and bbd.bb_inv_device_id != NULL)
+	          reply->qual[prod_cnt].cur_device_id           = p.cur_dispense_device_id          ; 004
+	
+	          reply->qual[prod_cnt].cur_device_desc         = bbd.description                   ; 004
+	      	else                                                                                  ; 004
+	          reply->qual[prod_cnt].cur_device_id           = 0.0                               ; 004
+	      	endif                                                                                 ; 004
+		    reply->qual[prod_cnt].cur_owner_area_cd           = p.cur_owner_area_cd                   ; 005
+		    reply->qual[prod_cnt].cur_inv_area_cd             = p.cur_inv_area_cd                     ; 005
+		    reply->qual[prod_cnt].cur_inv_device_id           = p.cur_inv_device_id                   ; 005
+		    reply->qual[prod_cnt].barcode_nbr                 = p.barcode_nbr                         ; 007
+		    reply->qual[prod_cnt].disease_cd                  = p.disease_cd
+		    reply->qual[prod_cnt].donation_type_cd            = p.donation_type_cd
+		    reply->qual[prod_cnt].electronic_entry_flag       = p.electronic_entry_flag               ;021
+		    reply->qual[prod_cnt].req_label_verify_ind        = p.req_label_verify_ind
+		    reply->qual[prod_cnt].xmatch_required_ind         = pc.xmatch_required_ind
+		    reply->qual[prod_cnt].intended_use_print_parm_txt = p.intended_use_print_parm_txt
+
+		    if ((p.pooled_product_ind = 1) and (bmo.recon_rbc_ind = 1))
+		    	reply->qual[prod_cnt].recon_type_flag         = 1
+		    else
+		    	reply->qual[prod_cnt].recon_type_flag         = 0
+		    endif
+		    
+		    reply->qual[prod_cnt].product_type_barcode		  = p.product_type_barcode  
+		endif
+	    
+	foot report
+	    stat = alterlist(reply->qual, prod_cnt)
+	
+	
+	with nocounter, dontcare(bbd), outerjoin(d_r) , outerjoin(d3), dontcare = o, dontcare = r
+	
+endif;012
+
+;  If history_ind is equal to 1, then check history tables for the given product number.
+if (request->check_history_ind = 1)
+%i cclsource:bbt_bpc_gbp_hst.inc        ; 008
+
+   ; Exit the script if no products were found, so the next select's are not executed
+   if (prod_cnt = 0)
+      go to END_SCRIPT
+   endif
+endif
+
+if (prod_cnt = 0)
+	go to END_SCRIPT
+endif
+
+; ** READ THE DATABASE A SECOND TIME FOR THE BLOOD_PRODUCT OR DERIVATIVE INFO, THE COMMENTS_IND, ETC  
+%i cclsource:bbt_bpc_gbp_det.inc
+
+/*THIRD READ OF DATA BASE FOR PRODUCT EVENTS*/
+%i cclsource:bbt_bpc_gbp_sta.inc
+
+/*FOURTH SCAN FOR TABLE SPECIFIC INFORMATION*/
+%i cclsource:bbt_bpc_gbp_sub.inc
+
+set prod_cnt = size (reply->qual,5)
+
+#END_SCRIPT
+if (prod_cnt = 0)
+    set reply->status_data.status = "Z"
+    if (nNoOrdersInd = 1)
+      set reply->status_data.subeventstatus[1].OperationName = "NO ORDERS"
+    endif
+elseif (reply->qual[1]->product_id < 1)
+    set reply->status_data.status = "Z"
+    if (nNoOrdersInd = 1)
+      set reply->status_data.subeventstatus[1].OperationName = "NO ORDERS"
+    endif
+else
+    set reply->status_data.status = "S"
+endif
+
+if (request->debug_ind = 1)
+    call echo(reply->status_data.status)
+    set prod_cnt = cnvtint(size(reply->qual, 5))
+    for (prod = 1 to prod_cnt)
+        call echo(build(prod, ".",
+            reply->qual[prod]->product_id                             , "/",
+            reply->qual[prod]->product_type                           , "/",
+            reply->qual[prod]->product_nbr                            , "/",
+            reply->qual[prod]->barcode_nbr                            , "/",
+            reply->qual[prod]->supplier_prefix                        , "/",
+            reply->qual[prod]->orig_vis_insp_cd                       , "/",
+            reply->qual[prod]->orig_ship_cond_cd                      )) 
+        set event_cnt = cnvtint(size(reply->qual[prod]->qual2, 5))
+        for (event = 1 to event_cnt)
+            call echo(build(event, ".....", 
+                    reply->qual[prod]->qual2[event]->product_event_id           , "/",
+                    reply->qual[prod]->qual2[event]->event_type_cd              , "/",
+                    reply->qual[prod]->qual2[event]->related_product_event_id   , "/",
+                    reply->qual[prod]->qual2[event]->sub_reason_cd              , "/",
+                    reply->qual[prod]->qual2[event]->collation_seq              ))
+       endfor
+    endfor
+    call echorecord(request)
+    call echorecord(reply)
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

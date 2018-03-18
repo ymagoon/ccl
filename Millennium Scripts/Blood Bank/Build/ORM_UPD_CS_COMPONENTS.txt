@@ -1,0 +1,682 @@
+ ;;Solution_Test/script/Order Management/orm_upd_cs_components/orm_upd_cs_components.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+	Source file name:       ORM_UPD_CS_COMPONENTS.PRG
+	Object name:            ORM_UPD_CS_COMPONENTS
+	Request #:		500179
+ 
+	Product:		DCP
+	Product Team:		ORDER MANAGEMENT
+	HNA Version:            500
+	CCL Version:            8.2.4
+ 
+	Program purpose:        Updates/Adds/Deletes components of a CareSet
+	Tables read:            -
+	Tables updated:		CS_COMPONENT
+ 
+	Executing from:         CARESET MAINTENANCE TOOL (APP 600011)
+ 
+	Special Notes:		-
+ 
+******************************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- --------------------	----------------------------------- *
+;     ### 10/09/96 Joe Geris            Initial Release                     *
+;     ### 07/20/98 Shawn Purcell        add linked_date_comp_seq            *
+;     002 07/23/98 Shawn Purcell        Changed to keep long_text_ids       *
+;                                       attached to notes                   *
+;     003 10/02/03 Jonathan Fewins      Add comp_reference                  *
+;     004 02/18/04 Michael Roco         Add lockdown_details_flag           *
+;     005 10/26/04 Michael Roco         Add av_optional_ingredient_ind      *
+;     006 01/08/05 Jim Anderson         Syntax fix, performance enhancements*
+;     007 07/14/05 dh011019             Fix to allow large sequence numbers *
+;~DE~************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program orm_upd_cs_components:dba go
+create program orm_upd_cs_components:dba
+ 
+/*
+record request
+( 1 catalog_cd = f8
+  1 add_cs_cnt = i4
+  1 add_qual[x]
+    2 comp_seq = i4
+    2 comp_type_cd = f8
+    2 comp_id = f8
+    2 comp_label = vc
+    2 comment_text = vc
+    2 required_ind = i2
+    2 lockdown_details_flag = i2	;004
+    2 include_exclude_ind = i2
+    2 order_sentence_id = f8
+    2 linked_date_comp_seq = i4
+    2 av_optional_ingredient_ind = i2  ;005
+  1 upd_cs_cnt = i4
+  1 upd_qual[x]
+    2 comp_seq = i4
+    2 comp_type_cd = f8
+    2 comp_id = f8
+    2 comp_label = vc
+    2 comment_text = vc
+    2 required_ind = i2
+    2 lockdown_details_flag = i2	;004
+    2 include_exclude_ind = i2
+    2 order_sentence_id = f8
+    2 linked_date_comp_seq = i4
+    2 updt_cnt = i4
+    2 comp_reference = vc ;003
+    2 av_optional_ingredient_ind = i2  ;005
+  1 del_cs_cnt = i4
+  1 del_qual[x]
+    2 comp_seq = i4
+)
+*/
+ 
+record reply
+(;006 1 status_data
+ ;006   2 status = c1
+ ;006   2 subeventstatus[1]
+ ;006     3 OperationName = c15
+ ;006     3 OperationStatus = c1
+ ;006     3 TargetObjectName = c15
+ ;006     3 TargetObjectValue = VC
+%i cclsource:status_block.inc ;006
+)
+ 
+;006 record cuc
+;006 ( 1 cuc_qual[*]
+;006     2 updt_cnt = i4
+;006     2 long_text_id = f8
+;006 )
+ 
+;005 - begin
+declare last_mod               = c5 with private, noconstant(fillstring(5, " "))
+declare mod_date               = c30 with private, noconstant(fillstring(30, " "))
+declare NBR_TO_CHG             = i4 with protect, constant(request->upd_cs_cnt) ;006
+;006 declare nbr_to_add             = i4 with protect, constant(0)
+declare failed                 = c1 with protect, noconstant("F")
+;006 declare updt_cnt               = i4 with protect, noconstant(0)
+declare count1                 = i4 with protect, noconstant(0)
+;006 declare code_set               = f8 with protect, noconstant(0.0)
+;006 declare code_value             = f8 with protect, noconstant(0.0)
+;006 declare cdf_meaning            = c12 with protect, noconstant(fillstring(12, " "))
+;005 - end
+ 
+;006 set nbr_to_chg = request->upd_cs_cnt
+;006 set nbr_to_add = request->add_cs_cnt
+;006 set nbr_to_del = request->del_cs_cnt
+ 
+declare num          = i4 with public, noconstant(0) ;006
+declare TEXT_TYPE_CD = f8 with public, constant(uar_get_code_by("MEANING", 6030, "NOTE")) ;006
+ 
+;003 Check to see if the comp_reference column exists
+ 
+declare url_exists = i2 with public, constant(checkdic("CS_COMPONENT.COMP_REFERENCE", "A", 0)) ;006
+ 
+declare msg_text_id = f8 with protect, noconstant(0.0) ;007
+ 
+;006 select into "nl:"
+;006     *
+;006 from
+;006     dba_tab_columns d
+;006 where
+;006     d.table_name = "CS_COMPONENT" and
+;006     d.column_name = "COMP_REFERENCE"
+;006 detail
+;006     url_exists = TRUE
+;006 with nocounter
+ 
+set reply->status_data->status = "F"
+ 
+/************************************/
+/*       Look up code values        */
+/************************************/
+;006 set code_set = 6030
+;006 set cdf_meaning = "NOTE"
+;006 execute cpm_get_cd_for_cdf
+;006 set text_type_cd = code_value
+ 
+if (NBR_TO_CHG > 0) ;006
+     record ws_lt
+     ( 1 qual[*]
+       2 catalog_cd   = f8
+       2 long_text_id = f8
+       )
+     set ws_lt_cnt = 0
+ 
+     /** Get long text info **/
+     select into "nl:"
+        cc.catalog_cd
+     from cs_component cc ;006 ,
+        ;006 (dummyt d with seq = value(nbr_to_chg))
+     ;006 plan d
+     ;006 join cc
+     where cc.catalog_cd = request->catalog_cd and
+                    ;006 cc.comp_seq = request->upd_qual[d.seq].comp_seq
+           expand (num, 1, NBR_TO_CHG, cc.comp_seq, request->upd_qual[num].comp_seq) ;006
+     detail
+        ws_lt_cnt = ws_lt_cnt + 1 ;006
+        if (ws_lt_cnt  > size(ws_lt->qual, 5))
+                stat = alterlist(ws_lt->qual,ws_lt_cnt + 5)
+        endif
+        ws_lt->qual[ws_lt_cnt].catalog_cd   = cc.catalog_cd
+        ws_lt->qual[ws_lt_cnt].long_text_id = cc.long_text_id
+     with nocounter
+ 
+     if (ws_lt_cnt > 0)
+        delete from long_text lt ;006 ,
+                    ;006(dummyt d with seq = value(ws_lt_cnt))
+        set lt.seq = 1
+        ;006 plan d
+        ;006 join lt where lt.long_text_id = ws_lt->qual[d.seq].long_text_id
+        where expand (num, 1, ws_lt_cnt, lt.long_text_id, ws_lt->qual[num].long_text_id) ;006
+        and   (lt.long_text_id > 0) ;006
+        with nocounter
+     endif
+ 
+     delete from cs_component cc ;006,
+              ;006 (dummyt d with seq = value(nbr_to_chg))
+     set cc.seq = 1
+     ;006 plan d
+     ;006 join cc
+     where cc.catalog_cd = request->catalog_cd
+     with nocounter
+ 
+     if (curqual = 0)
+       set failed = "T"
+       set reply->status_data->subeventstatus[1].operationname = "delete"
+       set reply->status_data->subeventstatus[1].operationstatus = "F"
+     endif
+ 
+;006 if (nbr_to_chg > 0)
+ 
+   for (x = 1 to NBR_TO_CHG)
+      if (failed = "F")
+       if (request->upd_qual[x].comp_type_cd = TEXT_TYPE_CD) ;006
+         set msg_text_id = 0.0 ;007
+         
+         select into "nl:"
+           nextseqnum = seq(long_data_seq,nextval) ;007 "#################;rp0"
+         from dual
+         detail
+           msg_text_id = nextseqnum ;007 cnvtint(nextseqnum)
+         with nocounter ;007 format
+    
+         if (msg_text_id = 0.0)
+            set failed = "T"
+         else
+            insert into long_text lt set
+              lt.long_text_id = msg_text_id,
+              lt.parent_entity_name = "CS_COMPONENT",
+              lt.parent_entity_id = request->catalog_cd,
+              lt.long_text = request->upd_qual[x].comment_text,
+              lt.active_ind = 1,
+              lt.active_status_cd = reqdata->active_status_cd,
+              lt.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+              lt.active_status_prsnl_id = reqinfo->updt_id,
+              lt.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+              lt.updt_id = reqinfo->updt_id,
+              lt.updt_task = reqinfo->updt_task,
+              lt.updt_cnt = 0,
+              lt.updt_applctx = reqinfo->updt_applctx
+           with nocounter
+    
+           if (curqual = 0)
+             set failed = "T"
+           endif
+         endif
+       else
+         set msg_text_id = 0
+       endif
+    
+       ;003
+       ; If the column exists and the request structure contains the comp_reference field
+       ; then include the comp_reference in the insert statement.
+       if ((url_exists > 0) and validate(request->upd_qual[x].comp_reference, "NO FIELD") != "NO FIELD") ;006
+           insert into cs_component cc set
+              cc.catalog_cd = request->catalog_cd,
+              cc.comp_seq = request->upd_qual[x].comp_seq,
+              cc.comp_type_cd = request->upd_qual[x].comp_type_cd,
+              cc.comp_id = request->upd_qual[x].comp_id,
+              cc.comp_label = request->upd_qual[x].comp_label,
+              cc.long_text_id = msg_text_id,
+              cc.required_ind = request->upd_qual[x].required_ind,
+              cc.lockdown_details_flag = request->upd_qual[x].lockdown_details_flag,		;004
+              cc.av_optional_ingredient_ind = request->upd_qual[x].av_optional_ingredient_ind,    ;005
+              cc.include_exclude_ind = request->upd_qual[x].include_exclude_ind,
+              cc.order_sentence_id = request->upd_qual[x].order_sentence_id,
+              cc.linked_date_comp_seq = request->upd_qual[x].linked_date_comp_seq,
+              cc.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+              cc.updt_id = reqinfo->updt_id,
+              cc.updt_task = reqinfo->updt_task,
+              cc.updt_applctx = reqinfo->updt_applctx,
+              cc.updt_cnt = 0,
+              cc.comp_reference = trim(request->upd_qual[x].comp_reference)
+           with nocounter
+       else
+           insert into cs_component cc set
+              cc.catalog_cd = request->catalog_cd,
+              cc.comp_seq = request->upd_qual[x].comp_seq,
+              cc.comp_type_cd = request->upd_qual[x].comp_type_cd,
+              cc.comp_id = request->upd_qual[x].comp_id,
+              cc.comp_label = request->upd_qual[x].comp_label,
+              cc.long_text_id = msg_text_id,
+              cc.required_ind = request->upd_qual[x].required_ind,
+              cc.lockdown_details_flag = request->upd_qual[x].lockdown_details_flag,		;004
+              cc.av_optional_ingredient_ind = request->upd_qual[x].av_optional_ingredient_ind,    ;005
+              cc.include_exclude_ind = request->upd_qual[x].include_exclude_ind,
+              cc.order_sentence_id = request->upd_qual[x].order_sentence_id,
+              cc.linked_date_comp_seq = request->upd_qual[x].linked_date_comp_seq,
+              cc.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+              cc.updt_id = reqinfo->updt_id,
+              cc.updt_task = reqinfo->updt_task,
+              cc.updt_applctx = reqinfo->updt_applctx,
+              cc.updt_cnt = 0
+           with nocounter
+       endif
+       if (curqual = 0)
+         set failed = "T"
+       endif
+      endif
+   endfor
+endif
+ 
+if (failed = "T")
+      set reply->status_data->subeventstatus[1]
+              ->operationname = "insert"
+      set reply->status_data->subeventstatus[1]
+              ->operationstatus = "F"
+      set failed = "T"
+      go to exit_script
+endif
+ 
+ 
+#exit_script
+if (failed = "T")
+  set reply->status_data->subeventstatus[1]
+              ->targetobjectname = "cs_component"
+  set reply->status_data->subeventstatus[1]
+              ->targetobjectvalue = "orm_upd_cs_component"
+  rollback
+  set reqinfo->commit_ind = 0
+else
+  set reqinfo->commit_ind = 1
+  set reply->status_data->status = "S"
+endif
+ 
+set last_mod = "007"
+set mod_date = "July 14, 2005"
+ 
+end go
+
+;Generated by GNU enscript 1.6.4.
+ ;;Solution_Test/script/Order Management/orm_upd_cs_components/orm_upd_cs_components.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+	Source file name:       ORM_UPD_CS_COMPONENTS.PRG
+	Object name:            ORM_UPD_CS_COMPONENTS
+	Request #:		500179
+ 
+	Product:		DCP
+	Product Team:		ORDER MANAGEMENT
+	HNA Version:            500
+	CCL Version:            8.2.4
+ 
+	Program purpose:        Updates/Adds/Deletes components of a CareSet
+	Tables read:            -
+	Tables updated:		CS_COMPONENT
+ 
+	Executing from:         CARESET MAINTENANCE TOOL (APP 600011)
+ 
+	Special Notes:		-
+ 
+******************************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- --------------------	----------------------------------- *
+;     ### 10/09/96 Joe Geris            Initial Release                     *
+;     ### 07/20/98 Shawn Purcell        add linked_date_comp_seq            *
+;     002 07/23/98 Shawn Purcell        Changed to keep long_text_ids       *
+;                                       attached to notes                   *
+;     003 10/02/03 Jonathan Fewins      Add comp_reference                  *
+;     004 02/18/04 Michael Roco         Add lockdown_details_flag           *
+;     005 10/26/04 Michael Roco         Add av_optional_ingredient_ind      *
+;     006 01/08/05 Jim Anderson         Syntax fix, performance enhancements*
+;     007 07/14/05 dh011019             Fix to allow large sequence numbers *
+;~DE~************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program orm_upd_cs_components:dba go
+create program orm_upd_cs_components:dba
+ 
+/*
+record request
+( 1 catalog_cd = f8
+  1 add_cs_cnt = i4
+  1 add_qual[x]
+    2 comp_seq = i4
+    2 comp_type_cd = f8
+    2 comp_id = f8
+    2 comp_label = vc
+    2 comment_text = vc
+    2 required_ind = i2
+    2 lockdown_details_flag = i2	;004
+    2 include_exclude_ind = i2
+    2 order_sentence_id = f8
+    2 linked_date_comp_seq = i4
+    2 av_optional_ingredient_ind = i2  ;005
+  1 upd_cs_cnt = i4
+  1 upd_qual[x]
+    2 comp_seq = i4
+    2 comp_type_cd = f8
+    2 comp_id = f8
+    2 comp_label = vc
+    2 comment_text = vc
+    2 required_ind = i2
+    2 lockdown_details_flag = i2	;004
+    2 include_exclude_ind = i2
+    2 order_sentence_id = f8
+    2 linked_date_comp_seq = i4
+    2 updt_cnt = i4
+    2 comp_reference = vc ;003
+    2 av_optional_ingredient_ind = i2  ;005
+  1 del_cs_cnt = i4
+  1 del_qual[x]
+    2 comp_seq = i4
+)
+*/
+ 
+record reply
+(;006 1 status_data
+ ;006   2 status = c1
+ ;006   2 subeventstatus[1]
+ ;006     3 OperationName = c15
+ ;006     3 OperationStatus = c1
+ ;006     3 TargetObjectName = c15
+ ;006     3 TargetObjectValue = VC
+%i cclsource:status_block.inc ;006
+)
+ 
+;006 record cuc
+;006 ( 1 cuc_qual[*]
+;006     2 updt_cnt = i4
+;006     2 long_text_id = f8
+;006 )
+ 
+;005 - begin
+declare last_mod               = c5 with private, noconstant(fillstring(5, " "))
+declare mod_date               = c30 with private, noconstant(fillstring(30, " "))
+declare NBR_TO_CHG             = i4 with protect, constant(request->upd_cs_cnt) ;006
+;006 declare nbr_to_add             = i4 with protect, constant(0)
+declare failed                 = c1 with protect, noconstant("F")
+;006 declare updt_cnt               = i4 with protect, noconstant(0)
+declare count1                 = i4 with protect, noconstant(0)
+;006 declare code_set               = f8 with protect, noconstant(0.0)
+;006 declare code_value             = f8 with protect, noconstant(0.0)
+;006 declare cdf_meaning            = c12 with protect, noconstant(fillstring(12, " "))
+;005 - end
+ 
+;006 set nbr_to_chg = request->upd_cs_cnt
+;006 set nbr_to_add = request->add_cs_cnt
+;006 set nbr_to_del = request->del_cs_cnt
+ 
+declare num          = i4 with public, noconstant(0) ;006
+declare TEXT_TYPE_CD = f8 with public, constant(uar_get_code_by("MEANING", 6030, "NOTE")) ;006
+ 
+;003 Check to see if the comp_reference column exists
+ 
+declare url_exists = i2 with public, constant(checkdic("CS_COMPONENT.COMP_REFERENCE", "A", 0)) ;006
+ 
+declare msg_text_id = f8 with protect, noconstant(0.0) ;007
+ 
+;006 select into "nl:"
+;006     *
+;006 from
+;006     dba_tab_columns d
+;006 where
+;006     d.table_name = "CS_COMPONENT" and
+;006     d.column_name = "COMP_REFERENCE"
+;006 detail
+;006     url_exists = TRUE
+;006 with nocounter
+ 
+set reply->status_data->status = "F"
+ 
+/************************************/
+/*       Look up code values        */
+/************************************/
+;006 set code_set = 6030
+;006 set cdf_meaning = "NOTE"
+;006 execute cpm_get_cd_for_cdf
+;006 set text_type_cd = code_value
+ 
+if (NBR_TO_CHG > 0) ;006
+     record ws_lt
+     ( 1 qual[*]
+       2 catalog_cd   = f8
+       2 long_text_id = f8
+       )
+     set ws_lt_cnt = 0
+ 
+     /** Get long text info **/
+     select into "nl:"
+        cc.catalog_cd
+     from cs_component cc ;006 ,
+        ;006 (dummyt d with seq = value(nbr_to_chg))
+     ;006 plan d
+     ;006 join cc
+     where cc.catalog_cd = request->catalog_cd and
+                    ;006 cc.comp_seq = request->upd_qual[d.seq].comp_seq
+           expand (num, 1, NBR_TO_CHG, cc.comp_seq, request->upd_qual[num].comp_seq) ;006
+     detail
+        ws_lt_cnt = ws_lt_cnt + 1 ;006
+        if (ws_lt_cnt  > size(ws_lt->qual, 5))
+                stat = alterlist(ws_lt->qual,ws_lt_cnt + 5)
+        endif
+        ws_lt->qual[ws_lt_cnt].catalog_cd   = cc.catalog_cd
+        ws_lt->qual[ws_lt_cnt].long_text_id = cc.long_text_id
+     with nocounter
+ 
+     if (ws_lt_cnt > 0)
+        delete from long_text lt ;006 ,
+                    ;006(dummyt d with seq = value(ws_lt_cnt))
+        set lt.seq = 1
+        ;006 plan d
+        ;006 join lt where lt.long_text_id = ws_lt->qual[d.seq].long_text_id
+        where expand (num, 1, ws_lt_cnt, lt.long_text_id, ws_lt->qual[num].long_text_id) ;006
+        and   (lt.long_text_id > 0) ;006
+        with nocounter
+     endif
+ 
+     delete from cs_component cc ;006,
+              ;006 (dummyt d with seq = value(nbr_to_chg))
+     set cc.seq = 1
+     ;006 plan d
+     ;006 join cc
+     where cc.catalog_cd = request->catalog_cd
+     with nocounter
+ 
+     if (curqual = 0)
+       set failed = "T"
+       set reply->status_data->subeventstatus[1].operationname = "delete"
+       set reply->status_data->subeventstatus[1].operationstatus = "F"
+     endif
+ 
+;006 if (nbr_to_chg > 0)
+ 
+   for (x = 1 to NBR_TO_CHG)
+      if (failed = "F")
+       if (request->upd_qual[x].comp_type_cd = TEXT_TYPE_CD) ;006
+         set msg_text_id = 0.0 ;007
+         
+         select into "nl:"
+           nextseqnum = seq(long_data_seq,nextval) ;007 "#################;rp0"
+         from dual
+         detail
+           msg_text_id = nextseqnum ;007 cnvtint(nextseqnum)
+         with nocounter ;007 format
+    
+         if (msg_text_id = 0.0)
+            set failed = "T"
+         else
+            insert into long_text lt set
+              lt.long_text_id = msg_text_id,
+              lt.parent_entity_name = "CS_COMPONENT",
+              lt.parent_entity_id = request->catalog_cd,
+              lt.long_text = request->upd_qual[x].comment_text,
+              lt.active_ind = 1,
+              lt.active_status_cd = reqdata->active_status_cd,
+              lt.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+              lt.active_status_prsnl_id = reqinfo->updt_id,
+              lt.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+              lt.updt_id = reqinfo->updt_id,
+              lt.updt_task = reqinfo->updt_task,
+              lt.updt_cnt = 0,
+              lt.updt_applctx = reqinfo->updt_applctx
+           with nocounter
+    
+           if (curqual = 0)
+             set failed = "T"
+           endif
+         endif
+       else
+         set msg_text_id = 0
+       endif
+    
+       ;003
+       ; If the column exists and the request structure contains the comp_reference field
+       ; then include the comp_reference in the insert statement.
+       if ((url_exists > 0) and validate(request->upd_qual[x].comp_reference, "NO FIELD") != "NO FIELD") ;006
+           insert into cs_component cc set
+              cc.catalog_cd = request->catalog_cd,
+              cc.comp_seq = request->upd_qual[x].comp_seq,
+              cc.comp_type_cd = request->upd_qual[x].comp_type_cd,
+              cc.comp_id = request->upd_qual[x].comp_id,
+              cc.comp_label = request->upd_qual[x].comp_label,
+              cc.long_text_id = msg_text_id,
+              cc.required_ind = request->upd_qual[x].required_ind,
+              cc.lockdown_details_flag = request->upd_qual[x].lockdown_details_flag,		;004
+              cc.av_optional_ingredient_ind = request->upd_qual[x].av_optional_ingredient_ind,    ;005
+              cc.include_exclude_ind = request->upd_qual[x].include_exclude_ind,
+              cc.order_sentence_id = request->upd_qual[x].order_sentence_id,
+              cc.linked_date_comp_seq = request->upd_qual[x].linked_date_comp_seq,
+              cc.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+              cc.updt_id = reqinfo->updt_id,
+              cc.updt_task = reqinfo->updt_task,
+              cc.updt_applctx = reqinfo->updt_applctx,
+              cc.updt_cnt = 0,
+              cc.comp_reference = trim(request->upd_qual[x].comp_reference)
+           with nocounter
+       else
+           insert into cs_component cc set
+              cc.catalog_cd = request->catalog_cd,
+              cc.comp_seq = request->upd_qual[x].comp_seq,
+              cc.comp_type_cd = request->upd_qual[x].comp_type_cd,
+              cc.comp_id = request->upd_qual[x].comp_id,
+              cc.comp_label = request->upd_qual[x].comp_label,
+              cc.long_text_id = msg_text_id,
+              cc.required_ind = request->upd_qual[x].required_ind,
+              cc.lockdown_details_flag = request->upd_qual[x].lockdown_details_flag,		;004
+              cc.av_optional_ingredient_ind = request->upd_qual[x].av_optional_ingredient_ind,    ;005
+              cc.include_exclude_ind = request->upd_qual[x].include_exclude_ind,
+              cc.order_sentence_id = request->upd_qual[x].order_sentence_id,
+              cc.linked_date_comp_seq = request->upd_qual[x].linked_date_comp_seq,
+              cc.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+              cc.updt_id = reqinfo->updt_id,
+              cc.updt_task = reqinfo->updt_task,
+              cc.updt_applctx = reqinfo->updt_applctx,
+              cc.updt_cnt = 0
+           with nocounter
+       endif
+       if (curqual = 0)
+         set failed = "T"
+       endif
+      endif
+   endfor
+endif
+ 
+if (failed = "T")
+      set reply->status_data->subeventstatus[1]
+              ->operationname = "insert"
+      set reply->status_data->subeventstatus[1]
+              ->operationstatus = "F"
+      set failed = "T"
+      go to exit_script
+endif
+ 
+ 
+#exit_script
+if (failed = "T")
+  set reply->status_data->subeventstatus[1]
+              ->targetobjectname = "cs_component"
+  set reply->status_data->subeventstatus[1]
+              ->targetobjectvalue = "orm_upd_cs_component"
+  rollback
+  set reqinfo->commit_ind = 0
+else
+  set reqinfo->commit_ind = 1
+  set reply->status_data->status = "S"
+endif
+ 
+set last_mod = "007"
+set mod_date = "July 14, 2005"
+ 
+end go
+
+;Generated by GNU enscript 1.6.4.

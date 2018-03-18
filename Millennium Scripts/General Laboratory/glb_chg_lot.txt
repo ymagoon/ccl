@@ -1,0 +1,267 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_chg_lot/glb_chg_lot.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_CHG_LOT.PRG
+        Object name:            GLB_CHG_LOT
+        Request #:              257516
+
+        Product:                General Lab           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Update current lot information for a
+                                given control in the database
+
+        Tables read:            n/a
+
+        Tables updated:         control_lot
+
+        Executing from:         General Lab Build/Maintain QC Material
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     500 07/08/96 Chad Moats           Initial Release                     *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_CHG_LOT:dba go    
+      create program GLB_CHG_LOT:dba
+     
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request                                      
+      (
+         1 control_id               = f8
+         1 lots[5]
+           2 lot_id                 = f8
+           2 short_description      = c20
+           2 lot_number             = vc
+           2 receive_dt_tm          = dq8
+           2 expiration_dt_tm       = dq8
+           2 lot_flag               = i2
+      ) 
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      ( 
+%i cclsource:status_block.inc
+      )
+     
+      record sr_to_save
+      (
+         1 sr[*]
+           2 lot_id	               = f8
+           2 service_resource_cd       = f8
+           2 receive_dt_tm             = dq8
+           2 expiration_dt_tm          = dq8
+      )
+
+     #Script
+      set failed = "F"
+      set reply->status_data->status = "F"
+      declare lots_to_add           = i4
+      set d_cnt = 0
+      set lots_to_add = size(request->lots, 5)
+
+/*******************************************************************/
+/* Update row into control_lot table                               */
+/*******************************************************************/
+
+      UPDATE
+         into control_lot cl,
+              (dummyt d1 with seq = value(lots_to_add))
+      SET
+         cl.short_description     = request->lots[d1.seq].short_description,
+         cl.lot_number            = request->lots[d1.seq].lot_number,
+         cl.receive_dt_tm         = if (request->lots[d1.seq].receive_dt_tm > 0)
+                                      cnvtdatetime(request->lots[d1.seq].receive_dt_tm)
+                                    else
+                                      NULL
+                                    endif,
+         cl.expiration_dt_tm      = if (request->lots[d1.seq].expiration_dt_tm > 0)
+                                      cnvtdatetime(request->lots[d1.seq].expiration_dt_tm)
+                                    else
+                                      NULL
+                                    endif,
+         cl.lot_flag               = request->lots[d1.seq].lot_flag,
+         cl.updt_dt_tm             = cnvtdatetime(curdate,curtime),
+         cl.updt_id                = reqinfo->updt_id,
+         cl.updt_task              = reqinfo->updt_task,
+         cl.updt_cnt               = cl.updt_cnt + 1,
+         cl.updt_applctx           = reqinfo->updt_applctx
+      PLAN d1
+      JOIN cl
+         where cl.control_id = request->control_id and
+               cl.lot_id = request->lots[d1.seq].lot_id
+      WITH
+         nocounter
+
+      if (curqual = 0)
+         go to cl_update_failed
+      endif     
+
+
+
+/*******************************************************************/
+/* Update expired lots to a status of 0                            */
+/*******************************************************************/
+
+      UPDATE
+         into control_lot cl
+      SET
+         cl.lot_flag               = 0,
+         cl.updt_dt_tm             = cnvtdatetime(curdate,curtime),
+         cl.updt_id                = reqinfo->updt_id,
+         cl.updt_task              = reqinfo->updt_task,
+         cl.updt_cnt               = cl.updt_cnt + 1,
+         cl.updt_applctx           = reqinfo->updt_applctx
+      PLAN cl
+         where cl.expiration_dt_tm < cnvtdatetime(curdate -1,curtime)
+           and  cl.control_id = request->control_id 
+           and  cl.lot_flag > 0 
+      WITH
+         nocounter
+
+
+/*******************************************************************/
+/* UPDATE RESOURCE_LOT_R WHEN LOT IS EXPIRED                       */
+/*******************************************************************/
+
+      SELECT into "nl:"
+	rlr.defined_active_dt_tm,
+	rlr.defined_inactive_dt_tm
+      FROM
+        resource_lot_r rlr,
+	(dummyt d1 with seq = value(lots_to_add))
+      PLAN d1
+      JOIN rlr
+        where rlr.lot_id = request->lots[d1.seq].lot_id and
+              (rlr.defined_inactive_dt_tm > cnvtdatetime(request->lots[d1.seq].expiration_dt_tm) or
+               rlr.defined_active_dt_tm < cnvtdatetime(request->lots[d1.seq].receive_dt_tm))
+      DETAIL
+         d_cnt = d_cnt + 1
+         IF (mod(d_cnt, 5) = 1)
+           stat = alterlist(sr_to_save->sr, d_cnt + 5)
+         ENDIF
+         sr_to_save->sr[d_cnt].lot_id = rlr.lot_id
+         sr_to_save->sr[d_cnt].service_resource_cd = rlr.service_resource_cd
+         sr_to_save->sr[d_cnt].receive_dt_tm = cnvtdatetime(request->lots[d1.seq].receive_dt_tm)
+         sr_to_save->sr[d_cnt].expiration_dt_tm = cnvtdatetime(request->lots[d1.seq].expiration_dt_tm)
+;call echo(sr_to_save->sr[d_cnt].receive_dt_tm, 0 )
+;call echo(" = ", 0)
+;call echo(request->lots[d1.seq].receive_dt_tm, 1)
+;call echo(sr_to_save->sr[d_cnt].expiration_dt_tm, 0)
+;call echo(" = ", 0)
+;call echo(request->lots[d1.seq].expiration_dt_tm, 1)
+      WITH
+         outerjoin = d1,
+	 nocounter
+
+;call echo(d_cnt, 1)
+;for (cnt = 1 to d_cnt)
+;  call echo(sr_to_save->sr[4].service_resource_cd, 1)
+;  call echo(sr_to_save->sr[4].receive_dt_tm, 1)
+;  call echo(sr_to_save->sr[4].expiration_dt_tm, 1)
+;  call echo(" ", 1)
+;endfor
+      set stat = alterlist(sr_to_save->sr, d_cnt)
+
+      UPDATE
+         into resource_lot_r rlr,
+              (dummyt d1 with seq = value(d_cnt))
+      SET
+         rlr.defined_active_dt_tm   = cnvtdatetime(sr_to_save->sr[d1.seq].receive_dt_tm),
+         rlr.defined_inactive_dt_tm = cnvtdatetime(sr_to_save->sr[d1.seq].expiration_dt_tm),
+         rlr.updt_dt_tm             = cnvtdatetime(curdate,curtime),
+         rlr.updt_id                = reqinfo->updt_id,
+         rlr.updt_task              = reqinfo->updt_task,
+         rlr.updt_cnt               = rlr.updt_cnt + 1,
+         rlr.updt_applctx           = reqinfo->updt_applctx
+      PLAN d1
+      JOIN rlr
+         where rlr.lot_id = sr_to_save->sr[d1.seq].lot_id
+               and rlr.service_resource_cd = sr_to_save->sr[d1.seq].service_resource_cd
+      WITH
+         nocounter
+
+
+/*      UPDATE
+         into resource_lot_r rlr,
+              (dummyt d1 with seq = value(lots_to_add))
+      SET
+         rlr.defined_active_dt_tm = cnvtdatetime(request->lots[d1.seq].receive_dt_tm),
+         rlr.defined_inactive_dt_tm = cnvtdatetime(request->lots[d1.seq].expiration_dt_tm),
+         rlr.updt_dt_tm             = cnvtdatetime(curdate,curtime),
+         rlr.updt_id                = reqinfo->updt_id,
+         rlr.updt_task              = reqinfo->updt_task,
+         rlr.updt_cnt               = rlr.updt_cnt + 1,
+         rlr.updt_applctx           = reqinfo->updt_applctx
+      PLAN d1
+      JOIN rlr
+         where rlr.lot_id = request->lots[d1.seq].lot_id
+      WITH
+         nocounter
+*/
+
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if control_lot table update is unsuccessful.            */
+/********************************************************************/
+     #cl_update_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "update"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "control_lot table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+      if (failed = "F")
+         set reply->status_data->status = "S"
+         commit
+      else
+         rollback
+      endif
+END
+GO     
+
+;Generated by GNU enscript 1.6.4.

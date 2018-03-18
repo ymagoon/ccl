@@ -1,0 +1,371 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_procs/glb_get_procs.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_PROCS.PRG
+        Object name:            GLB_GET_PROCS
+        Request #:
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve procedures to display in
+				procedure lookup.dll
+
+
+        Tables read:            order_catalog_synonym
+				accession_order_r
+				orders
+				order_serv_res_container
+
+        Tables updated:         n/a
+        Executing from:         General Lab Procedure Lookup.dll
+
+        Special Notes:          n/a
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 07/13/98 Gary Runde           Initial Release                     *
+;     001 01/04/02 Ahti Rovainen        Add Fields to Order By for the Head *
+;     002 03/01/05 Scott Sundahl        Do not return duplicate synonyms    *
+;     003 25/03/07 Vibhor Mathur	    CR 1-845693461 Do not return        *
+;										Canceled type procedures   			*
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+        drop program glb_get_procs:dba go
+        create program glb_get_procs:dba
+
+%i cclsource:pcs_subevent.inc
+
+/*
+record request
+(
+    1  seed			            = c40
+	  1  ValidString		      = c40
+	  1  accession			      = c20
+	  1  ServiceResourceCd		= F8
+)
+*/
+
+record reply
+(
+    1 context_more_data       = c1
+	  1  procs[*]
+	      2  catalog_cd       	= F8
+	      2  display_name		    = VC
+%i cclsource:status_block.inc
+)
+
+declare nCodeCnt        		    = i4  with protected, noconstant(1)
+declare GLBCatalogTypeCd        = f8 with protected, noconstant(0.0)
+declare HighBuffer = c30 with protect, noconstant(fillstring(30, " "))
+declare sUpperString            = vc with protect, noconstant(" ")
+declare dCanceledTypeCd         = f8 with protected, noconstant(0.0)
+declare dHelixChargeOrderCd     = f8 with protect, noconstant(0.0)
+
+set p_cnt                       = 0
+set reply->context_more_data    = "F"
+set reply->status_data->status  = "F"
+
+    set i18nHandle = uar_i18nalphabet_init()
+    call uar_i18nalphabet_highchar(i18nHandle, HighBuffer, size(HighBuffer))
+    set HighValues = cnvtupper(trim(HighBuffer))
+    call uar_i18nalphabet_end(i18nHandle)
+SET stat = UAR_GET_MEANING_BY_CODESET(6000,"GENERAL LAB",nCodeCnt,GLBCatalogTypeCd)
+SET stat = Uar_Get_Meaning_By_Codeset(6004, "CANCELED",1, dCanceledTypeCd)
+
+set dHelixChargeOrderCd = uar_get_code_by("MEANING", 5801, "HLX_CO")
+
+if (nCodeCnt > 1)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of GENERAL LAB (cs 6000) returned multiple values.")
+  go to exit_script
+else
+  if (nCodeCnt = 0)
+    set failed = "T"
+    call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of GENERAL LAB (cs 6000) returned nothing.")
+    go to exit_script
+  endif
+endif
+if (dCanceledTypeCd = 0.0)
+    set failed = "T"
+    call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of CANCELED (cs 6004) returned a zero value.")
+    go to exit_script
+  endif
+
+if (request->ValidString > "")   ;if IsValid is calling script
+	go to VALIDATEPROC
+endif
+if (request->accession > "" and request->ServiceResourceCd > 0)
+	go to SERVRES
+endif
+if (request->accession > "")
+	go to ACCESSION
+endif
+
+set sUpperString = cnvtupper(request->seed) 
+
+      /***********************************************************************
+      *   retrieve the order mnemonics from the order_catalog_synonym table  *
+      ***********************************************************************/
+select 	into "nl:"
+	ocs.mnemonic_key_cap
+from
+	order_catalog_synonym ocs
+where (ocs.mnemonic_key_cap between sUpperString and HighValues)
+		and ocs.catalog_type_cd = GLBCatalogTypeCd  ; general lab
+		and ocs.mnemonic > " "
+ 		and ocs.active_ind = 1
+ 		and ocs.activity_subtype_cd + 0.0 != dHelixChargeOrderCd
+order ocs.mnemonic_key_cap, ocs.catalog_cd
+head report
+	p_cnt = 0
+	
+head ocs.mnemonic_key_cap 	
+	row + 0
+	
+head ocs.catalog_cd
+	p_cnt = p_cnt + 1
+	if (p_cnt = 21)
+	     reply->context_more_data = "T"
+	endif
+  if (mod(p_cnt,10) = 1)
+      stat = alterlist(reply->procs, (p_cnt + 10))
+  endif
+	reply->procs[p_cnt].catalog_cd = ocs.catalog_cd
+	reply->procs[p_cnt].display_name = ocs.mnemonic
+with nocounter, maxrec = 21
+
+set stat = alterlist(reply->procs, p_cnt)
+GO TO EXIT_SCRIPT
+
+#VALIDATEPROC
+
+if (trim(request->accession) != " " and request->ServiceResourceCd > 0)
+		go to VALIDATE_SERVRES
+endif
+if (trim(request->accession) != " ")
+    go to VALIDATE_ACCESSION
+endif
+
+set sUpperString = cnvtupper(request->ValidString)
+
+/*******************************************************************************
+*   check the order_catalog_synonym table to see if string is a valid mnemonic *
+*******************************************************************************/
+
+select 	into "nl:"
+	ocs.mnemonic_key_cap
+from
+	order_catalog_synonym ocs
+where ocs.mnemonic_key_cap = sUpperString and
+		ocs.mnemonic > " " and
+		ocs.catalog_type_cd = GLBCatalogTypeCd  ; general lab
+		and ocs.active_ind = 1
+ 		and ocs.activity_subtype_cd + 0.0 != dHelixChargeOrderCd
+order by ocs.mnemonic_key_cap, ocs.catalog_cd		
+		
+head report
+	p_cnt = 0
+	
+ocs.mnemonic_key_cap 	
+	row + 0
+	
+head ocs.catalog_cd
+	p_cnt = p_cnt + 1
+  if (mod(p_cnt,10) = 1)
+      stat = alterlist(reply->procs, (p_cnt + 10))
+  endif
+	reply->procs[p_cnt].catalog_cd = ocs.catalog_cd
+	reply->procs[p_cnt].display_name = ocs.mnemonic
+with nocounter
+
+set stat = alterlist(reply->procs, p_cnt)
+
+GO TO EXIT_SCRIPT
+
+/*******************************************************************************
+*   check to see if mnemonic is valid for the accession entered                *
+*******************************************************************************/
+
+#VALIDATE_ACCESSION
+
+select into "nl:"
+	aor.accession,
+	aor.order_id,
+	o.order_id
+from 	orders o,
+	accession_order_r aor
+plan aor where aor.accession = request->accession
+join o   where aor.order_id = o.order_id and
+		trim(cnvtupper(o.order_mnemonic)) =
+		  trim(cnvtupper(request->ValidString)) and
+	      o.order_status_cd+0 != dCanceledTypeCd
+head report
+	p_cnt = 0
+detail
+	p_cnt = p_cnt + 1
+  if (mod(p_cnt,10) = 1)
+      stat = alterlist(reply->procs, (p_cnt + 10))
+  endif
+	reply->procs[p_cnt].catalog_cd = o.catalog_cd
+	reply->procs[p_cnt].display_name = o.order_mnemonic
+with nocounter
+set stat = alterlist(reply->procs, p_cnt)
+
+go to EXIT_SCRIPT
+
+/*******************************************************************************
+*   retrieve valid mnemonics for a entered accession                           *
+*******************************************************************************/
+
+#ACCESSION
+select into "nl:"
+	aor.accession,
+	aor.order_id,
+	o.order_id,
+	o.order_mnemonic
+from 	orders o,
+	accession_order_r aor
+plan aor where aor.accession = request->accession
+join o   where aor.order_id = o.order_id and 
+		 o.order_status_cd+0 != dCanceledTypeCd
+order 	 o.order_mnemonic
+
+head report
+	p_cnt = 0
+detail
+	p_cnt = p_cnt + 1
+  if (mod(p_cnt,10) = 1)
+      stat = alterlist(reply->procs, (p_cnt + 10))
+  endif
+	reply->procs[p_cnt].catalog_cd = o.catalog_cd
+	reply->procs[p_cnt].display_name = o.order_mnemonic
+with nocounter
+
+set stat = alterlist(reply->procs, p_cnt)
+go to EXIT_SCRIPT
+
+/*******************************************************************************
+*   check to see if the mnemonic is valid for a entered accession and          *
+*   service resource code                                                      *
+*******************************************************************************/
+
+#VALIDATE_SERVRES
+select into "nl:"
+	aor.accession,
+	aor.order_id,
+	o.order_id,
+	osrc.order_id
+from 	orders o,
+	accession_order_r aor,
+	order_serv_res_container osrc
+plan aor where aor.accession = request->accession
+join osrc where aor.order_id = osrc.order_id
+	and osrc.service_resource_cd = request->serviceresourcecd
+join o   where osrc.order_id = o.order_id and
+		trim(cnvtupper(o.order_mnemonic)) =
+			trim(cnvtupper(request->ValidString))
+head report
+	p_cnt = 0
+detail
+	p_cnt = p_cnt + 1
+  if (mod(p_cnt,10) = 1)
+      stat = alterlist(reply->procs, (p_cnt + 10))
+  endif
+	reply->procs[p_cnt].catalog_cd = o.catalog_cd
+	reply->procs[p_cnt].display_name = o.order_mnemonic
+with nocounter
+set stat = alterlist(reply->procs, p_cnt)
+
+go to EXIT_SCRIPT
+
+/*******************************************************************************
+*   select valid mnemonics for a entered service resource code and accession
+*******************************************************************************/
+
+#SERVRES
+select into "nl:"
+	aor.accession,
+	aor.order_id,
+	o.order_id,
+	o.order_mnemonic,
+	osrc.order_id,
+	osrc.service_resource_cd
+from 	orders o,
+	accession_order_r aor,
+	order_serv_res_container osrc
+plan aor where aor.accession = request->accession
+join osrc where aor.order_id = osrc.order_id and
+		osrc.service_resource_cd = request->ServiceResourceCd
+join o   where osrc.order_id = o.order_id
+order 	 o.order_mnemonic, o.catalog_cd
+
+head report
+	p_cnt = 0
+	
+head o.order_mnemonic 	
+	row + 0
+	
+head o.catalog_cd
+	p_cnt = p_cnt + 1
+  if (mod(p_cnt,10) = 1)
+      stat = alterlist(reply->procs, (p_cnt + 10))
+  endif
+	reply->procs[p_cnt].catalog_cd = o.catalog_cd
+	reply->procs[p_cnt].display_name = o.order_mnemonic
+detail
+	row +0
+with nocounter
+
+set stat = alterlist(reply->procs, p_cnt)
+go to EXIT_SCRIPT
+
+/*******************************************************************************
+*   If no records match, exit with return status of "Z"                        *
+*******************************************************************************/
+/* If no record matching, exit with return
+   status of "Z". */
+#EXIT_SCRIPT
+if (curqual = 0)
+	  set reply->status_data->status = "Z"
+    go to EXIT_PROGRAM
+endif
+
+set reply->status_data->status = "S"
+
+#EXIT_PROGRAM
+end go
+
+;Generated by GNU enscript 1.6.4.

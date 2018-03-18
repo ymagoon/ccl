@@ -1,0 +1,245 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_qc_validation/glb_get_qc_validation.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_QC_VALIDATION.PRG
+        Object name:            GLB_GET_QC_VALIDATION
+        Request #:              257593
+
+        Product:                General Lab/Quality Control
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        
+
+        Tables read:            
+
+        Tables updated:         n/a
+
+        Executing from:         PathNet General Lab:  QCEnforcer dll
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 07/12/05 Heatheryn Peak       Initial Release                     *
+;    *002 04/26/07 Paul Lessin          Check perform_results_exist_ind = 1 *
+;    *                                  Add lkey to request/reply
+;    *003 07/11/10 Greetan Antony       Validation logic to consider cycle  *
+;                                       start time when the QC passes       *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program glb_get_qc_validation:dba go
+      create program glb_get_qc_validation:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 Qual[*]
+           2 task_assay_cd               = f8
+           2 service_resource_cd         = f8
+           2 perform_dt_tm               = dq8
+           2 perform_results_exist_ind   = i2
+           2 lkey                        = i4
+           2 qc_assay_list [*]
+             3 task_assay_cd             = f8
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+        1 Qual[*]
+          2 task_assay_cd              = f8
+          2 task_assay_disp            = c40
+          2 service_resource_cd        = f8
+          2 service_resource_disp      = c40
+          2 pass_validation_ind        = i2
+          2 enforced_qc_assay_cd       = f8
+          2 enforced_qc_assay_disp     = c40
+          2 show_time_reminder_ind     = i2
+          2 qc_step_expire_dt_tm       = dq8
+          2 show_results_reminder_ind  = i2
+          2 remaining_results_nbr      = i4
+          2 lkey                       = i4
+%i cclsource:status_block.inc
+      )
+
+     #Script
+      declare lCnt                = i4 with protect, noconstant(0)
+      declare lAssayIdx           = i4 with protect, noconstant(0)
+      declare lEIdx               = i4 with protect, noconstant(0)
+      declare Cycle_Dt_Tm         = dq8 with protect
+      
+      set reply->status_data->status = "F"
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+      if (size(request->qual, 5) = 0) 
+        set reply->status_data->status = "Z"
+        go to exit_script
+      endif
+
+      set lAssayIdx = 1
+      
+      ;Copy the primary assay to the list of valid qc assays
+      for (lCnt = 1 to size(request->qual, 5))
+        set stat = alterlist(request->qual[lCnt].qc_assays, lAssayIdx) 
+        set request->qual[lCnt].qc_assays[1].task_assay_cd = request->qual[lCnt].task_assay_cd
+      endfor
+      
+      set lCnt = 0
+      
+      ;Find any related assays to add to the list of valid qc assays
+      select into "nl:"
+      from (dummyt d1 with seq = value(size(request->qual, 5))), 
+           related_assay ra1,
+           related_assay ra2
+      plan d1
+      join ra1 
+        where ra1.task_assay_cd = request->qual[d1.seq].qc_assays[1].task_assay_cd
+      join ra2
+        where ra2.related_entity_id = ra1.related_entity_id
+        and ra2.task_assay_cd != ra1.task_assay_cd
+      order by d1.seq, ra2.task_assay_cd
+      head d1.seq
+        lAssayIdx = 1
+      head ra2.task_assay_cd
+        lAssayIdx = lAssayIdx + 1
+        if (lAssayIdx > size(request->qual[d1.seq].qc_assays, 5))
+          stat = alterlist(request->qual[d1.seq].qc_assays, lAssayIdx + 3)
+        endif
+        request->qual[d1.seq].qc_assays[lAssayIdx].task_assay_cd = ra2.task_assay_cd
+      foot d1.seq
+        stat = alterlist(request->qual[d1.seq].qc_assays, lAssayIdx)   
+      with nocounter              
+      
+      ;Find the current QC Step Status Row which expires the soonest across the valid QC assays 
+      ;for the given resource with an active QC schedule   
+      select into "nl:"
+           qs_exists_ind = decode(qs.qc_schedule_id, "y", "n"),
+           qss_exists_ind = decode(qss.qc_step_status_id, "y", "n")
+      from qc_schedule qs,
+           qc_step_status qss,
+           (dummyt d1 with seq = value(size(request->qual, 5))),
+           (dummyt d2 with seq = 1)
+      plan d1
+      join qs 
+        where qs.service_resource_cd = request->qual[d1.seq].service_resource_cd
+        and   qs.active_ind = 1
+      join d2
+      join qss
+        where expand(lEIdx, 1, size(request->qual[d1.seq].qc_assays,5), qss.task_assay_cd, 
+                     request->qual[d1.seq].qc_assays[lEIdx].task_assay_cd) 
+        and   qss.service_resource_cd = qs.service_resource_cd
+        ; Order by d1.seq to allow us to head on each parent request item, step_complete_dt_tm desc to find the 
+        ; step completed most recently, and the step_expire_dt_tm in the event that both QC assays were on the same 
+        ; step (step_complete_dt_tm is the same), but one has been expired.  Finally, task_assay_cd in case
+        ; all the other attributes are the same.
+      order by d1.seq, qss.step_complete_dt_tm desc, qss.step_expire_dt_tm, qss.task_assay_cd
+      head d1.seq
+           lCnt = lCnt + 1
+           lcurrent_results_nbr = 0
+           if (lCnt > size(reply->qual, 5))
+                stat = alterlist(reply->Qual, lCnt + 9)
+           endif
+           reply->Qual[lCnt].lkey = request->qual[d1.seq].lkey
+           reply->Qual[lCnt].task_assay_cd = request->qual[d1.seq].task_assay_cd
+           reply->Qual[lCnt].service_resource_cd = request->qual[d1.seq].service_resource_cd
+           if (qs_exists_ind = "n" or (qs_exists_ind = "y" and qs.enforce_verified_results_ind = 0))
+               reply->Qual[lCnt].pass_validation_ind = 1
+           endif
+	   if (CURTIME <= CnvtTime(qs.start_dt_tm))
+		Cycle_Dt_Tm =  CNVTDATETIME(curdate-1, CNVTTIME(qs.start_dt_tm))
+	   else
+		Cycle_Dt_Tm =  CNVTDATETIME(curdate, CNVTTIME(qs.start_dt_tm))
+           endif     
+           if (qs.enforce_verified_results_ind = 1 and qss.step_complete_dt_tm >= Cycle_Dt_Tm
+            and request->qual[d1.seq].perform_dt_tm <= qss.step_expire_dt_tm
+            and qs_exists_ind = "y" and (qss.current_results_nbr < qss.verify_results_nbr or qss.verify_results_nbr <= 0
+                or request->qual[d1.seq].perform_results_exist_ind = 1))
+               reply->Qual[lCnt].pass_validation_ind = 1
+           endif
+           if (reply->Qual[lCnt].pass_validation_ind = 1 and (qs_exists_ind = "y" and qs.enforce_verified_results_ind = 1) 
+            and qss_exists_ind = "y")
+               ;return the task_assay which was used for qc enforcement
+               reply->Qual[lCnt].enforced_qc_assay_cd = qss.task_assay_cd
+               if (request->qual[d1.seq].perform_dt_tm >= 
+               (datetimeadd(qss.step_complete_dt_tm, ((qss.verify_minutes_nbr - qs.reminder_minutes_nbr)/1440.0)))
+                and qss.verify_minutes_nbr > 0 and qs.reminder_minutes_nbr > 0)
+                   reply->Qual[lCnt].show_time_reminder_ind = 1
+                   reply->Qual[lCnt].qc_step_expire_dt_tm = datetimeadd(qss.step_complete_dt_tm, qss.verify_minutes_nbr/1440.0)
+               endif
+               if (request->qual[d1.seq].perform_results_exist_ind = 1) 
+                  lcurrent_results_nbr = qss.current_results_nbr
+               else
+                  lcurrent_results_nbr = qss.current_results_nbr + 1
+               endif
+               if (lcurrent_results_nbr >= (qss.verify_results_nbr - qs.reminder_results_nbr) and qss.verify_results_nbr > 0
+                  and qs.reminder_results_nbr > 0)
+                   reply->Qual[lCnt].show_results_reminder_ind = 1
+                   reply->Qual[lCnt].remaining_results_nbr = qss.verify_results_nbr - lcurrent_results_nbr 
+               endif
+           elseif (reply->Qual[lCnt].pass_validation_ind = 0 and (qs_exists_ind = "y" and 
+             qs.enforce_verified_results_ind = 1))
+               if(qss_exists_ind = "y")
+                 ;If the current QC step failed validation, return the task_assay_cd 
+                 ;for the assay causing the failure
+                 reply->Qual[lCnt].enforced_qc_assay_cd = qss.task_assay_cd
+               elseif(qss_exists_ind = "n")
+                 ;Since the relevant step has not yet been run, we'll say the primary assay failed.
+                 reply->Qual[lCnt].enforced_qc_assay_cd = request->qual[d1.seq].task_assay_cd
+               endif
+           endif
+      with nocounter, outerjoin = d1, outerjoin = d2, dontcare=qss                         
+
+      if (lCnt > 0)
+        set stat = alterlist(reply->Qual, lCnt)
+      endif
+    
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+      set reply->status_data->status = "S"
+      go to exit_script
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+END GO
+
+;Generated by GNU enscript 1.6.4.

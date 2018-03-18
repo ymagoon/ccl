@@ -1,0 +1,488 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_gl_upd_osrc_status/pfmt_gl_upd_osrc_status.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       PFMT_GL_UPD_OSRC_STATUS.PRG
+        Object name:            PFMT_GL_UPD_OSRC_STATUS
+        Request #:
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        update the status_flag in order_serv_res_container
+                                to verified if the individual details at that service
+                                resource_cd have been verified, autoverified of corrected
+        Tables read:            code_value, order_serv_res_container, order_laboratory,
+                                result, order_procedure_exception
+
+        Tables updated:         order_serv_res_container
+
+        Executing from:         Process Server
+
+        Special Notes:          Triggered from Request 250074.
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000          Soham Dhakal         Initial Release                     *
+;    *001 08/16/01 Mike Gabrick         Add checking for twice-verified     *
+;    *                                  result                              *
+;    *002 07/17/02 CERGYL               Fix fail_reason_flag reference.     *
+;    *003 04/19/04 Craig Sumrall        Fix row not found when assay is     *
+;    *                                  routed to subsection                *
+;	 *004 07/09/13 Bharath Sridhara		Reset pending_assay_cnt after each order*
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program pfmt_gl_upd_osrc_status:dba go
+create program pfmt_gl_upd_osrc_status:dba
+
+
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC  
+%i CCLSOURCE:PCS_CODE.INC
+SET LOG_PROGRAM_NAME = "pfmt_gl_upd_osrc_status" 
+
+/***************************/
+/*   temp records          */
+/***************************/
+
+record temp_orders
+(
+
+        1 order_id = f8
+        1 sr_list[*]
+          2 service_resource_cd = f8
+          2 sr_flag = i2
+          2 assay_count = i2
+          2 pending_assay_cnt = i4
+          2 task_assay_list [*]
+          	  3 task_assay_cd = f8
+              3 assay_cnt = i4
+              3 pending_ind = i2
+        1 route_level_flag = i2              	
+) 
+
+/**** Main Processing ****/
+
+declare RESULT_STATUS_CODESET   = i4 with protect, constant(1901)
+declare VERIFIED_CDF            = c12 with protect, constant("VERIFIED")
+declare verified_cd             = f8 with protect, noconstant(0.0)
+declare AUTOVERIFIED_CDF        = c12 with protect, constant("AUTOVERIFIED")
+declare autoverified_cd         = f8 with protect, noconstant(0.0)
+declare CORRECTED_CDF           = c12 with protect, constant("CORRECTED")
+declare corrected_cd            = f8 with protect, noconstant(0.0)
+declare INREVIEW_CDF            = c12 with protect, constant("INREVIEW")
+declare inreview_cd             = f8 with protect, noconstant(0.0)
+
+declare SERV_RES_SUBSECTION_CDF = c12 with protect, constant("SUBSECTION")
+declare SERV_RES_INSTR_CDF      = c12 with protect, constant("INSTRUMENT")
+declare SERV_RES_BENCH_CDF      = c12 with protect, constant("BENCH")
+
+
+set nbr_of_orders           = 0
+set nbr_of_assays           = 0
+
+set oidx                    = 0
+set aidx                    = 0
+
+set e_cnt                   = 0
+set a_cnt                   = 0
+set o_cnt                   = 0
+set or_cnt                  = 0
+set s_cnt                   = 0
+set r_cnt                   = 0
+set d_cnt                   = 0
+set d1_cnt                  = 0
+set d2_cnt                  = 0
+set d3_cnt                  = 0
+declare dGroupCd                  = f8 with protect, noconstant(0.0)
+declare lPendingAssaysResultedCnt = i4 with protect, noconstant(0)
+declare lOrderCnt                 = i4 with protect, noconstant(0)
+declare iTemp                     = i4 with protect, noconstant(0)
+
+set dGroupCd = GetCodeValueByMeaning (223, "SUBSECTION")
+
+if (dGroupCd = 0)
+  set reqinfo->commit_ind = 0
+  go to EXIT_SCRIPT
+endif
+
+if ( requestin->reply->status_data->status = "F" )
+     set reqinfo->commit_ind = 0
+     call echo ("  Requestin failure")
+     go to EXIT_SCRIPT
+endif
+
+/*******************************************/
+;get the codevalues from the result codeset
+/*******************************************/
+
+set verified_cd = uar_get_code_by("MEANING", RESULT_STATUS_CODESET, nullterm(VERIFIED_CDF))
+set autoverified_cd = uar_get_code_by("MEANING", RESULT_STATUS_CODESET, nullterm(AUTOVERIFIED_CDF))
+set corrected_cd = uar_get_code_by("MEANING", RESULT_STATUS_CODESET, nullterm(CORRECTED_CDF))
+set inreview_cd = uar_get_code_by("MEANING", RESULT_STATUS_CODESET, nullterm(INREVIEW_CDF))  
+
+;*************************
+;*get the no of orders   **
+;**************************
+
+SET nbr_of_orders = size(requestin->request->orders, 5)
+
+IF (nbr_of_orders = 0)
+    go to EXIT_SCRIPT
+ENDIF
+
+FOR (oidx = 1 to nbr_of_orders)
+
+;**********************************************
+;Look for orders that have not been completed.*
+;**********************************************
+    IF (requestin->reply->orders[oidx]->complete_ind != 1)
+
+        set temp_orders->order_id = requestin->request->orders[oidx]->order_id
+        set nbr_of_assays= size(requestin->request->orders[oidx]->assays, 5)
+
+/*************************************************************************************/
+;       if the results have been verified for the assay_cd of the order then get the **
+;       service_resource_cd belonging to  that order                                 **
+/*************************************************************************************/
+
+        set old_service_resource_cd = 0.0      ; get only unique service_resource_cds
+  
+        FOR (aidx = 1 to nbr_of_assays)
+          IF (requestin->request->orders[oidx].assays[aidx].result_status_cd
+                        in(verified_cd, autoverified_cd, corrected_cd, inreview_cd)
+                        and old_service_resource_cd !=
+                         requestin->request->orders[oidx].assays[aidx].service_resource_cd
+                        and requestin->reply->orders[oidx].assays[aidx].fail_reason_flag != 4)          ;002
+;002                        and requestin->request->orders[oidx].assays[aidx].fail_reason_flag != 4)          ;001
+            set s_cnt = s_cnt + 1
+            IF (s_cnt >size(temp_orders->sr_list, 5))
+              set stat=alterlist(temp_orders->sr_list, s_cnt + 10)
+            ENDIF
+            set temp_orders->sr_list[s_cnt].service_resource_cd =
+                          requestin->request->orders[oidx].assays[aidx].service_resource_cd
+            set old_service_resource_cd = temp_orders->sr_list[s_cnt].service_resource_cd
+            
+          ENDIF
+        ENDFOR
+
+;* Find subsection and test sites that relate to the posting           
+;* service resource.                                                   
+      IF (s_cnt != 0)                                                
+            select into "nl:"
+            join_path = decode(rg1.seq, "1",
+                          rg2.seq, "2",
+                                   "0")
+                ,d1.seq
+                ,d_rg1.seq
+                ,rg1.seq
+                ,d_rg2.seq
+
+              from
+                 (dummyt d1 with seq = value(s_cnt))
+                ,(dummyt d_rg1 with seq = 1)
+                ,resource_group rg1
+                ,(dummyt d_rg2 with seq = 1)
+                ,resource_group rg2
+                ,resource_group rg3
+
+              plan d1
+              join (d_rg1 where d_rg1.seq = 1
+                     and uar_get_code_meaning(temp_orders->sr_list[d1.seq].service_resource_cd) = SERV_RES_SUBSECTION_CDF
+              join rg1 where rg1.parent_service_resource_cd = temp_orders->sr_list[d1.seq].service_resource_cd 
+                     and rg1.child_service_resource_cd > 0.0
+                     and rg1.resource_group_type_cd = dGroupCd
+                     and rg1.root_service_resource_cd + 0 = 0.0)
+              orjoin (d_rg2 where d_rg2.seq = 1
+                     and uar_get_code_meaning(temp_orders->sr_list[d1.seq].service_resource_cd) in 
+                        (SERV_RES_INSTR_CDF, SERV_RES_BENCH_CDF)
+              join rg2 where rg2.child_service_resource_cd = temp_orders->sr_list[d1.seq].service_resource_cd
+                     and rg2.root_service_resource_cd + 0 = 0.0
+                     and rg2.resource_group_type_cd + 0 =
+                             dGroupCd
+              join rg3 where rg3.parent_service_resource_cd = 
+                             rg2.parent_service_resource_cd
+                      and rg3.child_service_resource_cd !=
+                          rg2.child_service_resource_cd
+                      and rg3.resource_group_type_cd =
+                             dGroupCd
+                      and rg3.root_service_resource_cd + 0 = 0.0)
+
+            head report                                                 
+                a_cnt = 0                                                
+                sr_cnt = 0                                               
+                arg_serv_res_cd = 0.0                                    
+                sr_found_ind = 0                                         
+             ;* Define macro to add service resource to temp_orders if missing.    
+                macro (add_serv_res)                                     
+                    sr_found_ind = 0                                      
+                    if (s_cnt > 0)                
+                        for (sr_cnt = 1 to s_cnt)  
+                          if (temp_orders->sr_list[sr_cnt].service_resource_cd = arg_serv_res_cd)    
+                            sr_found_ind = 1                             
+                            sr_cnt = s_cnt       
+                          endif                                           
+                        endfor                                             
+                    endif                                                 
+                    if (sr_found_ind = 0)                                       
+                        s_cnt = s_cnt + 1                                  
+                        IF (s_cnt >size(temp_orders->sr_list, 5))
+                            stat=alterlist(temp_orders->sr_list, s_cnt + 10)
+                        ENDIF
+                        temp_orders->sr_list[s_cnt].service_resource_cd = arg_serv_res_cd
+                    endif                                                 
+                endmacro                                                 
+                                                                        
+
+            detail
+                case (join_path)
+                of "1":   ;* Subsection posting level - find related children
+                    arg_serv_res_cd = rg1.child_service_resource_cd                
+                    add_serv_res                                                   
+                of "2":   ;* Test Site posting level - find related subsection
+                       ;*                           and all related children
+                    arg_serv_res_cd = rg2.parent_service_resource_cd
+                    add_serv_res
+                    arg_serv_res_cd = rg3.child_service_resource_cd
+                    add_serv_res
+                endcase
+
+            with nocounter
+            ,outerjoin = d_rg1
+            ,dontcare = rg1
+            ,outerjoin = d_rg2
+
+            IF (s_cnt > 0)
+                set stat=alterlist(temp_orders->sr_list, s_cnt)
+            ENDIF
+
+/**************************************************************************/
+;       select all the taskassay matching the order id and service resource cd
+/**************************************************************************/
+
+          SELECT INTO "nl:"
+                         ol.order_id
+                        ,ope.service_resource_cd
+
+          FROM          (dummyt d1 with seq = value(s_cnt))
+                        ,order_laboratory ol
+                        ,order_procedure_exception ope
+                        ,orders o
+                        ,Profile_task_r ptr
+
+          PLAN          d1
+          JOIN          ol
+          WHERE         ol.order_id = temp_orders->order_id
+          	AND         ol.resource_route_level_flag > 1
+          JOIN          ope
+          WHERE         ope.order_id = ol.order_id 
+            AND         ope.service_resource_cd = temp_orders->sr_list[d1.seq].service_resource_cd
+          JOIN          o
+          WHERE         ol.order_id = o.order_id
+          JOIN          ptr
+          WHERE         o.catalog_cd = ptr.catalog_cd and ope.task_assay_cd = ptr.task_assay_cd
+          ORDER         ope.service_resource_cd
+          HEAD REPORT
+            row + 0
+
+          HEAD ope.service_resource_cd
+            e_cnt = 0
+          	d1_cnt = d1.seq
+          	temp_orders->sr_list[d1_cnt].pending_assay_cnt = 0
+            temp_orders->route_level_flag = ol.resource_route_level_flag          	
+
+          DETAIL
+          	e_cnt = e_cnt + 1
+          
+          IF (ptr.pending_ind = 1) 
+          	temp_orders->sr_list[d1_cnt].pending_assay_cnt = 
+          						temp_orders->sr_list[d1_cnt].pending_assay_cnt + 1
+          ENDIF 
+          
+          IF (e_cnt > size(temp_orders->sr_list[d1_cnt].task_assay_list, 5))
+            stat = alterlist(temp_orders->sr_list[d1_cnt].task_assay_list, e_cnt + 10)
+          ENDIF
+          
+          temp_orders->sr_list[d1_cnt].task_assay_list[e_cnt].task_assay_cd 
+                                                                        = ope.task_assay_cd
+          
+          temp_orders->sr_list[d1_cnt].task_assay_list[e_cnt].pending_ind = ptr.pending_ind
+          
+          temp_orders->sr_list[d1_cnt].assay_count = e_cnt
+
+        CALL ECHO(BUILD("ope.order_id---------->", ope.order_id))
+        CALL ECHO(BUILD("SERVICE_RESOURCE_CD--->",ope.service_resource_cd))
+        CALL ECHO(BUILD("task_assay--->",ope.task_assay_cd))
+
+
+        FOOT ope.service_resource_cd
+            IF (e_cnt > 0)
+                stat = alterlist(temp_orders->sr_list[d1_cnt].task_assay_list, e_cnt)
+            ENDIF            
+;debug
+        FOOT REPORT
+
+        CALL ECHO(BUILD("ecnt->",e_cnt))
+        call echo(" ")
+        WITH NOCOUNTER
+     ENDIF        
+/**************************************************************************/
+;       select the taskassay for a level one orderable
+/**************************************************************************/
+
+          SELECT INTO "nl:"
+                         ol.order_id
+
+          FROM          order_laboratory ol
+                        ,orders o
+                        ,Profile_task_r ptr
+
+          PLAN          ol
+          WHERE         ol.order_id = temp_orders->order_id and ol.resource_route_level_flag = 1
+          JOIN          o
+          WHERE         ol.order_id = o.order_id
+          JOIN          ptr
+          WHERE         o.catalog_cd = ptr.catalog_cd and ptr.active_ind = 1
+          ORDER         ptr.task_assay_cd
+          HEAD REPORT
+            e_cnt = 0
+           
+          HEAD ptr.task_assay_cd
+            e_cnt = e_cnt + 1
+            IF (e_cnt > size(temp_orders->sr_list[1].task_assay_list, 5))
+                stat = alterlist(temp_orders->sr_list[1].task_assay_list, e_cnt + 10)
+            ENDIF
+            temp_orders->sr_list[1].task_assay_list[e_cnt].task_assay_cd = ptr.task_assay_cd
+            temp_orders->sr_list[1].task_assay_list[e_cnt].pending_ind = ptr.pending_ind
+          
+            IF (ptr.pending_ind = 1) 
+          	 temp_orders->sr_list[1].pending_assay_cnt = temp_orders->sr_list[1].pending_assay_cnt + 1
+            ENDIF 
+          
+            temp_orders->sr_list[1].assay_count = e_cnt
+          
+            s_cnt = 1
+   
+            temp_orders->route_level_flag = 1
+
+        FOOT REPORT 
+           IF (e_cnt > 0)
+                stat = alterlist(temp_orders->sr_list[1].task_assay_list, e_cnt)
+           ENDIF 
+
+        WITH NOCOUNTER
+
+/**************************************************************************/
+;       get the assays from the result for the orders and set the result flag
+/**************************************************************************/
+set iTemp = 0
+
+call echo("getting the assays from the result table for the order in the result table")
+
+FOR (itemp = 1 to s_cnt)
+
+    set lOrderCnt = 0
+    set lPendingAssaysResultedCnt = 0
+    
+    if (temp_orders->sr_list[itemp].assay_count != 0)
+
+        SELECT  INTO "nl:"
+                r.order_id
+        FROM    (dummyt d1 with seq = value(temp_orders->sr_list[itemp].assay_count))
+                ,result r
+        PLAN    d1
+        JOIN    r
+        WHERE   r.order_id = temp_orders->order_id
+        AND     r.task_assay_cd = temp_orders->sr_list[itemp].task_assay_list[d1.seq].task_assay_cd
+        AND     r.result_status_cd in(autoverified_cd, verified_cd, corrected_cd, inreview_cd)
+        ORDER   r.task_assay_cd
+    
+        HEAD REPORT
+
+        row +0
+	      lPendingAssaysResultedCnt = 0
+
+        head r.task_assay_cd
+
+        if (temp_orders->sr_list[itemp].task_assay_list[d1.seq].pending_ind = 1)
+            lPendingAssaysResultedCnt = lPendingAssaysResultedCnt + 1
+        endif
+        lOrderCnt = lOrderCnt + 1
+
+        FOOT REPORT
+        row +0
+
+        WITH NOCOUNTER
+        
+/**************************************************************************/
+;  check the order_ids from ope with the ones in result to see if all the
+;  details exist
+/**************************************************************************/
+
+        set temp_orders->sr_list[iTemp].sr_flag = 0
+        IF ((temp_orders->sr_list[iTemp].pending_assay_cnt > 0 
+        		and lPendingAssaysResultedCnt = temp_orders->sr_list[iTemp].pending_assay_cnt) 
+        		OR (temp_orders->sr_list[iTemp].pending_assay_cnt = 0 and lOrderCnt > 0))
+          set temp_orders->sr_list[iTemp].sr_flag = 1
+        ENDIF
+	
+	 endif
+	 ;Reset the value of the pending_assay_cnt for the next order.
+	 set temp_orders->sr_list[iTemp].pending_assay_cnt = 0
+ENDFOR
+
+/**************************************************************************/
+;       update the status_flag in the osrc table for the selected
+;        service_resource_cd    and the order_id
+/**************************************************************************/
+    IF (s_cnt != 0)        
+      UPDATE INTO      order_serv_res_container osrc
+                      ,(dummyt d1 with seq  = value(s_cnt))
+      SET             osrc.status_flag = 2
+      PLAN            d1
+      JOIN            osrc
+      WHERE           osrc.order_id = temp_orders->order_id
+      AND             temp_orders->sr_list[d1.seq]->sr_flag = 1
+      AND             ((osrc.service_resource_cd = temp_orders->sr_list[d1.seq]->service_resource_cd
+      AND             temp_orders->route_level_flag = 2)
+      OR              (temp_orders->route_level_flag = 1))
+
+      WITH COUNTER
+    ENDIF       
+  ENDIF
+ENDFOR
+
+#EXIT_SCRIPT
+
+COMMIT
+END GO
+
+;Generated by GNU enscript 1.6.4.

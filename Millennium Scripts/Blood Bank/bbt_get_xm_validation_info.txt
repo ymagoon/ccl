@@ -1,0 +1,517 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/RESULTENTRYFORBLOODBANK/BBT_GET_XM_VALIDATION_INFO.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2004 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_xm_validation_info.prg
+        Object name:            bbt_get_xm_validation_info
+        Request #:              225077
+
+        Product:                Blood Bank
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Get all active/inactive crossmatch and all
+                                inprogress crossmatches for a product
+
+        Tables read:            container_accession
+                                code_value
+                                order_serv_res_container
+                                orders
+                                perform_result
+                                product_event
+                                profile_task_r
+                                person
+                                result
+
+        Tables updated:         None
+        Executing from:
+
+        Special Notes:
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 06/19/96 Yvonne Klipfel       Initial Release                     *
+;    *001 08/22/02 Chris Heil           Resolve script error with in        *
+;    *                                  progress products.                  *
+;    *002 11/15/04 Jason Osborn         Add select for Flexible XM's        *
+;    *003 12/08/08 Jacob Anderson       Add result_id to the reply for      *
+;                                       Dispensed with Incompatible         *
+;                                       Crossmatch                          *
+;    *004 08/28/09 Ronda Zheng          fixed CR1-3389396081. Qualify on    *
+;                                       bb_result_id for incompatibel xm    *
+;	 *005 07/16/13 Gayatri Samala       Fix for CR 1-7027895211,to populate *
+;										reply structure by qualifying on    *
+;										primary accession for the order     *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop   program BBT_GET_XM_VALIDATION_INFO:dba go
+             create program BBT_GET_XM_VALIDATION_INFO:dba
+
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  product_id                    = f8
+         1  person_id                     = f8
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      (
+         1  qual[*]
+            2  product_event_id             = f8
+            2  person_id                    = f8
+            2  accession                    = c20
+            2  person_full_name             = vc
+            2  event_type_cd                = f8
+            2  event_type_disp              = c40
+            2  event_type_desc              = c60
+            2  event_type_mean              = c12
+            2  active_ind                   = i4
+;need to pass back meaning
+            2  result_value_numeric         = f8
+            2  result_value_dt_tm           = dq8
+            2  result_value_alpha           = vc
+            2  string_identifier            = vc
+            2  perform_dt_tm                = dq8
+            2  bb_result_processing_cd      = f8  ;lqs
+            2  bb_result_processing_disp    = c40 ;lqs
+            2  bb_result_processing_mean    = c12 ;lqs
+            2  result_id                    = f8
+%i cclsource:status_block.inc
+      )
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set CV_REQUIRED_RECS            = 4
+         declare cv_cnt                  = i4
+         set PRODUCT_STATES_CODESET      = 1610
+         set IN_PROGRESS_CDF             = "16"
+         set CROSSMATCH_CDF              = "3"
+         set BB_RESULT_PROCESS_CODESET   = 1636
+         set HISTORY_UPD_CDF             = "HISTRY & UPD"
+         set HISTORY_CDF                 = "HISTRY ONLY"
+
+         declare in_progress_cd = f8
+         declare crossmatch_cd = f8
+         declare xm_interp_cd = f8
+         declare xm_hist_only_interp_cd = f8
+
+         declare q_cnt                   = i4
+         declare d_cnt                   = i4
+         declare process_cd              = f8
+         set reply->status_data.status = "F"
+         set q_cnt = 0
+         set d_cnt = 0
+         declare srch_idx = I4 WITH NOCONSTANT(0),PUBLIC
+/***********************************************************************
+
+      ***********************************************************************/
+         set cv_cnt = 0
+
+         select into "nl:"
+            cv.code_set,
+            cv.code_value
+         from
+            code_value cv
+         where cv.code_set in ( PRODUCT_STATES_CODESET,
+                                BB_RESULT_PROCESS_CODESET )
+           and cv.active_ind = 1
+           and (cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+             and  cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+         detail
+            if (cv.code_set = PRODUCT_STATES_CODESET)
+               case (cv.cdf_meaning)
+                 of IN_PROGRESS_CDF:
+                    in_progress_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of CROSSMATCH_CDF:
+                    crossmatch_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+            if (cv.code_set = BB_RESULT_PROCESS_CODESET)
+               case (cv.cdf_meaning)
+                 of HISTORY_UPD_CDF:
+                    xm_interp_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of HISTORY_CDF:
+                    xm_hist_only_interp_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+         with nocounter
+
+         ;* Verify that all required code value records were read.
+         if (cv_cnt != CV_REQUIRED_RECS)
+            go to Resize_Reply
+         endif
+
+      /***********************************************************************
+      * Select regular crossmatches
+      ***********************************************************************/
+         select into "nl:"
+            pe.product_id,
+            pe.event_type_cd,
+            pe.order_id,
+            pe.bb_result_id,
+            c.person_id,
+            d1.seq,
+            aor.seq,
+            o.order_id,
+            p.person_id,
+            d2.seq,
+            result_exists = decode(r.seq, "Y", "N"),
+            ptr.task_assay_cd,
+            r.order_id,
+            r.task_assay_cd,
+            r.bb_result_id,
+            r.result_id,
+            pr.result_id,
+            pr.result_status_cd,
+            n.nomenclature_id
+
+         from
+            product_event pe,
+            crossmatch c,
+            (dummyt d1 with seq = 1),
+            (dummyt d2 with seq = 1),
+            accession_order_r aor,
+            orders o,
+            person p,
+            profile_task_r ptr,
+            result r,
+            perform_result pr,
+            nomenclature n,
+            discrete_task_assay dta
+
+         plan pe   where pe.product_id = request->product_id
+                   and pe.product_event_id > 0
+                   and ((pe.event_type_cd = in_progress_cd and pe.active_ind = 1)
+                         or (pe.event_type_cd = crossmatch_cd))
+         join aor  where aor.order_id = pe.order_id
+                        and aor.order_id > 0 and aor.primary_flag = 0
+         join o    where o.order_id = pe.order_id
+         join p    where p.person_id = o.person_id
+         join ptr where ptr.catalog_cd = o.catalog_cd
+                  and ptr.active_ind = 1
+         join dta where dta.task_assay_cd = ptr.task_assay_cd and
+                  (dta.bb_result_processing_cd = xm_interp_cd
+                  or dta.bb_result_processing_cd = xm_hist_only_interp_cd)
+         join d1
+         join c    where c.product_event_id = pe.product_event_id
+         join d2
+         join r  where r.order_id = o.order_id
+                 and r.task_assay_cd = ptr.task_assay_cd
+                 and r.bb_result_id = pe.bb_result_id
+         join pr where pr.result_id = r.result_id
+                 and pr.result_status_cd = r.result_status_cd
+         join n  where n.nomenclature_id = pr.nomenclature_id
+
+         head report
+            q_cnt = 0
+
+         detail
+               /* send back all active xm/in progress for the product.  But only send back
+                * inactive xm if the same person is being used */
+               if (pe.active_ind = 0 and pe.event_type_cd = crossmatch_cd and result_exists = "Y")
+                  /* only send if previous xm is for the person being xm to */
+                  if (c.person_id = request->person_id)
+                     q_cnt = q_cnt + 1
+                     stat = alterlist(reply->qual, q_cnt)
+                     reply->qual[q_cnt].product_event_id = pe.product_event_id
+                     reply->qual[q_cnt].result_id = r.result_id
+                     reply->qual[q_cnt].person_id = o.person_id
+                     reply->qual[q_cnt].accession = aor.accession
+                     reply->qual[q_cnt].person_full_name = p.name_full_formatted
+                     reply->qual[q_cnt].event_type_cd = pe.event_type_cd
+                     reply->qual[q_cnt].active_ind = pe.active_ind
+                     reply->qual[q_cnt].result_value_numeric = pr.result_value_numeric
+                     reply->qual[q_cnt].result_value_dt_tm = pr.result_value_dt_tm
+                     reply->qual[q_cnt].result_value_alpha = pr.result_value_alpha
+                     reply->qual[q_cnt].perform_dt_tm = pr.perform_dt_tm
+                     reply->qual[q_cnt].string_identifier = n.source_string_keycap
+                     reply->qual[q_cnt].bb_result_processing_cd = dta.bb_result_processing_cd
+                  endif
+               elseif ((pe.active_ind = 1 and pe.event_type_cd = crossmatch_cd and result_exists = "Y") or
+                      (pe.active_ind = 1 and pe.event_type_cd = in_progress_cd))
+                  q_cnt = q_cnt + 1
+                  stat = alterlist(reply->qual, q_cnt)
+                  reply->qual[q_cnt].product_event_id = pe.product_event_id
+                  reply->qual[q_cnt].result_id = r.result_id
+                  reply->qual[q_cnt].person_id = o.person_id
+                  reply->qual[q_cnt].accession = aor.accession
+                  reply->qual[q_cnt].person_full_name = p.name_full_formatted
+                  reply->qual[q_cnt].event_type_cd = pe.event_type_cd
+                  reply->qual[q_cnt].active_ind = pe.active_ind
+                  reply->qual[q_cnt].bb_result_processing_cd = dta.bb_result_processing_cd
+                  if (result_exists = "Y")
+                     reply->qual[q_cnt].result_value_numeric = pr.result_value_numeric
+                     reply->qual[q_cnt].result_value_dt_tm = pr.result_value_dt_tm
+                     reply->qual[q_cnt].result_value_alpha = pr.result_value_alpha
+                     reply->qual[q_cnt].perform_dt_tm = pr.perform_dt_tm
+                     reply->qual[q_cnt].string_identifier = n.source_string_keycap
+                  endif
+               endif
+         with
+            nocounter,
+            dontcare = c,
+            outerjoin = d1,
+            outerjoin = d2
+
+
+      /***********************************************************************
+      * Select Flexible crossmatches
+      ***********************************************************************/
+         select into "nl:"
+            pe.product_id,
+            pe.event_type_cd,
+            pe.order_id,
+            pe.bb_result_id,
+            c.person_id,
+            d1.seq,
+            aor.seq,
+            o.order_id,
+            p.person_id,
+            d2.seq,
+            result_exists = decode(r.seq, "Y", "N"),
+            pg.task_assay_cd,
+            r.order_id,
+            r.task_assay_cd,
+            r.bb_result_id,
+            r.result_id,
+            pr.result_id,
+            pr.result_status_cd,
+            n.nomenclature_id
+
+         from
+            product_event pe,
+            crossmatch c,
+            (dummyt d1 with seq = 1),
+            (dummyt d2 with seq = 1),
+            accession_order_r aor,
+            orders o,
+            person p,
+            result r,
+            perform_result pr,
+            nomenclature n,
+            bb_order_phase bbop,
+            phase_group pg,
+            discrete_task_assay dta
+
+         plan pe   where pe.product_id = request->product_id
+                   and pe.product_event_id > 0
+                   and ((pe.event_type_cd = in_progress_cd and pe.active_ind = 1)
+                         or (pe.event_type_cd = crossmatch_cd))
+         join aor  where aor.order_id = pe.order_id
+                        and aor.order_id > 0 and aor.primary_flag = 0
+         join o    where o.order_id = pe.order_id
+         join p    where p.person_id = o.person_id
+         join bbop where bbop.order_id = o.order_id
+         join pg where pg.phase_group_cd = bbop.phase_grp_cd
+         join dta where dta.task_assay_cd = pg.task_assay_cd and
+                  (dta.bb_result_processing_cd = xm_interp_cd
+                  or dta.bb_result_processing_cd = xm_hist_only_interp_cd)
+         join d1
+         join c    where c.product_event_id = pe.product_event_id
+         join d2
+         join r  where r.order_id = o.order_id
+                 and r.task_assay_cd = pg.task_assay_cd
+                 and r.bb_result_id = pe.bb_result_id
+         join pr where pr.result_id = r.result_id
+                 and pr.result_status_cd = r.result_status_cd
+         join n  where n.nomenclature_id = pr.nomenclature_id
+
+         head report
+            row+0
+
+         detail
+               /* send back all active xm/in progress for the product.  But only send back
+                * inactive xm if the same person is being used */
+               if (pe.active_ind = 0 and pe.event_type_cd = crossmatch_cd and result_exists = "Y")
+                  /* only send if previous xm is for the person being xm to */
+                  if (c.person_id = request->person_id)
+                     q_cnt = q_cnt + 1
+                     stat = alterlist(reply->qual, q_cnt)
+                     reply->qual[q_cnt].product_event_id = pe.product_event_id
+                     reply->qual[q_cnt].result_id = r.result_id
+                     reply->qual[q_cnt].person_id = o.person_id
+                     reply->qual[q_cnt].accession = aor.accession
+                     reply->qual[q_cnt].person_full_name = p.name_full_formatted
+                     reply->qual[q_cnt].event_type_cd = pe.event_type_cd
+                     reply->qual[q_cnt].active_ind = pe.active_ind
+                     reply->qual[q_cnt].result_value_numeric = pr.result_value_numeric
+                     reply->qual[q_cnt].result_value_dt_tm = pr.result_value_dt_tm
+                     reply->qual[q_cnt].result_value_alpha = pr.result_value_alpha
+                     reply->qual[q_cnt].perform_dt_tm = pr.perform_dt_tm
+                     reply->qual[q_cnt].string_identifier = n.source_string_keycap
+                     reply->qual[q_cnt].bb_result_processing_cd = dta.bb_result_processing_cd
+                  endif
+               elseif ((pe.active_ind = 1 and pe.event_type_cd = crossmatch_cd and result_exists = "Y") or
+                      (pe.active_ind = 1 and pe.event_type_cd = in_progress_cd))
+                  q_cnt = q_cnt + 1
+                  stat = alterlist(reply->qual, q_cnt)
+                  reply->qual[q_cnt].product_event_id = pe.product_event_id
+                  reply->qual[q_cnt].result_id = r.result_id
+                  reply->qual[q_cnt].person_id = o.person_id
+                  reply->qual[q_cnt].accession = aor.accession
+                  reply->qual[q_cnt].person_full_name = p.name_full_formatted
+                  reply->qual[q_cnt].event_type_cd = pe.event_type_cd
+                  reply->qual[q_cnt].active_ind = pe.active_ind
+                  reply->qual[q_cnt].bb_result_processing_cd = dta.bb_result_processing_cd
+                  if (result_exists = "Y")
+                     reply->qual[q_cnt].result_value_numeric = pr.result_value_numeric
+                     reply->qual[q_cnt].result_value_dt_tm = pr.result_value_dt_tm
+                     reply->qual[q_cnt].result_value_alpha = pr.result_value_alpha
+                     reply->qual[q_cnt].perform_dt_tm = pr.perform_dt_tm
+                     reply->qual[q_cnt].string_identifier = n.source_string_keycap
+                  endif
+               endif
+         with
+            nocounter,
+            dontcare = c,
+            outerjoin = d1,
+            outerjoin = d2
+        
+/***********************************************************************
+      * Select without crossmatches
+      ***********************************************************************/
+         select into "nl:"
+            pe.product_id,
+            pe.event_type_cd,
+            pe.order_id,
+            pe.bb_result_id,
+            pe.event_dt_tm,
+            aor.seq,
+            o.order_id,
+            p.person_id,
+            result_exists = decode(r.seq, "Y", "N"),
+            ptr.task_assay_cd,
+            r.order_id,
+            r.task_assay_cd,
+            r.bb_result_id,
+            r.result_id,
+            pr.result_id,
+            pr.result_status_cd,
+            n.nomenclature_id
+
+         from
+            product_event pe,
+            accession_order_r aor,
+            orders o,
+            person p,
+            profile_task_r ptr,
+            result r,
+            perform_result pr,
+            nomenclature n,
+            discrete_task_assay dta
+            
+            
+
+         plan pe   where pe.product_id = request->product_id
+                   and pe.product_event_id > 0
+                   and pe.bb_result_id > 0.0
+                   and ((pe.event_type_cd = in_progress_cd)) and pe.active_ind = 0
+         join o    where o.order_id = pe.order_id and o.person_id = request->person_id
+         join aor  where aor.order_id = pe.order_id
+                        and aor.order_id > 0 and aor.primary_flag = 0
+         join p    where p.person_id = o.person_id
+         join ptr where ptr.catalog_cd = o.catalog_cd
+                  and ptr.active_ind = 1
+         join dta where dta.task_assay_cd = ptr.task_assay_cd and
+                  (dta.bb_result_processing_cd = xm_interp_cd
+                  or dta.bb_result_processing_cd = xm_hist_only_interp_cd)
+         join r  where r.order_id = o.order_id
+                 and r.task_assay_cd = ptr.task_assay_cd
+                 and r.bb_result_id = pe.bb_result_id
+         join pr where pr.result_id = r.result_id
+                 and pr.result_status_cd = r.result_status_cd
+         join n  where n.nomenclature_id = pr.nomenclature_id
+
+		 ORDER BY CNVTDATETIME(pr.perform_dt_tm)
+
+         detail
+               /* Only add units to the reply if results exist for the products  */
+               /* and the order was placed for the person in the request */
+               /*make sure there are no duplicate records being fetched*/
+               /*make sure that there are no other prod events at the same time */
+               if (result_exists = "Y")
+                 if ((locateval(srch_idx,1,SIZE(reply->qual,5),pe.product_event_id,reply->qual[srch_idx]->product_event_id) = 0)   
+                    and (locateval(srch_idx,1,SIZE(reply->qual,5),pr.perform_dt_tm,reply->qual[srch_idx]->perform_dt_tm) = 0))
+                     q_cnt = q_cnt + 1
+                     stat = alterlist(reply->qual, q_cnt)
+                     reply->qual[q_cnt].product_event_id = pe.product_event_id
+                     reply->qual[q_cnt].result_id = r.result_id
+                     reply->qual[q_cnt].person_id = o.person_id
+                     reply->qual[q_cnt].accession = aor.accession
+                     reply->qual[q_cnt].person_full_name = p.name_full_formatted
+                     reply->qual[q_cnt].event_type_cd = pe.event_type_cd
+                     reply->qual[q_cnt].active_ind = pe.active_ind
+                     reply->qual[q_cnt].result_value_numeric = pr.result_value_numeric
+                     reply->qual[q_cnt].result_value_dt_tm = pr.result_value_dt_tm
+                     reply->qual[q_cnt].result_value_alpha = pr.result_value_alpha
+                     reply->qual[q_cnt].perform_dt_tm = pr.perform_dt_tm
+                     reply->qual[q_cnt].string_identifier = n.source_string_keycap
+                     reply->qual[q_cnt].bb_result_processing_cd = dta.bb_result_processing_cd
+                 endif    
+               endif
+         with
+            nocounter
+         
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/ 
+      #Resize_Reply
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+            set reply->status_data.subeventstatus[1]->OperationName = "SELECT"
+            set reply->status_data.subeventstatus[1]->OperationStatus = "Z"
+            set reply->status_data.subeventstatus[1]->TargetObjectName = "TABLE"
+            set reply->status_data.subeventstatus[1]->TargetObjectValue =
+                                                           "Unable to retrieve xm info"
+            set q_cnt = 1
+         endif
+         set stat = alterlist(reply->qual, q_cnt)
+         end
+         go
+
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,210 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_gl_set_order_status/pfmt_gl_set_order_status.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       pfmt_gl_set_order_status.prg
+        Object name:            pfmt_gl_set_order_status
+        Request #:              ??????
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Update Order Status.
+
+        Tables read:            none
+
+        Tables updated:         none
+
+        Executing from:         Process Server
+
+        Special Notes:          Triggered from Request 250074.
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 03/28/97 Jeff Fry             Initial Release                     *
+;    *001 08/24/99 Gary Runde           Add error logging to msgview        *
+;    *002 01/29/01 Soham Dhakal		Improve error logging		    *
+;					Feature :- 15673     		    *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program pfmt_gl_set_order_status:dba go
+create program pfmt_gl_set_order_status:dba
+
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC                                  ;001
+SET LOG_PROGRAM_NAME = "pfmt_gl_set_order_status"                      ;001
+
+/***********************************************************************
+ *   Print date and time to log file.                                  *
+ ***********************************************************************/
+  select into "nl:"                                                ;001
+    currentdate = cnvtdatetime(curdate,curtime3)                   ;001
+  detail                                                           ;001
+    sText = fillstring(254, " ")                                   ;001
+    sText = CONCAT("{{Script::PFMT_gl_set_order_status}} Started at ",         ;001
+                   format(currentdate, "dd-mmm-yyyy-hhmm;;d"))     ;001
+    call uar_SysEvent(hSys, 4, "ScriptBegin", NULLTERM(sText))     ;001
+  with nocounter                                                   ;001
+
+/**** Main Processing ****/
+
+;Define Request Record for Orm_chg_ord_stat_to_ip.prg.
+record request
+(
+  1 order_id = F8
+)
+
+set ORDERED_CDF   = "ORDERED"
+set ORDERED_CD    = 0.0
+set VERIFIED_CDF  = "VERIFIED"
+set VERIFIED_CD   = 0.0
+set INREVIEW_CDF  = "INREVIEW"
+set INREVIEW_CD   = 0.0
+set changes_made  = 0
+
+if ( requestin->reply->status_data->status = "F" )
+   ;If the Update Lab Results script
+   ; failed, then don't change order status.
+     set reqinfo->commit_ind = 0
+
+     Call LOG_MESSAGE("Requestin failure", LOG_LEVEL_DEBUG)  ;001
+     go to EXIT_SCRIPT
+endif
+
+
+select into "nl:"
+    cv.code_value
+  from code_value cv
+  where (cv.code_set = 6004 and cv.cdf_meaning = ORDERED_CDF)
+  or    (cv.code_set = 1901 and cv.cdf_meaning = VERIFIED_CDF)
+  or    (cv.code_set = 1901 and cv.cdf_meaning = INREVIEW_CDF)
+
+  detail
+    case (cv.cdf_meaning)
+       of ORDERED_CDF:
+          ORDERED_CD = cv.code_value
+       of VERIFIED_CDF:
+          VERIFIED_CD = cv.code_value
+       of INREVIEW_CDF:
+          INREVIEW_CD = cv.code_value
+    endcase
+
+with nocounter
+
+
+set nbr_of_orders = size(requestin->request->orders, 5)
+for (oidx = 1 to nbr_of_orders)
+   Call LOG_MESSAGE(build("Processing OrderID = ", requestin->request->orders[oidx]->order_id), LOG_LEVEL_DEBUG)   ;001
+   ;Don't Change to In-Process if completing order.
+   if (requestin->reply->orders[oidx]->complete_ind = 0)
+      ;Change only if something is being verified.
+      ; This is the point at which the order can no
+      ; longer be canceled.
+
+      if (requestin->reply->orders[oidx]->assays[1]->result_status_cd in
+         (VERIFIED_CD, INREVIEW_CD))
+         select into "nl:"
+             o.order_id,
+             o.order_status_cd
+           from orders o
+           where o.order_id = requestin->request->orders[oidx]->order_id
+           and   o.order_status_cd = ORDERED_CD
+
+         with nocounter
+
+         if (curqual > 0)
+	    Call LOG_MESSAGE("--> Changing Order Status To In-Process...", LOG_LEVEL_DEBUG)  ;001
+            set request->order_id = requestin->request->orders[oidx]->order_id
+            execute ORM_CHG_ORD_STAT_TO_IP
+
+	    CALL ERROR_MESSAGE(0)
+
+            if (reqinfo->commit_ind = 0)
+;002               Call LOG_MESSAGE("--> *** FAILED ***", LOG_LEVEL_ERROR)  ;001
+               Call LOG_MESSAGE("--> *** FAILED ***", LOG_LEVEL_INFO)  ;002
+               rollback
+            else
+               Call LOG_MESSAGE("--> Changed", LOG_LEVEL_DEBUG)  ;001
+               commit
+            endif
+         else
+            Call LOG_MESSAGE("  --> Order Is Not In An Ordered Status -> Skipping", LOG_LEVEL_DEBUG)  ;001
+         endif
+      else
+         Call LOG_MESSAGE ("  --> Not A Verify Request -> Skipping", LOG_LEVEL_DEBUG)		;001
+      endif
+   else
+      Call LOG_MESSAGE ("  --> Order Is Being Completed -> Skipping", LOG_LEVEL_DEBUG)   ;001
+   endif
+endfor
+
+;For orders which are being reviewed, set the pending review indicator on the
+;order laboratory table to true.
+for (oidx = 1 to nbr_of_orders)
+   if (pfmt_reply->orders[oidx].create_review_ind = 1
+   or pfmt_reply->orders[oidx].update_review_ind = 1)
+      update into order_laboratory a
+      set 
+        a.pending_review_ind = 1
+      plan a where a.order_id = requestin->request.orders[oidx].order_id
+      with nocounter
+      set changes_made = 1
+   endif
+endfor
+
+;For orders which were reviewed and are now complete, set the pending review indicator
+;on the order laboratory table to false.
+for (oidx = 1 to nbr_of_orders)
+   if (requestin->reply->orders[oidx].complete_ind = 1
+   and requestin->request->orders[oidx].pending_review_ind = 1)
+      update into order_laboratory a
+      set 
+        a.pending_review_ind = 0
+      plan a where a.order_id = requestin->request.orders[oidx].order_id
+      with nocounter
+      set changes_made = 1
+   endif
+endfor
+
+#EXIT_SCRIPT
+if (changes_made = 1)
+   commit
+endif
+
+Call LOG_MESSAGE ( build("Ending GL Set Order Status (",
+                  format(curdate, "MM/DD/YY;;D")," ", 
+                  format(curtime, " HHMM;;M"),")" ), LOG_LEVEL_DEBUG)                ;001
+
+call uar_SysDestroyHandle(hSys)   ;001
+
+end go
+
+;Generated by GNU enscript 1.6.4.

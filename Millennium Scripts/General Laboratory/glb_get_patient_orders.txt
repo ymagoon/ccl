@@ -1,0 +1,965 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_patient_orders/glb_get_patient_orders.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2000 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_patient_orders.prg
+        Object name:            glb_get_patient_orders
+        Request #:              250052
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load patient orders for a given collect date
+                                range.
+
+        Tables read:            code_value
+                                container
+                                container_accession
+                                encounter
+                                mic_order_lab
+                                oe_field_meaning
+                                orders
+                                order_action
+                                order_alias
+                                order_comment
+                                order_container_r
+                                order_detail
+                                order_laboratory
+                                organization
+                                pending_collection
+                                prsnl
+                                result
+                                v500_specimen
+
+        Tables updated:         None
+        Executing from:         
+
+        Special Notes:          Scheduled/Drawn date and time for the order
+                                procedure is determined by retrieving the
+                                first pending_collection/container record.
+                                If neither record exists, get scheduled
+                                date and time from orders table.
+
+                                If no activity types are specified in the
+                                request, return all activity types on the
+                                each order.
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 01/10/96 Hal Patchen          Initial Release                     *
+;    *001 10/03/97 Hal Patchen          Return collection priority          *
+;    *002 02/25/98 Hal Patchen          Return order care set & body site   *
+;    *003 04/22/98 Hal Patchen          Update placer order id logic        *
+;    *004 06/07/99 Gary Runde           Retrieve the encounter status code  *
+;    *                                  and the org_name                    *
+;    *005 08/30/99 Chris Heil           Format aliases using cnvtalias      *
+;    *006 05/23/00 Hal Patchen          Return encounter organization and   *
+;    *                                  confidentiality code for            *
+;    *                                  organization level security.        *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_PATIENT_ORDERS:dba go    
+             create program GLB_GET_PATIENT_ORDERS:dba
+     
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  person_id                    = f8
+         1  collect_dt_tm_begin          = dq8
+         1  collect_dt_tm_end            = dq8
+         1  activity_types[x]
+            2  activity_type_cd          = f8
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      ( 
+         1  qual_cnt                     = i4
+         1  qual[*]
+            2  order_id                  = f8
+            2  updt_cnt                  = i4
+            2  cs_order_id               = f8                          ;002
+            2  cs_catalog_cd             = f8                          ;002
+            2  cs_order_mne              = vc                          ;002
+            2  catalog_cd                = f8
+            2  catalog_type_cd           = f8
+            2  order_mnemonic            = vc
+            2  activity_type_cd          = f8
+            2  activity_type_disp        = vc
+            2  activity_type_desc        = vc
+            2  activity_type_mean        = vc
+            2  orig_order_dt_tm          = dq8
+            2  order_prsnl_id            = f8
+            2  order_prsnl_name          = vc
+            2  order_status_cd           = f8
+            2  order_status_disp         = vc
+            2  order_status_mean         = vc
+            2  order_proc_status         = vc
+            2  encntr_id                 = f8
+            2  last_update_provider_id   = f8
+            2  last_update_provider_name = vc
+            2  encntr_status_cd          = f8                          ;004
+            2  encntr_status_disp        = vc                          ;004
+            2  encntr_org_id             = f8                          ;006
+            2  org_name                  = vc                          ;004
+            2  confid_level_cd           = f8                          ;006
+            2  confid_level_disp         = vc                          ;006
+            2  loc_facility_cd           = f8
+            2  loc_facility_disp         = vc
+            2  loc_nurse_unit_cd         = f8
+            2  loc_nurse_unit_disp       = vc
+            2  loc_room_cd               = f8
+            2  loc_room_disp             = vc
+            2  loc_bed_cd                = f8
+            2  loc_bed_disp              = vc
+            2  reason_for_visit          = vc
+            2  accession                 = c18
+            2  order_alias               = vc
+            2  specimen_type_cd          = f8
+            2  specimen_type_disp        = vc   ;codeset 2052
+            2  specimen_type_desc        = vc
+            2  specimen_type_mean        = vc
+            2  body_site_cd              = f8                          ;002
+            2  body_site_disp            = vc                          ;002
+            2  spec_cnt                  = i4   
+            2  spec_qual[*]                  
+               3  specimen_cd            = f8   ;codeset 1306
+               3  specimen_disp          = vc
+               3  specimen_desc          = vc
+               3  specimen_mean          = vc
+            2  current_start_dt_tm       = dq8
+            2  scheduled_dt_tm           = dq8
+            2  drawn_dt_tm               = dq8
+            2  cancel_dt_tm              = dq8
+            2  cancel_prsnl_id           = f8
+            2  cancel_prsnl_name         = vc
+            2  cancel_reason             = vc
+            2  report_priority_cd        = f8
+            2  report_priority_disp      = vc
+            2  collection_priority_cd    = f8                          ;001
+            2  collection_priority_disp  = vc                          ;001
+            2  order_comment_ind         = i2
+            2  susceptibility_ind        = i2
+            2  positive_ind              = i2
+            2  micro_status_cd           = f8
+            2  micro_status_disp         = vc
+            2  oe_format_id							 = f8
+%i cclsource:status_block.inc
+      )
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set CV_REQUIRED_RECS            = 14
+         declare cv_cnt                  = i4
+         set COMMENT_TYPE_CODESET        = 14
+         set ORDER_COMMENT_CDF           = "ORD COMMENT"
+         set ORDER_NOTE_CDF              = "ORD NOTE"
+         set CANCEL_COMMENT_CDF          = "CANCELREASON"
+         set ACTIVITY_TYPE_CODESET       = 106
+         set ACTIVITY_TYPE_AP_CDF        = "AP"
+;003         set ESI_ALIAS_FIELD_CODESET     = 317
+;003         set ESI_ALIAS_PLACERORDID_CDF   = "PLACERORDID"
+         set ORDER_ALIAS_CODESET         = 754                         ;003
+         set ORDER_ALIAS_PLACERORDID_CDF = "PLACERORDID"               ;003
+         set CONTAINER_STATUS_CODESET    = 2060
+         set CONT_STATUS_PENDING_CDF     = "PENDING"
+         set CONT_STATUS_DISPATCH_CDF    = "DISPATCH"
+         set CONT_STATUS_COLLECTED_CDF   = "COLLECTED"
+         set CONT_STATUS_MISSED_CDF      = "MISSED"
+         set ORD_ACTION_TYPE_CODESET     = 6003
+         set ORD_ACTION_TYPE_ORDER_CDF   = "ORDER"
+         set ORD_ACTION_TYPE_CANCEL_CDF  = "CANCEL"
+         set ORDER_STATUS_CODESET        = 6004
+         set ORDER_STATUS_COMPLETED_CDF  = "COMPLETED"
+         set ORDER_STATUS_CANCELED_CDF   = "CANCELED"
+         set ORDER_STATUS_INPROCESS_CDF  = "INPROCESS"
+         declare order_comment_cd        = f8
+         declare order_note_cd           = f8
+         declare cancel_comment_cd       = f8
+         declare activity_type_ap_cd     = f8
+         declare esi_alias_placerordid_cd = f8
+         declare order_alias_placerordid_cd = f8                       ;003
+         set cont_status_pending_disp    = fillstring(40, " ")
+         set cont_status_dispatch_disp   = fillstring(40, " ")
+         set cont_status_collected_disp  = fillstring(40, " ")
+         set cont_status_missed_disp     = fillstring(40, " ")
+         declare ord_action_type_order_cd  = f8
+         declare ord_action_type_cancel_cd = f8
+         declare order_status_completed_cd = f8
+         set order_status_completed_disp = fillstring(40, " ")
+         declare order_status_canceled_cd = f8
+         set order_status_canceled_disp  = fillstring(40, " ")
+         declare order_status_inprocess_cd = f8
+         set order_status_inprocess_disp = fillstring(40, " ")
+         set OE_MEANING_CANCEL_REASON    = "CANCELREASON"
+         declare oe_meaning_cancel_reason_id = f8
+         declare nbr_containers          = i4
+         set highest_container_status_flag = 0
+           ; 0 - Canceled   (Order_Container_R.collection_status_flag is 5)
+           ; 1 - Pending    (Pending_Collection rec exists, but no 
+           ;                 Order_Container_R, or neither rec exists)
+           ; 2 - Dispatched (Order_Container_R.collection_status_flag is 0)
+           ; 3 - Missed     (Order_Container_R.collection_status_flag is 2,3,4)
+           ; 4 - Collected  (Order_Container_R.collection_status_flag is 1)
+         set higher_status_found         = " "
+         set result_found                = " "
+         declare nbr_of_activity_types   = i4
+         declare q_cnt                   = i4
+
+         set reply->status_data.status = "F"
+
+      /***********************************************************************
+      * Select processing code values                                        *
+      ***********************************************************************/
+         set cv_cnt = 0
+
+         ;* Select first 10 code values
+         select into "nl:"
+            cv.code_value
+
+         from
+            code_value cv
+
+         where ((cv.code_set = COMMENT_TYPE_CODESET
+             and cv.cdf_meaning in (ORDER_COMMENT_CDF,
+                                    ORDER_NOTE_CDF,
+                                    CANCEL_COMMENT_CDF))
+           or   (cv.code_set = ACTIVITY_TYPE_CODESET
+             and cv.cdf_meaning = ACTIVITY_TYPE_AP_CDF)
+;003           or   (cv.code_set = ESI_ALIAS_FIELD_CODESET
+;003             and cv.cdf_meaning = ESI_ALIAS_PLACERORDID_CDF)
+           or   (cv.code_set = ORDER_ALIAS_CODESET                     ;003
+             and cv.cdf_meaning = ORDER_ALIAS_PLACERORDID_CDF)         ;003
+           or   (cv.code_set = CONTAINER_STATUS_CODESET
+             and cv.cdf_meaning in (CONT_STATUS_PENDING_CDF,
+                                    CONT_STATUS_DISPATCH_CDF,
+                                    CONT_STATUS_COLLECTED_CDF,
+                                    CONT_STATUS_MISSED_CDF)))
+           and cv.active_ind = 1
+           and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+           and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+
+         detail
+            if (cv.code_set = COMMENT_TYPE_CODESET)
+               case (cv.cdf_meaning)
+                 of ORDER_COMMENT_CDF:
+                    order_comment_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of ORDER_NOTE_CDF:
+                    order_note_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of CANCEL_COMMENT_CDF:
+                    cancel_comment_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+            if (cv.code_set = ACTIVITY_TYPE_CODESET)
+               case (cv.cdf_meaning)
+                 of ACTIVITY_TYPE_AP_CDF:
+                    activity_type_ap_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+;003            if (cv.code_set = ESI_ALIAS_FIELD_CODESET)
+;003               case (cv.cdf_meaning)
+;003                 of ESI_ALIAS_PLACERORDID_CDF:
+;003                    esi_alias_placerordid_cd = cv.code_value
+;003                    cv_cnt = cv_cnt + 1
+;003               endcase
+;003            endif
+            if (cv.code_set = ORDER_ALIAS_CODESET)                     ;003
+               case (cv.cdf_meaning)                                   ;003
+                 of ORDER_ALIAS_PLACERORDID_CDF:                       ;003
+                    esi_alias_placerordid_cd = cv.code_value           ;003
+                    order_alias_placerordid_cd = cv.code_value         ;003
+                    cv_cnt = cv_cnt + 1                                ;003
+               endcase                                                 ;003
+            endif                                                      ;003
+            if (cv.code_set = CONTAINER_STATUS_CODESET)
+               case (cv.cdf_meaning)
+                 of CONT_STATUS_PENDING_CDF:
+                    cont_status_pending_disp = cv.display
+                    cv_cnt = cv_cnt + 1
+                 of CONT_STATUS_DISPATCH_CDF:
+                    cont_status_dispatch_disp = cv.display
+                    cv_cnt = cv_cnt + 1
+                 of CONT_STATUS_COLLECTED_CDF:
+                    cont_status_collected_disp = cv.display
+                    cv_cnt = cv_cnt + 1
+                 of CONT_STATUS_MISSED_CDF:
+                    cont_status_missed_disp = cv.display
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+         with nocounter
+
+         select into "nl:"
+            cv.code_value
+
+         from
+            code_value cv
+
+         where ((cv.code_set = ORD_ACTION_TYPE_CODESET
+             and cv.cdf_meaning in (ORD_ACTION_TYPE_ORDER_CDF,
+                                    ORD_ACTION_TYPE_CANCEL_CDF))
+           or (cv.code_set = ORDER_STATUS_CODESET
+             and cv.cdf_meaning in (ORDER_STATUS_COMPLETED_CDF,
+                                    ORDER_STATUS_CANCELED_CDF,
+                                    ORDER_STATUS_INPROCESS_CDF)))
+           and cv.active_ind = 1
+           and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+           and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+
+         detail
+            if (cv.code_set = ORD_ACTION_TYPE_CODESET)
+               case (cv.cdf_meaning)
+                 of ORD_ACTION_TYPE_ORDER_CDF:
+                    ord_action_type_order_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of ORD_ACTION_TYPE_CANCEL_CDF:
+                    ord_action_type_cancel_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+            if (cv.code_set = ORDER_STATUS_CODESET)
+               case (cv.cdf_meaning)
+                 of ORDER_STATUS_COMPLETED_CDF:
+                    order_status_completed_cd = cv.code_value
+                    order_status_completed_disp = cv.display
+                    cv_cnt = cv_cnt + 1
+                 of ORDER_STATUS_CANCELED_CDF:
+                    order_status_canceled_cd = cv.code_value
+                    order_status_canceled_disp = cv.display
+                    cv_cnt = cv_cnt + 1
+                 of ORDER_STATUS_INPROCESS_CDF:
+                    order_status_inprocess_cd = cv.code_value
+                    order_status_inprocess_disp = cv.display
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+         with nocounter
+
+         ;* Verify that all required code value records were read.
+         if (cv_cnt != CV_REQUIRED_RECS)
+            go to Exit_Script
+         endif
+
+      /***********************************************************************
+      * Select order entry field meaning                                     *
+      ***********************************************************************/
+         select into "nl:"
+            ofm.oe_field_meaning_id
+
+         from
+            oe_field_meaning ofm
+         
+         where oe_field_meaning = OE_MEANING_CANCEL_REASON
+
+         detail
+            oe_meaning_cancel_reason_id = ofm.oe_field_meaning_id
+
+         with
+            nocounter
+
+      /***********************************************************************
+      * Select patient orders based on collect date range                    *
+      ***********************************************************************/
+         set nbr_of_activity_types = size(request->activity_types, 5)
+         if (nbr_of_activity_types = 0)
+            set nbr_of_activity_types = 1
+            set request->activity_types[1].activity_type_cd = 0.0
+         endif
+
+         if (request->collect_dt_tm_begin = 0.0)
+            set o_collect_date_time_where = " 0 = 0 "
+            set pc_collect_date_time_where = " 0 = 0 "
+            set c_collect_date_time_where = " 0 = 0 "
+            set o2_collect_date_time_where = " 0 = 0 "
+         else
+            set o_collect_date_time_where = 
+              concat( "o.current_start_dt_tm between cnvtdatetime(",
+                      "request->collect_dt_tm_begin) and cnvtdatetime(",
+                      "request->collect_dt_tm_end)")
+            set pc_collect_date_time_where = 
+              concat( "pc.scheduled_dt_tm between cnvtdatetime(",
+                      "request->collect_dt_tm_begin) and cnvtdatetime(",
+                      "request->collect_dt_tm_end)")
+            set c_collect_date_time_where = 
+              concat( "c.drawn_dt_tm between cnvtdatetime(",
+                      "request->collect_dt_tm_begin) and cnvtdatetime(",
+                      "request->collect_dt_tm_end)")
+            set o2_collect_date_time_where = 
+              concat( "o2.current_start_dt_tm between cnvtdatetime(",
+                      "request->collect_dt_tm_begin) and cnvtdatetime(",
+                      "request->collect_dt_tm_end)")
+         endif
+
+         select into "nl:"
+            join_path = decode(e.seq,   "e",
+                               pl.seq,  "pl",
+                               pc.seq,  "pc",
+                               ocr.seq, "ocr",
+                               o2.seq,  "o2",
+                               oc.seq,  "oc",
+                               mol.seq, "mol",
+                               r.seq,   "r",
+                               oa.seq,  "oa",
+                               oal.seq, "oal",
+                               od.seq,  "od",
+                                        "o"),
+            d.seq,
+            o.order_id,
+            o_cs.seq,                                                  ;002
+            ol.seq,
+            d1.seq,
+            e.seq,
+            d2.seq,
+            pl.seq,
+            d3.seq,
+            pc.seq,
+            d4.seq,
+            ocr.seq,
+            c.seq,
+            ca.seq,
+            d10.seq,
+            o2.seq,
+            d5.seq,
+            s_exists = decode(s.seq, "Y", "N"),
+            s.seq,
+            d6.seq,
+            oc.seq,
+            d7.seq,
+            mol.seq,
+            d8.seq,
+            r.seq,
+            d9.seq,
+            oa.seq,
+            oa_pl.seq,
+            d11.seq,
+            oal.seq,
+            alias_frmt = cnvtalias(oal.alias, oal.alias_pool_cd),         ;005
+            d12.seq,
+            od.seq,
+            cv_od.seq
+
+            /* selection fields:
+            join_path = decode(e.seq,   "e",
+                               pl.seq,  "pl",
+                               pc.seq,  "pc",
+                               ocr.seq, "ocr",
+                               o2.seq,  "o2",
+                               oc.seq,  "oc",
+                               mol.seq, "mol",
+                               r.seq,   "r",
+                               oa.seq,  "oa",
+                               oal.seq, "oal",
+                               od.seq,  "od",
+                                        "o"),
+            d.seq,
+            o.person_id,
+            o.cs_order_id,                                             ;002
+            o.order_id,
+            o.catalog_cd,
+            o.order_mnemonic,
+            o.activity_type_cd,
+            o.orig_order_dt_tm,
+            o.current_start_dt_tm,
+            o.order_status_cd,
+            o.encntr_id,
+            o_cs.catalog_cd,                                           ;002
+            o_cs.order_mnemonic,                                       ;002
+            ol.report_priority_cd,
+            ol.collection_priority_cd,                                 ;001
+            d1.seq,
+            e.loc_facility_cd,
+            e.encntr_status_cd,                                        ;004
+            e.organization_id,					                          ;004	
+            org.organization_id,                                       ;004
+            org.org_name,                                              ;004	
+            e.loc_nurse_unit_cd,
+            e.loc_room_cd,
+            e.loc_bed_cd,
+            e.reason_for_visit,
+            d2.seq,
+            pl.person_id,
+            pl.name_full_formatted,
+            d3.seq,
+            pc.scheduled_dt_tm,
+            d4.seq,
+            ocr.container_id,
+            ocr.collection_status_flag,
+            c.drawn_dt_tm,
+            ca.accession,
+            d10.seq,
+            o2.order_id,
+            o2.current_start_dt_tm,
+            d5.seq,
+            s_exists = decode(s.seq, "Y", "N"),
+            s.specimen_id,
+            s.specimen_type_cd,
+            s.body_site_cd,                                            ;002
+            d6.seq,
+            oc.action_sequence,
+            oc.comment_type_cd,
+            oc.long_text_id,
+            d7.seq,
+            mol.susceptibility_ind,
+            mol.positive_ind,
+            mol.status_cd,
+            d8.seq,
+            r.order_id,
+            d9.seq,
+            oa.action_type_cd,
+            oa.action_dt_tm,
+            oa.action_personnel_id,
+            oa_pl.person_id,
+            oa_pl.name_full_formatted,
+            d11.seq,
+            oal.order_id,
+            oal.order_alias_type_cd,
+            oal.alias,
+            d12.seq,
+            od.order_id,
+            od.oe_field_meaning_id,
+            od.oe_field_value,
+            cv_od.display
+            */
+
+         from
+            (dummyt d with seq = value(nbr_of_activity_types)),
+            orders o,
+            orders o_cs,                                               ;002
+            order_laboratory ol,
+            dummyt d1,
+            encounter e,
+            organization org,                                          ;004
+            dummyt d2,
+            prsnl pl,
+            dummyt d3,
+            pending_collection pc,
+            dummyt d4,
+            order_container_r ocr,
+            container c,
+            container_accession ca,
+            dummyt d10,
+            orders o2,
+            dummyt d5,
+            v500_specimen s,
+            dummyt d6,
+            order_comment oc,
+            dummyt d7,
+            mic_order_lab mol,
+            dummyt d8,
+            result r,
+            dummyt d9,
+            order_action oa,
+            prsnl oa_pl,
+            dummyt d11,
+            order_alias oal,
+            dummyt d12,
+            order_detail od,
+            code_value cv_od
+ 
+         plan    d  
+         join    o   where o.person_id = request->person_id
+                       and parser( o_collect_date_time_where )
+                       and (request->activity_types[d.seq]
+                            .activity_type_cd <= 0.0 
+                         or (o.activity_type_cd = 
+                             request->activity_types[d.seq].activity_type_cd
+                           and o.activity_type_cd != activity_type_ap_cd))
+         join   o_cs where o_cs.order_id = o.cs_order_id               ;002
+         join    ol  where ol.order_id = o.order_id
+         join   (d1  where d1.seq = 1
+           join  e   where e.encntr_id = o.encntr_id
+           join org where org.organization_id = e.organization_id)	  ;004
+         orjoin (d2  where d2.seq = 1
+           join  pl  where pl.person_id = o.last_update_provider_id)
+         orjoin (d3  where d3.seq = 1
+           join  pc  where pc.order_id = ol.order_id
+                       and parser( pc_collect_date_time_where ))
+         orjoin (d4  where d4.seq = 1
+           join  ocr where ocr.order_id = ol.order_id
+           join  c   where c.container_id = ocr.container_id
+                       and (ocr.collection_status_flag != 1
+                         or (ocr.collection_status_flag = 1
+                           and parser( c_collect_date_time_where )))
+           join  ca  where ca.container_id = c.container_id
+           join  d5  where d5.seq = 1
+           join  s   where s.specimen_id = c.specimen_id)
+         orjoin (d10 where d10.seq = 1
+           join  o2  where o2.order_id = o.order_id
+                       and parser( o2_collect_date_time_where ))
+         orjoin (d6  where d6.seq = 1
+           join  oc  where oc.order_id = ol.order_id
+                       and oc.comment_type_cd in ( order_comment_cd,
+                                                   order_note_cd,
+                                                   cancel_comment_cd ))
+         orjoin (d7  where d7.seq = 1
+           join  mol where mol.order_id = o.order_id
+                       and mol.catalog_cd = o.catalog_cd)
+         orjoin (d8  where d8.seq = 1
+           join  r   where r.order_id = o.order_id)
+         orjoin (d9  where d9.seq = 1
+           join  oa  where oa.order_id = o.order_id
+                       and oa.action_type_cd in (ord_action_type_order_cd,
+                                                 ord_action_type_cancel_cd)
+           join  oa_pl where oa_pl.person_id = oa.action_personnel_id)
+         orjoin (d11 where d11.seq = 1
+           join  oal where oal.order_id = o.order_id
+;003                       and oal.order_alias_type_cd = esi_alias_placerordid_cd)
+                       and oal.order_alias_type_cd =                   ;003
+                                  order_alias_placerordid_cd)          ;003
+         orjoin (d12 where d12.seq = 1
+           join  od  where od.order_id = o.order_id
+                       and od.oe_field_meaning_id = oe_meaning_cancel_reason_id
+           join cv_od where cv_od.code_value = od.oe_field_value)
+
+         head report
+            q_cnt = 0
+            nbr_containers = 0
+            collect_date_ind = 0
+            highest_container_status_flag = -1
+            result_found = "N"
+
+         head o.order_id
+            nbr_containers = 0
+            collect_date_ind = 0
+            highest_container_status_flag = -1
+            result_found = "N"
+            q_cnt = q_cnt + 1
+            stat = alterlist(reply->qual, q_cnt)
+            reply->qual_cnt = q_cnt
+            reply->qual[q_cnt].order_id = o.order_id
+            reply->qual[q_cnt].updt_cnt = o.updt_cnt
+            reply->qual[q_cnt].cs_order_id = o.cs_order_id             ;002
+            if (o_cs.order_id > 0.0)                                   ;002
+               reply->qual[q_cnt].cs_catalog_cd = o_cs.catalog_cd      ;002
+               reply->qual[q_cnt].cs_order_mne = o_cs.order_mnemonic   ;002
+            endif                                                      ;002
+            reply->qual[q_cnt].catalog_cd = o.catalog_cd
+            reply->qual[q_cnt].catalog_type_cd = o.catalog_type_cd
+            reply->qual[q_cnt].order_mnemonic = o.order_mnemonic
+            reply->qual[q_cnt].activity_type_cd = o.activity_type_cd
+            reply->qual[q_cnt].orig_order_dt_tm = o.orig_order_dt_tm
+            reply->qual[q_cnt].current_start_dt_tm = o.current_start_dt_tm
+            reply->qual[q_cnt].order_status_cd = o.order_status_cd
+            reply->qual[q_cnt].order_proc_status = cont_status_pending_disp
+            reply->qual[q_cnt].encntr_id = o.encntr_id
+            reply->qual[q_cnt].report_priority_cd = ol.report_priority_cd
+            reply->qual[q_cnt].collection_priority_cd =                ;001
+              ol.collection_priority_cd                                ;001
+            reply->qual[q_cnt].order_comment_ind = 0
+						reply->qual[q_cnt].oe_format_id = o.oe_format_id
+						
+         detail
+            case (join_path)
+              of "e":
+                 reply->qual[q_cnt].encntr_org_id = e.organization_id  ;006
+                 reply->qual[q_cnt].org_name = org.org_name            ;004            
+                 reply->qual[q_cnt].confid_level_cd = e.confid_level_cd ;006
+                 reply->qual[q_cnt].encntr_status_cd = e.encntr_status_cd ;004
+                 reply->qual[q_cnt].loc_facility_cd = e.loc_facility_cd
+                 reply->qual[q_cnt].loc_nurse_unit_cd = e.loc_nurse_unit_cd
+                 reply->qual[q_cnt].loc_room_cd = e.loc_room_cd
+                 reply->qual[q_cnt].loc_bed_cd = e.loc_bed_cd
+                 reply->qual[q_cnt].reason_for_visit = e.reason_for_visit
+              of "pl":
+                 reply->qual[q_cnt].last_update_provider_id = o.last_update_provider_id
+                 reply->qual[q_cnt].last_update_provider_name = pl.name_full_formatted
+              of "pc":
+                 reply->qual[q_cnt].scheduled_dt_tm = pc.scheduled_dt_tm
+                 collect_date_ind = 1
+                 if (highest_container_status_flag <= 1)
+                    highest_container_status_flag = 1
+                    reply->qual[q_cnt].order_proc_status = 
+                      cont_status_pending_disp
+                 endif
+              of "ocr":
+                 if (ocr.collection_status_flag = 5
+                 and highest_container_status_flag <= 0
+                 and o.order_status_cd = order_status_canceled_cd)
+                    ;* Canceled
+                    highest_container_status_flag = 0
+                    ;* if there are multiple containers in different
+                    ;* statuses, prefix the status with an asterick
+                    nbr_containers = nbr_containers + 1
+                    if (nbr_containers > 1)
+                       reply->qual[q_cnt].order_proc_status = 
+                         concat("*", order_status_canceled_disp)
+                    else
+                       reply->qual[q_cnt].order_proc_status = 
+                         order_status_canceled_disp
+                    endif
+                    higher_status_found = "Y"
+                 elseif (ocr.collection_status_flag = 0
+                 and highest_container_status_flag <= 1)
+                    ;* Dispatched
+                    highest_container_status_flag = 2
+                    ;* if there are multiple containers in different
+                    ;* statuses, prefix the status with an asterick
+                    nbr_containers = nbr_containers + 1
+                    if (nbr_containers > 1)
+                       reply->qual[q_cnt].order_proc_status = 
+                         concat("*", cont_status_dispatch_disp)
+                    else
+                       reply->qual[q_cnt].order_proc_status = 
+                         cont_status_dispatch_disp
+                    endif
+                    higher_status_found = "Y"
+                 elseif (ocr.collection_status_flag in (2,3,4)
+                   and highest_container_status_flag <= 2)
+                    ;* Missed
+                    highest_container_status_flag = 3
+                    ;* if there are multiple containers in different
+                    ;* statuses, prefix the status with an asterick
+                    nbr_containers = nbr_containers + 1
+                    if (nbr_containers > 1)
+                       reply->qual[q_cnt].order_proc_status = 
+                         concat("*", cont_status_missed_disp)
+                    else
+                       reply->qual[q_cnt].order_proc_status = 
+                         cont_status_missed_disp
+                    endif
+                    higher_status_found = "Y"
+                 elseif (ocr.collection_status_flag = 1
+                   and highest_container_status_flag <= 3)
+                    ;* Collected
+                    highest_container_status_flag = 4
+                    ;* if there are multiple containers in different
+                    ;* statuses, prefix the status with an asterick
+                    nbr_containers = nbr_containers + 1
+                    if (nbr_containers > 1)
+                       reply->qual[q_cnt].order_proc_status = 
+                         concat("*", cont_status_collected_disp)
+                    else
+                       reply->qual[q_cnt].order_proc_status = 
+                         cont_status_collected_disp
+                    endif
+                    higher_status_found = "Y"
+                 else
+                    higher_status_found = "N"
+                 endif
+                 if (higher_status_found = "Y")
+                    if (c.drawn_dt_tm > 0)
+                       reply->qual[q_cnt].drawn_dt_tm = c.drawn_dt_tm
+                       collect_date_ind = 1
+                    endif
+                    reply->qual[q_cnt].accession = ca.accession
+                    if (s_exists = "Y")
+                       reply->qual[q_cnt].specimen_type_cd = s.specimen_type_cd
+                       reply->qual[q_cnt].body_site_cd =               ;002
+                         s.body_site_cd                                ;002
+                    else
+                       reply->qual[q_cnt].specimen_type_cd = 0.0
+                       reply->qual[q_cnt].body_site_cd = 0.0           ;002
+                    endif
+                 endif
+              of "o2":
+                 ;* Use the current_start_dt_tm off the orders table in the
+                 ;* event that no pending_collection record exists and the
+                 ;* container has not been drawn (e.g. procedure was canceled
+                 ;* before pending_collection record was created)
+                 if (reply->qual[q_cnt].scheduled_dt_tm <= 0)
+                    reply->qual[q_cnt].scheduled_dt_tm = 
+                      o2.current_start_dt_tm
+                    collect_date_ind = 1
+                    if (highest_container_status_flag <= 1)
+                       highest_container_status_flag = 1
+                       reply->qual[q_cnt].order_proc_status = 
+                         cont_status_pending_disp
+                    endif
+                 endif
+              of "oc":
+                 reply->qual[q_cnt].order_comment_ind = 1
+              of "mol":
+                 reply->qual[q_cnt].susceptibility_ind = mol.susceptibility_ind
+                 reply->qual[q_cnt].positive_ind = mol.positive_ind
+                 reply->qual[q_cnt].micro_status_cd = mol.status_cd
+              of "r":
+                 result_found = "Y"
+              of "oa":
+                 if (oa.action_type_cd = ord_action_type_order_cd)
+                    if (oa_pl.person_id > 0.0)
+                       reply->qual[q_cnt].order_prsnl_id =
+                         oa_pl.person_id
+                       reply->qual[q_cnt].order_prsnl_name =
+                         oa_pl.name_full_formatted
+                    endif
+                 elseif (oa.action_type_cd = ord_action_type_cancel_cd)
+                    reply->qual[q_cnt].cancel_dt_tm = oa.action_dt_tm
+                    if (oa_pl.person_id > 0.0)
+                       reply->qual[q_cnt].cancel_prsnl_id =
+                         oa_pl.person_id
+                       reply->qual[q_cnt].cancel_prsnl_name =
+                         oa_pl.name_full_formatted
+                    endif
+                 endif
+              of "oal":
+;005                 reply->qual[q_cnt].order_alias = oal.alias
+                 reply->qual[q_cnt].order_alias = alias_frmt              ;005
+              of "od":
+                 reply->qual[q_cnt].cancel_reason = cv_od.display
+            endcase
+         
+         foot o.order_id
+            ;* If at least one container in the order was collected
+            ;* and at least one result was found for the order, update
+            ;* the order_proc_status to in process.
+            if (collect_date_ind = 1
+            and highest_container_status_flag = 4
+            and result_found = "Y")
+               reply->qual[q_cnt].order_proc_status = 
+                 order_status_inprocess_disp
+            endif
+
+            ;* If order has been completed, update order_proc_status
+            if (collect_date_ind = 1
+            and o.order_status_cd = order_status_completed_cd)
+               reply->qual[q_cnt].order_proc_status =
+                 order_status_completed_disp
+            endif
+
+            ;* If order has been canceled, update order_proc_status
+            if (o.order_status_cd = order_status_canceled_cd)
+               reply->qual[q_cnt].order_proc_status =
+                 order_status_canceled_disp
+            endif
+
+            ;* If no schedule date or drawn date was found,
+            ;* don't return the information because the data doesn't qualify.
+            if (collect_date_ind = 0)
+               ;* Reinitialize the reply occurance.
+               reply->qual[q_cnt].order_id = 0.0
+               reply->qual[q_cnt].updt_cnt = 0
+               reply->qual[q_cnt].cs_order_id = 0.0                    ;002
+               reply->qual[q_cnt].cs_catalog_cd = 0.0                  ;002
+               reply->qual[q_cnt].cs_order_mne = " "                   ;002
+               reply->qual[q_cnt].catalog_cd = 0.0
+               reply->qual[q_cnt].catalog_type_cd = 0.0
+               reply->qual[q_cnt].order_mnemonic = " "
+               reply->qual[q_cnt].activity_type_cd = 0.0
+               reply->qual[q_cnt].orig_order_dt_tm = 0
+               reply->qual[q_cnt].order_prsnl_id = 0.0
+               reply->qual[q_cnt].order_prsnl_name = " "
+               reply->qual[q_cnt].order_status_cd = 0.0
+               reply->qual[q_cnt].order_proc_status = " "
+               reply->qual[q_cnt].encntr_id = 0.0
+               reply->qual[q_cnt].last_update_provider_id = 0.0
+               reply->qual[q_cnt].last_update_provider_name = " "
+               reply->qual[q_cnt].loc_facility_cd = 0.0
+               reply->qual[q_cnt].loc_nurse_unit_cd = 0.0
+               reply->qual[q_cnt].loc_room_cd = 0.0
+               reply->qual[q_cnt].loc_bed_cd = 0.0
+               reply->qual[q_cnt].reason_for_visit = " "
+               reply->qual[q_cnt].accession = " "
+               reply->qual[q_cnt].order_alias = " "
+               reply->qual[q_cnt].specimen_type_cd = 0.0
+               reply->qual[q_cnt].body_site_cd = 0.0                   ;002
+               reply->qual[q_cnt].scheduled_dt_tm = 0
+               reply->qual[q_cnt].drawn_dt_tm = 0
+               reply->qual[q_cnt].cancel_dt_tm = 0
+               reply->qual[q_cnt].cancel_prsnl_id = 0.0
+               reply->qual[q_cnt].cancel_prsnl_name = " "
+               reply->qual[q_cnt].cancel_reason = " "
+               reply->qual[q_cnt].report_priority_cd = 0.0
+               reply->qual[q_cnt].collection_priority_cd = 0.0         ;001
+               reply->qual[q_cnt].order_comment_ind = 0
+               reply->qual[q_cnt].susceptibility_ind = 0
+               reply->qual[q_cnt].positive_ind = 0
+               reply->qual[q_cnt].micro_status_cd = 0.0
+               q_cnt = q_cnt - 1
+               stat = alterlist(reply->qual, q_cnt)
+            endif
+  
+         with 
+            nocounter,
+            outerjoin = d1,
+            outerjoin = d2,
+            outerjoin = d3,
+            outerjoin = d4,
+            outerjoin = d5,
+            outerjoin = d6,
+            outerjoin = d7,
+            outerjoin = d8,
+            outerjoin = d9,
+            outerjoin = d10,
+            outerjoin = d11,
+            outerjoin = d12,
+            maxread(pc, 1),
+            maxread(oc, 1),
+            maxread(r, 1)
+
+      /***********************************************************************
+      * Call Anatomic Pathology script for AP order activity.                *
+      ***********************************************************************/
+         if (nbr_of_activity_types = 1
+         and request->activity_types[1].activity_type_cd = 0.0)
+            ;* All activity types requested
+            execute aps_glb_get_cases_by_person
+         else
+            ;* Verify that anatomic pathology activity was requested.
+            select into "nl:"
+               d.seq
+            from 
+               (dummyt d with seq = value(nbr_of_activity_types))
+            plan d  where request->activity_types[d.seq].activity_type_cd =
+                            activity_type_ap_cd
+            with nocounter
+            if (curqual = 1)
+               execute aps_glb_get_cases_by_person
+            endif
+         endif
+
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+         endif
+         set stat = alterlist(reply->qual, q_cnt)
+
+      #Exit_Script
+         end
+         go      
+
+;Generated by GNU enscript 1.6.4.

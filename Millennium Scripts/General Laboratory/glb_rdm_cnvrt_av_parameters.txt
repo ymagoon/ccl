@@ -1,0 +1,383 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_rdm_cnvrt_av_parameters/GLB_RDM_CNVRT_AV_PARAMETERS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+	Source file name:       glb_rdm_cnvrt_av_parameters.prg
+	Object name:            glb_rdm_cnvrt_av_parameters
+	Request #:		0
+
+	Product:		PathNet General Lab
+	Product Team:		PathNet
+	HNA Version:            500
+	CCL Version:            
+	
+	Program purpose:        Converts autoverification parameters.  This
+                                version of script corresponds to correct
+                                OCD readme methods.
+
+	Tables read,		TABLE_NAME		METHOD (UNIQUE, RANGE, FULL)
+	and access method:      --------------------    -----------------------------
+				
+
+	Tables updated:		Auto_Verify
+                                Av_Res_Cat
+                                Lab_Instrument
+
+	Executing from:         
+
+	Special Notes:		Each section should clearly identify what the purpose
+				of that README step is.  
+	
+	Run Occurance:		(select ONE of the following)
+				-----------------------------
+				[X] 1. RUN ONCE
+				[ ] 2. RUN MANY
+
+	ReadMe Category:	(select ONE of the following)
+				-----------------------------
+				[ ] 1. Data Load
+				[X] 2. Data Conversion
+				[ ] 3. Data Migration
+
+	Execution Time:		(select ONE of the following)
+				------------------------------------
+				[ ] 1. Uptime before uptime schema.
+				[ ] 2. Uptime after uptime schema.
+				[ ] 3. Downtime before downtime schema.
+				[X] 4. Downtime after downtime schema.
+				[ ] 5. Uptime after all other components.
+	
+	Exec. Justification:	Data conversion that needs to be converted during dowtime.
+      
+        Parent Script:		Parent script that must execute successfully for 
+				this to execute.
+
+	Check Script:		
+
+	Data file for import:	
+	
+	Execution Duration:	(select ONE of the following)
+				----------------------------------
+				[ ] 1. Fixed Time
+				[X] 2. Driver Table: Auto_Verify
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer		Comment 			    *
+;    *--- -------- --------------------	----------------------------------- *
+;     ### 01/12/01 Chris Cline          Initial (template) Release          *
+;     001 02/01/01 Chris Cline			Template update for COMMIT. *
+;     003 02/16/00 Kasie Sly            Transfer old readme to new template *
+;     004 04/20/01 Randy Prindle	Removed check on av_ref_id at end   *
+;                                       of script for successful return and *
+;                                       deleted all 9's row from            *
+;                                       auto_verify table.                  *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program glb_rdm_cnvrt_av_parameters:dba go
+create program glb_rdm_cnvrt_av_parameters:dba
+
+%i cclsource:pathnet_ocd_subroutines.inc
+
+/**********************
+** Log Start Message **
+**                   **********************************
+** LOGSCRIPTSTART creates log row as:                **
+**    "Starting (<sREADME_NAME>) - [<date/time>]..." **
+******************************************************/
+#START_SCRIPT
+SET sREADME_NAME = "glb_rdm_cnvrt_av_parameters"
+CALL LOGSCRIPTSTART(sREADME_NAME)
+
+/************************
+** README ACTION STEPS **
+************************/
+/***********************************************************************
+ *   Initialize variables.                                             *
+ ***********************************************************************/
+  record av_hold
+  (
+    1 av_qual[*]
+      2 av_ref_id = f8
+      2 delta_chk_flag = i2
+      2 repeat_map = vc
+      2 av_status_flag = i2
+  )
+
+  set failed = "F"
+  set av_cnt = 0
+  set phase1_complete_ind = 0
+  set phase2_complete_ind = 0
+  set phase3_complete_ind = 0
+  set sErrMsg = fillstring(132," ")
+  set iErrCode = Error(sErrMsg, 0)
+
+/***********************************************************************
+ *  Delete dummy row created because of readme failure with OCD 5928.  *
+ ***********************************************************************/
+  delete from auto_verify av		;004
+  where av.service_resource_cd = 0	;004
+    and av.task_assay_cd = 0		;004
+    and av.av_ref_id > 0		;004
+  with nocounter			;004
+
+  set iErrCode = Error(sErrMsg, 0)
+  if (iErrCode > 0)
+    go to script_error
+  endif
+
+/***********************************************************************
+ *  Retrieve data to be formatted and determine if readme has been     *
+ *    previously run.                                                  *
+ ***********************************************************************/
+  select into "nl:"
+    av.av_ref_id,
+    av.delta_chk_ind,
+    av.repeat_map
+  from auto_verify av
+  where av.av_ref_id > 0
+
+  detail
+    add_to_array = 0
+    phase1_add_to_array = 0
+
+    if (size(trim(av.repeat_map), 1) = 6)
+      phase1_complete_ind = 1
+    else
+      add_to_array = 1
+      phase1_add_to_array = 1
+    endif
+
+    if (av.consistent_map = "")
+      phase2_complete_ind = 1
+    else
+      add_to_array = 1
+    endif
+
+    if (av.av_status_flag != -1)
+      phase3_complete_ind = 1
+    else
+      add_to_array = 1
+    endif
+
+    if (add_to_array = 1)
+      av_cnt = av_cnt + 1
+      if (mod(av_cnt, 100) = 1)
+        stat = alterlist(av_hold->av_qual, av_cnt + 100)
+      endif
+
+      av_hold->av_qual[av_cnt]->av_ref_id = av.av_ref_id
+
+      if (phase1_add_to_array = 1)
+        av_hold->av_qual[av_cnt]->delta_chk_flag = av.delta_chk_ind
+        av_hold->av_qual[av_cnt]->repeat_map = concat(trim(av.repeat_map, 3), "0")
+      else
+        av_hold->av_qual[av_cnt]->delta_chk_flag = av.delta_chk_flag
+        av_hold->av_qual[av_cnt]->repeat_map = av.repeat_map
+      endif
+
+      if (av.av_status_flag = -1)
+        if (av.active_ind = 0 or av.prev_verf_ind = 1)
+          av_hold->av_qual[av_cnt]->av_status_flag = 0
+        else
+          av_hold->av_qual[av_cnt]->av_status_flag = 1
+        endif
+      else
+        av_hold->av_qual[av_cnt]->av_status_flag = av.av_status_flag
+      endif
+    endif
+
+  foot report
+    stat = alterlist(av_hold->av_qual, av_cnt)
+
+  with nocounter
+
+  set iErrCode = Error(sErrMsg, 0)
+  if (iErrCode > 0)
+    go to script_error
+  endif
+
+/***********************************************************************
+ *  Delete orderable item parameters for associated and level tabs.    *
+ ***********************************************************************/
+  if (phase1_complete_ind = 0)
+    delete from av_res_cat arc
+      set arc.seq = 1
+    where arc.av_res_cat_flag in (1, 3)
+    with nocounter
+
+    set iErrCode = Error(sErrMsg, 0)
+    if (iErrCode > 0)
+      go to script_error
+    endif
+  endif
+
+/***********************************************************************
+ *  Delete qc_schedule information.                                    *
+ ***********************************************************************/
+  if (phase3_complete_ind = 0)
+    delete from qc_schedule_ctrl qsc
+      set qsc.seq = 1
+    where qsc.qc_schedule_id > 0.0 
+    with nocounter
+
+    set iErrCode = Error(sErrMsg, 0)
+    if (iErrCode > 0)
+      go to script_error
+    endif
+
+    delete from qc_schedule_step qss
+      set qss.seq = 1
+    where qss.qc_schedule_id > 0.0
+    with nocounter
+
+    set iErrCode = Error(sErrMsg, 0)
+    if (iErrCode > 0)
+      go to script_error
+    endif
+
+    delete from qc_schedule qs
+      set qs.seq = 1
+    where qs.qc_schedule_id > 0.0
+    with nocounter
+
+    set iErrCode = Error(sErrMsg, 0)
+    if (iErrCode > 0)
+      go to script_error
+    endif
+  endif
+
+/***********************************************************************
+ *  Update av_part_ind on lab_instrument to 0.                         *
+ ***********************************************************************/
+  update into lab_instrument li set
+    li.av_part_ind = 0,
+    li.auto_verify_flag = 0,
+    li.updt_applctx = 0,
+    li.updt_task = 0,
+    li.updt_id = 0,
+    li.updt_cnt = li.updt_cnt + 1,
+    li.updt_dt_tm = cnvtdatetime(curdate, curtime3)
+  where li.av_part_ind != 0
+     or li.auto_verify_flag != 0
+  with nocounter
+
+  set iErrCode = Error(sErrMsg, 0)
+  if (iErrCode > 0)
+    go to script_error
+  endif
+
+/***********************************************************************
+ *  Update auto_verify table with re-formatted information.            *
+ ***********************************************************************/
+  update into auto_verify av,
+              (dummyt d1 with seq = value(av_cnt)) set
+
+    av.prev_rslt_ind  = 0,        /************************************/
+    av.repeat_flag    = 0,        /*                                  */
+    av.consistent_map = "",       /* These columns are no longer used */
+    av.cons_nbr_hrs   = 0,        /*                                  */
+    av.delta_chk_ind  = 0,        /*                                  */
+    av.dest_codes     = "",       /************************************/
+
+    ; feasibility check always on
+    av.feas_range_ind = 1,
+
+    ; set delta_chk_flag to delta_chk_ind if phase 1
+    av.delta_chk_flag = av_hold->av_qual[d1.seq]->delta_chk_flag,
+
+    ; add extra digit (0) to repeat map if phase 1
+    av.repeat_map     = av_hold->av_qual[d1.seq]->repeat_map,
+
+    ; set av_status_flag appropriately
+    av.av_status_flag = av_hold->av_qual[d1.seq]->av_status_flag,
+
+    av.updt_applctx   = 0,
+    av.updt_task      = 0,
+    av.updt_id        = 0,
+    av.updt_cnt       = av.updt_cnt + 1,
+    av.updt_dt_tm     = cnvtdatetime(curdate, curtime3)
+  plan d1
+  join av
+    where av.av_ref_id = av_hold->av_qual[d1.seq]->av_ref_id
+  with nocounter
+
+  set iErrCode = Error(sErrMsg, 0)
+  if (iErrCode > 0)
+    go to script_error
+  endif
+
+  go to exit_script
+
+/***********************************************************************
+ *   Error message routines                                            *
+ ***********************************************************************/
+#script_error
+  set failed = "T"
+  call echo("Script Error:  Autoverify parameters could not be converted.") ;P001
+  go to exit_script
+;---------------------------------------------------------
+#EXIT_SCRIPT
+/****************************
+**  LOG Execution Status.  **
+**                         ***************************************
+**  Note:  if you have a check script then you do not 		**
+**  need to perform the LOGSTATUS in the RDM script.  		**
+**  Explicit COMMIT and/or ROLLBACK must be perform   		**
+**  In this section both in the README and the CHECK 		**
+**  script.  For example:                             		**
+**     if (nCnt > 0)						**
+**       COMMIT  ;Just in case LOGSTATUS pulls an Oracle error. **
+**       CALL LOGSTATUS("Execution Successful.", "S") 		**
+**     else                                           		**
+**       ROLLBACK                                            	**
+**       CALL LOGSTATUS("Execution Failed because ...", "F")	**
+**     endif                                          		**
+**                                                    		**
+*****************************************************************/
+  if (failed = "F")
+    COMMIT 
+    CALL LOGSTATUS("Execution Successful.", "S") 
+  else
+    ROLLBACK
+    call LOGSTATUS("Conversion of autoverification parameters failed.", "F")
+   endif
+
+
+
+/********************
+** Log End Message **
+**                   ******************************************
+** LOGSCRIPTEND creates log row as:                          **
+**    "Execution (<sREADME_NAME>) Complete - [<date/time>]." **
+**************************************************************/
+CALL LOGSCRIPTEND(sREADME_NAME)
+
+end go
+
+;Generated by GNU enscript 1.6.4.

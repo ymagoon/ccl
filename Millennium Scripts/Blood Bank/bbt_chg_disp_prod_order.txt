@@ -1,0 +1,364 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/SCRIPTCORRECTINVENTORY/BBT_CHG_DISP_PROD_ORDER.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *       Revision      (c) 1984-2007 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+ 
+        Source file name:       bbt_chg_disp_prod_order.prg
+        Object name:            bbt_chg_disp_prod_order
+        Request #:              225691
+ 
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        This script is used to update/correct
+                                the product order for product dispenses.
+        Tables read:            product,
+                                product_event,
+                                patient_dispense,
+                                orders
+        Tables updated:         product,
+                                patient_dispense,
+                                product_event,
+                                corrected_product
+        Executing from:
+ 
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    * Mod Date     Engineer             Comment                            *
+;    * --- -------- -------------------- ---------------------------------- *
+;    * 001 02/09/14  Fitsum Abebe         Initial Release                   *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program bbt_chg_disp_prod_order:dba go
+create program bbt_chg_disp_prod_order:dba
+ 
+/*
+record request
+(
+  1 corr_reason_cd = f8
+  1 corr_note = vc
+  1 qual[*]
+    2 product_id = f8
+    2 product_updt_cnt = i4
+    2 disp_event_id = f8
+    2 disp_updt_cnt = i4
+    2 disp_prod_order_id = f8
+    2 disp_pe_updt_cnt = i4
+)
+*/
+ 
+record reply
+(
+%i cclsource:status_block.inc
+ )
+ 
+record disp_info
+(
+  1 qual[*]
+    2 corr_disp_prod_order_id = f8
+    2 corr_disp_prov_id = f8
+    2 orig_dispense_prov_id = f8
+    2 orig_product_order_id = f8
+    2 orig_updt_cnt = i4
+    2 orig_updt_dt_tm = dq8
+    2 orig_updt_id = f8
+    2 orig_updt_task = i4
+    2 orig_updt_applctx = f8
+)
+
+/* Initialize Variables */
+declare count2 					= i4   with protect, noconstant(0)
+declare failed 					= c1   with protect, noconstant("F")
+declare prodCnt 			    = i4   with protect, noconstant(0)
+set reply->status_data->status 	= "F"
+%i cclsource:bbt_inc_corr_prod_mean.inc
+
+/***********************************/
+/*   lock products for update   */
+/***********************************/
+set prodCnt = size(request->qual, 5)
+
+if (prodCnt = 0)
+  set failed = "T"
+  set count2 = count2 + 1
+  set reply->status_data->subeventstatus[count2]->OperationName = "No Product Info Provided"
+  set reply->status_data->subeventstatus[count2]->OperationStatus = "F"
+  set reply->status_data->subeventstatus[count2]->TargetObjectName = "Product"
+  go to exit_script
+else
+
+    select into "nl:"
+          p.*
+    from
+          product p,
+          (dummyt d with seq = value(prodCnt))
+    plan d
+    join p where p.product_id = request->qual[d.seq].product_id and
+         p.updt_cnt  = request->qual[d.seq].product_updt_cnt and
+         p.active_ind = 1
+    with counter, forupdate(p)
+
+    if (curqual != prodCnt)
+      set failed = "T"
+      set count2 = count2 + 1
+      set reply->status_data->subeventstatus[count2]->OperationName = "Lock"
+      set reply->status_data->subeventstatus[count2]->OperationStatus = "F"
+      set reply->status_data->subeventstatus[count2]->TargetObjectName = "Product"
+      go to exit_script
+    else
+
+          /***********************************/
+          /*  unlock & update product rows   */
+          /***********************************/
+          update into product p,
+                     (dummyt d with seq = value(prodCnt))
+          set
+              p.locked_ind = 0,
+              p.updt_cnt = request->qual[d.seq]->product_updt_cnt + 1,
+              p.corrected_ind = 1,
+              p.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+              p.updt_id = reqinfo->updt_id,
+              p.updt_task = reqinfo->updt_task,
+              p.updt_applctx = reqinfo->updt_applctx
+          plan d
+          join p where  p.product_id = request->qual[d.seq].product_id and
+                        p.updt_cnt = request->qual[d.seq].product_updt_cnt and
+                        p.active_ind = 1
+          with counter
+
+          if (curqual != prodCnt)
+            set failed = "T"
+            set count2 = count2 + 1
+            set reply->status_data->subeventstatus[count2]->OperationName = "update"
+            set reply->status_data->subeventstatus[count2]->OperationStatus = "F"
+            set reply->status_data->subeventstatus[count2]->TargetObjectName = "product"
+            go to exit_script
+          else
+          
+                 /**********************************************/
+                 /*   lock product event table for update       */
+                 /***********************************************/ 
+                 select into "nl:"
+                 pe.*
+                 from
+                        product_event pe,
+                        (dummyt d with seq = value(prodCnt))                        
+                 plan d
+                 join pe where  pe.product_event_id = request->qual[d.seq].disp_event_id and
+                                pe.updt_cnt = request->qual[d.seq].disp_pe_updt_cnt
+                 with  nocounter, forupdate(pe)
+                 
+                 if (curqual != prodCnt)
+                   set failed = "T"
+                   set count2 = count2 + 1
+                   set reply->status_data->subeventstatus[count2]->OperationName = "Lock"
+                   set reply->status_data->subeventstatus[count2]->OperationStatus = "F"
+                   set reply->status_data->subeventstatus[count2]->TargetObjectName = "product_event"
+                   go to exit_script
+                else
+                     /***********************************************/
+                     /*   lock patient dispense table for update    */
+                     /***********************************************/
+                     select into "nl:"
+                     pd.product_event_id
+                     from
+                            patient_dispense pd,
+                            (dummyt d with seq = value(prodCnt))   
+                     plan d
+                     join pd where  pd.product_event_id = request->qual[d.seq].disp_event_id and
+                                    pd.updt_cnt = request->qual[d.seq].disp_updt_cnt
+                     with nocounter, forupdate(pd)
+                      
+                    if (curqual != prodCnt)
+                       set failed = "T"
+                       set count2 = count2 + 1
+                       set reply->status_data->subeventstatus[count2]->OperationName = "Lock"
+                       set reply->status_data->subeventstatus[count2]->OperationStatus = "F"
+                       set reply->status_data->subeventstatus[count2]->TargetObjectName = "patient_dispense"
+                       go to exit_script
+                    else
+                         ;retrieve dispense info.
+                         select into "nl:"
+                         pe.*
+                         from
+                                product_event pe,
+                                patient_dispense pd,
+                                orders o,
+                                (dummyt d with seq = value(prodCnt)),
+                                (dummyt do with seq = value(1))                       
+                         plan d
+                         join pe where  pe.product_event_id = request->qual[d.seq].disp_event_id
+                         join pd where  pd.product_event_id = pe.product_event_id
+                         join do
+                         join o  where  request->qual[d.seq].disp_prod_order_id > 0 and 
+                                        o.order_id = request->qual[d.seq].disp_prod_order_id
+                         head report
+                                stat = alterlist(disp_info->qual, prodCnt)               
+                         detail
+                                ;get the corrected product order & ordering physician ids.                                
+                                disp_info->qual[d.seq].corr_disp_prod_order_id = request->qual[d.seq].disp_prod_order_id
+                                disp_info->qual[d.seq].corr_disp_prov_id = o.last_update_provider_id
+                                ;get the current/original product order & ordering physician ids.  
+                                disp_info->qual[d.seq].orig_dispense_prov_id = pd.dispense_prov_id
+                                disp_info->qual[d.seq].orig_product_order_id = pe.order_id
+                                ;get additional product event info.
+                                disp_info->qual[d.seq].orig_updt_cnt = pe.updt_cnt
+                                disp_info->qual[d.seq].orig_updt_dt_tm = pe.updt_dt_tm
+                                disp_info->qual[d.seq].orig_updt_id = pe.updt_id
+                                disp_info->qual[d.seq].orig_updt_task = pe.updt_task
+                                disp_info->qual[d.seq].orig_updt_applctx = pe.updt_applctx
+                         with  nocounter
+                     
+    
+                        /************************************/
+                        /*   update product order id on     */
+                        /*   product event table            */
+                        /************************************/
+                        update into
+                                product_event pe,
+                                (dummyt d with seq = value(prodCnt))
+                        set
+                          pe.order_id = request->qual[d.seq].disp_prod_order_id,
+                          pe.updt_cnt = request->qual[d.seq].disp_pe_updt_cnt + 1,
+                          pe.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+                          pe.updt_id = reqinfo->updt_id,
+                          pe.updt_task = reqinfo->updt_task,
+                          pe.updt_applctx = reqinfo->updt_applctx
+                        plan d
+                        join pe  where pe.product_event_id = request->qual[d.seq].disp_event_id and
+                                       pe.updt_cnt = request->qual[d.seq].disp_pe_updt_cnt
+                        with nocounter
+                        
+                       if (curqual != prodCnt)
+                          set failed = "T"
+                          set count2 = count2 + 1
+                          set reply->status_data->subeventstatus[count2]->OperationName = "update"
+                          set reply->status_data->subeventstatus[count2]->OperationStatus = "F"
+                          set reply->status_data->subeventstatus[count2]->TargetObjectName = "product_event"
+                          go to exit_script
+                       else
+                        
+                            /************************************/
+                            /*   update dispense provider on    */
+                            /*   the patient dispense table     */
+                            /************************************/
+                            update into
+                                    patient_dispense pd,
+                                    (dummyt d with seq = value(prodCnt))
+                            set
+                              pd.dispense_prov_id = disp_info->qual[d.seq].corr_disp_prov_id,
+                              pd.updt_cnt = request->qual[d.seq].disp_updt_cnt + 1,
+                              pd.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+                              pd.updt_id = reqinfo->updt_id,
+                              pd.updt_task = reqinfo->updt_task,
+                              pd.updt_applctx = reqinfo->updt_applctx
+                            plan d
+                            join pd  where pd.product_event_id = request->qual[d.seq].disp_event_id and
+                                           pd.updt_cnt = request->qual[d.seq].disp_updt_cnt
+                            with nocounter
+        
+                            if (curqual != prodCnt)
+                              set failed = "T"
+                              set count2 = count2 + 1
+                              set reply->status_data->subeventstatus[count2]->OperationName = "update"
+                              set reply->status_data->subeventstatus[count2]->OperationStatus = "F"
+                              set reply->status_data->subeventstatus[count2]->TargetObjectName = "patient_dispense"
+                              go to exit_script
+                           else        
+                                insert into corrected_product cp,
+                                            (dummyt d with seq = value(prodCnt))
+                                set
+                                   cp.correction_id = seq(pathnet_seq,nextval),
+                                   cp.product_id = request->qual[d.seq].product_id,
+                                   cp.product_event_id = request->qual[d.seq].disp_event_id,
+                                   cp.correction_type_cd = chg_disp_prod_order_cd,
+                                   cp.correction_reason_cd = request->corr_reason_cd,
+                                   cp.correction_note = request->corr_note,
+                                   cp.orig_disp_prov_id = disp_info->qual[d.seq].orig_dispense_prov_id,
+                                   cp.orig_disp_prod_order_id = disp_info->qual[d.seq].orig_product_order_id,
+                                   cp.corr_disp_prod_order_id = disp_info->qual[d.seq].corr_disp_prod_order_id,
+                                   cp.orig_updt_cnt = disp_info->qual[d.seq].orig_updt_cnt,
+                                   cp.orig_updt_dt_tm = cnvtdatetime(disp_info->qual[d.seq].orig_updt_dt_tm),
+                                   cp.orig_updt_id = disp_info->qual[d.seq].orig_updt_id,
+                                   cp.orig_updt_task = disp_info->qual[d.seq].orig_updt_task,
+                                   cp.orig_updt_applctx = disp_info->qual[d.seq].orig_updt_applctx,
+                                   cp.updt_cnt =  0,
+                                   cp.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+                                   cp.updt_id =  reqinfo->updt_id,
+                                   cp.updt_task =  reqinfo->updt_task,
+                                   cp.updt_applctx =  reqinfo->updt_applctx,
+                                   cp.unknown_patient_text = null,
+                                   cp.product_nbr = null,
+                                   cp.product_sub_nbr = null,
+                                   cp.alternate_nbr = null,
+                                   cp.product_cd = 0,
+                                   cp.product_class_cd = 0,
+                                   cp.product_cat_cd = 0,
+                                   cp.supplier_id = 0,
+                                   cp.recv_dt_tm = null,
+                                   cp.volume = null,
+                                   cp.unit_meas_cd = 0,
+                                   cp.expire_dt_tm = null,
+                                   cp.abo_cd = 0,
+                                   cp.rh_cd = 0,
+                                   cp.segment_nbr = null,
+                                   cp.event_dt_tm = null,
+                                   cp.reason_cd = 0,
+                                   cp.autoclave_ind = null,
+                                   cp.destruction_method_cd = 0,
+                                   cp.destruction_org_id = 0,
+                                   cp.manifest_nbr = null
+                                plan d
+                                join cp
+                                with nocounter
+        
+                                if (curqual != prodCnt)
+                                  set failed = "T"
+                                  set count2 = count2 + 1
+                                  set reply->status_data->subeventstatus[count2]->OperationName  = "insert"
+                                  set reply->status_data->subeventstatus[count2]->OperationStatus = "F"
+                                  set reply->status_data->subeventstatus[count2]->TargetObjectName = "corrected_product"
+                                  go to exit_script
+                                endif
+                          endif
+                      endif
+                  endif
+             endif
+        endif
+   endif
+endif
+ 
+#exit_script
+if (failed = "T")
+  set reqinfo->commit_ind = 0
+   set reply->status_data->status = "F"
+else
+   set reqinfo->commit_ind = 1
+   set reply->status_data->status = "T"
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

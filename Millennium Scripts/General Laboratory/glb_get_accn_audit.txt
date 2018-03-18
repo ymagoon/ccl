@@ -1,0 +1,372 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_accn_audit/GLB_GET_ACCN_AUDIT.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_PATIENT_INFO.PRG
+        Object name:            GLB_GET_PATIENT_INFO
+        Request #:              250071
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Retrieve patient info and location, and
+                                determine whether encounter- or order-
+                                level comments exist
+
+        Tables read:            person
+                                accession_order_r
+                                orders
+                                profile_task_r
+                                order_laboratory
+                                order_serv_res_container
+                                order_procedure_exception
+                             
+                                
+ 
+        Tables updated:         n/a
+        Executing from:         General Lab accession audit application(s)
+
+        Special Notes:          n/a
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 06/01/98 Gary Runde           Initial Release                     *
+;     001 04/07/99 Gary Runde		Retrieve activity_type_cd values    *
+;					into record structure to fix problem*
+;					with multiple GLB cdf_meanings	    *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_ACCN_AUDIT: dba go
+      create program GLB_GET_ACCN_AUDIT:dba
+
+/*
+      record request
+      (
+         1  accession                    = VC
+      )
+*/
+
+      record reply
+      (
+         1  person_id                   = F8
+         1  name_full_formatted         = VC
+         1  birth_dt_tm                 = DQ8
+         1  birth_tz                    = I4
+         1  sex_cd                      = F8
+         1  sex_disp                    = VC
+         1  species_cd                  = F8
+         1  alias                       = VC
+	 1  accession			= VC
+         1  loc_facility_cd             = F8
+         1  loc_facility_disp           = VC
+         1  loc_nurse_unit_cd           = F8
+         1  loc_nurse_unit_disp         = VC
+         1  loc_room_cd                 = F8
+         1  loc_room_disp               = VC
+         1  loc_bed_cd                  = F8
+         1  loc_bed_disp                = VC
+         1  reason_for_visit            = VC
+         1  location_cd                 = F8                        
+         1  organization_id             = F8                         
+         1  encntr_type_cd              = F8                   
+         1  cat_order[*]
+            2  order_id                 = F8
+            2  catalog_cd               = F8
+            2  catalog_disp             = VC
+            2  activity_type_cd         = F8
+            2  activity_type_disp    = VC
+            2  catalog_type_cd          = F8
+            2  catalog_type_disp        = VC
+            2  current_start_dt_tm      = DQ8
+            2  resource_route_level_flag = I2
+            2  report_priority_cd       = F8
+            2  report_priority_disp     = VC
+            2  collection_priority_cd   = F8
+            2  collection_priority_disp = VC
+            2  svr_cnt                  = I4    
+            2  SVR[*]
+               3  service_resource_cd   = F8
+               3  service_resource_disp = VC
+	       3  Drawn_dt_tm		= DQ8	            
+	       3  specimen_type_cd	= F8	
+               3  tasks[*]
+		  4  default_result_type_cd	= F8
+		  4  default_result_type_disp	= VC
+                  4  task_assay_cd      = F8
+                  4  task_assay_disp    = VC
+		  4  delta_lvl_flag	= I2
+	          4  apr_row_exists     = VC
+		  4  apr_display_sequence = F8    
+                        
+%i cclsource:status_block.inc
+      )
+
+record CV (                                 ;001
+	1  cv[*]                            ;001
+		2  code_value	= f8        ;001
+)                                           ;001
+
+/* Variable initialization */
+      set mrn_cd = 0.0
+      set reply->status_data->status = "F"
+      set o_cnt = 0
+      set t_cnt = 0
+      set svr_cnt = 0
+      set max_svr_cnt = 0
+      set glb_cd = 0
+      set bb_cd = 0
+      set hla_cd = 0    	
+      set failed = "F"  
+      set c_cnt = 0                          ;001
+
+/*get the code value for Gen Lab, Bloodbank, and HLA*/
+      select into "nl:"                      ;001
+         c.code_value,                       ;001
+         c.cdf_meaning                       ;001
+      from code_value c                      ;001
+      where (c.code_set = 106    and c.cdf_meaning IN("GLB", "BB", "HLA")) ;001
+      detail                                 ;001
+         c_cnt = c_cnt + 1                   ;001
+         if (mod(c_cnt,5) = 1)               ;001
+            stat = alterlist(CV->cv, (c_cnt + 5))  ;001   
+         endif                               ;001
+	 cv->cv[c_cnt].code_value = c.code_value   ;001
+      with nocounter                               ;001
+                                                   ;001
+      set stat = alterlist(CV->cv, c_cnt)          ;001
+
+/* Retrieve information about a orderable matching the given accession number.*/
+      select into "nl:"
+         dt.seq,
+         aor.accession,
+         ol.order_id,
+         ol.resource_route_level_flag,
+         osrc.order_id,
+         osrc.service_resource_cd,
+         o.order_id,
+         o.catalog_cd,
+         o.activity_type_cd,
+         o.catalog_type_cd,
+         o.current_start_dt_tm,
+         ptr_exists = decode(ptr.seq, "Y", "N"),
+         ptr.task_assay_cd,
+         p.person_id,
+         p.name_full_formatted,
+         p.birth_dt_tm,
+         p.species_cd,
+         p.sex_cd,
+	 apr_exists = decode(apr.seq, "Y", "N"),
+	 apr.display_sequence,
+	 c.container_id,
+	 dta.delta_lvl_flag,
+	 dtc.seq                                   ;001
+      from  
+         person p,
+         accession_order_r aor,
+         orders o,
+         profile_task_r ptr,
+         order_laboratory ol,
+         order_serv_res_container osrc,
+	 container c,
+	 assay_processing_r apr,
+         (dummyt dt with seq = 1),
+	 (dummyt dt2 with seq = 1),
+	 (dummyt dtc with seq = value(c_cnt)),    ;001
+	 discrete_task_assay dta
+      plan aor where aor.accession = request->accession
+      join dtc                                            ;001
+      join o where o.order_id = aor.order_id              ;001
+      and o.activity_type_cd = CV->cv[dtc.seq].code_value ;001
+      join p where p.person_id = o.person_id
+      join ol where o.order_id = ol.order_id
+      join osrc where ol.order_id = osrc.order_id
+      join c where osrc.container_id = c.container_id
+      join dt where dt.seq = 1
+      join ptr where o.catalog_cd = ptr.catalog_cd and
+                        ol.resource_route_level_flag = 1   
+      join dta where ptr.task_assay_cd = dta.task_assay_cd
+      join dt2 where dt2.seq = 1
+      join apr where apr.service_resource_cd = osrc.service_resource_cd and
+			apr.task_assay_cd = ptr.task_assay_cd
+      order p.person_id, o.catalog_cd, osrc.service_resource_cd, ptr.catalog_cd,
+		ptr.task_assay_cd
+      head p.person_id
+         reply->person_id = p.person_id
+         reply->name_full_formatted = p.name_full_formatted
+         reply->birth_dt_tm = p.birth_dt_tm
+         reply->birth_tz = validate(p.birth_tz,0) 
+         reply->species_cd = p.species_cd
+         reply->sex_cd = p.sex_cd
+	 reply->accession = aor.accession
+         o_cnt = 0
+      
+      head o.catalog_cd
+         o_cnt = o_cnt + 1
+         if (mod(o_cnt,10) = 1)
+            stat = alterlist(reply->cat_order, (o_cnt + 10))     
+         endif
+         reply->cat_order[o_cnt].order_id = o.order_id
+         reply->cat_order[o_cnt].catalog_cd = o.catalog_cd
+         reply->cat_order[o_cnt].activity_type_cd = o.activity_type_cd
+         reply->cat_order[o_cnt].catalog_type_cd = o.catalog_type_cd
+         reply->cat_order[o_cnt].current_start_dt_tm = o.current_start_dt_tm
+         reply->cat_order[o_cnt].resource_route_level_flag =
+                        ol.resource_route_level_flag
+         reply->cat_order[o_cnt].report_priority_cd = ol.report_priority_cd
+         reply->cat_order[o_cnt].collection_priority_cd =
+                        ol.collection_priority_cd
+         svr_cnt = 0
+      head osrc.service_resource_cd
+         svr_cnt = svr_cnt + 1
+         if (max_svr_cnt < svr_cnt)
+            max_svr_cnt = svr_cnt
+         endif
+         if (mod(svr_cnt,10) = 1)
+            stat = alterlist(reply->cat_order[o_cnt].SVR, (svr_cnt + 10))     
+         endif  
+         reply->cat_order[o_cnt].SVR[svr_cnt].service_resource_cd = 
+                        osrc.service_resource_cd
+         reply->cat_order[o_cnt].SVR[svr_cnt].specimen_type_cd = 
+                        c.specimen_type_cd
+	 reply->cat_order[o_cnt].SVR[svr_cnt].Drawn_dt_tm = c.DRAWN_DT_TM
+
+         t_cnt = 0
+      head ptr.task_assay_cd      
+         if (ptr_exists = "Y")
+           t_cnt = t_cnt + 1
+           if (mod(t_cnt,10) = 1)
+             stat = alterlist(reply->cat_order[o_cnt].SVR[svr_cnt].tasks, 
+                                                        (t_cnt + 10))     
+           endif
+           reply->cat_order[o_cnt].SVR[svr_cnt].tasks[t_cnt].task_assay_cd = 
+                                        ptr.task_assay_cd
+           reply->cat_order[o_cnt].SVR[svr_cnt].tasks[t_cnt].delta_lvl_flag = 
+                                        dta.delta_lvl_flag
+	   if (apr_exists = "Y")
+             reply->cat_order[o_cnt].SVR[svr_cnt].tasks[t_cnt].default_result_type_cd = 
+	   				apr.DEFAULT_RESULT_TYPE_CD
+             reply->cat_order[o_cnt].SVR[svr_cnt].tasks[t_cnt].apr_row_exists = 
+                                        "True"
+             reply->cat_order[o_cnt].SVR[svr_cnt].tasks[t_cnt].apr_display_sequence = 
+					apr.display_sequence
+           else
+             reply->cat_order[o_cnt].SVR[svr_cnt].tasks[t_cnt].apr_row_exists = 
+					"False"
+	   endif ;apr_exists	      
+		
+         endif ;ptr_exists
+      foot osrc.service_resource_cd     
+        if (ptr_exists = "Y") 
+          stat = alterlist(reply->cat_order[o_cnt].SVR[svr_cnt].tasks, t_cnt)  
+        endif
+      foot o.catalog_cd
+         reply->cat_order[o_cnt].svr_cnt = svr_cnt
+         stat = alterlist(reply->cat_order[o_cnt].SVR, svr_cnt)
+      with nocounter, outerjoin = dt, outerjoin = dt2
+
+      if (curqual = 0)
+		set failed = "T"
+      endif
+      set stat = alterlist(reply->cat_order, o_cnt) 
+       
+      select into "nl:" 
+         d.seq,
+         d2.seq,
+         ope.task_assay_cd,
+	 apr.seq,
+	 apr_exists = decode(apr.seq, "Y", "N")
+      from 
+         (dummyt d with seq = value(o_cnt)),
+         (dummyt d2 with seq = value(max_svr_cnt)),
+         order_procedure_exception ope,
+	 (dummyt dt with seq = 1),
+	 assay_processing_r apr
+      plan d
+      join d2 where d2.seq <= reply->cat_order[d.seq].svr_cnt
+      join ope where reply->cat_order[d.seq].SVR[d2.seq].service_resource_cd = 
+                                ope.service_resource_cd and
+                reply->cat_order[d.seq].order_id = ope.order_id and
+                reply->cat_order[d.seq].resource_route_level_flag = 2
+      join dt where dt.seq = 1
+      join apr where reply->cat_order[d.seq].SVR[d2.seq].service_resource_cd = 
+				apr.service_resource_cd  and
+                apr.task_assay_cd = ope.task_assay_cd
+      head report       
+         t_cnt = 0
+      head d2.seq
+         t_cnt = 0
+      detail
+	 t_cnt = t_cnt + 1
+         if (mod(t_cnt,10) = 1)
+            stat = alterlist(reply->cat_order[d.seq].SVR[d2.seq].tasks, 
+                                                        t_cnt + 10)     
+         endif
+         reply->cat_order[d.seq].SVR[d2.seq].tasks[t_cnt].task_assay_cd = 
+                                        ope.task_assay_cd
+         if (apr_exists = "Y")
+             reply->cat_order[d.seq].SVR[d2.seq].tasks[t_cnt].apr_row_exists = 
+                                        "True"
+             reply->cat_order[d.seq].SVR[d2.seq].tasks[t_cnt].apr_display_sequence = 
+					apr.display_sequence
+         else
+             reply->cat_order[d.seq].SVR[d2.seq].tasks[t_cnt].apr_row_exists = 
+                                        "False"
+         endif ;apr_exists          
+     
+      foot d2.seq
+            stat = alterlist(reply->cat_order[d.seq].SVR[d2.seq].tasks, 
+                                                        t_cnt)     
+      
+      foot report
+            stat = alterlist(reply->cat_order[d.seq].SVR[d2.seq].tasks, 
+                                                        t_cnt)     
+                
+      with nocounter, outerjoin = dt        
+ 
+/* If no record matching person_id exists in person file, exit with return
+   status of "F". */
+
+
+      if (failed = "F")
+	      set reply->status_data->status = "S"
+		call echo("passed")
+      elseif (o_cnt = 0)
+	set reply->status_data->status = "Z"
+      endif
+
+
+#EXIT_PROGRAM
+      end go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,362 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/SUPPLIEPREFIXTOOL/BBT_GET_ORG_BB_SUPPLIER.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+
+
+        Source file name:       bbt_get_org_bb_supplier.prg 
+        Object name:            bbt_get_org_bb_supplier
+        Request #:              225451
+
+        Product:                PathNet Transfusion                 
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        get blood bank suppliers
+
+        Tables read:            organization, org_type_reltn, code_value, 
+                                bb_supplier
+        Tables updated:         none
+        Executing from:         variety
+
+        Special Notes:          ?
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 01/30/97 Jon Weekes           Initial Release                     *
+;     001 05/08/07 Ronda Zheng          Retrieve ISBT_barcode value and     *
+;                                       org_type_disp, org_type_mean. Also  *
+;                                       retrieve the inventory area that is *
+;                                       associated to the supplier          *
+;     002 06/25/08 Jacob Anderson       add a select to the new             *
+;                                       bb_isbt_supplier table and return   *
+;                                       the FIN, license, and registration  *
+;                                       number at the inventory area level. *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_get_org_bb_supplier:dba go
+create program bbt_get_org_bb_supplier:dba
+
+/*
+record request
+(
+ 1  typelist[*]
+     2  cdf_meaning     = c12
+)
+*/
+
+record reply  
+(
+ 1 return_inactive_ind          = i2
+ 1 qual[*]
+    2  organization_id          = f8
+    2  org_name                 = vc
+    2  bb_supplier_ind          = i2
+    2  bb_supplier_id           = f8
+    2  barcode_value            = c20
+    2  prefix_ind               = i2
+    2  prefix_value             = c5
+    2  default_prefix_ind       = i2
+    2  alpha_translation_ind    = i2
+    2  updt_cnt                 = i4
+    2  active_ind               = i2
+    2  org_type_cd              = f8
+    2  org_type_disp            = c40
+    2  org_type_mean            = c12
+    2  bb_inv_area_ind          = i2
+    2  bbInvQaul[*]
+       3  bb_isbt_supplier_id      = f8
+       3  bb_inv_area_cd           = f8
+       3  bb_inv_area_disp         = c40
+       3  bb_inv_area_mean         = c12
+       3  isbt_supplier_fin        = c5
+       3  license_nbr_txt          = c15
+       3  registration_nbr_txt     = c15
+       3  active_ind               = i2
+%i cclsource:status_block.inc
+)
+
+
+/*
+ * Initialize Constants 
+ */
+set org_type_code_set = 278
+    
+declare code_cnt          = i4  with protect, noconstant(1)
+declare lStat             = i4  with protect, noconstant(0)
+declare lIdx              = i4  with protect, noconstant(0)  ;Indexes for EXPAND
+declare lIdx2             = i4  with protect, noconstant(0)  ;Indexes for EXPAND
+declare lReplyCnt         = i4  with protect, noconstant(0)
+declare lLOC_TYPE_CS      = i4  with protect, constant(222)
+declare sBBINVAREA_MEAN   = c12 with protect, constant("BBINVAREA")
+declare dBBInvAreaCD      = f8  with protect, noconstant(0.0)
+
+declare errmsg            = c132 with noconstant(fillstring(132," "))
+declare error_check       = i2 with noconstant(error(errmsg,1))
+/*
+ * Initialize Globals
+ */
+    set reply->status_data->status = "F"
+    set count1 = 0
+    set type_cnt = 0
+    set qual_cnt = 0
+    set select_ok_ind = 0
+
+/* Determine number of organizations types */
+set type_cnt = size(request->typelist, 5)
+
+set stat = alterlist(reply->qual, 10)
+
+select into "nl:"
+    otr.org_type_cd
+    , cv.cdf_meaning
+    , org.organization_id
+    , org.org_name
+    , bbs.seq
+    , bbs.bb_supplier_id
+    , bbs.barcode_value
+    , bbs.prefix_ind
+    , bbs.prefix_value
+    , bbs.default_prefix_ind
+    , bbs.alpha_translation_ind
+    , bbs.updt_cnt
+    , bbs.active_ind
+
+from 
+    (dummyt d with seq = value(type_cnt))
+    , code_value cv
+    , org_type_reltn otr
+    , organization org
+    , (dummyt d_bbs with seq = 1)
+    , bb_supplier bbs
+
+plan    d
+join    cv  where   cv.code_set                 = org_type_code_set
+                      and cv.cdf_meaning        = request->typelist[d.seq]->cdf_meaning 
+                      and cv.active_ind         = 1
+                      and cv.begin_effective_dt_tm < cnvtdatetime(curdate, curtime3)
+                      and cv.end_effective_dt_tm > cnvtdatetime(curdate, curtime3)                    
+join    otr where   otr.org_type_cd             = cv.code_value
+                      and otr.organization_id   != NULL
+                      and otr.organization_id   > 0
+                      and otr.active_ind        = 1
+join    org where   org.organization_id         = otr.organization_id
+                      and org.active_ind        = 1
+join    (d_bbs where d_bbs.seq                  = 1
+    join    bbs where   bbs.organization_id     = org.organization_id
+                          and ((request->return_inactive_ind = 1)
+                            or (request->return_inactive_ind = 0
+                                  and bbs.active_ind = 1)))
+
+head report
+    select_ok_ind = 0
+
+detail
+    qual_cnt = qual_cnt + 1
+    if (mod(qual_cnt, 10) = 1 and qual_cnt != 1)
+        stat = alterlist(reply->qual, qual_cnt + 9)
+    endif
+    reply->qual[qual_cnt]->organization_id  = otr.organization_id
+    reply->qual[qual_cnt]->org_name         = org.org_name
+    reply->qual[qual_cnt]->org_type_cd      = otr.org_type_cd
+    if (bbs.seq > 0)
+        reply->qual[qual_cnt]->bb_supplier_ind          = 1
+        reply->qual[qual_cnt]->bb_supplier_id           = bbs.bb_supplier_id    
+        reply->qual[qual_cnt]->barcode_value            = bbs.barcode_value 
+        reply->qual[qual_cnt]->prefix_ind               = bbs.prefix_ind
+        reply->qual[qual_cnt]->prefix_value             = bbs.prefix_value
+        reply->qual[qual_cnt]->default_prefix_ind       = bbs.default_prefix_ind
+        reply->qual[qual_cnt]->alpha_translation_ind    = bbs.alpha_translation_ind
+        reply->qual[qual_cnt]->updt_cnt                 = bbs.updt_cnt
+        reply->qual[qual_cnt]->active_ind               = bbs.active_ind
+        
+    else 
+        reply->qual[qual_cnt]->bb_supplier_ind          = 0
+        reply->qual[qual_cnt]->bb_supplier_id           = 0.0
+        reply->qual[qual_cnt]->barcode_value            = ""
+        reply->qual[qual_cnt]->prefix_ind               = 0
+        reply->qual[qual_cnt]->prefix_value             = ""
+        reply->qual[qual_cnt]->default_prefix_ind       = 0
+        reply->qual[qual_cnt]->alpha_translation_ind    = 0
+        reply->qual[qual_cnt]->updt_cnt                 = 0
+        reply->qual[qual_cnt]->active_ind               = 0
+        
+    endif   
+
+foot report
+    stat = alterlist(reply->qual, qual_cnt)
+    select_ok_ind = 1
+
+with nocounter, outerjoin(d_bbs), nullreport
+
+set count1 = count1 + 1
+if (count1 != 1)
+    set stat = alter(reply->status_data->subeventstatus, count1)
+endif
+if (select_ok_ind = 1)
+    if (curqual = 0)
+        set reply->status_data->status = "Z"
+        set reply->status_data->subeventstatus[1]->OperationName    = "select organizations"
+        set reply->status_data->subeventstatus[1]->OperationStatus  = "Z"
+        set reply->status_data->subeventstatus[1]->TargetObjectName = "bbt_get_org_bb_supplier"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = 
+            "No organizations found for requested types/cdf_meanings"
+        go to EXIT_SCRIPT
+    endif
+else
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[1]->OperationName    = "select organizations"
+    set reply->status_data->subeventstatus[1]->OperationStatus  = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectName = "bbt_get_org_bb_supplier"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue = "Script/CCL error.  Select failed."
+    go to EXIT_SCRIPT
+endif
+
+
+;Determine if the organization is associated to inventory area
+set lStat = uar_get_meaning_by_codeset(lLOC_TYPE_CS, nullterm(sBBINVAREA_MEAN), code_cnt, dBBInvAreaCD)
+if (dBBInvAreaCD = 0.0)
+    set reply->status_data.status = "F"
+    set reply->status_data->subeventstatus[1]->OperationName    = "select organizations"
+    set reply->status_data->subeventstatus[1]->OperationStatus  = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectName = "bbt_get_org_bb_supplier"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+        = "Script/CCL error.  Can't retrieve BBInvArea Code Value from code set 222."
+endif
+   
+
+set lReplyCnt = size(reply->qual, 5)
+set bb_inv_cnt = 0
+
+
+select into "nl:"
+
+from bb_isbt_supplier biss
+
+where biss.bb_isbt_supplier_id > 0 
+            and ((request->return_inactive_ind = 1)
+            or (request->return_inactive_ind = 0
+            and biss.active_ind = 1))
+    
+
+detail
+  
+    lIdx2 = locateval(lIdx,1, size(reply->qual,5), biss.organization_id, reply->qual[lIdx].organization_id)
+    
+    if (lIdx2 > 0)
+    
+        bb_inv_cnt = size(reply->qual[lIdx2].bbInvQaul,5)
+           
+        bb_inv_cnt = bb_inv_cnt + 1
+        stat = alterlist(reply->qual[lIdx2].bbInvQaul,bb_inv_cnt)
+        reply->qual[lIdx2].bbInvQaul[bb_inv_cnt].bb_inv_area_cd = biss.inventory_area_cd 
+        reply->qual[lIdx2].bbInvQaul[bb_inv_cnt].isbt_supplier_fin = biss.isbt_supplier_fin
+        reply->qual[lIdx2].bbInvQaul[bb_inv_cnt].license_nbr_txt = biss.license_nbr_txt
+        reply->qual[lIdx2].bbInvQaul[bb_inv_cnt].registration_nbr_txt = biss.registration_nbr_txt
+        reply->qual[lIdx2].bbInvQaul[bb_inv_cnt].active_ind = biss.active_ind
+        reply->qual[lIdx2].bbInvQaul[bb_inv_cnt].bb_isbt_supplier_id = biss.bb_isbt_supplier_id
+        reply->qual[lIdx2].bb_inv_area_ind = 1
+                
+    endif
+ 
+with nocounter
+
+;* Check for CCL errors.
+set error_check = error(errmsg,0)
+if (error_check != 0)
+    set reply->status_data.status = "F"
+    set reply->status_data->subeventstatus[1]->OperationName    = "select ISBT Suppliers"
+    set reply->status_data->subeventstatus[1]->OperationStatus  = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectName = "bbt_get_org_bb_supplier"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue= errmsg
+        
+    go to EXIT_SCRIPT
+endif
+
+set reply->status_data->status = "S"
+set reply->status_data->subeventstatus[1]->OperationName    = "select ISBT Suppliers"
+set reply->status_data->subeventstatus[1]->OperationStatus  = "S"
+set reply->status_data->subeventstatus[1]->TargetObjectName = "bbt_get_org_bb_supplier"
+set reply->status_data->subeventstatus[1]->TargetObjectValue = "SUCCESS"
+
+
+/*
+
+call echo("     ")
+for (x = 1 to size(reply->qual,5))
+
+    call echo(build(
+        reply->qual[x].bb_inv_area_ind             , "/", 
+        reply->qual[x]->bb_supplier_ind          , "/", 
+        reply->qual[x]->org_type_cd             , "/",
+        reply->qual[x]->organization_id         , "/",
+        reply->qual[x]->org_name                , "/",
+        reply->qual[x]->bb_supplier_id           , "/", 
+        reply->qual[x]->prefix_ind               , "/",
+        reply->qual[x]->prefix_value             , "/", 
+        reply->qual[x]->default_prefix_ind       , "/", 
+        reply->qual[x]->alpha_translation_ind    , "/", 
+        reply->qual[x]->updt_cnt                 , "/", 
+        reply->qual[x]->active_ind               ))
+endfor
+
+
+call echo("     ")
+for (x = 1 to size(reply->qual,5))
+
+if (size(reply->qual[x].bbInvQaul,5)>0)
+
+    for (y = 1 to size(reply->qual[x].bbInvQaul,5))
+
+        call echo(build(
+            reply->qual[x].active_ind                , "/",
+            reply->qual[x]->org_name                , "/",
+            reply->qual[x].bbInvQaul[y].bb_inv_area_cd , "/",
+            reply->qual[x].bbInvQaul[y].bb_inv_area_disp , "/",
+            reply->qual[x].bbInvQaul[y].isbt_supplier_fin , "/",
+            reply->qual[x].bbInvQaul[y].license_nbr_txt , "/",
+            reply->qual[x].bbInvQaul[y].registration_nbr_txt ;, "/",
+                 ))
+        
+    endfor
+    
+endif
+    
+endfor
+*/
+
+#EXIT_SCRIPT
+
+end go
+
+;Generated by GNU enscript 1.6.4.

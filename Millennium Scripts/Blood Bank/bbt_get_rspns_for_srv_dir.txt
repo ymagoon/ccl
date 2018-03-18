@@ -1,0 +1,193 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Interpretationtool/BBT_GET_RSPNS_FOR_SRV_DIR.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2004 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       BBT_GET_RSPNS_FOR_SRV_DIR.PRG
+        Object name:            BBT_GET_RSPNS_FOR_SRV_DIR
+        Request #:              225158
+
+        Product:                PathNet
+        Product Team:           BB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve default alpha responses for assay
+                                from the order catalog for a service resource
+
+        Tables read:            REFERENCE_RANGE_FACTOR,
+                                ALPHA_RESPONSES,
+                                NOMENCLATURE,
+                                DISCRETE_TASK_ASSAY,
+
+        Tables updated:         n/a
+
+        Executing from:         QC Material Build
+
+        Special Notes:          None
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 08/23/96 Mike Goings          Initial Release                     *
+;     002 12/16/97 Mike Goings          Changed source_string to mnemonic   *
+;     003 06/17/03 Jim Jensen           Use alterlist intead of alter       *
+;     004 08/03/04 Jason Osborn         Remove filtering of MDI Alpha       *
+;                                       Responses for CAPEP00133029         *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program BBT_GET_RSPNS_FOR_SRV_DIR:dba go
+create program BBT_GET_RSPNS_FOR_SRV_DIR:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+record request
+(
+ 1 assays[x]
+    2 task_assay_cd       = f8
+    2 service_resource_cd = f8
+)
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+record reply
+(
+ 1 assay_list[*]
+    2 task_assay_cd            = f8
+    2 alpha_responses_cnt      = i4
+    2 alpha_list[*]
+        3 nomenclature_id      = f8
+        3 mnemonic             = vc
+        3 result_process_cd    = f8
+        3 result_process_disp  = c40
+ 1 status_data
+    2 status                   = c1
+    2 subeventstatus[1]
+        3 OperationName        = c15
+        3 OperationStatus      = c1
+        3 TargetObjectName     = c15
+        3 TargetObjectValue    = vc
+)
+
+/***********************************************************************
+* Script                                                               *
+***********************************************************************/
+declare stat                   = i4 with noconstant(0)
+declare q_cnt                  = i2 with noconstant(0)
+declare a_cnt                  = i2 with noconstant(0)
+declare nbr_of_assays          = i2 with noconstant(0)
+set cv_cnt = 1
+set reply->status_data.status = "F"
+
+/***********************************************************************
+* Select reference ranges                                              *
+***********************************************************************/
+set nbr_of_assays = size(request->assays,5)
+
+select into "nl:"
+    d1.seq,
+    rr.reference_range_factor_id,
+    rr.service_resource_cd,
+    rr.task_assay_cd,
+    ar.nomenclature_id,
+    ar.result_process_cd,
+    ar.sequence,
+    n.nomenclature_id,
+    n.mnemonic
+
+from
+    (dummyt d1 with seq = value(nbr_of_assays)),
+    reference_range_factor rr,
+    alpha_responses ar,
+    nomenclature n
+
+plan  d1
+join  rr   where rr.task_assay_cd             = request->assays[d1.seq].task_assay_cd
+             and rr.active_ind                = 1
+             and ((rr.service_resource_cd     = request->assays[d1.seq].service_resource_cd)
+              or (rr.service_resource_cd      = 0))
+join  ar   where ar.reference_range_factor_id = rr.reference_range_factor_id
+join  n    where ar.nomenclature_id           = n.nomenclature_id
+order
+    rr.task_assay_cd,
+    ar.sequence
+
+head report
+    q_cnt = 0
+    a_cnt = 0
+
+head rr.task_assay_cd
+    q_cnt = q_cnt + 1
+    if (q_cnt > size(reply->assay_list, 5))
+        stat = alterlist(reply->assay_list , q_cnt + 4)
+    endif
+    reply->assay_list[q_cnt].task_assay_cd       = rr.task_assay_cd
+    reply->assay_list[q_cnt].alpha_responses_cnt = 0
+    a_cnt = 0
+
+detail
+    found_ind = 0
+    i = 1
+    while (found_ind = 0 and i <= a_cnt)
+        if (ar.nomenclature_id = reply->assay_list[q_cnt].alpha_list[i].nomenclature_id)
+            found_ind = 1
+        endif
+        i = i + 1
+    endwhile
+    if (found_ind = 0)
+        a_cnt = a_cnt + 1
+        if (a_cnt > size(reply->assay_list[q_cnt].alpha_list, 5))
+            stat = alterlist(reply->assay_list[q_cnt].alpha_list, a_cnt + 4)
+        endif
+        reply->assay_list[q_cnt].alpha_list[a_cnt].nomenclature_id   = ar.nomenclature_id
+        reply->assay_list[q_cnt].alpha_list[a_cnt].result_process_cd = ar.result_process_cd
+        reply->assay_list[q_cnt].alpha_list[a_cnt].mnemonic          = n.mnemonic
+    endif
+
+foot rr.task_assay_cd
+    reply->assay_list[q_cnt].alpha_responses_cnt = a_cnt
+    stat = alterlist(reply->assay_list[q_cnt].alpha_list, a_cnt)
+
+foot report
+    stat = alterlist(reply->assay_list, q_cnt)
+
+with nocounter
+
+/***********************************************************************
+* Determine Script Status                                              *
+***********************************************************************/
+if (curqual > 0)
+    set reply->status_data.status = "S"
+else
+    set reply->status_data.status = "Z"
+endif
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,216 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_xfer_testsites/glb_get_xfer_testsites.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_XFER_TESTSITES.PRG
+        Object name:            GLB_GET_XFER_TESTSITES
+        Request #:              250104
+
+        Product:                General Lab           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Get a list of available test sites for each
+  				order.
+
+        Tables read:            orders
+    				order_catalog
+ 				profile_task_r
+  				orc_resource_list
+          			assay_processing_list
+
+        Tables updated:         n/a
+
+        Executing from:         General Lab transfer application
+
+        Special Notes:          n/a
+
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 07/25/96 Newton Hughes        Initial Release                     *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+  
+      DROP PROGRAM glb_get_xfer_testsites:dba GO
+      CREATE PROGRAM glb_get_xfer_testsites:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      RECORD request
+      (
+        1 qual[x]
+          2 order_id = f8
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      RECORD reply
+      (
+        1 nbr_orders = i4
+        1 qual[10]
+          2 order_id = f8
+          2 catalog_cd = f8
+          2 task_assay_cd = f8
+          2 route = i4
+          2 nbr_testsites = i4
+          2 testsite_list[5]
+            3 service_resource_cd = f8
+%i cclsource:status_block.inc
+      )
+
+#script
+      SET reply->status_data->status = "F"
+
+      SET req_ords = size(request->qual, 5)
+      SET nords = 0
+      SET ntestsites = 0
+      SET testsite_total = 0
+
+/* Use resource_route_lvl field from order_catalog table to decide
+   which of the orders passed in have detail components */
+
+      SELECT INTO "nl:"
+        o.order_id
+        , o.catalog_cd
+        , orc.resource_route_lvl
+      FROM
+        orders o
+        , order_catalog orc
+        , (dummyt d1 with seq = value(req_ords))
+
+      PLAN d1
+      JOIN o
+        WHERE o.order_id = request->qual[d1.seq]->order_id
+      JOIN orc
+        WHERE orc.catalog_cd = o.catalog_cd
+
+      DETAIL
+        nords = nords + 1
+        IF (mod(nords, 10) = 1 and nords > 10)
+          stat = alter(reply->qual, nords + 10)
+        ENDIF
+        reply->qual[nords]->order_id = o.order_id
+        reply->qual[nords]->catalog_cd = o.catalog_cd
+        reply->qual[nords]->task_assay_cd = 0
+        reply->qual[nords]->route = orc.resource_route_lvl
+        reply->qual[nords]->nbr_testsites = 0
+        reply->nbr_orders = nords
+
+      WITH
+        NOCOUNTER
+
+/* See whether any orders were found */
+
+      IF (nords = 0)
+        SET reply->status_data->status = "Z"
+        GO TO exit_script
+      ENDIF
+
+/* Look for available test sites for group procedures */
+
+      SELECT INTO "nl:"
+        orl.service_resource_cd
+        , orl.catalog_cd
+        , d1.seq
+      FROM
+        orc_resource_list orl
+        , (dummyt d1 with seq = value(nords))
+
+      PLAN d1
+        WHERE reply->qual[d1.seq]->route = 1	; group orders only
+      JOIN orl
+        WHERE orl.catalog_cd = reply->qual[d1.seq]->catalog_cd
+
+      HEAD d1.seq
+        ntestsites = 0
+
+      DETAIL
+        ntestsites = ntestsites + 1
+        IF (mod(ntestsites, 5) = 1 and ntestsites > 5)
+          stat = alter(reply->qual[d1.seq]->testsite_list, 5)
+        ENDIF
+        reply->qual[d1.seq]->testsite_list[ntestsites]->service_resource_cd = orl.service_resource_cd
+        reply->qual[d1.seq]->nbr_testsites = ntestsites
+
+        testsite_total = testsite_total + 1
+
+      WITH
+        NOCOUNTER
+
+/* Look for available test sites for detail procedures */
+
+      SELECT INTO "nl:"
+        ptr.task_assay_cd
+        , apl.service_resource_cd
+        , d1.seq
+      FROM
+        profile_task_r ptr
+        , assay_processing_list apl
+        , (dummyt d1 with seq = value(nords))
+
+      PLAN d1
+        WHERE reply->qual[d1.seq]->route = 2	; details only
+      JOIN ptr
+        WHERE ptr.catalog_cd = reply->qual[d1.seq]->catalog_cd
+      JOIN apl
+        WHERE apl.task_assay_cd = ptr.task_assay_cd
+     
+      HEAD d1.seq
+        ntestsites = 0
+        reply->qual[d1.seq]->task_assay_cd = ptr.task_assay_cd
+
+      DETAIL
+        ntestsites = ntestsites + 1
+        IF (mod(ntestsites, 5) = 1 and ntestsites > 5)
+          stat = alter(reply->qual[d1.seq]->testsite_list, 5)
+        ENDIF  
+        reply->qual[d1.seq]->testsite_list[ntestsites]->service_resource_cd = apl.service_resource_cd
+        reply->qual[d1.seq]->nbr_testsites = ntestsites
+
+        testsite_total = testsite_total + 1
+
+      WITH
+        NOCOUNTER
+
+/* Determine whether any test sites were found */
+
+      IF (testsite_total = 0)
+        SET reply->status_data->status = "Z"
+      ELSE
+        SET reply->status_data->status = "S"
+      ENDIF
+      
+#exit_script
+      END GO
+
+;Generated by GNU enscript 1.6.4.

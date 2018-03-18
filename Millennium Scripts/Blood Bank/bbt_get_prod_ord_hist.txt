@@ -1,0 +1,331 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Producthistoryreview/bbt_get_prod_ord_hist.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2004 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_prod_ord_hist.prg
+        Object name:            bbt_get_prod_ord_hist
+        Request #:              225085
+
+        Product:                Blood Bank
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load order, task assay, result information
+                                and cells for a given product test for viewing
+                                in product history review.
+
+        Tables read:            bb_order_phase
+                                code_value
+                                phase_group
+                                orc_resource_list
+                                orders
+                                service_directory
+                                profile_task_r
+                                bb_order_cell
+
+        Tables updated:         None
+        Executing from:         
+
+        Special Notes:          
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *001 11/11/96 Linda DeJong         Initial Release                     *
+;    *002 05/03/99 Doug Saus            Replaced code_value selects with uar*
+;    *003 07/03/03 Rob Peterson         Added activity_type_flag and the    *
+;    *                                  ability to return both donor and    *
+;    *                                  transfusion results.                *
+;    *004 11/18/03 CD4140               Fix Defect CAPEP00059553 (don't show*
+;    *                                  inactive phases from phase group)   *
+;    *005 08/18/04 Jason Coy            Update to send bb_result_processing *
+;    *                                  and order_cell_id in the reply.     *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program BBT_GET_PROD_ORD_HIST:dba go    
+             create program BBT_GET_PROD_ORD_HIST:dba
+     
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  productid                    = f8
+         1  activity_type_flag           = i2    ;0 = Transfusion results only
+                                                 ;1 = Donor results only
+                                                 ;2 = Both transfusion and donor results
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      ( 
+         1  qual[*]
+            2  order_id                     = f8
+            2  order_mnemonic               = vc
+            2  order_status_cd              = f8
+            2  order_status_disp            = vc
+            2  order_status_mean            = c12
+            2  orig_order_dt_tm             = dq8
+            2  bb_processing_cd             = f8
+            2  bb_processing_disp           = vc
+            2  bb_processing_mean           = c12
+            2  service_resource_cd          = f8
+            2  service_resource_disp        = vc
+            2  cells[*]
+               3  cell_cd                   = f8    
+               3  cell_disp                 = vc    
+               3  cell_mean                 = c12   
+               3  product_id                = f8 
+               3  bb_result_id              = f8   
+               3  order_cell_id             = f8 
+            2  assays[*]
+               3  task_assay_cd             = f8
+               3  task_assay_disp           = c40
+               3  sequence                  = i4
+               3  bb_result_processing_cd   = f8
+               3  bb_result_processing_disp = vc
+               3  bb_result_processing_mean = c12
+%i cclsource:status_block.inc
+      )
+      
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+      declare q_cnt                   = i4
+      declare a_cnt                   = i4
+      declare oc_cnt                  = i4
+      declare max_a_cnt               = i4
+      declare max_oc_cnt              = i4
+      set reply->status_data.status   = "F"
+      declare activity_parser         = vc with protect, noconstant("")
+      declare bbd_lab_section_cd      = f8 with protect, noconstant(0.0)
+      declare bbdprod_lab_section_cd  = f8 with protect, noconstant(0.0)
+
+      /***********************************************************************
+      * Select the order status codes to avoid retrieving                    *
+      ***********************************************************************/
+      set cancel_cd = 0.0
+      set bbt_lab_section_cd = 0.0
+      set cdf_meaning = fillstring(12," ")
+
+      ;Retrieve BB Transfusion activity_type_cd
+      set cdf_meaning = "BB"
+      set stat = uar_get_meaning_by_codeset(106,cdf_meaning,1,bbt_lab_section_cd)
+      if (stat = 1)
+          go to Resize_Reply
+      endif
+      ;call echo(build("bbt_lab_section_cd = ",bbt_lab_section_cd))
+
+      set cdf_meaning = "CANCELED"
+      set stat = uar_get_meaning_by_codeset(6004,cdf_meaning,1,cancel_cd)
+      if (stat = 1)
+          go to Resize_Reply
+      endif
+      ;call echo(build("cancel_cd = ", cancel_cd))
+
+      ;Retrieve BBDonor activity_type_cd
+      set cdf_meaning = "BBDONOR"
+      set stat = uar_get_meaning_by_codeset(106,cdf_meaning,1,bbd_lab_section_cd)
+      if (stat = 1)
+          go to Resize_Reply
+      endif
+      ;call echo(build("bbd_lab_section_cd =", bbd_lab_section_cd))
+
+      ;Retrieve BBDonorProd activity_type_cd
+      set cdf_meaning = "BBDONORPROD"
+      set stat = uar_get_meaning_by_codeset(106,cdf_meaning,1,bbdprod_lab_section_cd)
+      if (stat = 1)
+          go to Resize_Reply
+      endif
+      ;call echo(build("bbdprod_lab_section_cd =", bbdprod_lab_section_cd))
+
+      /*************************************************************
+      *  Populate activity_parser                                  *
+      **************************************************************/
+      if (request->activity_type_flag = 0)
+        set activity_parser = build("(o.activity_type_cd =", bbt_lab_section_cd, ")")
+      elseif (request->activity_type_flag = 1)
+        set activity_parser = build("(o.activity_type_cd =", bbd_lab_section_cd,
+                                    " or o.activity_type_cd =", bbdprod_lab_section_cd, ")")
+      else
+        set activity_parser = build("(o.activity_type_cd =", bbt_lab_section_cd,
+                                    " or o.activity_type_cd =", bbd_lab_section_cd,
+                                    " or o.activity_type_cd =", bbdprod_lab_section_cd, ")")
+      endif
+      ;call echo(build("activity_parser = ", activity_parser))
+
+      /***********************************************************************
+      * Select order information based on accession                          *
+      ***********************************************************************/
+         select into "nl:"
+            o.seq,
+            o.order_id,
+            o.order_status_cd,
+            o.activity_type_cd,
+            o.orig_order_dt_tm,
+            d1.seq,
+            sd.bb_processing_cd,
+            d2.seq,
+            orl.service_resource_cd,
+            op.order_id,
+            d3.seq,
+            join_path = decode(pg.seq, "1", ptr.seq, "2", "0"),
+            pg.task_assay_cd,
+            dta.task_assay_cd,
+            dta.bb_result_processing_cd,
+            d5.seq,
+            ptr.task_assay_cd,
+            dta2.task_assay_cd,
+            dta2.bb_result_processing_cd,
+            d6.seq,
+            cell_yn = decode(oc.seq, "Y", "N")
+
+         from
+            orders o,
+            dummyt d1,
+            service_directory sd,
+            dummyt d2,
+            orc_resource_list orl,
+            dummyt d3,
+            bb_order_phase op,
+            phase_group pg,
+            dummyt d5,
+            profile_task_r ptr,
+            dummyt d6,
+            bb_order_cell oc,
+            discrete_task_assay dta,
+            discrete_task_assay dta2
+
+         plan  o   where o.product_id       = request->productid
+                     and o.order_status_cd != cancel_cd
+                     and parser(activity_parser)
+         join  (d1 where d1.seq = 1
+               join  sd  where sd.catalog_cd   = o.catalog_cd
+               join  d2  where d2.seq          = 1
+               join  orl where orl.catalog_cd  = o.catalog_cd
+                           and orl.active_ind  = 1
+                           and orl.primary_ind = 1
+               join  (d3 where d3.seq = 1
+                     join  op  where op.order_id       = o.order_id
+                     join  pg  where (op.order_id      > 0
+                                 and pg.phase_group_cd = op.phase_grp_cd
+                                 and pg.active_ind     = 1)
+                     join  dta where dta.task_assay_cd = pg.task_assay_cd)
+             orjoin  (d5 where d5.seq = 1
+                     join  ptr where ptr.catalog_cd = o.catalog_cd
+                     join  dta2 where dta2.task_assay_cd = ptr.task_assay_cd))
+       orjoin  (d6 where d6.seq = 1
+               join  oc  where oc.order_id = o.order_id)
+
+        order
+            o.order_id
+
+        head report
+            q_cnt = 0
+            a_cnt = 0
+            oc_cnt = 0
+            max_a_cnt = 0
+            max_oc_cnt = 0
+
+        head o.order_id
+            q_cnt = q_cnt + 1
+            stat = alterlist(reply->qual, q_cnt)
+            reply->qual[q_cnt].order_id = o.order_id
+            reply->qual[q_cnt].orig_order_dt_tm = o.orig_order_dt_tm
+            reply->qual[q_cnt].order_mnemonic = o.order_mnemonic
+            reply->qual[q_cnt].order_status_cd = o.order_status_cd
+            reply->qual[q_cnt].bb_processing_cd = sd.bb_processing_cd
+            reply->qual[q_cnt].service_resource_cd = orl.service_resource_cd
+            oc_cnt = 0
+            a_cnt = 0
+
+        detail
+            /* determine if a cell is associated with the order */
+            if (cell_yn = "Y")
+              oc_cnt = oc_cnt + 1
+              stat = alterlist(reply->qual[q_cnt].cells, oc_cnt)
+              if (oc_cnt > max_oc_cnt)
+                max_oc_cnt = oc_cnt
+              endif
+              reply->qual[q_cnt].cells[oc_cnt].cell_cd = oc.cell_cd
+              reply->qual[q_cnt].cells[oc_cnt].product_id = oc.product_id
+              reply->qual[q_cnt].cells[oc_cnt].bb_result_id = oc.bb_result_id
+              reply->qual[q_cnt].cells[oc_cnt].order_cell_id = oc.order_cell_id
+            endif
+
+            /* determine if a task assay exists for the order */
+            if (join_path = "1" or join_path = "2")
+              a_cnt = a_cnt + 1
+              stat = alterlist(reply->qual[q_cnt].assays, a_cnt)
+              if (a_cnt > max_a_cnt)
+                max_a_cnt = a_cnt
+              endif
+              if (join_path = "2")
+                reply->qual[q_cnt].assays[a_cnt].task_assay_cd = ptr.task_assay_cd
+                reply->qual[q_cnt].assays[a_cnt].sequence = ptr.sequence
+                reply->qual[q_cnt].assays[a_cnt].bb_result_processing_cd = dta2.bb_result_processing_cd
+              endif
+              if (join_path = "1")
+                reply->qual[q_cnt].assays[a_cnt].task_assay_cd = pg.task_assay_cd
+                reply->qual[q_cnt].assays[a_cnt].sequence = pg.sequence
+                reply->qual[q_cnt].assays[a_cnt].bb_result_processing_cd = dta.bb_result_processing_cd
+              endif
+            endif
+
+          with
+            nocounter,
+            outerjoin = d1,
+            outerjoin = d2,
+            outerjoin = d3,
+            outerjoin = d5,
+            outerjoin = d6,
+            maxqual(rc, 1)
+
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/
+      #Resize_Reply
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+            set q_cnt = 1
+         endif
+
+         end
+         go
+
+;Generated by GNU enscript 1.6.4.

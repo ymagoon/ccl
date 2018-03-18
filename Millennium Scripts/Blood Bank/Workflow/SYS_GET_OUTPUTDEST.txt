@@ -1,0 +1,688 @@
+ ;;Solution_Test/script/Millennium Foundations/Printservices/sys_get_outputdest_loc.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       SYS_GET_OUTPUTDEST_LOC.PRG
+        Object name:            ?
+        Request #:              2256
+ 
+        Product:                Output Services
+        Product Team:           Application Architecture
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Retrieve output_dest records
+                                according to the filter type
+                                and organization_id
+ 
+        Tables read:            OUTPUT_DEST
+                                DEVICE
+                                LOCATION
+        Tables updated:
+        Executing from:
+ 
+        Special Notes:
+ 
+        return status:
+ 
+                0 = failure - no output_dest entries found
+                1 = success
+ 
+******************************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer        Comment                                  *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 10/03/01 YL2982          Initial Release                          *
+;     002 11/13/01 YL2982          Added check for encntr_org security      *
+;     003 03/24/08 RM5864          changed subroutine fubareter name from   *
+;                                  fubar to fubar                            *
+;~DE~************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program sys_get_outputdest_loc:dba go
+create program sys_get_outputdest_loc:dba
+ 
+/**************************************************************************
+*      Request Record                                                     *
+***************************************************************************/
+ 
+/*
+ 
+record request
+(
+ 1 label_program_name           = c20
+ 1 label_prefix                 = c20
+ 1 filter_count                 = i4
+ 1 qual[*]
+  2 device_type_cd              = f8
+)
+ 
+*/
+ 
+ 
+/**************************************************************************
+*      Reply Record                                                       *
+***************************************************************************/
+record reply
+( 1 sts                         = i4
+ 
+  1 org_qual[*]
+    2 organization_id           = f8
+ 
+  1 qual[*]
+    2 name                      = vc
+    2 description               = vc
+    2 output_dest_cd            = f8
+    2 output_device_cd          = f8
+    2 device_type_cd            = f8
+    2 device_type               = vc
+    2 device_cd                 = f8
+    2 device_function_cd        = f8
+    2 location_cd               = f8
+    2 location                  = vc
+    2 chart_printer_ind         = i2
+ 
+%i cclsource:status_block.inc
+)
+ 
+/*
+record reqinfo
+( 1 commit_ind                  = i2
+  1 updt_id                     = f8
+  1 position_cd                 = f8
+  1 updt_app                    = i4
+  1 updt_task                   = i4
+  1 updt_req                    = i4
+  1 updt_applctx                = i4
+)
+*/
+ 
+/**************************************************************************
+*      Initialize Variables                                               *
+***************************************************************************/
+ 
+set reply->status_data->status  = "F"
+ 
+declare g_status = i2 with public, noconstant (1)
+declare g_failed = c1 with public, noconstant ("F")
+declare g_count = i4 with public, noconstant (0)
+declare g_encntr_org_sec_ind = i2 with public, noconstant (0)
+ 
+declare g_code_set = i4 with public, constant (3000)
+declare g_cdf_meaning = c12 with public, constant ("CHARTQUEUE")
+declare g_chart_queue_cd = f8 with public, noconstant (0.0)
+declare nsize = i4 with noconstant (50)
+declare nsizeq = i4 with noconstant (50)
+declare nsizep = i4 with noconstant (50)
+set stat = uar_get_meaning_by_codeset (g_code_set, g_cdf_meaning, 1, g_chart_queue_cd)
+ 
+/*
+  See if encntr_org security is turned on
+*/
+ 
+select into "nl:"
+from dm_info di
+where di.info_domain = "SECURITY"
+   and di.info_name = "SEC_ORG_RELTN"
+ 
+detail
+   g_encntr_org_sec_ind = di.info_number
+ 
+with nocounter
+
+ 
+/*
+  get organization_ids
+*/
+ 
+ 
+if (g_encntr_org_sec_ind = 0)
+   set stat = alterlist (reply->org_qual, 1)
+   set reply->org_qual[1]->organization_id = 0
+else
+   declare org_count = i4 with private, noconstant (0)
+   select into 'nl:'
+      por.person_id,
+      por.organization_id,
+      por.active_ind
+   from prsnl_org_reltn por
+   where por.person_id = reqinfo->updt_id
+      and por.active_ind = 1
+   head report
+      org_count = 0
+      reply->status_data->status = "F"
+ 
+   detail
+      org_count = org_count + 1
+ 
+      if (mod (org_count, 10) = 1)
+         stat = alterlist (reply->org_qual, org_count + 9)
+      endif
+ 
+      reply->org_qual[org_count]->organization_id = por.organization_id
+ 
+   foot report
+      stat = alterlist (reply->org_qual, org_count)
+ 
+   with nocounter
+ 
+endif
+ 
+/*
+  get all the output_dest entries and the device_type_cd for
+  all device referenced in the output_dest entries.
+*/
+ 
+set qual = size (request->qual, 5)
+call echo (build ("Size:", qual))
+ 
+if (qual = 0)
+   set stat = alterlist (request->qual, 1)
+   set request->qual[1]->device_type_cd = 0
+endif
+ 
+ 
+if (trim (request->label_program_name) = "" and trim (request->label_prefix) = "" )
+   call echo ("calling select_without_labelprinters")
+   call select_without_labelprinters ( "" )
+elseif ( trim (request->label_program_name) = "" )
+   call echo ("calling select_with_labelprefix")
+   call select_with_labelprefix ( "" )
+elseif ( trim (request->label_prefix) = "" )
+   call echo ("calling select_with_labelprogram")
+   call select_with_labelprogram ( "" )
+else
+   call echo ("calling select_with_labelprinters")
+   call select_with_labelprinters ( "" )
+endif
+ 
+ 
+if (curqual = 0)
+   set g_status = 0
+   set g_failed = "T"
+   go to exit_script
+endif
+ 
+ 
+/* find out if the device is a chart printer */
+
+set nstart = 1
+set ntotal2 = size(reply->qual, 5)
+set ntotal = ntotal2 + (nsize - mod(ntotal2, nsize))
+set stat = alterlist (reply->qual, ntotal)
+for (idx = ntotal2 + 1 to ntotal)
+   set reply->qual[idx].name = reply->qual[ntotal2].name
+   set reply->qual[idx].description = reply->qual[ntotal2].description
+   set reply->qual[idx].output_dest_cd = reply->qual[ntotal2].output_dest_cd
+   set reply->qual[idx].output_device_cd = reply->qual[ntotal2].output_device_cd
+   set reply->qual[idx].device_type_cd = reply->qual[ntotal2].device_type_cd
+   set reply->qual[idx].device_type = reply->qual[ntotal2].device_type
+   set reply->qual[idx].device_cd = reply->qual[ntotal2].device_cd
+   set reply->qual[idx].device_function_cd = reply->qual[ntotal2].device_function_cd
+   set reply->qual[idx].location_cd = reply->qual[ntotal2].location_cd
+   set reply->qual[idx].location = reply->qual[ntotal2].location
+   set reply->qual[idx].chart_printer_ind = reply->qual[ntotal2].chart_printer_ind
+endfor
+
+select into 'nl:'
+   dx.device_cd,
+   dx.parent_entity_name,
+   dx.parent_entity_id,
+   d.device_cd,
+   d.device_type_cd
+from device_xref dx,
+   device d,
+   (dummyt dt with seq = value (1 + ((ntotal-1) / nsize)))
+plan dt
+   where initarray (nstart, evaluate (dt.seq, 1, 1, nstart + nsize))
+join dx
+   where expand (idx,
+                 nstart,
+                 nstart + (nsize - 1),
+                 dx.device_cd,
+                 reply->qual[idx]->device_cd)
+   and dx.parent_entity_name = "PRINTER / QUEUE"
+join d
+   where d.device_cd = dx.parent_entity_id
+   and d.device_type_cd = g_chart_queue_cd
+ 
+detail
+    index = locateval (num1, 1, ntotal2, dx.device_cd, reply->qual[num1]->device_cd)
+    reply->qual[index]->chart_printer_ind = 1
+ 
+with nocounter
+
+set stat = alterlist(reply->qual, ntotal2)
+
+
+#exit_script
+ 
+if (g_failed = "T")
+   set reqinfo->commit_ind = 0
+   set reply->status_data->status = "Z"
+else
+   set reqinfo->commit_ind = 1
+   set reply->status_data->status = "S"
+   set reply->sts = g_status
+endif
+ 
+ 
+SUBROUTINE select_without_labelprinters (fubar)
+
+   set org_qual = size (reply->org_qual, 5)
+   call echo (build ("Size:", org_qual))
+ 
+   if (org_qual = 0)
+      set stat = alterlist (reply->org_qual, 1)
+      set reply->org_qual[1]->organization_id = 0
+   endif
+ 
+   set nstart = 1
+
+   ; Prepare request->qual for expand/join using dummyt table dtq
+   set ntotalq2 = size (request->qual, 5)
+   set ntotalq  = ntotalq2 + (nsizeq - mod (ntotalq2, nsizeq))
+   set stat = alterlist (request->qual, ntotalq)
+   for (idx = ntotalq2 + 1 to ntotalq)
+      set request->qual[idx].device_type_cd = request->qual[ntotalq2].device_type_cd
+   endfor
+
+   ; Prepare reply->org_qual for expand/join using dummyt table dtp
+   set ntotalp2 = size (reply->org_qual, 5)
+   set ntotalp  = ntotalp2 + (nsizep - mod (ntotalp2, nsizep))
+   set stat = alterlist (reply->org_qual, ntotalp)
+   for (idx = ntotalp2 + 1 to ntotalp)
+      set reply->org_qual[idx].name = reply->org_qual[ntotalp2].name
+      set reply->org_qual[idx].description = reply->org_qual[ntotalp2].description
+      set reply->org_qual[idx].output_dest_cd = reply->org_qual[ntotalp2].output_dest_cd
+      set reply->org_qual[idx].output_device_cd = reply->org_qual[ntotalp2].output_device_cd
+      set reply->org_qual[idx].device_type_cd = reply->org_qual[ntotalp2].device_type_cd
+      set reply->org_qual[idx].device_type = reply->org_qual[ntotalp2].device_type
+      set reply->org_qual[idx].device_cd = reply->org_qual[ntotalp2].device_cd
+      set reply->org_qual[idx].device_function_cd = reply->org_qual[ntotalp2].device_function_cd
+      set reply->org_qual[idx].location_cd = reply->org_qual[ntotalp2].location_cd
+      set reply->org_qual[idx].location = reply->org_qual[ntotalp2].location
+      set reply->org_qual[idx].chart_printer_ind = reply->org_qual[ntotalp2].chart_printer_ind
+   endfor
+
+ 
+   select distinct into 'nl:'
+      od.device_cd,
+      od.label_prefix,
+      od.label_program_name,
+      od.output_dest_cd,
+      od.name,
+      od.description
+   from output_dest od,
+      device d,
+      location l,
+      (dummyt dtq with seq = value (request->filter_count)),
+      (dummyt dtp with seq = value (org_qual))
+   plan dtq
+      where initarray (nstart, evaluate (dtq.seq, 1, 1, nstart + nsizeq))
+   join d
+      where expand (idx,
+                    nstart,
+                    nstart + (nsizeq - 1),
+                    d.device_type_cd,
+                    request->qual[dtq.seq]->device_type_cd)
+   join dtp
+      where initarray (nstart, evaluate (dtp.seq, 1, 1, nstart + nsizep))
+   join l
+      where expand (idx,
+                    nstart,
+                    nstart + (nsizep - 1),
+                    l.organization_id,
+                    reply->org_qual[dtp.seq]->organization_id,
+                    0.0,
+                    reply->org_qual[dtp.seq]->organization_id)
+         or d.location_cd = 0
+   join od
+      where d.device_cd = od.device_cd
+      and ((od.label_prefix = NULL or od.label_prefix = " ")
+         and (od.label_program_name = NULL or od.label_program_name = " "))
+   order od.name ;cnvtupper (od.name)
+ 
+   head report
+      g_count = 0
+      reply->status_data->status = "F"
+ 
+   detail
+      g_count = g_count + 1
+
+      if (mod (g_count, 10) = 1 )
+         stat = alterlist (reply->qual, g_count + 9)
+      endif
+ 
+      reply->qual[g_count]->device_cd        = od.device_cd
+      reply->qual[g_count]->output_dest_cd   = od.output_dest_cd
+      reply->qual[g_count]->output_device_cd = 0.0
+      reply->qual[g_count]->name             = od.name
+      reply->qual[g_count]->description      = od.description
+      reply->qual[g_count]->device_type_cd   = d.device_type_cd
+      reply->qual[g_count]->device_type      = UAR_GET_CODE_MEANING (d.device_type_cd)
+      reply->qual[g_count]->device_function_cd = d.device_function_cd
+      reply->qual[g_count]->location_cd      = d.location_cd
+      reply->qual[g_count]->location         = UAR_GET_CODE_DESCRIPTION (d.location_cd)
+      reply->qual[g_count]->chart_printer_ind = 0
+ 
+   foot report
+      stat = alterlist (reply->qual, g_count)
+ 
+   with nocounter
+
+   set stat = alterlist (request->qual, ntotalq2)
+   set stat = alterlist (reply->org_qual, ntotalp2)
+
+   ; prepare dummyt join on reply->qual[*]->device_cd
+   set nstart = 1
+   set ntotal2 = size(reply->qual, 5)
+   set ntotal = ntotal2 + (nsize - mod(ntotal2, nsize))
+   set stat = alterlist (reply->qual, ntotal)
+   for (idx = ntotal2 + 1 to ntotal)
+      set reply->qual[idx].name = reply->qual[ntotal2].name
+      set reply->qual[idx].description = reply->qual[ntotal2].description
+      set reply->qual[idx].output_dest_cd = reply->qual[ntotal2].output_dest_cd
+      set reply->qual[idx].output_device_cd = reply->qual[ntotal2].output_device_cd
+      set reply->qual[idx].device_type_cd = reply->qual[ntotal2].device_type_cd
+      set reply->qual[idx].device_type = reply->qual[ntotal2].device_type
+      set reply->qual[idx].device_cd = reply->qual[ntotal2].device_cd
+      set reply->qual[idx].device_function_cd = reply->qual[ntotal2].device_function_cd
+      set reply->qual[idx].location_cd = reply->qual[ntotal2].location_cd
+      set reply->qual[idx].location = reply->qual[ntotal2].location
+      set reply->qual[idx].chart_printer_ind = reply->qual[ntotal2].chart_printer_ind
+   endfor
+
+   select into 'nl:'
+   from
+      remote_device rd,
+      remote_device_type rdt,
+      (dummyt dt with seq = value (reply->device_cd))
+   plan dt
+   join rd
+      where expand (idx,
+                    nstart,
+                    nstart + (nsize - 1),
+                    rd.device_cd,
+                    reply->qual[dt.seq]->device_cd)
+   join rdt
+      where rd.remote_dev_type_id = rdt.remote_dev_type_id
+
+   detail
+      index = locateval (num1, 1, ntotal2, rd.device_cd, reply->qual[index]->device_cd)
+      reply->qual[index]->output_device_cd = rdt.output_format_cd
+
+   with nocounter
+END ;
+ 
+ 
+SUBROUTINE select_with_labelprefix (fubar)
+
+   set org_qual = size (reply->org_qual, 5)
+   call echo (build ("Size:", org_qual))
+ 
+   if (org_qual = 0)
+      set stat = alterlist (reply->org_qual, 1)
+      set reply->org_qual[1]->organization_id = 0
+   endif
+
+   set nstart = 1
+
+   ; Prepare reply->org_qual for expand/join using dummyt table dtp
+   set ntotalp2 = size (reply->org_qual, 5)
+   set ntotalp  = ntotalp2 + (nsizep - mod (ntotalp2, nsizep))
+   set stat = alterlist (reply->org_qual, ntotalp)
+   for (idx = ntotalp2 + 1 to ntotalp)
+      set reply->org_qual[idx].organization_id = reply->org_qual[ntotalp2].organization_id
+   endfor
+
+ 
+   select distinct into 'nl:'
+      od.device_cd,
+      od.label_prefix,
+      od.label_program_name,
+      od.output_dest_cd,
+      od.name,
+      od.description
+   from output_dest od,
+     device d,
+     location l,
+     (dummyt dtp with seq = value (org_qual))
+   plan d
+   join dtp
+      where initarray (nstart, evaluate (dtp.seq, 1, 1, nstart + nsizep))
+   join l
+      where expand (idx,
+                    nstart,
+                    nstart + (nsizep - 1),
+                    l.organization_id,
+                    reply->org_qual[dtp.seq]->organization_id,
+                    0.0,
+                    reply->org_qual[dtp.seq]->organization_id)
+         or d.location_cd = 0
+   join od
+      where od.device_cd = d.device_cd
+      and od.label_prefix = request->label_prefix
+   order od.name  ;cnvtupper (od.name)
+ 
+   head report
+      g_count = 0
+      reply->status_data->status = "F"
+ 
+   detail
+      g_count = g_count + 1
+      if ( mod(g_count, 10) = 1 )
+         stat = alterlist (reply->qual, g_count + 9)
+      endif
+ 
+      reply->qual[g_count]->device_cd        = od.device_cd
+      reply->qual[g_count]->output_dest_cd   = od.output_dest_cd
+      reply->qual[g_count]->output_device_cd = od.output_device_cd
+      reply->qual[g_count]->name             = od.name
+      reply->qual[g_count]->description      = od.description
+      reply->qual[g_count]->device_type_cd   = d.device_type_cd
+      reply->qual[g_count]->device_type      = UAR_GET_CODE_MEANING (d.device_type_cd)
+      reply->qual[g_count]->device_function_cd = d.device_function_cd
+      reply->qual[g_count]->location_cd      = d.location_cd
+      reply->qual[g_count]->location         = UAR_GET_CODE_DESCRIPTION (d.location_cd)
+      reply->qual[g_count]->chart_printer_ind = 0
+ 
+   foot report
+      stat = alterlist (reply->qual, g_count)
+ 
+   with nocounter
+
+   set stat = alterlist (reply->org_qual, ntotalp2)
+END ;
+ 
+ 
+SUBROUTINE select_with_labelprogram (fubar)
+ 
+   set org_qual = size (reply->org_qual, 5)
+   call echo (build ("Size:", org_qual))
+ 
+   if (org_qual = 0)
+      set stat = alterlist (reply->org_qual, 1)
+      set reply->org_qual[1]->organization_id = 0
+   endif
+
+   set nstart = 1
+
+   ; Prepare reply->org_qual for expand/join using dummyt table dtp
+   set ntotalp2 = size (reply->org_qual, 5)
+   set ntotalp  = ntotalp2 + (nsizep - mod (ntotalp2, nsizep))
+   set stat = alterlist (reply->org_qual, ntotalp)
+   for (idx = ntotalp2 + 1 to ntotalp)
+      set reply->org_qual[idx].organization_id = reply->org_qual[ntotalp2].organization_id
+   endfor
+
+
+   select distinct into 'nl:'
+      od.device_cd,
+      od.label_prefix,
+      od.label_program_name,
+      od.output_dest_cd,
+      od.name,
+      od.description
+   from output_dest od,
+      device d,
+      location l,
+      (dummyt dtp with seq = value (org_qual))
+   plan d
+   join dtp
+      where initarray (nstart, evaluate (dtp.seq, 1, 1, nstart + nsizep))
+   join l
+      where expand (idx,
+                    nstart,
+                    nstart + (nsizep - 1),
+                    l.organization_id,
+                    reply->org_qual[dtp.seq]->organization_id,
+                    0.0,
+                    reply->org_qual[dtp.seq]->organization_id)
+         or d.location_cd = 0
+   join od
+      where od.device_cd = d.device_cd
+      and od.label_program_name = request->label_program_name
+   order od.name  ;cnvtupper (od.name)
+ 
+   head report
+      g_count = 0
+      reply->status_data->status = "F"
+ 
+   detail
+      g_count = g_count + 1
+      if (mod (g_count, 10) = 1 )
+         stat = alterlist (reply->qual, g_count + 9)
+      endif
+ 
+      reply->qual[g_count]->device_cd        = od.device_cd
+      reply->qual[g_count]->output_dest_cd   = od.output_dest_cd
+      reply->qual[g_count]->output_device_cd = od.output_device_cd
+      reply->qual[g_count]->name             = od.name
+      reply->qual[g_count]->description      = od.description
+      reply->qual[g_count]->device_type_cd   = d.device_type_cd
+      reply->qual[g_count]->device_type      = UAR_GET_CODE_MEANING (d.device_type_cd)
+      reply->qual[g_count]->device_function_cd = d.device_function_cd
+      reply->qual[g_count]->location_cd      = d.location_cd
+      reply->qual[g_count]->location         = UAR_GET_CODE_DESCRIPTION (d.location_cd)
+      reply->qual[g_count]->chart_printer_ind = 0
+ 
+   foot report
+      stat = alterlist(reply->qual, g_count)
+ 
+   with nocounter
+
+   set stat = alterlist (reply->org_qual, ntotalp2)
+END ;
+ 
+ 
+SUBROUTINE select_with_labelprinters (fubar)
+
+   set org_qual = size (reply->org_qual, 5) 
+   call echo (build ("Size:", org_qual))
+
+   if (org_qual = 0)
+      set stat = alterlist (reply->org_qual, 1)
+      set reply->org_qual[1]->organization_id = 0
+   endif
+
+   set nstart = 1
+
+   ; Prepare reply->org_qual for expand/join using dummyt table dtp
+   set ntotalp2 = size (reply->org_qual, 5)
+   set ntotalp  = ntotalp2 + (nsizep - mod (ntotalp2, nsizep))
+   set stat = alterlist (reply->org_qual, ntotalp)
+   for (idx = ntotalp2 + 1 to ntotalp)
+      set reply->org_qual[idx].organization_id = reply->org_qual[ntotalp2].organization_id
+   endfor
+
+ 
+   select distinct into 'nl:'
+      od.device_cd,
+      od.label_prefix,
+      od.label_program_name,
+      od.output_dest_cd,
+      od.name,
+      od.description
+   from output_dest od,
+      device d,
+      location l,
+      (dummyt dtp with seq = value (org_qual))
+   plan d
+   join dtp
+      where initarray (nstart, evaluate (dtp.seq, 1, 1, nstart + nsizep))
+   join l
+      where expand (idx,
+                    nstart,
+                    nstart + (nsizep - 1),
+                    l.organization_id,
+                    reply->org_qual[dtp.seq]->organization_id,
+                    0.0,
+                    reply->org_qual[dtp.seq]->organization_id)
+         or d.location_cd = 0
+   join od
+      where od.device_cd = d.device_cd
+      and (od.label_prefix = request->label_prefix
+          and od.label_program_name = request->label_program_name)
+   order od.name  ;cnvtupper (od.name)
+ 
+   head report
+      g_count = 0
+      reply->status_data->status = "F"
+ 
+   detail
+      g_count = g_count + 1
+
+      if (mod (g_count, 10) = 1 )
+         stat = alterlist (reply->qual, g_count + 9)
+      endif
+ 
+      reply->qual[g_count]->device_cd        = od.device_cd
+      reply->qual[g_count]->output_dest_cd   = od.output_dest_cd
+      reply->qual[g_count]->output_device_cd = od.output_device_cd
+      reply->qual[g_count]->name             = od.name
+      reply->qual[g_count]->description      = od.description
+      reply->qual[g_count]->device_type_cd   = d.device_type_cd
+      reply->qual[g_count]->device_type      = UAR_GET_CODE_MEANING (d.device_type_cd)
+      reply->qual[g_count]->device_function_cd = d.device_function_cd
+      reply->qual[g_count]->location_cd      = d.location_cd
+      reply->qual[g_count]->location         = UAR_GET_CODE_DESCRIPTION (d.location_cd)
+      reply->qual[g_count]->chart_printer_ind = 0
+ 
+   foot report
+      stat = alterlist (reply->qual, g_count)
+ 
+   with nocounter
+
+   set stat = alterlist (reply->org_qual, ntotalp2)
+END ;
+ 
+end go
+
+;Generated by GNU enscript 1.6.4.

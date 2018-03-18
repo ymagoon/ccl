@@ -1,0 +1,287 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Generatetagslabels/BBT_GET_XM_RESULTS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_xm_results.prg
+        Object name:            bbt_get_xm_results
+        Request #:              225103
+
+        Product:                PathNet
+        Product Team:           Blood Bank Transfusion
+        HNA Version:            500
+        CCL Version:            4.0    
+        
+        Program purpose:        Get all product notes for product_id
+
+        Tables read:            xm_results
+        Tables updated:         (none)
+        Executing from:         VB - bbt comment class
+
+        Special Notes:          ?
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer                     Comment                                 *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 06/26/96 Jon Weekes           Initial Release                             *
+;     001 04/05/99 Matt Benson		Changed CV selects to UAR calls     *
+;     002 07/16/13 Gayatri Samala   Fix for CR 1-7027895211,to populate     *
+;									reply structure by qualifying on primary*
+;									accession for the order                 *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_get_xm_results:dba go
+create program bbt_get_xm_results:dba
+
+/*
+record request
+(
+ 1  eventlist[event]
+     2  product_event_id        = f8
+)
+*/
+
+record reply
+(
+ 1  qual[1]
+     2  product_event_id                = f8
+     2  xm_result_value_alpha           = c20
+     2  xm_result_event_prsnl_username  = c20
+     2  xm_result_event_dt_tm           = dq8
+     2  xm_expire_dt_tm                 = dq8
+     2  accession                       = c20
+     2  mnemonic_key_cap                = c50
+%i cclsource:status_block.inc
+)
+
+%i cclsource:bbt_get_code_value.inc    ;001
+
+/*
+ * Set Constants 
+ */
+    set bb_processing_code_set      = 1636
+    set xm_interp_cdf_meaing        = "               "
+    set xm_interp_cdf_meaning       = "HISTRY & UPD"
+    set result_stat_code_set        = 1901
+    set verified_status_cdf_meaning = "               "	     ;001	
+    set corrected_status_cdf_meaning = "               "     ;001
+    set verified_status_cdf_meaning = "VERIFIED"
+    set corrected_status_cdf_meaning = "CORRECTED"
+
+/*
+ * Initialize Global Variables
+ */
+set reply->status_data->status = "F"
+set count1 = 0
+set event_cnt = 0
+set result_cnt = 0
+set xm_interp_cd = 0.0
+set cv_cnt = 0
+set verified_status_cd = 0.0
+set corrected_status_cd = 0.0
+
+#BEGIN_MAIN
+set reply->status_data->status = "I"            ; Incomplete
+
+/* Determine number of events to process */
+set event_cnt = cnvtint(size(request->eventlist, 5))
+
+/* Resize reply to be size of request */
+set stat = alter(reply->qual, event_cnt)
+
+/* Select xm_interp_cd */
+set xm_interp_cd = 0.0
+
+set xm_interp_cd = GET_CODE_VALUE(bb_processing_code_set, xm_interp_cdf_meaning)     ;001
+if (xm_interp_cd = 0.0)								     ;001
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alter(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get xm_interp code_value"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_tag_print_ctrl"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get xm_interp code_value"
+else
+
+    /* Select verified_status_cd */
+    set cv_cnt = 0
+
+    set verified_status_cd = GET_CODE_VALUE(result_stat_code_set, verified_status_cdf_meaning)    ;001
+    set corrected_status_cd = GET_CODE_VALUE(result_stat_code_set, corrected_status_cdf_meaning)  ;001
+    if (verified_status_cd = 0.0								  ;001
+    or corrected_status_cd = 0.0)								  ;001
+        set count1 = count1 + 1
+        if (count1 > 1)
+            set stat = alter(reply->status_data->subeventstatus, count1+1)
+        endif
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[count1]->OperationName = "get verified/corrected status code_value"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_tag_print_ctrl"
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+            = "could not get verified/corrected status code_value"
+    else
+
+        /*
+         * Get crossmatch results 
+         */
+
+        select into "nl:"
+            pe.order_id,
+            pe.bb_result_id,
+            xm.crossmatch_exp_dt_tm,
+            r.result_id,
+            r.task_assay_cd,
+            dta.bb_result_processing_cd,
+            pr.result_value_alpha,
+            re.event_dt_tm,
+            re.event_personnel_id,
+            pnl.username, 
+            aor.accession
+        from
+            (dummyt d with seq = value(event_cnt)),
+            product_event pe,
+            crossmatch xm,
+            result r,
+            discrete_task_assay dta,
+            perform_result pr,
+            result_event re,
+            prsnl pnl,
+            (dummyt d_aor with seq = 1),
+            accession_order_r aor
+        plan    d           
+        join    pe      where   pe.product_event_id                 = request->eventlist[d.seq]->product_event_id
+        join    xm      where   xm.product_event_id                 = pe.product_event_id
+        join    r       where   r.bb_result_id                      = pe.bb_result_id
+                                  and r.order_id                    = pe.order_id
+        join    dta     where   dta.task_assay_cd                   = r.task_assay_cd
+                                  and dta.bb_result_processing_cd   = xm_interp_cd
+        join    pr      where   pr.result_id                        = r.result_id
+                                  and (pr.result_status_cd          = verified_status_cd
+                                        or pr.result_status_cd      = corrected_status_cd)
+        join    re      where   re.result_id                        = r.result_id
+                                  and re.perform_result_id          = pr.perform_result_id
+                                  and re.event_type_cd              = pr.result_status_cd
+        join    pnl     where   pnl.person_id                       = re.event_personnel_id
+        join    d_aor   where   d_aor.seq                           = 1
+          join  aor     where   aor.order_id                        = pe.order_id and aor.primary_flag = 0
+
+        detail
+            result_cnt = result_cnt + 1
+            reply->qual[d.seq]->product_event_id                    = pe.product_event_id
+            reply->qual[d.seq]->xm_result_value_alpha               = pr.result_value_alpha
+            reply->qual[d.seq]->xm_result_event_prsnl_username      = pnl.username
+            reply->qual[d.seq]->xm_result_event_dt_tm               = re.event_dt_tm
+            reply->qual[d.seq]->xm_expire_dt_tm                     = xm.crossmatch_exp_dt_tm
+            reply->qual[d.seq]->accession                           = aor.accession
+            reply->qual[d.seq]->mnemonic_key_cap                    = dta.mnemonic_key_cap
+
+        with    nocounter, outerjoin(d_aor)
+                        
+        if (curqual = 0)
+            set count1 = count1 + 1
+            if (count1 > size(reply->status_data->subeventstatus,5))
+                set stat = alter(reply->status_data, count1)
+            endif
+            set reply->status_data->subeventstatus[count1]->OperationName = "get xm_results"
+            set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+            set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_xm_results"
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue  = ""
+        endif       ; endif curqual = 0 xm_results
+    endif           ; endif curqual = 0 get verified_status_cd
+endif               ; endif curqual = 0 get xm_interp_cd
+go to EXIT_SCRIPT
+#END_MAIN
+    
+
+#EXIT_SCRIPT
+
+if (reply->status_data->status != "F")
+    set count1 = count1 + 1
+    if (count1 > size(reply->status_data->subeventstatus,5))
+        set stat = alter(reply->status_data->subeventstatus, count1)
+    endif
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_xm_results"
+    if (result_cnt = event_cnt)
+        set reply->status_data->status = "S"    ; Success
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue  
+            = "crossmatch results found for all crossmatch events"
+        set reply->status_data->subeventstatus[count1]->OperationName = "Success"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "S"
+    else
+        if (result_cnt > 0)
+            set reply->status_data->status = "P"    ; Partial Success
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue  
+                = "WARNING:  Crossmatch results not fould for all crossmatch events"
+            set reply->status_data->subeventstatus[count1]->OperationName = "Zero"
+            set reply->status_data->subeventstatus[count1]->OperationStatus = "Z"
+        else
+            set reply->status_data->status = "Z"    ; Zero Success
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue  
+                = "WARNING:  No crossmatch results found for any crossmatch events"
+            set reply->status_data->subeventstatus[count1]->OperationName = "Zero"
+            set reply->status_data->subeventstatus[count1]->OperationStatus = "Z"
+        endif
+    endif
+endif
+
+;call echo(build("reply->status_data->status =", reply->status_data->status))
+;call echo(build("count1 =", count1))
+;for (x = 1 to count1)
+;    call echo(reply->status_data->subeventstatus[x]->OperationName)
+;    call echo(reply->status_data->subeventstatus[x]->OperationStatus)
+;    call echo(reply->status_data->subeventstatus[x]->TargetObjectName)
+;    call echo(reply->status_data->subeventstatus[x]->TargetObjectValue)
+;endfor
+;
+;call echo("     ")
+;call echo(build("xm_interp_cd =", xm_interp_cd))
+;call echo(build("verified_status_cd = ", verified_status_cd))
+;call echo(build("corrected_status_cd = ", corrected_status_cd))
+;
+;call echo("     ")
+;call echo(build("event_cnt =", event_cnt))
+;call echo("     ")
+;for (x = 1 to event_cnt)
+;    call echo(build(
+;        "product_event_id:", reply->qual[x]->product_event_id, "/",
+;        "result_value_alpha:", reply->qual[x]->xm_result_value_alpha, "/",
+;        "result_event_prsnl_username:", reply->qual[x]->xm_result_event_prsnl_username, "/",
+;        "result_event_dt_tm:", reply->qual[x]->xm_result_event_dt_tm, "/",
+;        "expire_dt_tm:", reply->qual[x]->xm_expire_dt_tm, "/",
+;        "accession:", reply->qual[x]->accession, "/",
+;        "procedure mnemonic_key_cap:", reply->qual[x]->mnemonic_key_cap))
+;endfor
+
+end go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,393 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/RESULTENTRYFORBLOODBANK/BBT_GET_PRODUCT_ORDERS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_product_orders.prg
+        Object name:            bbt_get_product_orders
+        Request #:              225191
+
+        Product:                Blood Bank
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load order, task assay, result information
+                                and cells for a given product test for result entry.
+
+        Tables read:            bb_order_phase
+                                code_value
+                                phase_group
+                                orc_resource_list
+                                orders
+                                service_directory
+                                profile_task_r
+                                bb_order_cell
+
+        Tables updated:         None
+        Executing from:
+
+        Special Notes:
+
+******************************************************************************/
+
+;~DB~**************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG                *
+;    **************************************************************************
+;    *                                                                        *
+;    *Mod Date     Engineer             Comment                               *
+;    *--- -------- -------------------- --------------------------------------*
+;    *000 10/16/96 Yvonne Klipfel       Initial Release                       *
+;    *001 11/14/97 Jon Weekes           Modified to return o.updt_cnt         *
+;    *002 03/03/98 Mike Goings          Return Donor Product Activity Type    *
+;    *003 05/09/02 Chris Noe            Changes for 0101945, multiple product *
+;                                       abo/rh orders loading in Result Entry.*
+;    *004 10/18/02 Christi Ditmars      Correct defect CAPEP00025891 error    *
+;                                       occurs when code_values were not found*
+;    *005 03/26/03 Chris Noe            Added synonym_id and oe_format_id     *
+;                                       to the reply.                         *
+;    *006 01/12/09 Ronda Zheng          Removed donor code.                   *
+;    *007 11/29/10 Archita S            Changes included as per the           *
+;                                       CR# 1-4470464901
+;~DE~**************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program BBT_GET_PRODUCT_ORDERS:dba go
+create program BBT_GET_PRODUCT_ORDERS:dba
+
+/***********************************************************************
+* Request Record                                                       *
+***********************************************************************/
+/*
+record request
+(
+    1 productid         = f8
+    1 cat_cnt           = i4
+    1 catlist[*]
+        2 catalog_cd    = f8
+        2 sequence      = i4
+)
+*/
+
+/***********************************************************************
+* Reply Record                                                         *
+***********************************************************************/
+record reply
+(
+    1 qual[*]
+        2 order_id                  = f8
+        2 order_mnemonic            = vc
+        2 catalog_cd                = f8
+        2 catalog_type_cd           = f8
+        2 order_status_cd           = f8
+        2 order_status_disp         = vc
+        2 order_status_mean         = c12
+        2 updt_cnt                  = i4
+        2 bb_processing_cd          = f8
+        2 bb_processing_disp        = vc
+        2 bb_processing_mean        = c12
+        2 bb_default_phases_cd      = f8
+        2 phase_grp_cd              = f8
+        2 phase_grp_disp            = vc
+        2 service_resource_cd       = f8
+        2 service_resource_disp     = vc
+        2 activity_type             = c12
+        2 cell_cnt                  = i4
+        2 cells[*]
+            3 order_id              = f8
+            3 order_cell_id         = f8
+            3 cell_cd               = f8
+            3 cell_disp             = vc
+            3 cell_mean             = c12
+            3 product_id            = f8
+            3 bb_result_id          = f8
+            3 order_cell_updt_cnt   = i4
+        2 assays_cnt                = i4
+        2 assays[*]
+            3 task_assay_cd         = f8
+            3 sequence              = i4
+            3 pending_ind           = i2
+            3 order_phase_id        = f8
+        2 order_dt_tm               = dq8
+        2 order_tech_id             = f8
+        2 order_tech_username       = c50
+        2 synonym_id                = f8
+        2 oe_format_id              = f8
+%i cclsource:status_block.inc
+)
+
+/***********************************************************************
+* Script                                                               *
+***********************************************************************/
+#Script
+
+    set CV_REQUIRED_RECS                = 3
+    declare cv_cnt                      = i4
+
+    set ACTIVITY_TYPE_CODESET           = 106
+    set ACTIVITY_TYPE_BB_CDF            = "BB"
+    set ORDER_STATUS_CODESET            = 6004
+    set ORDER_STATUS_CANCELED_CDF       = "CANCELED"
+
+    declare order_status_canceled_cd    = f8
+    declare bb_activity_cd              = f8
+    declare q_cnt                       = i4
+    declare a_cnt                       = i4
+    declare oc_cnt                      = i4
+
+    DECLARE code_set                    = I4 WITH NOCONSTANT(0)
+    DECLARE cdf_meaning                 = C12 WITH NOCONSTANT(fillstring(12," "))
+    DECLARE sSCRIPT_NAME            	= C22 WITH CONSTANT("BBT_GET_PRODUCT_ORDERS")
+    DECLARE code_value                  = F8 WITH NOCONSTANT(0.0)
+    declare order_action_ordered_cd          = f8 with NOCONSTANT(0.0)
+
+    set reply->status_data.status = "F"
+    /***********************************************************************
+    * Select the order status codes to avoid retrieving                    *
+    ***********************************************************************/
+    set cv_cnt = 0
+
+    ;Get 'Ordered' Order Action
+    set code_value = 0.0
+    set cdf_meaning                     = "ORDER"
+    set code_set                        = 6003
+    execute cpm_get_cd_for_cdf
+    if (code_value > 0)
+        set order_action_ordered_cd = code_value
+        set cv_cnt = cv_cnt + 1
+    else
+        set reply->status_data->subeventstatus[1]->OperationName = "get order action code_value"
+        set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectName = "bbt_get_current_order_result"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = "could not get order action code_value"
+        go to EXIT_SCRIPT
+    endif
+
+    ;Get 'Cancelled' Order Status
+    set code_value  = 0.0
+    set cdf_meaning = ORDER_STATUS_CANCELED_CDF
+    set code_set    = ORDER_STATUS_CODESET
+    execute cpm_get_cd_for_cdf
+    if (code_value > 0)
+        set order_status_canceled_cd = code_value
+        set cv_cnt = cv_cnt + 1
+    else
+        set reply->status_data->subeventstatus[1]->OperationName = "get cancel order status code_value"
+        set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectName = "bbt_get_current_order_result"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = "could not get order status cancel code_value"
+        go to EXIT_SCRIPT
+    endif
+
+
+    ;Get BB Activtity type
+    set code_value  = 0.0
+    set cdf_meaning = ACTIVITY_TYPE_BB_CDF
+    set code_set    = ACTIVITY_TYPE_CODESET
+    execute cpm_get_cd_for_cdf
+    if (code_value > 0)
+        set bb_activity_cd = code_value
+        set cv_cnt = cv_cnt + 1
+    else
+        set reply->status_data->subeventstatus[1]->OperationName = "get bb activity type code_value"
+        set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectName = "bbt_get_current_order_result"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = "could not get bb activity code_value"
+        go to EXIT_SCRIPT
+    endif
+
+
+    ;* Verify that all required code value records were read.
+    if (cv_cnt != CV_REQUIRED_RECS)
+        go to EXIT_SCRIPT
+    endif
+
+    /***********************************************************************
+    * Select order information based on accession                          *
+    ***********************************************************************/
+    select into "nl:"
+        cat_seq
+            = if (request->cat_cnt > 0)
+                request->catlist[d_cat.seq]->sequence
+              else
+                0
+              endif,
+        o.seq,
+        o.order_id,
+        sd.bb_processing_cd,
+        orl.service_resource_cd,
+        d1.seq,
+        op.order_id,
+        join_path = decode(pg.seq, "1", ptr.seq, "2", "0"),
+        pg.task_assay_cd,
+        d2.seq,
+        ptr.task_assay_cd,
+        d3.seq,
+        cell_yn = decode(oc.seq, "Y", "N"),
+        cv.display
+
+    from
+        (dummyt d_cat with seq = value(request->cat_cnt)),
+        orders o,
+        service_directory sd,
+        orc_resource_list orl,
+        dummyt d1,
+        bb_order_phase op,
+        phase_group pg,
+        dummyt d2,
+        profile_task_r ptr,
+        dummyt d3,
+        bb_order_cell oc,
+        code_value cv,
+        order_action oa,
+        prsnl p
+
+    plan d_cat
+    join o where o.product_id = request->productid and o.product_id != 0
+                 and (o.activity_type_cd+0  = bb_activity_cd) 
+                 and ((request->cat_cnt = 0)
+                       or (request->cat_cnt > 0
+                 and o.catalog_cd+0 = request->catlist[d_cat.seq]->catalog_cd))
+                 and o.active_ind = 1
+    join sd where sd.catalog_cd = o.catalog_cd and sd.catalog_cd != 0
+                 and sd.active_ind = 1
+    join orl where orl.catalog_cd = o.catalog_cd and orl.catalog_cd != 0
+                 and orl.primary_ind = 1
+                 and orl.active_ind = 1
+    join oa where oa.order_id = o.order_id
+                 and oa.action_type_cd = order_action_ordered_cd
+    join p where p.person_id = oa.action_personnel_id
+    join (d1 where d1.seq = 1
+        join (op where op.order_id = o.order_id
+            join pg where (pg.phase_group_cd = op.phase_grp_cd
+                           and pg.active_ind = 1))
+        orjoin (d2 where d2.seq = 1
+            join ptr where ptr.catalog_cd = o.catalog_cd and ptr.active_ind = 1))
+    orjoin (d3 where d3.seq = 1
+        join oc where oc.order_id = o.order_id
+        join cv where cv.code_value = oc.cell_cd and cv.active_ind = 1
+                and cv.code_value > 0 and cv.code_set = 1603
+                and (cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+    order
+        o.order_id
+
+    head report
+        stat = alterlist(reply->qual, 2)
+        q_cnt = 0
+        a_cnt = 0
+        oc_cnt = 0
+
+    head o.order_id
+    if(o.order_status_cd != order_status_canceled_cd)
+        q_cnt = q_cnt + 1
+        /* determine if array resize is necessary */
+        if (mod(q_cnt,2) = 1 and q_cnt != 1)
+            stat = alterlist(reply->qual, q_cnt + 2)
+        endif
+
+        reply->qual[q_cnt].activity_type = ACTIVITY_TYPE_BB_CDF
+        reply->qual[q_cnt].order_id = o.order_id
+        reply->qual[q_cnt].order_mnemonic = o.order_mnemonic
+        reply->qual[q_cnt].catalog_cd = o.catalog_cd
+        reply->qual[q_cnt].catalog_type_cd = o.catalog_type_cd
+        reply->qual[q_cnt].order_status_cd = o.order_status_cd
+        reply->qual[q_cnt].updt_cnt = o.updt_cnt                            ; 001
+        reply->qual[q_cnt].bb_processing_cd = sd.bb_processing_cd
+        reply->qual[q_cnt].bb_default_phases_cd = sd.bb_default_phases_cd
+        reply->qual[q_cnt].phase_grp_cd = op.phase_grp_cd
+        reply->qual[q_cnt].service_resource_cd = orl.service_resource_cd
+        reply->qual[q_cnt].order_dt_tm = oa.action_dt_tm
+        reply->qual[q_cnt].order_tech_id = oa.action_personnel_id
+        reply->qual[q_cnt].order_tech_username = p.username
+        reply->qual[q_cnt].synonym_id = o.synonym_id
+        reply->qual[q_cnt].oe_format_id = o.oe_format_id 
+        oc_cnt = 0
+        a_cnt = 0
+     endif
+    detail
+        /* determine if a cell is associated with the order */
+     if(o.order_status_cd != order_status_canceled_cd)
+        if (cell_yn = "Y")
+            oc_cnt = oc_cnt + 1
+            stat = alterlist(reply->qual[q_cnt].cells, oc_cnt)
+            reply->qual[q_cnt].cell_cnt = oc_cnt
+            /* stored at this level in case a cell does exist but no results exist */
+            reply->qual[q_cnt].cells[oc_cnt].order_id = o.order_id
+            reply->qual[q_cnt].cells[oc_cnt].order_cell_id = oc.order_cell_id
+            reply->qual[q_cnt].cells[oc_cnt].cell_cd = oc.cell_cd
+            reply->qual[q_cnt].cells[oc_cnt].cell_disp = cv.display
+            reply->qual[q_cnt].cells[oc_cnt].cell_mean = cv.cdf_meaning
+            reply->qual[q_cnt].cells[oc_cnt].product_id = oc.product_id
+            reply->qual[q_cnt].cells[oc_cnt].bb_result_id = oc.bb_result_id
+            reply->qual[q_cnt].cells[oc_cnt].order_cell_updt_cnt = oc.updt_cnt
+        endif
+
+        /* determine if a task assay exists for the order */
+        if (join_path = "1" or
+            join_path = "2")
+
+            a_cnt = a_cnt + 1
+            stat = alterlist(reply->qual[q_cnt].assays, a_cnt)
+
+            reply->qual[q_cnt].assays_cnt = a_cnt
+            if (join_path = "2")
+                reply->qual[q_cnt].assays[a_cnt].task_assay_cd = ptr.task_assay_cd
+                reply->qual[q_cnt].assays[a_cnt].order_phase_id = 0
+                reply->qual[q_cnt].assays[a_cnt].sequence = ptr.sequence
+                reply->qual[q_cnt].assays[a_cnt].pending_ind = ptr.pending_ind
+            endif
+            if (join_path = "1")
+                reply->qual[q_cnt].assays[a_cnt].task_assay_cd = pg.task_assay_cd
+                reply->qual[q_cnt].assays[a_cnt].order_phase_id = op.order_phase_id
+                reply->qual[q_cnt].assays[a_cnt].sequence = pg.sequence
+                reply->qual[q_cnt].assays[a_cnt].pending_ind = pg.required_ind
+            endif
+        endif
+     endif
+    foot o.order_id
+        row+0
+
+    with
+        nocounter,
+        outerjoin = d1,
+        outerjoin = d2,
+        outerjoin = d3,
+        ORAHINTCBO("index(O XIF886ORDERS)")
+
+    /***********************************************************************
+    * Resize reply record                                                  *
+    ***********************************************************************/
+
+    #Resize_Reply
+        if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+        else
+            set reply->status_data.status = "Z"    ;Zero
+            set q_cnt = 1
+        endif
+        set stat = alterlist(reply->qual, q_cnt)
+#EXIT_SCRIPT
+
+end ;End script
+go
+
+;Generated by GNU enscript 1.6.4.

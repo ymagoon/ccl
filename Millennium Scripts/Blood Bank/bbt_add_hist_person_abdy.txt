@@ -1,0 +1,419 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBT_FOREIGN_SYSTEM_UPLOAD/BBT_ADD_HIST_PERSON_ABDY.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       BBT_ADD_HIST_PERSON_ABDY.PRG
+        Object name:            bbt_add_hist_person_abdy
+        Request #:              225445
+
+        Product:                Blood Bank Transfusion
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Update the person's historical antibody to the
+                                person_antibody table (from history through HL7
+                                messages)
+
+        Tables read:            N/A
+
+        Tables updated:         PERSON_ANTIBODY
+
+        Executing from:
+
+        Special Notes:          N/A
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 10/20/97 Lisa Grayson         Initial Release                     *
+;     002 12/28/98 David Hall           Major rewrite.                      *
+;     003 05/29/01 Doug Saus			Rewrite								*
+;	  004 10/25/05 Jeff Wain			Remove formating of seqn variable	*
+;										to allow for large sequences		*
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_add_hist_person_abdy:dba go
+create program bbt_add_hist_person_abdy:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+        /*
+   contributor_system_cd  [Double]
+   debug_ind             [Short]
+   qual                  [List]
+      person_id             [Double]
+      encntr_id             [Double]
+      antibody_cd           [Double]
+      active_status_dt_tm   [Date]
+	  antibody_prsnl_id		[Double]
+	  antibody_dt_tm		[Date]
+   active_status_prsnl_id	[Double]
+        */
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+record reply
+(
+%i cclsource:status_block.inc
+)
+
+/*************************/
+/* Variable declarations */
+/*************************/
+declare SCRIPT_NAME = c40 with public, constant("bbt_add_hist_person_abdy") ;name of this script
+declare CODE_SET = i4 with public, constant(1613)
+declare i = i4 with private, noconstant(0) ;loop counter
+declare exists_ind = i2 with public, noconstant(0) ;tells if active antibody for current contrib sys code exists already
+declare item_prsnl_id = f8 with private, noconstant(0.0) ;holds prsnl_id for current item
+declare item_dt_tm = q8 with private, noconstant(cnvtdatetime(curdate,curtime3)) ;holds dt_tm for current item
+
+
+/****************/
+/* Main Program */
+/****************/
+
+;validate contributor system cd
+if (not request->contributor_system_cd > 0.0)
+	call fill_out_status_data("F"
+							  , "Validate contrib_sys_cd"
+							  , "Contributor system code not > 0")
+	go to EXIT_SCRIPT
+endif
+
+for (i = 1 to size(request->qual,5))
+	;validate current item
+	if (perform_data_validation(request->qual[i].person_id
+								, request->qual[i].encntr_id
+								, request->qual[i].antibody_cd
+								, CODE_SET) = 0)
+		go to EXIT_SCRIPT
+	endif
+
+	;set current item's prsnl_id
+	if (request->qual[i].antibody_prsnl_id > 0.0)
+		set item_prsnl_id = request->qual[i].antibody_prsnl_id
+	else
+		set item_prsnl_id = request->active_status_prsnl_id
+	endif
+
+	;set current item's dt_tm
+	if (request->qual[i].antibody_dt_tm > 0)
+		set item_dt_tm = request->qual[i].antibody_dt_tm
+	else
+		set item_dt_tm = cnvtdatetime(curdate,curtime3)
+	endif
+
+
+	;see if item already exists on table with same contributor system cd
+	if (check_if_attribute_exists(request->qual[i].person_id
+									, request->qual[i].antibody_cd
+									, request->contributor_system_cd) = 0)
+		go to exit_script
+	endif
+
+	;item doesn't already exist, write new active
+	;if item already exists, do nothing, go on to next item
+	if (exists_ind = 0)
+		if (insert_attribute(request->qual[i].person_id
+							, request->qual[i].encntr_id
+							, request->qual[i].antibody_cd
+							, 1
+							, item_dt_tm
+							, item_prsnl_id
+							, request->contributor_system_cd) = 0)
+			go to exit_script
+		endif
+	endif
+
+endfor
+
+
+go to exit_script
+/***********************************************/
+/*Function Declarations/Subroutine Definitions */
+/***********************************************/
+declare perform_data_validation(person_id_new = f8
+								, encounter_id = f8
+								, attribute_cd = f8
+								, code_set = i4) = i2
+subroutine perform_data_validation(	person_id_new
+									, encounter_id
+									, attribute_cd
+									, code_set)
+/*
+This routine will perform all data validation for current item.  Return 1 if successful, 0 if not
+*/
+	;validate person id
+	select into "nl:"
+		p.person_id
+	from
+		person p
+	where p.person_id = person_id_new
+	    and p.person_id > 0.0
+
+	with nocounter
+
+	;check for script errors
+	if (check_for_ccl_error("Select on person") = 0)
+		return(0)
+	else
+		if (curqual = 0)
+			;person id not valid
+			call fill_out_status_data("F", "Validate person_id"
+									, concat("Person "
+											, trim(cnvtstring(person_id_new, 32, 0))
+											, " does not exist on person table"))
+									
+			return(0)
+		endif
+	endif
+
+	;validate encounter_id if > 0
+	if (encounter_id > 0.0)
+		select into "nl:"
+			e.encntr_id
+		from
+			encounter e
+		where e.encntr_id = encounter_id
+		    and e.encntr_id > 0.0
+			and e.person_id = person_id_new
+		with nocounter
+
+		;check for script errors
+		if (check_for_ccl_error("Select on encounter") = 0)
+			return(0)
+		else
+			if (curqual = 0)
+				;encounter id not valid
+				call fill_out_status_data("F", "Validate encntr_id"
+										, concat("Encntr_id "
+												, trim(cnvtstring(encounter_id, 32, 0))
+												, " for person "
+												, trim(cnvtstring(person_id_new, 32, 0))
+												, " does not exist on encounter table"))
+				return(0)
+			endif
+		endif
+	endif
+
+	;check code set of attribute_cd
+	select into "nl:"
+		cv.code_value
+	from
+		code_value cv
+	where cv.code_value = attribute_cd
+	    and cv.code_set = code_set
+	    and cv.code_value > 0.0
+
+	with nocounter
+
+	;check for script errors
+	if (check_for_ccl_error("Select on code_value") = 0)
+		return(0)
+	else
+		if (curqual = 0)
+			;code value not valid
+			call fill_out_status_data("F", "Validate attribute_cd"
+								, concat("antibody_cd "
+										, trim(cnvtstring(attribute_cd, 32, 0))
+										, " does not exist on code_set "
+										, trim(cnvtstring(code_set))))
+			return(0)
+		endif
+	endif
+
+
+	;successful
+	return(1)
+
+end
+declare check_if_attribute_exists(person_id_new = f8
+								, attribute_cd = f8
+								, contributor_system_cd_new = f8) = i2
+subroutine check_if_attribute_exists(person_id_new
+								, attribute_cd
+								, contributor_system_cd_new)
+/* 
+This subroutine will check to see if the passed in attribute_cd already exists
+as active and with contributor_system_cd.  If yes, sets exists_ind = 1
+*/
+
+	set exists_ind = 0
+	;check code set of attribute_cd
+	select into "nl:"
+		pa.antibody_cd
+	from
+		person_antibody pa
+	where pa.antibody_cd = attribute_cd
+		and pa.person_id = person_id_new
+	    and pa.antibody_cd > 0.0
+		and pa.active_ind = 1
+	    and pa.contributor_system_cd = contributor_system_cd_new
+
+	detail
+		exists_ind = 1
+	with nocounter
+
+	;check for script errors
+	if (check_for_ccl_error("Select on person_antibody") = 0)
+		return(0)
+	else
+		return(1)
+	endif
+
+
+end
+
+declare insert_attribute(person_id_new = f8
+						, encounter_id = f8
+						, attribute_cd = f8
+						, active_ind_new = i2
+						, active_status_dt_tm = dq8
+						, active_status_prsnl_id_new = f8
+						, contributor_system_cd_new = f8) = i2
+subroutine insert_attribute(person_id_new
+						, encounter_id
+						, attribute_cd
+						, active_ind_new
+						, active_status_dt_tm
+						, active_status_prsnl_id_new
+						, contributor_system_cd_new)
+/* This routine will insert a new row to the person_antibody table */
+	declare new_pathnet_id = f8 with noconstant(0.0)
+
+	;get new id
+	select into "nl:"
+		seqn        = seq(pathnet_seq,nextval)
+	from
+		dual
+	detail
+		 new_pathnet_id        = seqn
+	with format, nocounter
+
+	;insert into person antibody
+	insert into person_antibody pa
+
+		set pa.person_antibody_id         = new_pathnet_id
+			, pa.person_id                = person_id_new
+			, pa.encntr_id                = encounter_id
+			, pa.antibody_cd              = attribute_cd
+			, pa.active_ind               = active_ind_new
+			, pa.active_status_cd         = if (active_ind_new = 1)
+												reqdata->active_status_cd
+										  	else
+										  		reqdata->inactive_status_cd
+										  	endif
+			, pa.active_status_dt_tm      = cnvtdatetime(active_status_dt_tm)
+			, pa.active_status_prsnl_id   = active_status_prsnl_id_new
+			, pa.updt_cnt                 = 0
+			, pa.updt_dt_tm               = cnvtdatetime(curdate, curtime3)
+			, pa.updt_id                  = ReqInfo->updt_id
+			, pa.updt_task                = ReqInfo->updt_task
+			, pa.updt_applctx             = ReqInfo->updt_applctx
+			, pa.contributor_system_cd    = contributor_system_cd_new
+	with nocounter
+
+	;check for script errors
+	if (check_for_ccl_error("Insert person_antibody") = 0)
+		return(0)
+	else
+		if (curqual = 0)
+			;code value not valid
+			call fill_out_status_data("F", "Insert person_antibody"
+					, concat("Unable to insert antibody "
+							, trim(cnvtstring(attribute_cd, 32, 0))
+							, " for person "
+							, trim(cnvtstring(person_id_new, 32, 0))))
+			return(0)
+		endif
+	endif
+
+	return(1)
+
+end
+
+declare check_for_ccl_error(target_object_name = c25) = i2
+subroutine check_for_ccl_error(target_object_name)
+/*
+This routine will check for any ccl errors from the most recent select/insert/update.
+Return 1 if successful, 0 if not.
+*/
+	declare error_msg = c132 with private, noconstant(FILLSTRING(132," "))
+	declare new_error = c132 with private, noconstant(FILLSTRING(132," "))
+	declare error_ind = i4 with private, noconstant(0) ;
+
+	set error_ind = ERROR(new_error, 0)
+	if (error_ind != 0)
+		while (error_ind != 0)
+			set error_msg = concat(error_msg, " ", new_error)
+			set error_ind = ERROR(new_error, 0)
+		endwhile
+		call fill_out_status_data("F", target_object_name, error_msg)
+		return(0)
+	else
+		return(1)
+	endif
+end
+
+
+declare fill_out_status_data(status = c1
+								,target_object_name = c25
+								, target_object_value = vc) = NULL
+subroutine fill_out_status_data(status
+								,target_object_name
+								, target_object_value)
+/*
+This routine will fill out the status block with parameters passed.
+*/
+	set reply->status_data->status = status
+    set reply->status_data.subeventstatus[1].OperationStatus = status
+	set reply->status_data.subeventstatus[1].OperationName = SCRIPT_NAME
+    set reply->status_data.subeventstatus[1].TargetObjectName = target_object_name
+    set reply->status_data.subeventstatus[1].TargetObjectValue = target_object_value
+end
+
+#EXIT_SCRIPT
+
+
+if (reply->status_data->status = "F")
+    set reqinfo->commit_ind = 0
+else
+     set reply->status_data->status = "S"
+     set reqinfo->commit_ind = 1
+endif
+
+if (request->debug_ind = 1)
+	call echorecord(request)
+	call echorecord(reply)
+endif
+
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

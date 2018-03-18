@@ -1,0 +1,587 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBT_FOREIGN_SYSTEM_UPLOAD/BBT_ADD_HIST_PERSON_COMMENTS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       BBT_ADD_HIST_PERSON_COMMENTS.PRG
+        Object name:            bbt_add_hist_person_comments
+        Request #:              225598
+
+        Product:                Blood Bank Transfusion
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Update the person's historical comments to the
+                                blood_bank_comment table (from history through HL7
+                                messages)
+
+        Tables read:            N/A
+
+        Tables updated:         BLOOD_BANK_COMMENT
+
+        Executing from:
+
+        Special Notes:          N/A
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 12/06/98 David Hall           Initial Release                     *
+;     002 05/25/01 Doug Saus			Rewrite								*
+;	  003 10/25/05 Jeff Wain			Removed formatting of seqn variable *
+;										to allow for large sequences		*
+;     004 04/02/07 Tom Brecht           Corrected CR 1-1023851281           *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+	drop program bbt_add_hist_person_comments:dba go
+	create program bbt_add_hist_person_comments:dba
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+	record reply
+	(
+%I CCLSOURCE:STATUS_BLOCK.INC
+	)
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+
+/*
+[request]
+   contributor_system_cd  [Double]
+   debug_ind              [Short]
+   qual                   [List]
+      person_id             [Double]
+      comment               [String: Variable]
+      active_status_dt_tm   [Date]
+      comment_prsnl_id		[Double]
+      comment_dt_tm			[Date]
+      comment_append_ind	[Short]
+   active_status_prsnl_id [Double]
+*/
+
+/*************************/
+/* Variable declarations */
+/*************************/
+declare SCRIPT_NAME = c40 with public, constant("bbt_add_person_comments") ;name of this script
+declare new_long_text_id = f8 with public, noconstant(0.0)
+declare long_text_id_new = f8 with public, noconstant(0.0)
+declare bb_comment_id_new = f8 with public, noconstant(0.0)
+declare active_exists_ind = i2 with public, noconstant(0)
+declare i = i4 with public, noconstant(0) ;loop counter
+declare item_prsnl_id = f8 with private, noconstant(0.0) ;holds prsnl_id for current item
+declare item_dt_tm = q8 with private, noconstant(cnvtdatetime(curdate,curtime3)) ;holds dt_tm for current item
+declare bb_comment_updt_cnt = i4 with public, noconstant(0)
+declare long_text_updt_cnt = i4 with public, noconstant(0)
+declare NEW_LINE = c2 with public, constant(concat(char(13),char(11)))
+
+record comment
+(
+	1 existing_comment = vc
+	1 new_comment = vc
+)
+
+/****************/
+/* Main Program */
+/****************/
+if (not request->contributor_system_cd > 0.0)
+	call fill_out_status_data("F"
+				, "Validate contrib_sys_cd"
+				, "Validation of contributor system code failed - Contributor system code not > 0")
+	go to EXIT_SCRIPT
+endif
+
+
+for (i = 1 to size(request->qual,5))
+	set comment->existing_comment = " "
+	set comment->new_comment = " "
+	;validate data
+	if (perform_data_validation(request->qual[i].person_id
+								, request->qual[i].comment) = 0)
+		go to EXIT_SCRIPT
+	endif
+
+	;set current item's prsnl_id
+	if (request->qual[i].comment_prsnl_id > 0.0)
+		set item_prsnl_id = request->qual[i].comment_prsnl_id
+	else
+		set item_prsnl_id = request->active_status_prsnl_id
+	endif
+
+	;set current item's dt_tm
+	if (request->qual[i].comment_dt_tm > 0)
+		set item_dt_tm = request->qual[i].comment_dt_tm
+	else
+		set item_dt_tm = cnvtdatetime(curdate,curtime3)
+	endif
+
+	if (get_active_comment(request->qual[i].person_id) = 0)
+		go to exit_script
+	endif
+	if (active_exists_ind = 1)
+		;inactivate old comment
+		if (update_bb_comment(bb_comment_id_new
+								, bb_comment_updt_cnt
+								, long_text_id_new
+								, long_text_updt_cnt
+								, 0
+								, item_prsnl_id
+								, item_dt_tm) = 0)
+			go to exit_script
+		endif
+		;add new comment on to old comment
+		if (request->comment_append_ind = 1)
+			;add new comment to end of existing comment
+			set comment->new_comment = concat(comment->existing_comment
+										, NEW_LINE
+										, NEW_LINE
+										,request->qual[i].comment)
+		else
+			;add new comment to beginning of existing comment
+			set comment->new_comment = concat(request->qual[i].comment
+										, NEW_LINE
+										, NEW_LINE
+										,comment->existing_comment)
+		endif
+		if (insert_bb_comment(request->qual[i].person_id
+							, 0
+							, request->contributor_system_cd
+							, item_prsnl_id
+							, item_dt_tm) = 0)
+			go to exit_script
+		endif
+	else
+		;write new comment
+		if (insert_bb_comment(request->qual[i].person_id
+							, i
+							, request->contributor_system_cd
+							, item_prsnl_id
+							, item_dt_tm) = 0)
+			go to exit_script
+		endif
+	endif
+
+endfor
+
+go to exit_script
+/* End Main Program */
+
+/***********************************************/
+/*Function Declarations/Subroutine Definitions */
+/***********************************************/
+
+declare update_bb_comment(bb_comment_id_new = f8
+							, bb_comment_updt_cnt = i4
+							, long_text_id_new = f8
+							, long_text_updt_cnt = i4
+							, active_ind_new = i2
+							, active_status_prsnl_id_new = f8
+							, active_status_dt_tm = dq8) = i2
+subroutine update_bb_comment(bb_comment_id_new
+							, bb_comment_updt_cnt
+							, long_text_id_new
+							, long_text_updt_cnt
+							, active_ind_new
+							, active_status_prsnl_id_new
+							, active_status_dt_tm)
+/* This routine will update the blood bank comment and long text rows given */
+	select into "nl:"
+		bbc.bb_comment_id
+	from
+		blood_bank_comment bbc
+	where bbc.bb_comment_id = bb_comment_id_new
+	  and bbc.bb_comment_id > 0.0
+	  and bbc.updt_cnt = bb_comment_updt_cnt
+	with nocounter, forupdate(bbc)
+
+	;check for errors
+	if (check_for_ccl_error("lock bbc forupdate") = 0)
+		return(0)
+	else
+	    if (curqual = 0)
+			call fill_out_status_data("F", "lock bbc forupdate"
+									, "unable to lock blood_bank_comment table for update")
+			return(0)
+	    endif
+	endif
+
+	;insert new blood_bank_comment row
+	update into blood_bank_comment bbc
+		set bbc.active_ind               = active_ind_new
+			, bbc.active_status_cd         = if (active_ind_new = 1)
+											 	reqdata->active_status_cd
+											 else
+											 	reqdata->inactive_status_cd
+											 endif
+			, bbc.active_status_dt_tm      = cnvtdatetime(active_status_dt_tm)
+			, bbc.active_status_prsnl_id   = active_status_prsnl_id_new
+			, bbc.updt_cnt                 = 0
+			, bbc.updt_dt_tm               = cnvtdatetime(curdate, curtime3)
+			, bbc.updt_id                  = reqinfo->updt_id
+			, bbc.updt_task                = reqinfo->updt_task
+			, bbc.updt_applctx             = reqinfo->updt_applctx
+	where bbc.bb_comment_id = bb_comment_id_new
+	  and bbc.bb_comment_id > 0.0
+	  and bbc.updt_cnt = bb_comment_updt_cnt
+	with nocounter
+
+	;check for errors
+	if (check_for_ccl_error("update blood_bank_comment") = 0)
+		return(0)
+	else
+	    if (curqual = 0)
+			call fill_out_status_data("F", "update blood_bank_comment"
+									, "unable to update into blood_bank_comment table")
+			return(0)
+	    endif
+	endif
+
+	select into "nl:"
+		lt.long_text_id
+	from
+		long_text lt
+	where lt.long_text_id = long_text_id_new
+	  and lt.long_text_id > 0.0
+	  and lt.updt_cnt = long_text_updt_cnt
+	with nocounter, forupdate(lt)
+
+	;check for errors
+	if (check_for_ccl_error("lock lt forupdate") = 0)
+		return(0)
+	else
+	    if (curqual = 0)
+			call fill_out_status_data("F", "lock lt forupdate"
+									, "unable to lock long_text table for update")
+			return(0)
+	    endif
+	endif
+
+	;insert new blood_bank_comment row
+	update into long_text lt
+		set	lt.active_ind                 = active_ind_new
+			, lt.active_status_cd         = if (active_ind_new = 1)
+											 	reqdata->active_status_cd
+											 else
+											 	reqdata->inactive_status_cd
+											 endif
+			, lt.active_status_dt_tm      = cnvtdatetime(active_status_dt_tm)
+			, lt.active_status_prsnl_id   = active_status_prsnl_id_new
+			, lt.updt_cnt                 = 0
+			, lt.updt_dt_tm               = cnvtdatetime(curdate, curtime3)
+			, lt.updt_id                  = reqinfo->updt_id
+			, lt.updt_task                = reqinfo->updt_task
+			, lt.updt_applctx             = reqinfo->updt_applctx
+	where lt.long_text_id = long_text_id_new
+	  and lt.long_text_id > 0.0
+	  and lt.updt_cnt = long_text_updt_cnt
+	with nocounter
+
+	;check for errors
+	if (check_for_ccl_error("update long_text") = 0)
+		return(0)
+	else
+	    if (curqual = 0)
+			call fill_out_status_data("F", "update long_text"
+									, "unable to update long_text table")
+			return(0)
+	    endif
+	endif
+
+	;success
+	return(1)
+end
+
+declare insert_bb_comment( person_id_new = f8
+							, list_index = i2
+							, contributor_system_cd_new = f8
+							, active_status_prsnl_id_new = f8
+							, active_status_dt_tm = dq8) = i2
+subroutine insert_bb_comment( person_id_new
+							, list_index
+							, contributor_system_cd_new
+							, active_status_prsnl_id_new
+							, active_status_dt_tm )
+/* This routine will insert new long_text and bb_comment rows */
+	declare new_bb_comment_id = f8 with noconstant(0.0)
+	declare new_long_text_id = f8 with noconstant(0.0)
+	declare new_comment_text = vc with noconstant(" ")
+
+	;retrieve new id from pathnet_seq
+    select into "nl:"
+        seqn = seq(PATHNET_SEQ, nextval)
+    from dual
+    detail
+        new_bb_comment_id   = seqn
+    with format, nocounter
+
+	;check for errors
+	if (check_for_ccl_error("Get pathnet_seq") = 0)
+		return(0)
+	else
+	    if (curqual = 0)
+			call fill_out_status_data("F", "Get pathnet_seq"
+										, "Failed getting new pathnet_seq id")
+			return(0)
+	    endif
+	endif
+
+	;retrieve new id from long_data sequence
+	select into "nl:"
+		seqn = seq(LONG_DATA_SEQ, nextval)
+	from dual
+	detail
+		new_long_text_id   = seqn
+	with        format, nocounter
+
+	;check for errors
+	if (check_for_ccl_error("Get long_data_seq") = 0)
+		return(0)
+	else
+	    if (curqual = 0)
+			call fill_out_status_data("F", "Get long_data_seq"
+									, "Failed getting new long_data_seq id")
+			return(0)
+	    endif
+	endif
+
+	;insert new blood_bank_comment row
+	insert into blood_bank_comment bbc
+		set bbc.bb_comment_id            = new_bb_comment_id
+			, bbc.person_id                = person_id_new
+			, bbc.long_text_id             = new_long_text_id
+			, bbc.active_ind               = 1
+			, bbc.active_status_cd         = reqdata->active_status_cd
+			, bbc.active_status_dt_tm      = cnvtdatetime(active_status_dt_tm)
+			, bbc.active_status_prsnl_id   = active_status_prsnl_id_new
+			, bbc.updt_cnt                 = 0
+			, bbc.updt_dt_tm               = cnvtdatetime(curdate, curtime3)
+			, bbc.updt_id                  = reqinfo->updt_id
+			, bbc.updt_task                = reqinfo->updt_task
+			, bbc.updt_applctx             = reqinfo->updt_applctx
+			, bbc.contributor_system_cd    = contributor_system_cd_new
+	with nocounter
+
+	;check for errors
+	if (check_for_ccl_error("insert blood_bank_comment") = 0)
+		return(0)
+	else
+	    if (curqual = 0)
+			call fill_out_status_data("F", "insert blood_bank_comment"
+									, "unable to insert into blood_bank_comment table")
+			return(0)
+	    endif
+	endif
+	
+	if (list_index = 0)
+	    set new_comment_text = comment->new_comment
+	else
+        set new_comment_text = request->qual[list_index].comment
+    endif
+    
+	;Insert new long_text row
+	insert into long_text lt
+		set lt.long_text_id            		= new_long_text_id
+			, lt.active_ind               	= 1
+			, lt.long_text					= new_comment_text
+			, lt.active_status_cd         	= reqdata->active_status_cd
+			, lt.active_status_dt_tm      	= cnvtdatetime(active_status_dt_tm)
+			, lt.active_status_prsnl_id   	= active_status_prsnl_id_new
+			, lt.updt_cnt                 	= 0
+			, lt.updt_dt_tm               	= cnvtdatetime(curdate, curtime3)
+			, lt.updt_id                  	= reqinfo->updt_id
+			, lt.updt_task                	= reqinfo->updt_task
+			, lt.updt_applctx             	= reqinfo->updt_applctx
+			, lt.parent_entity_name			= "BLOOD_BANK_COMMENT"
+			, lt.parent_entity_id			= new_bb_comment_id
+	with nocounter
+
+	;check for errors
+	if (check_for_ccl_error("add_long_text") = 0)
+		return(0)
+	else
+	    if (curqual = 0)
+			call fill_out_status_data("F", "add_long_text"
+									, "unable to add long_text row")
+			return(0)
+	    endif
+	endif
+
+	;success
+	return(1)
+end
+
+
+declare get_active_comment(person_id_new = f8) = i2
+subroutine get_active_comment(person_id_new)
+/*
+This routine will read the blood_bank_comment table and long_text tables
+	to see if an active comment already exists for the patient.
+*/
+	;reset variables
+	set active_exists_ind = 0
+	set long_text_id_new = 0.0
+	set blood_bank_comment_id = 0.0
+	set comment->existing_comment = " "
+	set bb_comment_updt_cnt = 0
+	set long_text_updt_cnt = 0
+
+	;get comments
+	select into "nl:"
+		bbc.person_id
+		, lt.long_text_id
+	from
+		long_text lt
+		, blood_bank_comment bbc
+	plan bbc where bbc.person_id = person_id_new
+			   and bbc.bb_comment_id > 0.0
+			   and bbc.active_ind = 1
+	join lt  where lt.long_text_id = bbc.long_text_id
+			   and lt.long_text_id > 0.0
+			   and lt.active_ind = 1
+	detail
+		;one exists, save off info
+		active_exists_ind = 1
+		comment->existing_comment = lt.long_text
+		long_text_id_new = lt.long_text_id
+		bb_comment_id_new = bbc.bb_comment_id
+		bb_comment_updt_cnt = bbc.updt_cnt
+		long_text_updt_cnt = lt.updt_cnt
+	with nocounter
+
+	;check for script errors
+	if (check_for_ccl_error("Select comment") = 0)
+		return(0)
+	endif
+
+	;successful
+	return(1)
+end
+
+declare perform_data_validation(person_id_new = f8
+								, list_index = i2) = i2
+subroutine perform_data_validation(	person_id_new
+									, list_index)
+/*
+This routine will perform all data validation for current item.  Return 1 if successful, 0 if not
+*/
+	;validate person id
+	select into "nl:"
+		p.person_id
+	from
+		person p
+	where p.person_id = person_id_new
+	    and p.person_id > 0.0
+
+	with nocounter
+
+	;check for script errors
+	if (check_for_ccl_error("Select on person") = 0)
+		return(0)
+	else
+		if (curqual = 0)
+			;person id not valid
+			call fill_out_status_data("F", "Validate person_id"
+									, concat("Person "
+											, trim(cnvtstring(person_id_new,32,2))
+											, " does not exist on person table"))
+			return(0)
+		endif
+	endif
+
+	;make sure comment exists
+	if (size(trim(request->qual[list_index].comment),1) = 0)
+		call fill_out_status_data("F", "Validate comment"
+				, concat("Comment is blank for person "
+						, cnvtstring(person_id_new,32,2)))
+		return(0)
+	endif
+
+	;successful
+	return(1)
+
+end
+
+declare check_for_ccl_error(target_object_name = c25) = i2
+subroutine check_for_ccl_error(target_object_name)
+/*
+This routine will check for any ccl errors from the most recent select/insert/update.
+Return 1 if successful, 0 if not.
+*/
+	declare error_msg = c132 with private, noconstant(FILLSTRING(132," "))
+	declare new_error = c132 with private, noconstant(FILLSTRING(132," "))
+	declare error_ind = i4 with private, noconstant(0) ;
+
+	set error_ind = ERROR(new_error, 0)
+	if (error_ind != 0)
+		while (error_ind != 0)
+			set error_msg = concat(error_msg, " ", new_error)
+			set error_ind = ERROR(new_error, 0)
+		endwhile
+		call fill_out_status_data("F", target_object_name, error_msg)
+		return(0)
+	else
+		return(1)
+	endif
+end
+
+declare fill_out_status_data(status = c1
+								,target_object_name = c25
+								, target_object_value = vc) = NULL
+subroutine fill_out_status_data(status
+								,target_object_name
+								, target_object_value)
+/*
+This routine will fill out the status block with parameters passed.
+*/
+	set reply->status_data->status = status
+    set reply->status_data.subeventstatus[1].OperationStatus = status
+	set reply->status_data.subeventstatus[1].OperationName = SCRIPT_NAME
+    set reply->status_data.subeventstatus[1].TargetObjectName = target_object_name
+    set reply->status_data.subeventstatus[1].TargetObjectValue = target_object_value
+end
+
+
+#EXIT_SCRIPT
+
+
+
+if (reply->status_data->status = "F")
+	set reqinfo->commit_ind = 0
+else
+	set reply->status_data->status = "S"
+	set reqinfo->commit_ind = 1
+endif
+
+if (request->debug_ind = 1)
+	call echorecord(request)
+	call echorecord(reply)
+endif
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

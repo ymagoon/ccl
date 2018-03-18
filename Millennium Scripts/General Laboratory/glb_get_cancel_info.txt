@@ -1,0 +1,334 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_cancel_info/glb_get_cancel_info.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1998 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_cancel_info.prg
+        Object name:            glb_get_cancel_info
+        Request #:              250152
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load cancel information for given orders.
+
+        Tables read:            code_value
+                                order_action
+                                order_detail
+                                prsnl
+
+        Tables updated:         None
+        Executing from:         
+
+        Special Notes:          
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 03/02/98 Hal Patchen          Initial Release                     *
+;    *001 09/20/06 Rahul Patel          added cancel prsnl username to reply
+;    *002 04/30/10 Joyce Crowley     added discont and void action type data
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_CANCEL_INFO:dba go
+             create program GLB_GET_CANCEL_INFO:dba
+                                               
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  orders[x]
+            2  order_id                  = f8
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      ( 
+         1  qual_cnt                     = i4
+         1  qual[*]
+            2  order_id                  = f8
+            2  cancel_dt_tm              = dq8
+            2  cancel_prsnl_id           = f8
+            2  cancel_prsnl_name         = vc
+            2  cancel_reason             = vc
+            2  cancel_prsnl_username = vc	;001
+            2  discontinue_dt_tm      = dq8	;002
+            2  discontinue_prsnl_id  = f8	;002
+            2  discontinue_prsnl_name   = vc	;002
+            2  discontinue_reason           = vc 	;002
+            2  discontinue_prsnl_username = vc	;002
+            2  void_dt_tm              = dq8	;002
+            2  void_prsnl_id           = f8	;002
+            2  void_prsnl_name         = vc	;002
+            2  void_reason             = vc	;002
+            2  void_prsnl_username = vc	;002
+%i cclsource:status_block.inc
+      )
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set ORD_ACTION_TYPE_CODESET     = 6003
+         set ORD_ACTION_TYPE_CANCEL_CDF  = "CANCEL"
+         set ORD_ACTION_TYPE_DISC_CDF = "DISCONTINUE"	;002
+         set ORD_ACTION_TYPE_VOID_CDF  = "DELETE"	;002
+         declare ord_action_type_cancel_cd  = f8
+         declare ord_action_type_discont_cd = f8	;002
+         declare ord_action_type_void_cd      = f8	;002
+         set OE_MEANING_CANCEL_REASON    = "CANCELREASON"
+         set OE_MEANING_DISCONT_REASON = "DCREASON"	;002
+         set OE_MEANING_VOID_REASON = "VOIDORDERREASON"	;002
+         declare oe_meaning_cancel_reason_id = f8
+         declare oe_meaning_discont_reason_id = f8	;002
+         declare oe_meaning_void_reason_id = f8	;002
+         declare nbr_of_orders           = i4
+         declare q_cnt                   = i4
+         declare lCnt                    = i4 with protected, noconstant(0)
+         declare lSizeReply              = i4 with protected, noconstant(0)
+
+         set reply->status_data.status = "F"
+
+      /***********************************************************************
+      * Select processing code values                                        *
+      ***********************************************************************/
+         
+                  
+         set ord_action_type_cancel_cd = uar_get_code_by("MEANING",ORD_ACTION_TYPE_CODESET,nullterm(ORD_ACTION_TYPE_CANCEL_CDF))
+ 
+         set ord_action_type_discont_cd = uar_get_code_by("MEANING",ORD_ACTION_TYPE_CODESET,nullterm(ORD_ACTION_TYPE_DISC_CDF))	;002
+         set ord_action_type_void_cd = uar_get_code_by("MEANING",ORD_ACTION_TYPE_CODESET,nullterm(ORD_ACTION_TYPE_VOID_CDF))	;002
+
+         ;* Verify that all required code value records were read.
+         if (ord_action_type_cancel_cd <= 0.0) 	
+            set reply->status_data.subeventstatus[1].OperationName =
+               "SELECT"
+            set reply->status_data.subeventstatus[1].OperationStatus =
+               "F"
+            set reply->status_data.subeventstatus[1].TargetObjectName =
+               "CODE_VALUE TABLE"
+            set reply->status_data.subeventstatus[1].TargetObjectValue =
+               "Unable to load all required code values for script execution"
+            go to Exit_Script
+         endif
+
+         if (ord_action_type_discont_cd <= 0.0) 	;002
+            set reply->status_data.subeventstatus[1].OperationName =
+               "SELECT"
+            set reply->status_data.subeventstatus[1].OperationStatus =
+               "F"
+            set reply->status_data.subeventstatus[1].TargetObjectName =
+               "CODE_VALUE TABLE"
+            set reply->status_data.subeventstatus[1].TargetObjectValue =
+               "Unable to load all required code values for script execution"
+            go to Exit_Script
+         endif
+
+         if (ord_action_type_void_cd <= 0.0) 		;002
+            set reply->status_data.subeventstatus[1].OperationName =
+               "SELECT"
+            set reply->status_data.subeventstatus[1].OperationStatus =
+               "F"
+            set reply->status_data.subeventstatus[1].TargetObjectName =
+               "CODE_VALUE TABLE"
+            set reply->status_data.subeventstatus[1].TargetObjectValue =
+               "Unable to load all required code values for script execution"
+            go to Exit_Script
+         endif
+      /***********************************************************************
+      * Select order entry field meaning                                     *
+      ***********************************************************************/
+         select into "nl:"
+            ofm.oe_field_meaning_id
+
+         from
+            oe_field_meaning ofm
+         
+         where oe_field_meaning = OE_MEANING_CANCEL_REASON
+
+         detail
+            oe_meaning_cancel_reason_id = ofm.oe_field_meaning_id
+
+         with
+            nocounter
+
+         select into "nl:"
+            ofm.oe_field_meaning_id
+
+         from
+            oe_field_meaning ofm
+         
+         where oe_field_meaning = OE_MEANING_DISCONT_REASON
+
+         detail
+            oe_meaning_discont_reason_id = ofm.oe_field_meaning_id
+
+         with
+            nocounter
+
+         select into "nl:"
+            ofm.oe_field_meaning_id
+
+         from
+            oe_field_meaning ofm
+         
+         where oe_field_meaning = OE_MEANING_VOID_REASON
+
+         detail
+            oe_meaning_void_reason_id = ofm.oe_field_meaning_id
+
+         with
+            nocounter
+
+      /***********************************************************************
+      * Select order action and personnel info                                                    *
+      ***********************************************************************/
+         set nbr_of_orders = size(request->orders, 5)
+         
+         select into "nl:"
+			lIndex = locateval(lCnt, 1, value(nbr_of_orders), oa.order_id, request->orders[lCnt].order_id)
+
+         from
+            order_action oa,
+            prsnl oa_pl
+ 
+         plan oa where expand(lCnt, 1, value(nbr_of_orders), oa.order_id, request->orders[lCnt].order_id)
+                   and (oa.action_type_cd = ord_action_type_cancel_cd
+	    or oa.action_type_cd = ord_action_type_discont_cd
+      	    or oa.action_type_cd = ord_action_type_void_cd)
+         join oa_pl where oa_pl.person_id = oa.action_personnel_id
+
+         order by lIndex
+			
+         head report
+            q_cnt = 0
+
+         head lIndex
+            q_cnt = q_cnt + 1
+            stat = alterlist(reply->qual, q_cnt)
+            reply->qual_cnt = q_cnt
+            reply->qual[q_cnt].order_id = request->orders[lIndex].order_id
+            if (oa.action_type_cd = ord_action_type_cancel_cd)	;002
+                reply->qual[q_cnt].cancel_dt_tm = oa.action_dt_tm
+                if (oa_pl.person_id > 0.0)
+                 	  reply->qual[q_cnt].cancel_prsnl_id = oa_pl.person_id
+            	  reply->qual[q_cnt].cancel_prsnl_name = oa_pl.name_full_formatted
+            	  reply->qual[q_cnt].cancel_prsnl_username = oa_pl.username	;001
+               endif
+            endif
+            if (oa.action_type_cd = ord_action_type_discont_cd)	;002
+	 reply->qual[q_cnt].discontinue_dt_tm = oa.action_dt_tm
+                  if (oa_pl.person_id > 0.0)
+                      reply->qual[q_cnt].discontinue_prsnl_id = oa_pl.person_id
+	    reply->qual[q_cnt].discontinue_prsnl_name = oa_pl.name_full_formatted
+                      reply->qual[q_cnt].discontinue_prsnl_username = oa_pl.username
+                  endif
+            endif
+            if (oa.action_type_cd = ord_action_type_void_cd)	;002
+                 reply->qual[q_cnt].void_dt_tm = oa.action_dt_tm
+                 if (oa_pl.person_id > 0.0)
+                     reply ->qual[q_cnt].void_prsnl_id = oa_pl.person_id
+                     reply->qual[q_cnt].void_prsnl_name = oa_pl.name_full_formatted
+                     reply->qual[q_cnt].void_prsnl_username = oa_pl.username
+                 endif
+            endif
+         with 
+            nocounter
+        
+         
+      /***********************************************************************
+      * Select order detail info                                                    *
+      ***********************************************************************/
+         set lSizeReply = size(reply->qual, 5)
+         
+         select into "nl:"
+			lIndex = locateval(lCnt, 1, value(nbr_of_orders), od.order_id, request->orders[lCnt].order_id)
+
+         from
+            order_detail od
+ 
+         plan od where expand(lCnt, 1, value(nbr_of_orders), od.order_id, request->orders[lCnt].order_id)
+                   and (od.oe_field_meaning_id = oe_meaning_cancel_reason_id
+                           or od.oe_field_meaning_id = oe_meaning_discont_reason_id
+                           or od.oe_field_meaning_id = oe_meaning_void_reason_id)
+         order by lIndex
+
+         head lIndex
+            lReplyIndex = locateval(lCnt,1, lSizeReply, od.order_id, reply->qual[lCnt].order_id)
+            if (lReplyIndex = 0)
+              q_cnt = q_cnt + 1
+              stat = alterlist(reply->qual, q_cnt)
+              reply->qual_cnt = q_cnt
+              reply->qual[q_cnt].order_id = request->orders[lIndex].order_id
+              if (od.oe_field_meaning_id = oe_meaning_cancel_reason_id)
+                     reply->qual[q_cnt].cancel_reason = uar_get_code_display(od.oe_field_value)
+              endif
+               if (od.oe_field_meaning_id = oe_meaning_discont_reason_id)
+                     reply->qual[q_cnt].discontinue_reason = uar_get_code_display(od.oe_field_value)
+               endif
+               if (od.oe_field_meaning_id = oe_meaning_void_reason_id)
+                     reply->qual[q_cnt].void_reason = uar_get_code_display(od.oe_field_value)
+              endif
+            else
+               if (od.oe_field_meaning_id = oe_meaning_cancel_reason_id)
+                    reply->qual[lReplyIndex].cancel_reason = uar_get_code_display(od.oe_field_value)
+              endif
+               if (od.oe_field_meaning_id = oe_meaning_discont_reason_id)
+                     reply->qual[lReplyIndex].discontinue_reason = uar_get_code_display(od.oe_field_value)
+               endif
+                if (od.oe_field_meaning_id = oe_meaning_void_reason_id)
+                     reply->qual[lReplyIndex].void_reason = uar_get_code_display(od.oe_field_value)
+               endif
+            endif
+      
+         with 
+            nocounter
+
+
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+         endif
+         set stat = alterlist(reply->qual, q_cnt)
+
+      #Exit_Script
+         end
+         go      
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,567 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/bb_get_pending_procs/bb_get_pending_procs.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *       Revision      (c) 1984-2007 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+ 
+        Source file name:       bb_get_pending_procs.prg
+        Object name:            bb_get_pending_procs
+        Request #:              225957
+ 
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        This script will retrieve pending blood bank
+                                procedures.
+ 
+        Tables read:            ORDER_SERV_RES_CONTAINER,
+                                ORDERS,
+                                ORDER_LABORATORY,
+                                ACCESSION_ORDER_R,
+                                CONTAINER,
+                                ORDER_COMMENT,
+ 
+        Tables updated:         none
+ 
+        Executing from:         BBPendingProcedures.dll
+ 
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    * Mod Date     Engineer             Comment                            *
+;    * --- -------- -------------------- ---------------------------------- *
+;    * 001 03/13/07  Matt Cummings        Initial Release                   *
+;    * 002 04/03/09  Kiran Vankadaru      Populate historic names after person*
+;                                         combine & based on facility level *
+;                                         preference settings               *
+;    * 003 18/11/10  Archita S            Added head on container_id        *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program   bb_get_pending_procs:dba go
+create program bb_get_pending_procs:dba
+ 
+;**************
+;includes
+;**************
+%i cclsource:glb_script_logging.inc
+%i cclsource:bb_historical.inc
+%i cclsource:pcs_resource_security.inc
+%i cclsource:BBT_GetBBPreference.inc
+ 
+;**************
+;record structures
+;**************
+;
+;record request
+;(
+;  1 person_id = f8
+;  1 facility_cd = f8
+;)
+ 
+record reply
+(
+  1 historical_demog_ind = i2
+  1 name_full_formatted  = vc
+  1 pend_proc_list[*]
+    2 service_resource_cd     = f8
+    2 service_resource_disp   = vc
+    2 order_mnemonic          = vc
+    2 report_priority_cd      = f8
+    2 report_priority_disp    = vc
+    2 accession_raw           = c20
+    2 accession_formatted     = c20
+    2 drawn_dt_tm             = dq8
+    2 dept_status_cd          = f8
+    2 dept_status_disp        = vc
+    2 order_comment_ind       = i2
+    2 container_location_cd   = f8
+    2 container_location_disp = vc
+    2 received_dt_tm          = dq8
+    2 historical_name         = c40
+    2 order_id                = f8
+%i cclsource:status_block.inc
+)
+ 
+;Set script to fail status until it has completed execution.
+set reply->status_data.status = "F"
+ 
+;**************
+;Declare constants (and variables that are meant to be treated as constants
+;once set to a value)
+;**************
+declare ACTIVITY_TYPE_BB               = f8 with protect,noconstant( 0.0 )
+declare ACTIVITY_TYPE_CODESET          = i4 with protect,constant( 106 )
+declare ACTIVITY_TYPE_MEAN_BB          = vc with protect,constant( "BB" )
+declare DEPARTMENT_STATUS_CODESET      = i4 with protect,constant( 14281 )
+declare DEPARTMENT_STATUS_IN_LAB       = f8 with protect,noconstant( 0.0 )
+declare DEPARTMENT_STATUS_IN_PROCESS   = f8 with protect,noconstant( 0.0 )
+declare DEPT_STATUS_MEANING_IN_LAB     = vc with protect,constant( "LABINLAB" )
+declare DEPT_STATUS_MEANING_IN_PROCESS = vc with protect,constant( "LABINPROCESS" )
+declare LAB_CATALOG_TYPE_CD				= f8 with protect,noconstant( 0.0 )
+declare ORDER_STATUS_MEANING_ORDERED	= vc with protect,constant("ORDERED")
+declare ORDER_STATUS_MEANING_INPROCESS	= vc with protect,constant("INPROCESS")
+declare ORDER_STATUS_CODESET 			= i4 with protect, constant(6004) 
+declare ORDER_STATUS_ORDERED			= f8 with protect,noconstant( 0.0 )
+declare ORDER_STATUS_IN_PROCESS			= f8 with protect,noconstant( 0.0 )
+;**************
+;Declare variables
+;**************
+declare cResourceSecStatus = c1   with noconstant('')
+declare iServiceResAccess  = i2   with protect,noconstant(-1)
+declare iContainerReq      = i2   with protect,noconstant(-1)
+declare lErrorFlag         = i4   with protect,noconstant(-1)
+declare lHistDemogsStored  = i2   with noconstant(-1)
+declare lSize              = i4   with protect,noconstant(-1)
+declare lStatus            = i4   with protect,noconstant(-1)
+declare sErrorMessage      = c132 with protect,noconstant( fillstring(132," ") )
+ 
+;**************
+;Main Block
+;**************
+ 
+select  into "nl:"
+  p.name_full_formatted
+from person p
+where p.person_id = request->person_id
+detail
+  ;Store patient's name in reply.
+  reply->name_full_formatted = p.name_full_formatted
+with nocounter
+ 
+;Retrieve the error status of the select.
+set lErrorFlag = Error(sErrorMessage,0)
+ 
+;If the select failed.
+if(lErrorFlag != 0)
+ 
+  ;Populate status block with failure information.
+  call Populate_Subeventstatus(
+    build("Set person's full name"),
+    "F",
+    "select",
+    NullTerm(CnvtString(sErrorMessage))
+  )
+  ;Set script status to fail.
+  set reply->status_data.status = "F"
+  ;Terminate script.
+  go to EXIT_SCRIPT
+ 
+endif
+ 
+;Load the code values used in the historical information reuseable.
+if( LoadHistCodeValues( NULL ) = 0 )
+ 
+  ;Set script to fail.
+  set reply->status_data.status = "F"
+  ;Terminate script early.
+  go to EXIT_SCRIPT
+ 
+endif
+ 
+
+/*****************************************************************************/
+/* Determine whether client stores historical records                        */
+/*****************************************************************************/
+set reply->historical_demog_ind = BbtGetHistoricInfoPreference(request->facility_cd)
+ 
+;Load Blood Bank activity
+set ACTIVITY_TYPE_BB = uar_get_code_by("MEANING", ACTIVITY_TYPE_CODESET,
+  NullTerm( ACTIVITY_TYPE_MEAN_BB ) )
+ 
+if(ACTIVITY_TYPE_BB < 1)
+ 
+  ;Populate failure information into status block.
+  call Populate_Subeventstatus(
+    "Main Block",
+    "F",
+    "uar_get_code_by() ",
+    Build2(
+      "Load meaning ",
+      ACTIVITY_TYPE_MEAN_BB,
+      " from CS",
+      NullTerm(CnvtString(ACTIVITY_TYPE_CODESET)),
+      " failed with status ",
+      NullTerm(CnvtString( ACTIVITY_TYPE_BB , 19, 0))
+    )
+  )
+  ;Set script to fail status.
+  set reply->status_data.status = "F"
+  ;Terminate this script.
+  go to EXIT_SCRIPT
+ 
+endif
+ 
+;Load department status of "in-lab"
+set DEPARTMENT_STATUS_IN_LAB = uar_get_code_by( "MEANING",
+  DEPARTMENT_STATUS_CODESET, NullTerm( DEPT_STATUS_MEANING_IN_LAB ) )
+ 
+;Load meaning failed.
+if(DEPARTMENT_STATUS_IN_LAB < 1)
+ 
+  ;Populate failure information into status block.
+  call Populate_Subeventstatus(
+    "Main Block",
+    "F",
+    "uar_get_code_by() ",
+    Build2(
+      "Load meaning ",
+      DEPT_STATUS_MEANING_IN_LAB,
+      " from CS",
+      NullTerm(CnvtString(DEPARTMENT_STATUS_CODESET)),
+      " failed with status ",
+      NullTerm(CnvtString( DEPARTMENT_STATUS_IN_LAB, 19, 0 ))
+    )
+  )
+  ;Set script to fail status.
+  set reply->status_data.status = "F"
+  ;Terminate this script.
+  go to EXIT_SCRIPT
+ 
+endif
+ 
+;Load department status of "in-process"
+set DEPARTMENT_STATUS_IN_PROCESS = uar_get_code_by( "MEANING" ,
+  DEPARTMENT_STATUS_CODESET , NullTerm( DEPT_STATUS_MEANING_IN_PROCESS ) )
+ 
+;Load meaning failed.
+if(DEPARTMENT_STATUS_IN_PROCESS < 1)
+ 
+  ;Populate failure information into status block.
+  call Populate_Subeventstatus(
+    "Main Block",
+    "F",
+    "uar_get_code_by() ",
+    Build2(
+      "Load meaning ",
+      DEPT_STATUS_MEANING_IN_PROCESS,
+      " from CS",
+      NullTerm(CnvtString(DEPARTMENT_STATUS_CODESET)),
+      " failed with status ",
+      NullTerm(CnvtString( DEPARTMENT_STATUS_IN_PROCESS, 19, 0 ))
+    )
+  )
+  ;Set script to fail status.
+  set reply->status_data.status = "F"
+  ;Terminate this script.
+  go to EXIT_SCRIPT
+ 
+endif
+
+set LAB_CATALOG_TYPE_CD = uar_get_code_by("MEANING",6000, "GENERAL LAB")
+;Load meaning failed.
+if(LAB_CATALOG_TYPE_CD < 1)
+ 
+  ;Populate failure information into status block.
+  call Populate_Subeventstatus(
+    "Main Block",
+    "F",
+    "uar_get_code_by() ",
+    Build2(
+      "Load meaning ",
+      "GENERAL LAB",
+      " from CS",
+      NullTerm(CnvtString(6000)),
+      " failed with status ",
+      NullTerm(CnvtString( LAB_CATALOG_TYPE_CD, 19, 0 ))
+    )
+  )
+  ;Set script to fail status.
+  set reply->status_data.status = "F"
+  ;Terminate this script.
+  go to EXIT_SCRIPT
+ 
+endif
+
+set ORDER_STATUS_ORDERED = uar_get_code_by("MEANING",ORDER_STATUS_CODESET , ORDER_STATUS_MEANING_ORDERED)
+;Load meaning failed.
+if(ORDER_STATUS_ORDERED < 1)
+ 
+  ;Populate failure information into status block.
+  call Populate_Subeventstatus(
+    "Main Block",
+    "F",
+    "uar_get_code_by() ",
+    Build2(
+      "Load meaning ",
+      ORDER_STATUS_MEANING_ORDERED,
+      " from CS",
+      NullTerm(CnvtString(ORDER_STATUS_CODESET )),
+      " failed with status ",
+      NullTerm(CnvtString( ORDER_STATUS_ORDERED, 19, 0 ))
+    )
+  )
+  ;Set script to fail status.
+  set reply->status_data.status = "F"
+  ;Terminate this script.
+  go to EXIT_SCRIPT
+ 
+endif
+
+set ORDER_STATUS_IN_PROCESS = uar_get_code_by("MEANING",ORDER_STATUS_CODESET , ORDER_STATUS_MEANING_INPROCESS)
+;Load meaning failed.
+if(ORDER_STATUS_IN_PROCESS < 1)
+ 
+  ;Populate failure information into status block.
+  call Populate_Subeventstatus(
+    "Main Block",
+    "F",
+    "uar_get_code_by() ",
+    Build2(
+      "Load meaning ",
+      ORDER_STATUS_MEANING_INPROCESS,
+      " from CS",
+      NullTerm(CnvtString(ORDER_STATUS_CODESET )),
+      " failed with status ",
+      NullTerm(CnvtString( ORDER_STATUS_IN_PROCESS, 19, 0 ))
+    )
+  )
+  ;Set script to fail status.
+  set reply->status_data.status = "F"
+  ;Terminate this script.
+  go to EXIT_SCRIPT
+ 
+endif
+
+ 
+;Initialize service resource security
+call InitResourceSecurity(TRUE)
+ 
+;Check to make sure that the resource security is setup properly for the user.
+set cResourceSecStatus = GetResourceSecurityStatus(0)
+ 
+;If the check on security status failed.
+if( cResourceSecStatus = 'F' )
+ 
+  ;Populate event status block failure information.
+  call Populate_Subeventstatus(
+    "Check resource sec",
+    "F",
+    "GetResourceSecurityStatus(0)",
+    "F"
+  )
+  ;Set script status to fail.
+  set reply->status_data.status = "F"
+  ;Terminate this script.
+  go to EXIT_SCRIPT
+ 
+;If user does not have access to any service resources.
+elseif( cResourceSecStatus = 'Z' )
+ 
+  ;Populate event status block security information.
+  call Populate_Subeventstatus(
+    "Check resource sec",
+    "Z",
+    "GetResourceSecurityStatus()",
+    "Z - User does not have access to any service resources."
+  )
+  ;Set script status to success since the script didn't fail but it does not
+  ;have access to any pending procedures.
+  set reply->status_data.status = "S"
+  ;Terminate this script.
+  go to EXIT_SCRIPT
+ 
+endif
+
+;Set list size.
+set lSize = 0
+
+;Perform query to retrieve all pending procedures for this patient.
+select into "nl:"
+  o.order_mnemonic,
+  aor.accession,
+  formatted_accn = cnvtacc( aor.accession ),
+  ol.report_priority_cd,
+  osrc.current_location_cd,
+  osrc.in_lab_dt_tm,
+  osrc.service_resource_cd,
+  c.drawn_dt_tm,
+  o.order_id
+from
+  orders o,
+  accession_order_r aor,
+  order_laboratory ol,
+  order_serv_res_container osrc,
+  container c,
+  order_comment oc
+plan o where o.person_id = request->person_id
+  and
+  ;Only get lab orders
+  o.catalog_type_cd = (LAB_CATALOG_TYPE_CD)
+  and
+  ;only get in process and ordered order stati
+  o.order_status_cd in (ORDER_STATUS_ORDERED, ORDER_STATUS_IN_PROCESS)
+  and
+  ;Only get Blood Bank orders.
+  o.activity_type_cd+0 = (ACTIVITY_TYPE_BB+0)
+  and
+  ;Only get in-lab and in-process orders.
+  o.dept_status_cd in (DEPARTMENT_STATUS_IN_LAB,DEPARTMENT_STATUS_IN_PROCESS)
+join aor  where
+  aor.order_id = o.order_id
+  and
+  aor.primary_flag = 0
+join ol   where ol.order_id = aor.order_id
+join osrc where osrc.order_id = ol.order_id
+join c    where c.container_id = osrc.container_id
+join oc   where oc.order_id = outerjoin(o.order_id)
+order by o.order_id, osrc.service_resource_cd, osrc.container_id 
+head o.order_id
+ 
+  ;Set the flag indicating that access is not granted to any of the service
+  ;resources for all the containers related to this order. The check to
+  ;determine whether the user has access to at least one service resource
+  ;related to this order is done below in the "head osrc.service_resource_cd"
+  ;block.
+  iServiceResAccess = 0
+ 
+head osrc.service_resource_cd
+  ;To load only one conatiner details 	
+  iContainerReq = 0 
+  ;The user does not have access to any of the services resources currently
+  ;found for this order. If this is set to 1,then the order has already been
+  ;added to the reply and does not need to be checked again.
+  if(iServiceResAccess = 0)
+ 
+    ;Make sure user has access to the service resource before adding it to the
+    ;record.
+    if( IsResourceViewable(osrc.service_resource_cd) = TRUE )
+      iServiceResAccess = 1
+      iContainerReq = 1
+      ;Resize the procedures list by increments of ten.
+      lSize = lSize + 1
+      if( lSize > size(reply->pend_proc_list,5) )
+        lStatus = alterlist(reply->pend_proc_list,lSize + 9)
+      endif
+ 
+    endif
+  endif
+      ;Insert data into new procedure element.
+head osrc.container_id 
+   if(osrc.in_lab_dt_tm > 0 and iContainerReq = 1) 
+      iContainerReq = 0
+      reply->pend_proc_list[lSize].service_resource_cd = osrc.service_resource_cd
+      reply->pend_proc_list[lSize].order_mnemonic = o.order_mnemonic
+      reply->pend_proc_list[lSize].report_priority_cd = ol.report_priority_cd
+      reply->pend_proc_list[lSize].accession_raw = substring(1,20,aor.accession)
+      reply->pend_proc_list[lSize].accession_formatted = substring(1,20,formatted_accn)
+      reply->pend_proc_list[lSize].drawn_dt_tm = c.drawn_dt_tm
+      reply->pend_proc_list[lSize].dept_status_cd = o.dept_status_cd
+      ;If a order_comment row exists.
+      if( size( trim(oc.rowid), 1) > 0 )
+        reply->pend_proc_list[lSize].order_comment_ind = 1
+      ;order_comment row does not exist.
+      else
+        reply->pend_proc_list[lSize].order_comment_ind = 0
+      endif
+      reply->pend_proc_list[lSize].container_location_cd = osrc.current_location_cd
+      reply->pend_proc_list[lSize].received_dt_tm = osrc.in_lab_dt_tm
+      reply->pend_proc_list[lSize].order_id = o.order_id
+ 
+      ;Historical demographics are stored, fill in the person_ids and
+      ;drawn_dt_tm's into the historical structures.
+      if( reply->historical_demog_ind = 1 )
+        ;Resize the historical name list to the same size as the procedure list.
+        lStatus = alterlist(recHistNames->list,lSize + 9)
+        ;Insert data into new historical name element.
+        recHistNames->list[lSize].person_id = request->person_id
+        recHistNames->list[lSize].trans_dt_tm = c.drawn_dt_tm
+        recHistNames->list[lSize].order_id = o.order_id
+      endif
+   endif
+    
+with nocounter,
+   outerjoin = oc_d
+ 
+;Get error status of query.
+set lStatus = error(sErrorMessage,0)
+ 
+;If select failed.
+if(lStatus != 0)
+ 
+  ;Populate status block with failure information.
+  call Populate_Subeventstatus(
+    "Get pending procs",
+    "F",
+    "select",
+    sErrorMessage
+  )
+  ;Set script status to fail.
+  set reply->status_data.status = "F"
+  ;Terminate this script.
+  go to EXIT_SCRIPT
+ 
+endif
+ 
+;Resize the procedure list to remove any empty/unused elements.
+set lStatus = alterlist(reply->pend_proc_list,lSize)
+;Resize the historical name list to remove any empty/unused elements.
+set lStatus = alterlist(recHistNames->list,lSize)
+
+;If the client is storing historical demographics.
+if(reply->historical_demog_ind = 1)
+ 
+  set lStatus = GetHistNames( NULL )
+ 
+  if( lStatus = 1 )
+ 
+    ;Iterate through all the procedures that were stored from the main query.
+    set lSize = size(reply->pend_proc_list,5)
+ 
+    for(lIdx = 1 to lSize)
+ 
+      set reply->pend_proc_list[lIdx].historical_name = recHistNames->list[lIdx].historical_name
+ 
+    endfor
+ 
+  else
+ 
+      ;Populate event status block failure information.
+      call Populate_Subeventstatus(
+        build("Retrieve historical names"),
+        "F",
+        "GetHistNames()",
+        "0"
+      )
+      ;Set script to fail status.
+      set reply->status_data.status = "F"
+      ;Terminate this function.
+      go to EXIT_SCRIPT
+
+  endif
+ 
+endif
+
+;**************
+;End Main Block
+;**************
+ 
+;**************
+;Cleanup
+;**************
+set reply->status_data.status = "S"
+ 
+#EXIT_SCRIPT ;Used only for failed termination of script.
+end
+go
+
+;Generated by GNU enscript 1.6.4.

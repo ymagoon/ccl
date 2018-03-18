@@ -1,0 +1,1274 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_new_stats/glb_get_new_stats.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_NEW_STATS.PRG
+        Object name:            GLB_GET_NEW_STATS
+        Request #:              257536
+
+        Product:                General
+         Lab - Quality Control
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Calculate statistics for a given time period
+
+        Tables read:            n/a
+
+        Tables updated:         qc_stat_period
+
+        Executing from:         General Lab QC Inquiry
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 10/08/96 Chad Moats           Initial Release                     *
+;     001 12/12/97 Kevin Brunner        Add auto verify logic               *
+;     002 06/01/98 Chad Moats           Use data_map plus one for calcs     *
+;     003 08/17/98 Chad Moats           Add patient data logic              *
+;     004 01/27/99 Chad Moats           Added dummy table so results with
+;                                       no data map will return             *
+;     005 11/22/99 Gary Runde           Fix issue with numerous lots        *
+;     006 03/17/00 Gary Runde           Return data map                     *
+;     007 06/28/00 Gary Runde           Return new stats for each pdm range *
+;     008 09/11/00 Gary Runde           Fix issue with numerous lots        *
+;     009 01/08/02 Ahti Rovainen        Changed order by to match head      *
+;     010 09/18/02 Mark Brooks          Added service resource security.    *
+;    *011 03/26/04 Craig Sumrall        Added parsers and fields to reply   *
+;     012 07/22/05 Scott Sundahl        statistical interval logic          *
+;     013 10/20/05 Matt Schile          Moved control_id to the second level*
+;                                       of the reply                        *
+;     014 10/09/06 Jason Osborn         Don't plan on resource_accession_r  *
+;                                       for PDM stats.                      *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_NEW_STATS:dba go
+      create program GLB_GET_NEW_STATS:dba
+
+%i cclsource:pcs_resource_security.inc
+
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 control_id              = f8
+         1 service_resource_cd     = f8
+         1 task_assay_cd           = f8
+         1 beg_dt_tm               = dq8
+         1 end_dt_tm               = dq8
+         1 qc_result_type_flag     = i2
+         1 service_resources[*]
+           2 service_resource_cd   = f8
+         1 assays[*]
+           2 task_assay_cd         = f8
+         1 series_interval_nbr     = i4
+         1 series_sequence_nbr     = i4
+      )
+
+record reqinfo
+( 1 commit_ind  = i2
+  1 updt_id     = f8
+  1 position_cd = f8
+  1 updt_app    = i4
+  1 updt_task   = i4
+  1 updt_req    = i4
+  1 updt_applctx= i4
+)
+*/
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+         1 stats[*]
+           2 lot_id                   = f8
+           2 lot_number               = vc
+           2 pdm_param_id             = f8
+           2 pdm_range_id             = f8
+           2 service_resource_cd      = f8
+           2 service_resource_disp    = vc
+           2 task_assay_cd            = f8
+           2 task_assay_disp          = vc
+           2 sum_of_results           = f8
+           2 sum_of_squares           = f8
+           2 count                    = i4
+           2 expected_mean            = f8
+           2 expected_std_dev         = f8
+           2 alpha_flag               = i2
+           2 arl_id                   = f8
+           2 mean                     = vc  
+           2 std_dev                  = vc  
+           2 co_var                   = vc  
+           2 fval                     = vc  
+           2 zstat                    = vc  
+           2 normal_cnt               = i4
+           2 abnormal_cnt             = i4
+           2 review_cnt               = i4
+           2 max_digits               = i2         
+           2 min_digits               = i2         
+           2 min_decimal_places       = i2
+           2 abs_low                  = vc
+           2 abs_high                 = vc
+           2 control_id				        = f8
+           2 control_name             = vc
+           2 procs[*]
+             3 qc_result_id           = f8
+             3 perform_dt_tm          = dq8
+             3 result_type_cd         = f8
+             3 result_value_numeric   = f8
+             3 result_value_alpha     = vc
+
+%i cclsource:status_block.inc
+
+;010         1 status_data
+;010           2 status                = c1
+;010           2 subeventstatus[1]
+;010             3 OperationName       = c15
+;010             3 OperationStatus     = c1
+;010             3 TargetObjectName    = c15
+;010             3 TargetObjectValue   = vc
+      )
+
+/********************************************************************/
+/*  Lot Record                                                      */
+/********************************************************************/
+      record lot
+      (
+         1 lots[*]
+           2 sequence                     = i4
+           2 lot_id                       = f8
+           2 lot_number                   = vc
+           2 pdm_param_id                 = f8
+           2 pdm_range_id                 = f8
+       )
+
+/********************************************************************/
+/*  Proc Record                                                      */
+/********************************************************************/
+      record procedure
+      (
+         1 procs[*]
+           2 lot_id                       = f8
+           2 pdm_param_id                 = f8
+           2 pdm_range_id                 = f8
+           2 qc_result_id                 = f8
+           2 perform_dt_tm                = dq8
+           2 result_type_cd               = f8
+           2 result_value_numeric         = f8
+           2 result_value_alpha           = vc
+       )
+
+/********************************************************************/
+/*  cumrec Record                                                      */
+/********************************************************************/
+      record cumrec
+      (
+         1 cums[*]
+           2 cum_sequence                 = i4
+           2 control_name                 = c25
+           2 service_resource_cd          = f8
+           2 task_assay_cd                = f8
+           2 pdm_param_id                 = f8
+           2 pdm_range_id                 = f8
+           2 lot_id                       = f8
+           2 lot_number                   = vc
+           2 sequence                     = i4
+           2 cum_mean                     = f8
+           2 cum_sum_sqr                  = f8
+           2 cum_count                    = i4
+           2 expected_mean                = f8
+           2 expected_std_dev             = f8
+           2 arl_id                       = f8
+           2 normal_cnt                   = i4
+           2 abnormal_cnt                 = i4
+           2 review_cnt                   = i4
+           2 max_digits                   = i2
+           2 min_digits                   = i2
+           2 min_decimal_places           = i2
+           2 abs_low                      = f8
+           2 abs_high                     = f8
+       )
+      
+record intervals
+(
+  1 qual[*]
+    2 begin_dt_tm                 = dq8
+    2 end_dt_tm                   = dq8
+    2 current_sequence            = i4
+)
+      
+      
+     #Script
+      set reply->status_data->status = "F"
+      set s_cnt = 0
+      set detail_cnt = 0
+      set x = 0
+      declare RESULT_STATUS_CODESET       = i4  with protect, constant(1901)
+      declare RESULT_STATUS_ACCEPT_CDF    = c12 with protect, constant("ACCEPT")
+      declare RESULT_STATUS_VERIFIED_CDF  = c12 with protect, constant("VERIFIED")
+      declare RESULT_STATUS_AUTO_VERF_CDF = c12 with protect, constant("AUTOVERIFIED")
+      declare RESULT_STATUS_REVIEWED_CDF  = c12 with protect, constant("REVIEWED")
+      declare RESULT_STATUS_CORRECTED_CDF = c12 with protect, constant("CORRECTED")
+      declare RESULT_STATUS_CHANGED_CDF   = c12 with protect, constant("CHANGE")
+      declare RESULT_STATUS_REJECTED_CDF  = c12 with protect, constant("REJECT")
+
+      declare FOOTNOTE_CD  = f8
+      declare REVIEW_NOTE_CD  = f8
+      declare ALPHA_CD = f8
+      declare NUMERIC_CD = f8
+      declare ALP_NORMAL_CD = f8
+      declare WITHIN_RANGE_CD = f8
+      declare ALP_ABNORMAL_CD = f8
+      declare ALP_REVIEW_CD = f8
+      declare result_status_accept_cd = f8
+      declare result_status_reviewed_cd  = f8
+      declare result_status_verified_cd  = f8
+      declare result_status_auto_verf_cd  = f8  
+      declare result_status_corrected_cd = f8
+      declare result_status_changed_cd = f8
+      declare result_status_rejected_cd = f8
+      declare value = f8
+      declare mean = f8
+      declare std_dev = f8
+      declare variance1 = f8
+      declare variance2 = f8
+      declare cum_mean = i4
+      declare cum_std_dev = i4
+      set cum_mean = 0.0
+      set cum_std_dev = 0.0
+      set cum_cnt = 0
+      set lot_cnt = 0
+      set p_cnt = 0
+      set r_cnt = 0
+      set proc_cnt = 0
+      set mean = 0.00
+      set count = 0
+      set std_dev = 0.00
+      set variance1 = 0.00
+      set variance2 = 0.00
+      set value = 0.00
+      set data_map_level = 0
+      set SERV_RES_TYPE_CODESET       = 223
+      declare SERV_RES_SUBSECTION_CDF = c12 with protect, constant("SUBSECTION")
+      declare serv_res_subsection_cd  = f8
+      set arg_max_digits = 0
+      set arg_min_digits = 0
+      set arg_min_dec_places = 0
+      declare uar_fmt_result (min, max, dec, flag, result) = c50 with protect, noconstant("")
+
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+      declare dServiceResourceCd = f8 with protect, noconstant(0.0)
+      declare nResourceSecInd = i2 with protect, noconstant(0)
+
+      if (request->qc_result_type_flag = NULL)
+        set request->qc_result_type_flag = 0
+      endif
+
+      if ( (request->service_resource_cd = 0)
+            and (request->qc_result_type_flag != 1) )
+         call InitResourceSecurity(1)
+      else
+         call InitResourceSecurity(0)
+      endif
+      
+declare nStatCnt                             = i2 with protect, noconstant(0)
+declare lTestSiteslist                       = i4 with protect, constant(size(request->service_resources,5))
+declare lProcedureslist                      = i4 with protect, constant(size(request->assays,5))
+declare sTestsite_Parser                     = vc with protect, noconstant("")
+declare sProcedure_Parser                    = vc with protect, noconstant("")
+declare nTestsiteCnt                         = i4 with protect, noconstant(0)
+declare nProcedureCnt                        = i4 with protect, noconstant(0)
+declare sProcedures                          = vc with protect, noconstant("")
+declare sTestsites                           = vc with protect, noconstant("")
+declare GetTestsiteParser(sTable)            = vc
+declare GetProcedureParser(sTable)           = vc
+
+declare lIntervalCnt                         = i4 with protect, noconstant(0)
+declare i                                    = i4 with protect, noconstant(0)
+declare lTempIndex                           = i4 with protect, noconstant(0)
+declare nProcessResultId                     = i2 with protect, noconstant(false)
+      
+/************************************************************************
+*build interval structure                                               *
+************************************************************************/
+
+if (request->series_interval_nbr != 0 and request->series_sequence_nbr != 0)     
+  
+  set lIntervalCnt = lIntervalCnt + 1
+  set stat = alterlist(intervals->qual, lIntervalCnt)
+  
+  set intervals->qual[lIntervalCnt].begin_dt_tm = request->beg_dt_tm
+  set intervals->qual[lIntervalCnt].end_dt_tm = datetimeadd(request->beg_dt_tm, (request->series_interval_nbr / 24))
+ 
+  while (intervals->qual[lIntervalCnt].end_dt_tm < request->end_dt_tm) ; interval end_dt_tm < request end_dt_tm
+    set lIntervalCnt = lIntervalCnt + 1
+    set stat = alterlist(intervals->qual, lIntervalCnt)   
+    set intervals->qual[lIntervalCnt].begin_dt_tm = intervals->qual[lIntervalCnt - 1].end_dt_tm
+    set intervals->qual[lIntervalCnt].end_dt_tm = 
+        datetimeadd(intervals->qual[lIntervalCnt].begin_dt_tm, (cnvtreal(request->series_interval_nbr) / 24))
+  endwhile
+  
+endif 
+      
+/************************************************************************
+*build parsers (2)                                                      *
+************************************************************************/
+
+subroutine GetTestsiteParser(sTable)
+  if (lTestSiteslist > 0)
+    if (sTable =  "rar")
+      set sTestsite_Parser = build("expand(nTestsiteCnt,1,lTestSiteslist,rar.service_resource_cd,",
+          "request->service_resources[nTestsiteCnt].service_resource_cd)")
+    elseif (sTable = "p")
+      set sTestsite_Parser = build("expand(nTestsiteCnt,1,lTestSiteslist,",
+          "p.service_resource_cd,request->service_resources[nTestsiteCnt].service_resource_cd)")
+    endif
+  elseif (request->service_resource_cd > 0)
+    if (sTable =  "rar") 	
+  	  set sTestsite_Parser = "rar.service_resource_cd = request->service_resource_cd"
+	  elseif(sTable = "p")
+	    set sTestsite_Parser = "p.service_resource_cd = request->service_resource_cd"
+    endif
+  else
+	 	set sTestsite_Parser = "1 = 1"
+	endif
+ return(sTestsite_Parser) 
+end
+
+subroutine GetProcedureParser(sTable)
+  if (lProcedureslist > 0)
+	  if (sTable = "p")
+		  set sProcedure_Parser = build("expand(nProcedureCnt, 1, lProcedureslist,",
+		      "p.task_assay_cd, request->assays[nProcedureCnt].task_assay_cd)")
+		elseif (sTable = "q")
+		  set sProcedure_Parser = build("expand(nProcedureCnt, 1, lProcedureslist,",
+		      "q.task_assay_cd, request->assays[nProcedureCnt].task_assay_cd)")
+		endif
+	elseif (request->task_assay_cd > 0)
+ 		if (sTable = "p")
+ 		 	set sProcedure_Parser = "p.task_assay_cd = request->task_assay_cd"
+	  elseif(sTable = "q")
+	    set sProcedure_Parser = "q.task_assay_cd = request->task_assay_cd"
+	  endif
+	else
+		set sProcedure_Parser = "1 = 1"
+	endif  
+ return(sProcedure_Parser)
+end
+
+
+   /***********************************************************************
+   * Load code values                                                     *
+   ***********************************************************************/
+   set serv_res_subsection_cd = uar_get_code_by("MEANING", SERV_RES_TYPE_CODESET, nullterm(SERV_RES_SUBSECTION_CDF))
+   
+ /***********************************************************************
+ * Load code values                                                     *
+ ***********************************************************************/
+
+      declare COMMENT_TYPE_CS    = i4  with protect, constant(14)
+      declare RESULT_TYPE_CS     = i4  with protect, constant(289)
+      declare RESULT_FLAG_CS     = i4  with protect, constant(1902)
+
+      declare ALPHA_CDF          = c12 with protect, constant("2")
+      declare NUMERIC_CDF        = c12 with protect, constant("3")
+      declare WITHIN_RANGE_CDF   = c12 with protect, constant("WITHIN_RANGE")
+      declare ALP_NORMAL_CDF     = c12 with protect, constant("ALP_NORMAL")
+      declare ALP_ABNORMAL_CDF   = c12 with protect, constant("ALP_ABNORMAL")
+      declare ALP_REVIEW_CDF     = c12 with protect, constant("ALP_REVIEW")
+
+      declare FOOTNOTE_CDF       = c12 with protect, constant("QC FTNT")
+      declare REVIEW_NOTE_CDF    = c12 with protect, constant("QC RVNT")
+
+	  set stat = uar_get_meaning_by_codeset(COMMENT_TYPE_CS, FOOTNOTE_CDF,1, FOOTNOTE_CD)
+
+	  set stat = uar_get_meaning_by_codeset(COMMENT_TYPE_CS, REVIEW_NOTE_CDF,1, REVIEW_NOTE_CD)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_TYPE_CS, ALPHA_CDF,1, ALPHA_CD)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_TYPE_CS, NUMERIC_CDF,1, NUMERIC_CD)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_FLAG_CS, WITHIN_RANGE_CDF,1, WITHIN_RANGE_CD)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_FLAG_CS, ALP_NORMAL_CDF,1, ALP_NORMAL_CD)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_FLAG_CS, ALP_ABNORMAL_CDF,1, ALP_ABNORMAL_CD)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_FLAG_CS, ALP_REVIEW_CDF,1, ALP_REVIEW_CD)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_STATUS_CODESET, RESULT_STATUS_ACCEPT_CDF,1, result_status_accept_cd)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_STATUS_CODESET, RESULT_STATUS_REVIEWED_CDF,1, result_status_reviewed_cd)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_STATUS_CODESET, RESULT_STATUS_VERIFIED_CDF,1, result_status_verified_cd)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_STATUS_CODESET, RESULT_STATUS_AUTO_VERF_CDF,1, result_status_auto_verf_cd)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_STATUS_CODESET, RESULT_STATUS_CORRECTED_CDF,1, result_status_corrected_cd)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_STATUS_CODESET, RESULT_STATUS_CHANGED_CDF,1, result_status_changed_cd)
+
+	  set stat = uar_get_meaning_by_codeset(RESULT_STATUS_CODESET, RESULT_STATUS_REJECTED_CDF,1, result_status_rejected_cd)
+
+/********************************************************************/
+/* SELECT LOT NUMBERS                                               */
+/********************************************************************/
+
+     if (request->qc_result_type_flag = 1)                           
+
+        SELECT                                                    
+          into "nl:"                                               
+            p.pdm_param_id,                                         
+            r.pdm_range_id                                           
+        FROM                                                       
+            pdm_params p,                                            
+            pdm_ranges r                                            
+        PLAN p                                                       
+          where parser(GetTestSiteParser("p"))                         
+          and parser(GetProcedureParser("p"))                                     
+        JOIN r                                                        
+          where r.pdm_param_id = p.pdm_param_id                      
+           and ((r.beg_effective_dt_tm                              
+           between cnvtdatetime(request->beg_dt_tm)                 
+           and cnvtdatetime(request->end_dt_tm))                       
+           or (r.end_effective_dt_tm                                  
+           between cnvtdatetime(request->beg_dt_tm)                       
+           and cnvtdatetime(request->end_dt_tm))                          
+           or (r.beg_effective_dt_tm < cnvtdatetime(request->beg_dt_tm)    
+           and p.end_effective_dt_tm > cnvtdatetime(request->end_dt_tm)))   
+	      ORDER BY r.pdm_range_id
+        HEAD r.pdm_range_id                                           
+           lot_cnt = lot_cnt + 1                                      
+           if (mod(lot_cnt,5) = 1)                                    
+               stat = alterlist(lot->lots,lot_cnt + 5)              
+           endif                                                        
+           lot->lots[lot_cnt].sequence = lot_cnt,                      
+           lot->lots[lot_cnt].pdm_param_id = r.pdm_param_id,           
+           lot->lots[lot_cnt].pdm_range_id = r.pdm_range_id,        
+           lot->lots[lot_cnt].lot_id = 0,                         
+           lot->lots[lot_cnt].lot_number = ""                      
+        DETAIL                                                       
+           row+0                                                    
+        WITH                                                     
+           nocounter   
+/********************************************************************/
+/* SELECT QC RESULTS for PDM                                        */
+/********************************************************************/                             
+      select 
+         if (request->series_sequence_nbr > 0)
+        
+           order by q.service_resource_cd,
+                    assay_lot_header,
+                    q.perform_dt_tm,
+                    q.qc_result_id  
+                 
+         elseif (request->series_sequence_nbr = -999)
+      
+           order by q.service_resource_cd,
+                    assay_lot_header,
+                    q.perform_dt_tm desc,
+                    q.qc_result_id 
+      
+         elseif (request->series_sequence_nbr = 0)
+        
+           order by q.service_resource_cd,
+                    assay_lot_header,
+                    q.qc_result_id desc
+      
+         endif
+      
+          into "nl:"
+            q.qc_result_id,
+            performdatetime = cnvtdatetime(q.perform_dt_tm),
+            assay_lot_header = build(q.task_assay_cd, q.lot_id),           
+            q.service_resource_cd,
+            q.task_assay_cd,
+            q.lot_id,
+            data_map_exists = decode(dm.seq, "Y", "N"),                 
+            dm.task_assay_cd,                                          
+            d_rg.seq,                                                  
+            rg_exists = decode(rg.seq, "Y", "N"),                     
+            rg.parent_service_resource_cd,                               
+            rg.child_service_resource_cd,                                
+            rg.resource_group_type_cd,                                 
+            rg.root_service_resource_cd                                
+          FROM
+            qc_result q,
+            (dummyt d1 with seq = 1),                                     
+            data_map dm,                                                
+            (dummyt d_rg with seq = 1),                                   
+            resource_group rg,         
+            control_material cm 
+            
+          plan q
+            where q.control_id = request->control_id
+              and parser(GetProcedureParser("q"))
+              and q.service_resource_cd = request->service_resource_cd
+              and ((q.perform_dt_tm between cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm))
+              or q.perform_dt_tm = cnvtdatetime(request->beg_dt_tm)
+              or q.perform_dt_tm = cnvtdatetime(request->end_dt_tm))
+              and q.result_status_cd in ( result_status_accept_cd,
+                                          result_status_verified_cd,
+                                          result_status_auto_verf_cd,     
+                                          result_status_reviewed_cd,
+                                          result_status_changed_cd,
+                                          result_status_corrected_cd,
+                                          result_status_rejected_cd)
+              and q.qc_result_type_flag = request->qc_result_type_flag   
+          join cm where cm.control_id = q.control_id
+          JOIN d1 where d1.seq = 1
+          JOIN dm                                                        
+            where dm.task_assay_cd = q.task_assay_cd                    
+              and dm.data_map_type_flag in (0, 1)                        
+              and dm.active_ind = 1                                     
+          JOIN d_rg                                                   
+            where d_rg.seq = 1                                           
+          JOIN rg                                                         
+            where rg.parent_service_resource_cd = dm.service_resource_cd  
+              and rg.child_service_resource_cd = q.service_resource_cd    
+              and rg.resource_group_type_cd = serv_res_subsection_cd      
+              and rg.root_service_resource_cd = 0.0                      
+   
+         HEAD q.service_resource_cd
+            dServiceResourceCd = q.service_resource_cd                  
+            if (IsResourceViewable(dServiceResourceCd))                   
+              nResourceSecInd = 1                                         
+            else                                                       
+              nResourceSecInd = 0                                      
+            endif                                                      
+            sr_cnt = 0
+         HEAD assay_lot_header             
+            if (nResourceSecInd = 1)
+              ;for QC results, create a cumrec every lot for each assay -this will allow stats to be cumulated for each
+              ;for Patient results, only create one for pdm_range_id
+              for (x=1 to lot_cnt)
+                if (lot->lots[x].lot_id = q.lot_id)                               
+                  cum_cnt = cum_cnt + 1
+                  if (mod(cum_cnt,5) = 1)
+                    stat = alterlist(cumrec->cums,cum_cnt + 5)
+                  endif
+                  cumrec->cums[cum_cnt].cum_sequence = cum_cnt,
+                  cumrec->cums[cum_cnt].sequence = lot->lots[x].sequence,
+                  cumrec->cums[cum_cnt].lot_number = lot->lots[x].lot_number,
+                  cumrec->cums[cum_cnt].lot_id = lot->lots[x].lot_id,
+                  cumrec->cums[cum_cnt].service_resource_cd = q.service_resource_cd,
+                  cumrec->cums[cum_cnt].task_assay_cd = q.task_assay_cd,
+                  cumrec->cums[cum_cnt].arl_id = q.arl_id,
+                  cumrec->cums[cum_cnt].expected_mean = q.mean,
+                  cumrec->cums[cum_cnt].expected_std_dev = q.statistical_std_dev,
+                  cumrec->cums[cum_cnt].pdm_param_id = lot->lots[x].pdm_param_id, 
+                  cumrec->cums[cum_cnt].pdm_range_id = lot->lots[x].pdm_range_id
+                  cumrec->cums[cum_cnt].abs_low = q.abs_low
+                  cumrec->cums[cum_cnt].abs_high = q.abs_high
+      
+                endif                                                             
+              endfor
+              data_map_level = 0                                                  
+              arg_max_digits = 8                                                   
+              arg_min_digits = 1                                                   
+              arg_min_dec_places = 2                                               
+            endif                                                                  
+
+
+          DETAIL
+            if (nResourceSecInd = 1)                                             
+              if (data_map_exists = "Y")
+                ;* Check for exact match on QC data map
+                if (data_map_level <= 3
+                    and dm.data_map_type_flag = 1
+                    and dm.service_resource_cd > 0.0
+                    and dm.service_resource_cd = q.service_resource_cd)
+                  data_map_level = 4
+                  arg_max_digits = dm.max_digits
+                  arg_min_digits = dm.min_digits
+                  arg_min_dec_places = dm.min_decimal_places
+                endif
+   
+                ;* Check for exact match on data map
+                if (data_map_level <= 2
+                    and dm.data_map_type_flag = 0
+                    and dm.service_resource_cd > 0.0
+                    and dm.service_resource_cd = q.service_resource_cd)
+                  data_map_level = 3
+                  arg_max_digits = dm.max_digits
+                  arg_min_digits = dm.min_digits
+                  arg_min_dec_places = dm.min_decimal_places
+                endif
+
+                ;* Check for subsection level data map
+                if (data_map_level <= 1
+                    and dm.data_map_type_flag = 0
+                    and dm.service_resource_cd > 0.0
+                    and rg_exists = "Y"
+                    and rg.parent_service_resource_cd = dm.service_resource_cd
+                    and rg.child_service_resource_cd = q.service_resource_cd)
+                  data_map_level = 2
+                  arg_max_digits = dm.max_digits
+                  arg_min_digits = dm.min_digits
+                  arg_min_decimal_places =
+                  dm.min_decimal_places
+                endif
+
+                ;* Check for default all resources level data map
+                if (data_map_level = 0
+                    and dm.data_map_type_flag = 0
+                    and dm.service_resource_cd = 0.0)
+                  data_map_level = 1
+                  arg_max_digits = dm.max_digits
+                  arg_min_digits = dm.min_digits
+                  arg_min_dec_places = dm.min_decimal_places
+                endif
+              endif
+            endif
+          FOOT q.qc_result_id
+            if (nResourceSecInd = 1)
+              for (x = 1 to cum_cnt)
+                if (((request->qc_result_type_flag = 0 and
+                   q.lot_id = cumrec->cums[x].lot_id)
+                   or (request->qc_result_type_flag = 1 and
+                   q.pdm_range_id > 0 and
+                   q.pdm_range_id = cumrec->cums[x].pdm_range_id))
+                   and q.task_assay_cd = cumrec->cums[x].task_assay_cd
+                   and q.service_resource_cd = cumrec->cums[x].service_resource_cd)
+                  ; begin analytical series logic
+                  nProcessResultId = false
+                  if (size(intervals->qual, 5) = 0)
+                    nProcessResultId = true
+                  else
+                    for (i = 1 to lIntervalCnt)
+                      if (q.perform_dt_tm between intervals->qual[i].begin_dt_tm and intervals->qual[i].end_dt_tm)  
+                        intervals->qual[i].current_sequence = intervals->qual[i].current_sequence + 1
+                        lTempIndex = i
+                        i = lIntervalCnt + 1
+                      endif
+                    endfor
+                    if (intervals->qual[lTempIndex].current_sequence = request->series_sequence_nbr or
+                       (intervals->qual[lTempIndex].current_sequence = 1 and request->series_sequence_nbr = -999))
+                      nProcessResultId = true
+                    endif
+                  endif
+                  if (nProcessResultId = true)
+                    proc_cnt = proc_cnt + 1
+                    if (mod(proc_cnt,5) = 1)
+                        stat = alterlist(procedure->procs,proc_cnt + 5)
+                    endif
+                    procedure->procs[proc_cnt].lot_id = q.lot_id,
+                    procedure->procs[proc_cnt].pdm_param_id = q.pdm_param_id,
+                    procedure->procs[proc_cnt].pdm_range_id = q.pdm_range_id,
+                    procedure->procs[proc_cnt].qc_result_id = q.qc_result_id,
+                    procedure->procs[proc_cnt].perform_dt_tm = q.perform_dt_tm,
+                    procedure->procs[proc_cnt].result_type_cd = q.result_type_cd,
+                    procedure->procs[proc_cnt].result_value_numeric = q.result_value_numeric,
+                    procedure->procs[proc_cnt].result_value_alpha = q.result_value_alpha,
+                    if (q.result_type_cd != alpha_cd)
+                       cumrec->cums[x].cum_mean = cumrec->cums[x].cum_mean +
+                           q.result_value_numeric
+                       cumrec->cums[x].cum_sum_sqr =
+                           cumrec->cums[x].cum_sum_sqr + q.result_value_numeric ** 2
+                       cumrec->cums[x].cum_count = cumrec->cums[x].cum_count + 1
+                    else
+                      cumrec->cums[x].cum_count = cumrec->cums[x].cum_count + 1
+                      if (q.result_process_cd = ALP_NORMAL_CD or
+                          q.result_process_cd = WITHIN_RANGE_CD)
+                        cumrec->cums[x].normal_cnt = cumrec->cums[x].normal_cnt + 1
+                      elseif (q.result_process_cd = ALP_ABNORMAL_CD)
+                        cumrec->cums[x].abnormal_cnt = cumrec->cums[x].abnormal_cnt + 1
+                      elseif (q.result_process_cd = ALP_REVIEW_CD)
+                        cumrec->cums[x].review_cnt = cumrec->cums[x].review_cnt + 1
+                      endif
+                    endif
+                  endif
+                endif
+              endfor
+            endif
+
+          FOOT assay_lot_header             
+            if (nResourceSecInd = 1)                                           
+              for (x=1 to cum_cnt)
+                if (cumrec->cums[x].task_assay_cd = q.task_assay_cd and
+                    cumrec->cums[x].service_resource_cd = q.service_resource_cd and
+                    cumrec->cums[x].cum_count > 0
+                    and cumrec->cums[x].lot_id = q.lot_id)
+
+                  s_cnt = s_cnt + 1
+                  if (mod(s_cnt,5) = 1)
+                    stat =  alterlist(reply->stats,s_cnt + 5)
+                  endif
+                  reply->stats[s_cnt].service_resource_cd =
+                      cumrec->cums[x].service_resource_cd
+                  reply->stats[s_cnt].task_assay_cd = cumrec->cums[x].task_assay_cd
+                  reply->stats[s_cnt].control_name = cm.short_description
+                  reply->stats[s_cnt].control_id = cm.control_id
+                  reply->stats[s_cnt].lot_id = cumrec->cums[x].lot_id
+                  reply->stats[s_cnt].pdm_param_id = cumrec->cums[x].pdm_param_id      
+                  reply->stats[s_cnt].pdm_range_id = cumrec->cums[x].pdm_range_id      
+                  reply->stats[s_cnt].lot_number = cumrec->cums[x].lot_number
+                  reply->stats[s_cnt].expected_mean = cumrec->cums[x].expected_mean
+                  reply->stats[s_cnt].expected_std_dev = cumrec->cums[x].expected_std_dev
+                  reply->stats[s_cnt].arl_id = cumrec->cums[x].arl_id               
+               
+                  if (q.result_type_cd != alpha_cd)
+                    value = 0
+                    if (q.task_assay_cd = cumrec->cums[x].task_assay_cd and
+                      q.service_resource_cd = cumrec->cums[x].service_resource_cd)
+                      count = cumrec->cums[x].cum_count
+                      reply->stats[s_cnt].count = count
+                      reply->stats[s_cnt].max_digits = arg_max_digits                     
+                      reply->stats[s_cnt].min_digits = arg_min_digits                    
+                      reply->stats[s_cnt].min_decimal_places = arg_min_dec_places       
+                      reply->stats[s_cnt].sum_of_results = cumrec->cums[x].cum_mean
+                      reply->stats[s_cnt].sum_of_squares = cumrec->cums[x].cum_sum_sqr
+                      mean = cumrec->cums[x].cum_mean / count
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places + 1, 0, mean)
+                      reply->stats[s_cnt].mean = rslt                                                                  
+                      
+                      abs_low = cumrec->cums[x].abs_low
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places, 0, abs_low)
+                      reply->stats[s_cnt].abs_low = rslt
+                      
+                      abs_high = cumrec->cums[x].abs_high
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places, 0, abs_high)
+                      reply->stats[s_cnt].abs_high = rslt
+                      
+                   
+                      stddev = (cumrec->cums[x].cum_sum_sqr -
+                          (cumrec->cums[x].cum_mean **2)/count)/(count-1)
+                      stddev = stddev ** 0.5                
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places + 1, 0, stddev)
+                      reply->stats[s_cnt].std_dev = rslt
+                   
+                      cv = (stddev / mean) * 100                                                                    
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places + 1, 0, cv)
+                      reply->stats[s_cnt].co_var = rslt
+                                                                                  
+                      variance1 = cumrec->cums[x].expected_std_dev ** 2
+                      variance2 = stddev ** 2
+                      if (variance1 > variance2)
+                        fval = variance1 / variance2                                                                   
+                      else
+                        fval = variance2 / variance1                                                                   
+                      endif
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places + 1, 0, fval)
+                      reply->stats[s_cnt].fval = rslt                                                                  
+                      value = cumrec->cums[x].cum_mean / count -
+                          cumrec->cums[x].expected_mean
+                      zstat = value / cumrec->cums[x].expected_std_dev
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places + 1, 0, zstat)
+                      reply->stats[s_cnt].zstat = rslt
+                    endif
+                  else
+                    reply->stats[s_cnt].alpha_flag = 1
+                    reply->stats[s_cnt].count = cumrec->cums[x].cum_count
+                    reply->stats[s_cnt].normal_cnt = cumrec->cums[x].normal_cnt
+                    reply->stats[s_cnt].abnormal_cnt = cumrec->cums[x].abnormal_cnt
+                    reply->stats[s_cnt].review_cnt = cumrec->cums[x].review_cnt
+                  endif
+                  p_cnt = 0
+                  for (x2 = 1 to proc_cnt)
+                    if (procedure->procs[x2].lot_id = cumrec->cums[x].lot_id or
+                       (request->qc_result_type_flag = 1 and
+                       procedure->procs[x2].pdm_range_id = cumrec->cums[x].pdm_range_id))
+                       p_cnt = p_cnt + 1
+                       if (mod(p_cnt,5) = 1)
+                         stat =  alterlist(reply->stats[s_cnt]->procs,p_cnt + 5)
+                       endif
+                       reply->stats[s_cnt]->procs[p_cnt].qc_result_id =
+                           procedure->procs[x2].qc_result_id
+                       reply->stats[s_cnt]->procs[p_cnt].perform_dt_tm =
+                           procedure->procs[x2].perform_dt_tm
+                       reply->stats[s_cnt]->procs[p_cnt].result_type_cd =
+                           procedure->procs[x2].result_type_cd
+                       reply->stats[s_cnt]->procs[p_cnt].result_value_numeric =
+                           procedure->procs[x2].result_value_numeric
+                       reply->stats[s_cnt]->procs[p_cnt].result_value_alpha =
+                           procedure->procs[x2].result_value_alpha
+                    endif
+                  endfor
+                  stat =  alterlist(reply->stats[s_cnt]->procs, p_cnt)
+                endif
+              endfor
+            endif                                                        
+
+            ;need to reset all of the interval current_sequence values to process the next assay lot
+            for (i = 1 to lIntervalCnt)
+              intervals->qual[i].current_sequence = 0
+            endfor
+
+          FOOT q.service_resource_cd
+            sr_cnt = 0
+          WITH
+            outerjoin = d1,                                            
+            dontcare = dm,                                              
+            outerjoin = d_rg,                                           
+            dontcare = rg,                                           
+            nocounter
+            
+     else                                                          
+        SELECT
+          into "nl:"
+            c.lot_id,
+            c.lot_number
+        FROM
+            control_lot c
+        WHERE
+           c.control_id = request->control_id and
+           ((c.receive_dt_tm between cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm)) or
+           (c.expiration_dt_tm between cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm)) or
+           (c.receive_dt_tm < cnvtdatetime(request->beg_dt_tm) and c.expiration_dt_tm > cnvtdatetime(request->end_dt_tm)))
+        DETAIL
+           lot_cnt = lot_cnt + 1
+           if (mod(lot_cnt,5) = 1)
+               stat = alterlist(lot->lots,lot_cnt + 5)
+           endif
+           lot->lots[lot_cnt].sequence = lot_cnt,
+           lot->lots[lot_cnt].lot_id = c.lot_id,
+           lot->lots[lot_cnt].lot_number = c.lot_number,
+           lot->lots[lot_cnt].pdm_param_id = 0
+           lot->lots[lot_cnt].pdm_range_id = 0
+        WITH
+           nocounter
+
+        set error_check = ERROR(sErrorMsg,0)   ;get error message
+        if (error_check != 0)
+           set reply->status_data->status = "F"
+           set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+           go to exit_script
+        endif
+        if (curqual = 0)
+           set reply->status_data->status = "Z"
+           go to exit_script
+        endif
+/********************************************************************/
+/* SELECT QC RESULTS for non PDM                                    */
+/********************************************************************/  
+       select 
+         if (request->series_sequence_nbr > 0)
+        
+           order by q.service_resource_cd,
+                    assay_lot_header,
+                    q.perform_dt_tm,
+                    q.qc_result_id  
+                 
+         elseif (request->series_sequence_nbr = -999)
+      
+           order by q.service_resource_cd,
+                    assay_lot_header,
+                    q.perform_dt_tm desc,
+                    q.qc_result_id 
+      
+         elseif (request->series_sequence_nbr = 0)
+        
+           order by q.service_resource_cd,
+                    assay_lot_header,
+                    q.qc_result_id desc
+      
+         endif
+          into "nl:"
+            q.qc_result_id,
+            performdatetime = cnvtdatetime(q.perform_dt_tm),
+            assay_lot_header = build(q.task_assay_cd, q.lot_id),           
+            q.service_resource_cd,
+            q.task_assay_cd,
+            q.lot_id,
+            data_map_exists = decode(dm.seq, "Y", "N"),                 
+            dm.task_assay_cd,                                          
+            d_rg.seq,                                                  
+            rg_exists = decode(rg.seq, "Y", "N"),                     
+            rg.parent_service_resource_cd,                               
+            rg.child_service_resource_cd,                                
+            rg.resource_group_type_cd,                                 
+            rg.root_service_resource_cd                                
+          FROM
+            resource_accession_r rar,
+            qc_result q,
+            (dummyt d1 with seq = 1),                                     
+            data_map dm,                                                
+            (dummyt d_rg with seq = 1),                                   
+            resource_group rg,         
+            control_material cm 
+          plan rar
+            where rar.control_id = request->control_id
+              and parser(GetTestSiteParser("rar"))
+          join q
+            where q.control_id = request->control_id
+              and parser(GetProcedureParser("q"))
+              and q.service_resource_cd = rar.service_resource_cd
+              and ((q.perform_dt_tm between cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm))
+              or q.perform_dt_tm = cnvtdatetime(request->beg_dt_tm)
+              or q.perform_dt_tm = cnvtdatetime(request->end_dt_tm))
+              and q.result_status_cd in ( result_status_accept_cd,
+                                          result_status_verified_cd,
+                                          result_status_auto_verf_cd,     
+                                          result_status_reviewed_cd,
+                                          result_status_changed_cd,
+                                          result_status_corrected_cd,
+                                          result_status_rejected_cd)
+              and q.qc_result_type_flag = request->qc_result_type_flag   
+          join cm where cm.control_id = q.control_id
+          JOIN d1 where d1.seq = 1
+          JOIN dm                                                        
+            where dm.task_assay_cd = q.task_assay_cd                    
+              and dm.data_map_type_flag in (0, 1)                        
+              and dm.active_ind = 1                                     
+          JOIN d_rg                                                   
+            where d_rg.seq = 1                                           
+          JOIN rg                                                         
+            where rg.parent_service_resource_cd = dm.service_resource_cd  
+              and rg.child_service_resource_cd = q.service_resource_cd    
+              and rg.resource_group_type_cd = serv_res_subsection_cd      
+              and rg.root_service_resource_cd = 0.0                      
+   
+         HEAD q.service_resource_cd
+            dServiceResourceCd = q.service_resource_cd                  
+            if (IsResourceViewable(dServiceResourceCd))                   
+              nResourceSecInd = 1                                         
+            else                                                       
+              nResourceSecInd = 0                                      
+            endif                                                      
+            sr_cnt = 0
+         HEAD assay_lot_header               
+            if (nResourceSecInd = 1)
+              ;for QC results, create a cumrec every lot for each assay -this will allow stats to be cumulated for each
+              ;for Patient results, only create one for pdm_range_id
+              for (x=1 to lot_cnt)
+                if (lot->lots[x].lot_id = q.lot_id)                               
+                  cum_cnt = cum_cnt + 1
+                  if (mod(cum_cnt,5) = 1)
+                    stat = alterlist(cumrec->cums,cum_cnt + 5)
+                  endif
+                  cumrec->cums[cum_cnt].cum_sequence = cum_cnt,
+                  cumrec->cums[cum_cnt].sequence = lot->lots[x].sequence,
+                  cumrec->cums[cum_cnt].lot_number = lot->lots[x].lot_number,
+                  cumrec->cums[cum_cnt].lot_id = lot->lots[x].lot_id,
+                  cumrec->cums[cum_cnt].service_resource_cd = q.service_resource_cd,
+                  cumrec->cums[cum_cnt].task_assay_cd = q.task_assay_cd,
+                  cumrec->cums[cum_cnt].arl_id = q.arl_id,
+                  cumrec->cums[cum_cnt].expected_mean = q.mean,
+                  cumrec->cums[cum_cnt].expected_std_dev = q.statistical_std_dev,
+                  cumrec->cums[cum_cnt].pdm_param_id = lot->lots[x].pdm_param_id, 
+                  cumrec->cums[cum_cnt].pdm_range_id = lot->lots[x].pdm_range_id
+                  cumrec->cums[cum_cnt].abs_low = q.abs_low
+                  cumrec->cums[cum_cnt].abs_high = q.abs_high
+      
+                endif                                                             
+              endfor
+              data_map_level = 0                                                  
+              arg_max_digits = 8                                                   
+              arg_min_digits = 1                                                   
+              arg_min_dec_places = 2                                               
+            endif                                                                  
+
+
+          DETAIL
+            if (nResourceSecInd = 1)                                             
+              if (data_map_exists = "Y")
+                ;* Check for exact match on QC data map
+                if (data_map_level <= 3
+                    and dm.data_map_type_flag = 1
+                    and dm.service_resource_cd > 0.0
+                    and dm.service_resource_cd = q.service_resource_cd)
+                  data_map_level = 4
+                  arg_max_digits = dm.max_digits
+                  arg_min_digits = dm.min_digits
+                  arg_min_dec_places = dm.min_decimal_places
+                endif
+   
+                ;* Check for exact match on data map
+                if (data_map_level <= 2
+                    and dm.data_map_type_flag = 0
+                    and dm.service_resource_cd > 0.0
+                    and dm.service_resource_cd = q.service_resource_cd)
+                  data_map_level = 3
+                  arg_max_digits = dm.max_digits
+                  arg_min_digits = dm.min_digits
+                  arg_min_dec_places = dm.min_decimal_places
+                endif
+
+                ;* Check for subsection level data map
+                if (data_map_level <= 1
+                    and dm.data_map_type_flag = 0
+                    and dm.service_resource_cd > 0.0
+                    and rg_exists = "Y"
+                    and rg.parent_service_resource_cd = dm.service_resource_cd
+                    and rg.child_service_resource_cd = q.service_resource_cd)
+                  data_map_level = 2
+                  arg_max_digits = dm.max_digits
+                  arg_min_digits = dm.min_digits
+                  arg_min_decimal_places =
+                  dm.min_decimal_places
+                endif
+
+                ;* Check for default all resources level data map
+                if (data_map_level = 0
+                    and dm.data_map_type_flag = 0
+                    and dm.service_resource_cd = 0.0)
+                  data_map_level = 1
+                  arg_max_digits = dm.max_digits
+                  arg_min_digits = dm.min_digits
+                  arg_min_dec_places = dm.min_decimal_places
+                endif
+              endif
+            endif
+          FOOT q.qc_result_id
+            if (nResourceSecInd = 1)
+              for (x = 1 to cum_cnt)
+                if (((request->qc_result_type_flag = 0 and
+                   q.lot_id = cumrec->cums[x].lot_id)
+                   or (request->qc_result_type_flag = 1 and
+                   q.pdm_range_id > 0 and
+                   q.pdm_range_id = cumrec->cums[x].pdm_range_id))
+                   and q.task_assay_cd = cumrec->cums[x].task_assay_cd
+                   and q.service_resource_cd = cumrec->cums[x].service_resource_cd)
+                  ; begin analytical series logic
+                  nProcessResultId = false
+                  if (size(intervals->qual, 5) = 0)
+                    nProcessResultId = true
+                  else
+                    for (i = 1 to lIntervalCnt)
+                      if (q.perform_dt_tm between intervals->qual[i].begin_dt_tm and intervals->qual[i].end_dt_tm)  
+                        intervals->qual[i].current_sequence = intervals->qual[i].current_sequence + 1
+                        lTempIndex = i
+                        i = lIntervalCnt + 1
+                      endif
+                    endfor
+                    if (intervals->qual[lTempIndex].current_sequence = request->series_sequence_nbr or
+                       (intervals->qual[lTempIndex].current_sequence = 1 and request->series_sequence_nbr = -999))
+                      nProcessResultId = true
+                    endif
+                  endif
+               
+                  if (nProcessResultId = true)
+                    proc_cnt = proc_cnt + 1
+                    if (mod(proc_cnt,5) = 1)
+                        stat = alterlist(procedure->procs,proc_cnt + 5)
+                    endif
+                    procedure->procs[proc_cnt].lot_id = q.lot_id,
+                    procedure->procs[proc_cnt].pdm_param_id = q.pdm_param_id,
+                    procedure->procs[proc_cnt].pdm_range_id = q.pdm_range_id,
+                    procedure->procs[proc_cnt].qc_result_id = q.qc_result_id,
+                    procedure->procs[proc_cnt].perform_dt_tm = q.perform_dt_tm,
+                    procedure->procs[proc_cnt].result_type_cd = q.result_type_cd,
+                    procedure->procs[proc_cnt].result_value_numeric = q.result_value_numeric,
+                    procedure->procs[proc_cnt].result_value_alpha = q.result_value_alpha,
+                    if (q.result_type_cd != alpha_cd)
+                       cumrec->cums[x].cum_mean = cumrec->cums[x].cum_mean +
+                           q.result_value_numeric
+                       cumrec->cums[x].cum_sum_sqr =
+                           cumrec->cums[x].cum_sum_sqr + q.result_value_numeric ** 2
+                       cumrec->cums[x].cum_count = cumrec->cums[x].cum_count + 1
+                    else
+                      cumrec->cums[x].cum_count = cumrec->cums[x].cum_count + 1
+                      if (q.result_process_cd = ALP_NORMAL_CD or
+                          q.result_process_cd = WITHIN_RANGE_CD)
+                        cumrec->cums[x].normal_cnt = cumrec->cums[x].normal_cnt + 1
+                      elseif (q.result_process_cd = ALP_ABNORMAL_CD)
+                        cumrec->cums[x].abnormal_cnt = cumrec->cums[x].abnormal_cnt + 1
+                      elseif (q.result_process_cd = ALP_REVIEW_CD)
+                        cumrec->cums[x].review_cnt = cumrec->cums[x].review_cnt + 1
+                      endif
+                    endif
+                  endif
+                endif
+              endfor
+            endif
+
+          FOOT assay_lot_header                
+            if (nResourceSecInd = 1)                                               
+              for (x=1 to cum_cnt)
+                if (cumrec->cums[x].task_assay_cd = q.task_assay_cd and
+                    cumrec->cums[x].service_resource_cd = q.service_resource_cd and
+                    cumrec->cums[x].cum_count > 0
+                    and cumrec->cums[x].lot_id = q.lot_id)
+
+                  s_cnt = s_cnt + 1
+                  if (mod(s_cnt,5) = 1)
+                    stat =  alterlist(reply->stats,s_cnt + 5)
+                  endif
+                  reply->stats[s_cnt].service_resource_cd =
+                      cumrec->cums[x].service_resource_cd
+                  reply->stats[s_cnt].task_assay_cd = cumrec->cums[x].task_assay_cd
+                  reply->stats[s_cnt].control_name = cm.short_description
+                  reply->stats[s_cnt].control_id = cm.control_id
+                  reply->stats[s_cnt].lot_id = cumrec->cums[x].lot_id
+                  reply->stats[s_cnt].pdm_param_id = cumrec->cums[x].pdm_param_id      
+                  reply->stats[s_cnt].pdm_range_id = cumrec->cums[x].pdm_range_id      
+                  reply->stats[s_cnt].lot_number = cumrec->cums[x].lot_number
+                  reply->stats[s_cnt].expected_mean = cumrec->cums[x].expected_mean
+                  reply->stats[s_cnt].expected_std_dev = cumrec->cums[x].expected_std_dev
+                  reply->stats[s_cnt].arl_id = cumrec->cums[x].arl_id               
+               
+                  if (q.result_type_cd != alpha_cd)
+                    value = 0
+                    if (q.task_assay_cd = cumrec->cums[x].task_assay_cd and
+                      q.service_resource_cd = cumrec->cums[x].service_resource_cd)
+                      count = cumrec->cums[x].cum_count
+                      reply->stats[s_cnt].count = count
+                      reply->stats[s_cnt].max_digits = arg_max_digits                     
+                      reply->stats[s_cnt].min_digits = arg_min_digits                    
+                      reply->stats[s_cnt].min_decimal_places = arg_min_dec_places       
+                      reply->stats[s_cnt].sum_of_results = cumrec->cums[x].cum_mean
+                      reply->stats[s_cnt].sum_of_squares = cumrec->cums[x].cum_sum_sqr
+                      mean = cumrec->cums[x].cum_mean / count
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places + 1, 0, mean)
+                      reply->stats[s_cnt].mean = rslt                                                                  
+                      
+                      abs_low = cumrec->cums[x].abs_low
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places, 0, abs_low)
+                      reply->stats[s_cnt].abs_low = rslt
+                      
+                      abs_high = cumrec->cums[x].abs_high
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places, 0, abs_high)
+                      reply->stats[s_cnt].abs_high = rslt
+                      
+                   
+                      stddev = (cumrec->cums[x].cum_sum_sqr -
+                          (cumrec->cums[x].cum_mean **2)/count)/(count-1)
+                      stddev = stddev ** 0.5                
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places + 1, 0, stddev)
+                      reply->stats[s_cnt].std_dev = rslt
+                   
+                      cv = (stddev / mean) * 100                                                                    
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places + 1, 0, cv)
+                      reply->stats[s_cnt].co_var = rslt
+                                                                                  
+                      variance1 = cumrec->cums[x].expected_std_dev ** 2
+                      variance2 = stddev ** 2
+                      if (variance1 > variance2)
+                        fval = variance1 / variance2                                                                   
+                      else
+                        fval = variance2 / variance1                                                                   
+                      endif
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places + 1, 0, fval)
+                      reply->stats[s_cnt].fval = rslt                                                                  
+                      value = cumrec->cums[x].cum_mean / count -
+                          cumrec->cums[x].expected_mean
+                      zstat = value / cumrec->cums[x].expected_std_dev
+                      rslt = uar_fmt_result(arg_min_digits, arg_max_digits,
+                          arg_min_dec_places + 1, 0, zstat)
+                      reply->stats[s_cnt].zstat = rslt
+                    endif
+                  else
+                    reply->stats[s_cnt].alpha_flag = 1
+                    reply->stats[s_cnt].count = cumrec->cums[x].cum_count
+                    reply->stats[s_cnt].normal_cnt = cumrec->cums[x].normal_cnt
+                    reply->stats[s_cnt].abnormal_cnt = cumrec->cums[x].abnormal_cnt
+                    reply->stats[s_cnt].review_cnt = cumrec->cums[x].review_cnt
+                  endif
+                  p_cnt = 0
+                  for (x2 = 1 to proc_cnt)
+                    if (procedure->procs[x2].lot_id = cumrec->cums[x].lot_id or
+                       (request->qc_result_type_flag = 1 and
+                       procedure->procs[x2].pdm_range_id = cumrec->cums[x].pdm_range_id))
+                       p_cnt = p_cnt + 1
+                       if (mod(p_cnt,5) = 1)
+                         stat =  alterlist(reply->stats[s_cnt]->procs,p_cnt + 5)
+                       endif
+                       reply->stats[s_cnt]->procs[p_cnt].qc_result_id =
+                           procedure->procs[x2].qc_result_id
+                       reply->stats[s_cnt]->procs[p_cnt].perform_dt_tm =
+                           procedure->procs[x2].perform_dt_tm
+                       reply->stats[s_cnt]->procs[p_cnt].result_type_cd =
+                           procedure->procs[x2].result_type_cd
+                       reply->stats[s_cnt]->procs[p_cnt].result_value_numeric =
+                           procedure->procs[x2].result_value_numeric
+                       reply->stats[s_cnt]->procs[p_cnt].result_value_alpha =
+                           procedure->procs[x2].result_value_alpha
+                    endif
+                  endfor
+                  stat =  alterlist(reply->stats[s_cnt]->procs, p_cnt)
+                endif
+              endfor
+            endif                                                        
+
+            ;need to reset all of the interval current_sequence values to process the next assay lot
+            for (i = 1 to lIntervalCnt)
+              intervals->qual[i].current_sequence = 0
+            endfor
+
+          FOOT q.service_resource_cd
+            sr_cnt = 0
+          WITH
+            outerjoin = d1,                                            
+            dontcare = dm,                                              
+            outerjoin = d_rg,                                           
+            dontcare = rg,                                           
+            nocounter        
+        
+      endif                                                           
+
+CALL ECHO(LOT_CNT, 1)
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+      set stat =  alterlist(reply->stats, s_cnt)
+      if (curqual = 0)
+        set reply->status_data->status = "Z"
+      else
+        set reply->status_data->status = "S"
+      endif
+
+      go to exit_script
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+
+
+     if ((reply->status_data->status != "F") and
+         (GetResourceSecurityStatus(0) != "S"))                         
+       call PopulateResSecStatusBlock(0)                               
+       set reply->status_data->status = GetResourceSecurityStatus(0)    
+     endif
+
+END GO
+
+;Generated by GNU enscript 1.6.4.

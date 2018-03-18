@@ -1,0 +1,395 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Specialtestingtool/BBT_UPD_PHENOTYPES.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1997 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       BBT_GET_PHENOTYPES
+        Object name:            BBT_GET_PHENOTYPES
+        Request #:              225458
+
+        Product:                Transfusion
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Update all the phenotypes and corresponding
+                                pheno_testing codes.
+
+        Tables read:            BB_RH_PHENOTYPE
+                                BB_RH_PHENO_TESTING
+
+        Tables updated:         None
+
+        Executing from:         SpecialTesting Tool
+
+        Special Notes:          ??
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 10/28/97 Badari Nath K.       Initial Release                     *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+Drop Program BBT_UPD_PHENOTYPES:DBA Go
+Create Program BBT_UPD_PHENOTYPES:DBA
+
+/*
+Record request
+( 
+ 1 qual[*]
+   2 rh_phenotype_id       = f8
+   2 phenotype_change_ind  = i2
+   2 fr_nomenclature_id    = f8 
+   2 w_nomenclature_id     = f8
+   2 active_ind            = i2 
+   2 updt_cnt              = i4      ;(update only)
+   2 pheno_testing[*]
+     3 rh_pheno_testing_id = f8
+     3 special_testing_cd  = f8
+     3 sequence            = f8
+     3 active_ind          = i2
+     3 updt_cnt            = i4      ;(update only)
+)
+*/
+
+record reply
+(
+ 1  qual[*]
+    2 rh_phenotype_id         = f8
+    2 pheno_testing[*]
+      3 rh_pheno_testing_id   = f8
+      
+%i cclsource:status_block.inc
+)
+
+
+set qual_cnt = 0
+set reply->status_data->status = "F"
+set count1 = 0 
+set nbr_ptype = 0
+set nbr_ptest = 0
+set new_phenotype_id = 0.0
+set new_phenotest_id = 0.0
+set ptype_cnt = 0
+set ptest_cnt = 0
+
+set stat = alterlist(reply->qual, 10)
+
+set ptype_cnt = size(request->qual, 5)
+
+for (nbr_ptype = 1 to ptype_cnt)
+
+  if (request->qual[nbr_ptype].rh_phenotype_id = 0)
+
+    ; ** Add new phenotype to bb_rh_phenotype table
+
+    ;  * Get next pathnet_seq for rh_phenotype_id
+    set new_phenotype_id = NEXT_PATHNET_SEQ(0)
+
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS
+            (
+             /* status  */ "F",
+             /* process */ "get next pathnet_seq",
+             /* message */ build("get next pathnet_seq failed--rh_phenotype_id =",
+                                request->qual[nbr_ptype].rh_phenotype_id)
+            )
+        go to EXIT_SCRIPT
+    endif
+
+    insert into bb_rh_phenotype ptype
+    set
+          ptype.rh_phenotype_id       = new_phenotype_id
+        , ptype.w_nomenclature_id     = request->qual[nbr_ptype].w_nomenclature_id
+        , ptype.fr_nomenclature_id    = request->qual[nbr_ptype].fr_nomenclature_id
+        , ptype.updt_cnt              = 0
+        , ptype.updt_dt_tm            = cnvtdatetime(curdate, curtime3)
+        , ptype.updt_id               = reqinfo->updt_id
+        , ptype.updt_task             = reqinfo->updt_task
+        , ptype.updt_applctx          = reqinfo->updt_applctx
+        , ptype.active_ind            = 1
+        , ptype.active_status_cd      = reqdata->active_status_cd
+        , ptype.active_status_dt_tm   = cnvtdatetime(curdate, curtime3)
+        , ptype.active_status_prsnl_id = reqinfo->updt_id
+
+    with nocounter
+
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS
+            (
+             /* status  */ "F",
+             /* process */ "insert into bb_rh_phenotype",
+             /* message */ build("insert into bb_rh_phenotype failed--rh_phenotype_id =",
+                                request->qual[nbr_ptype].rh_phenotype_id)
+            )
+        go to EXIT_SCRIPT
+    endif
+
+    call PROCESS_PHENO_TESTING(nbr_ptype, new_phenotype_id)
+
+    ; ** Return new_phenotype_id to VB
+    set stat = alterlist(reply->qual, nbr_ptype)
+    set reply->qual[nbr_ptype].rh_phenotype_id = new_phenotype_id
+
+else   ;not a new phenotype
+    if (request->qual[nbr_ptype].phenotype_change_ind = 1)
+
+        ; ** Update existing phenotypes
+        select into "nl:"
+           ptype.rh_phenotype_id
+
+        from
+            bb_rh_phenotype ptype
+
+        where
+            ptype.rh_phenotype_id  = request->qual[nbr_ptype].rh_phenotype_id
+
+        with nocounter, forupdate(ptype)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock bb_rh_phenotype forupdate",
+                 /* message */ build("lock bb_rh_phenotype forupdate failed--rh_phenotype_id =",
+                                      request->qual[nbr_ptype].rh_phenotype_id)
+                )
+            go to EXIT_SCRIPT
+        endif
+
+        update into bb_rh_phenotype ptype
+        set
+              ptype.w_nomenclature_id           = request->qual[nbr_ptype].w_nomenclature_id
+            , ptype.fr_nomenclature_id          = request->qual[nbr_ptype].fr_nomenclature_id
+            , ptype.updt_cnt                    = request->qual[nbr_ptype].updt_cnt + 1
+            , ptype.updt_dt_tm                  = cnvtdatetime(curdate, curtime3)
+            , ptype.updt_id                     = reqinfo->updt_id
+            , ptype.updt_task                   = reqinfo->updt_task
+            , ptype.updt_applctx                = reqinfo->updt_applctx
+            , ptype.active_ind                  = request->qual[nbr_ptype].active_ind
+            , ptype.active_status_cd
+              = if (request->qual[nbr_ptype].active_ind = 1)
+                    reqdata->active_status_cd
+                else
+                    reqdata->inactive_status_cd
+                endif
+            , ptype.active_status_dt_tm   = cnvtdatetime(curdate, curtime3)
+            , ptype.active_status_prsnl_id = reqinfo->updt_id
+
+        where ptype.rh_phenotype_id  = request->qual[nbr_ptype].rh_phenotype_id 
+          and ptype.updt_cnt         = request->qual[nbr_ptype].updt_cnt        ;BNK - 11/06/97
+
+        with  nocounter
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "update into bb_rh_pheno_type",
+                 /* message */ build("update into bb_rh_phenotype failed--rh_phenotype_id ="
+                                    ,request->qual[nbr_ptype].rh_phenotype_id)
+                )
+            go to EXIT_SCRIPT
+        endif
+    endif       ; endif request->qual[nbr_ptype].phenotype_change_ind
+
+
+    call PROCESS_PHENO_TESTING(nbr_ptype, request->qual[nbr_ptype].rh_phenotype_id)
+endif
+
+ENDFOR
+
+call LOAD_PROCESS_STATUS
+    (
+     /* status  */ "S",
+     /* process */ "SUCCESS",
+     /* message */ "All records added/updated successfully"
+    )
+        
+go to EXIT_SCRIPT
+
+
+subroutine PROCESS_PHENO_TESTING(nptype, phenotype_id)
+
+    set stat = alterlist(reply->qual, 10)
+    set ptest_cnt = size(request->qual[nptype].pheno_testing, 5)
+
+    for (nbr_ptest = 1 to ptest_cnt)
+        if (request->qual[nptype].pheno_testing[nbr_ptest].rh_pheno_testing_id = 0.0)
+            ; ** Add new row to the pheno_testing table.
+
+            ;  * Get next pathnet_seq for rh_pheno_testing_id
+            set new_phenotest_id = NEXT_PATHNET_SEQ(0)
+
+            if (curqual = 0)
+                call LOAD_PROCESS_STATUS
+                    (
+                     /* status  */ "F",
+                     /* process */ "get next pathnet_seq",
+                     /* message */ build("get next pathnet_seq failed--bb_pheno_testing_id =",
+                        request->qual[nptype].pheno_testing[nbr_ptest]->rh_pheno_testing_id)
+                    )
+                go to EXIT_SCRIPT
+            endif
+
+            insert into bb_rh_pheno_testing ptest
+            set
+                  ptest.rh_pheno_testing_id   = new_phenotest_id 
+                , ptest.rh_phenotype_id       = phenotype_id
+                , ptest.special_testing_cd    = request->qual[nptype].pheno_testing[nbr_ptest]->special_testing_cd
+                , ptest.sequence              = request->qual[nptype].pheno_testing[nbr_ptest]->sequence
+                , ptest.updt_cnt              = 0
+                , ptest.updt_dt_tm            = cnvtdatetime(curdate, curtime3)
+                , ptest.updt_id               = reqinfo->updt_id
+                , ptest.updt_task             = reqinfo->updt_task
+                , ptest.updt_applctx          = reqinfo->updt_applctx
+                , ptest.active_ind            = 1
+                , ptest.active_status_cd      = reqdata->active_status_cd
+                , ptest.active_status_dt_tm   = cnvtdatetime(curdate, curtime3)
+                , ptest.active_status_prsnl_id = reqinfo->updt_id
+  
+            with nocounter
+
+            if (curqual = 0)
+                call LOAD_PROCESS_STATUS
+                    (
+                     /* status  */ "F",
+                     /* process */ "insert into bb_rh_pheno_testing",
+                     /* message */ build("insert into bb_rh_pheno_testing failed--rh_pheno_testing_id =",
+                        request->qual[nptype].pheno_testing[nbr_ptest]->rh_pheno_testing_id)
+                    )
+                go to EXIT_SCRIPT
+            endif
+                                                      
+
+            ; ** Return new_phenotest_id to VB
+            set qual_cnt = qual_cnt + 1    
+            if (mod(qual_cnt, 10) = 1 and qual_cnt != 1)
+                set stat = alterlist(reply->qual[nptype].pheno_testing, qual_cnt + 9)
+            endif
+       ;     set reply->qual[nptype].pheno_testing[qual_cnt].rh_pheno_testing_id = new_phenotest_id
+
+        else
+            ; ** Update existing supplier
+            select into "nl:"
+               ptest.rh_pheno_testing_id
+
+            from
+                   bb_rh_pheno_testing ptest
+
+            where
+                   ptest.rh_pheno_testing_id = request->qual[nptype].pheno_testing[nbr_ptest]->rh_pheno_testing_id
+                   and  ptest.updt_cnt = request->qual[nptype].pheno_testing[nbr_ptest]->updt_cnt
+
+            with    nocounter, forupdate(ptest)
+
+            if (curqual = 0)
+                call LOAD_PROCESS_STATUS
+                    (
+                     /* status  */ "F",
+                     /* process */ "lock bb_rh_pheno_testing forupdate",
+                     /* message */ build("lock bb_rh_pheno_testing forupdate failed--rh_pheno_testing_id, updt_cnt =",
+                                   request->qual[nptype].pheno_testing[nbr_ptest].rh_pheno_testing_id, 
+                                   request->qual[nptype].pheno_testing[nbr_ptest].updt_cnt)
+                    )
+                go to EXIT_SCRIPT
+            endif
+
+            update into bb_rh_pheno_testing ptest
+            set 
+                  ptest.sequence              = request->qual[nptype].pheno_testing[nbr_ptest]->sequence
+                , ptest.special_testing_cd    = 
+                                request->qual[nptype].pheno_testing[nbr_ptest]->special_testing_cd
+                , ptest.updt_cnt              = ptest.updt_cnt + 1
+                , ptest.updt_dt_tm            = cnvtdatetime(curdate, curtime3)
+                , ptest.updt_id               = reqinfo->updt_id
+                , ptest.updt_task             = reqinfo->updt_task
+                , ptest.updt_applctx          = reqinfo->updt_applctx
+                , ptest.active_ind            = request->qual[nptype].pheno_testing[nbr_ptest]->active_ind
+                , ptest.active_status_cd      = 
+                    if (request->qual[nptype].pheno_testing[nbr_ptest]->active_ind = 1)
+                        reqdata->active_status_cd
+                    else
+                        reqdata->inactive_status_cd
+                    endif
+                , ptest.active_status_dt_tm   = cnvtdatetime(curdate, curtime3)
+                , ptest.active_status_prsnl_id = reqinfo->updt_id
+
+                where 
+                     ptest.rh_pheno_testing_id = request->qual[nptype].pheno_testing[nbr_ptest].rh_pheno_testing_id
+                 and ptest.updt_cnt = request->qual[nptype].pheno_testing[nbr_ptest]->updt_cnt
+            
+            with  nocounter
+
+            if (curqual = 0)
+                call LOAD_PROCESS_STATUS
+                    (
+                     /* status  */ "F",
+                     /* process */ "update into bb_rh_pheno_testing",
+                     /* message */ build("update into bb_rh_pheno_testing failed--rh_pheno_testing_id =",
+                        request->qual[nptype].pheno_testing[nbr_ptest]->rh_pheno_testing_id)
+                    )
+                go to EXIT_SCRIPT
+            endif
+        endif
+    endfor  
+        
+    ; ** Resize qual to actual number returned
+    set stat = alterlist(reply->qual[nptype].pheno_testing, ptest_cnt)
+
+END         ; END subroutine PROCESS_PHENO_TESTING
+
+
+; ** Get next Pathnet_Seq
+%i cclsource:bbt_get_pathnet_seq_sub.inc
+
+subroutine LOAD_PROCESS_STATUS
+    (
+     sub_status,
+     sub_process,
+     sub_message
+    )
+
+    set reply->status_data->status = sub_status
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alter(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->subeventstatus[count1]->OperationName = sub_process
+    set reply->status_data->subeventstatus[count1]->OperationStatus = sub_status
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_upd_phenotypes"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = sub_message
+END         ; end subroutine LOAD_PROCESS_STATUS
+
+
+#EXIT_SCRIPT
+
+if (reply->status_data->status = "S")
+    set reqinfo->commit_ind = 1
+else
+    set reqinfo->commit_ind = 0
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

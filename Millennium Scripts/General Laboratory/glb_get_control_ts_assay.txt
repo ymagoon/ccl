@@ -1,0 +1,267 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_control_ts_assay/glb_get_control_ts_assay.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_CONTROL_TS_ASSAY.PRG
+        Object name:            GLB_GET_CONTROL_TS_ASSAY
+        Request #:              257560
+
+        Product:                General Lab/Quality Control
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve test site/ assay info associated with
+                                the given control
+
+        Tables read:            resource_lot_r
+                                resource_accession
+                                accession
+
+        Tables updated:         n/a
+
+        Executing from:         General Lab QCInquiry
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 01/19/98 Chad Moats           Initial Release                     *
+;     001 05/12/98 Chad Moats           Handle inactive procedures          *
+;     002 09/16/02 Mark Brooks          Added service resource security     *
+;     003 02/28/08 Bruce Bishop         CR 1-1357916666                     *
+;     004 02/18/11 Sharada K            Fis for CR 1-4557033031             *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_CONTROL_TS_ASSAY:dba go
+      create program GLB_GET_CONTROL_TS_ASSAY:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 control_id = f8
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+      record reply
+      (
+         1 controls[*]
+           2 control_id                = f8
+           2 short_description         = vc
+           2 testsites[*]
+             3 service_resource_cd     = f8
+             3 service_resource_disp   = vc
+             3 assays[*]
+               4 task_assay_cd         = f8
+               4 task_assay_disp       = vc
+
+%i cclsource:status_block.inc
+      )
+
+
+%i cclsource:pcs_resource_security.inc                                 ;002
+
+     #Script
+      set reply->status_data->status = "F"
+      set c_cnt = 0
+      set ts_cnt = 0
+      set a_cnt = 0
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+      declare dServiceResourceCd = f8 with protect, noconstant(0.0)   
+
+      /* Indicates whether or not the user has access to the test site. */       
+      declare nResourceSecInd = i2 with protect, noconstant(0)        
+      
+      /* Indicates whether or not the user has access to at least 1 resource for control */
+      declare nControlSecInd = i2 with protect, noconstant(0)         
+
+      /* Initialize service resource security */
+      call InitResourceSecurity(1)                                    
+
+/*******************************************************************/
+/*  Get Lots                                                       */
+/*******************************************************************/
+      SELECT 
+      IF (request->control_id = 0.0)
+          PLAN cm where cm.control_id > 0.0
+          JOIN cl
+              where cl.control_id = cm.control_id
+          JOIN rlr
+              where rlr.lot_id = outerjoin(cl.lot_id)
+                and rlr.lot_id+0 > outerjoin(0.0)
+                and rlr.service_resource_cd+0 > outerjoin(0.0)
+          JOIN arl
+              where arl.lot_id = outerjoin(rlr.lot_id) 
+                and arl.lot_id+0 > outerjoin(0.0)
+                and arl.service_resource_cd+0 = outerjoin(rlr.service_resource_cd)
+      ELSE
+          PLAN cm
+              where (cm.control_id = request->control_id)
+          JOIN cl
+              where cl.control_id = cm.control_id
+          JOIN rlr
+              where rlr.lot_id = outerjoin(cl.lot_id)
+                and rlr.lot_id+0 > outerjoin(0.0)
+                and rlr.service_resource_cd+0 > outerjoin(0.0)
+          JOIN arl
+              where arl.lot_id = outerjoin(rlr.lot_id) 
+                and arl.lot_id+0 > outerjoin(0.0)
+                and arl.service_resource_cd+0 = outerjoin(rlr.service_resource_cd)
+      ENDIF
+      
+      INTO "nl:"
+          cm.control_id,
+          cl.lot_id,
+          rlr.service_resource_cd,
+          rlr_exists = evaluate(nullind(rlr.service_resource_cd),0,1,0),
+          arl.task_assay_cd,
+          arl_exists = evaluate(nullind(arl.task_assay_cd),0,1,0)
+      FROM
+          control_material cm,
+          control_lot cl,
+          resource_lot_r rlr,
+          assay_resource_lot arl
+              
+      ORDER BY cm.control_id, rlr.service_resource_cd, arl.task_assay_cd
+      
+      HEAD REPORT
+          c_cnt = 0
+      
+      HEAD cm.control_id
+          c_cnt = c_cnt + 1
+          IF (mod(c_cnt, 5) = 1)
+              stat = alterlist(reply->controls, c_cnt + 5)
+          ENDIF
+          reply->controls[c_cnt].control_id = cm.control_id
+          reply->controls[c_cnt].short_description = cm.short_description
+          ts_cnt = 0
+          nControlSecInd = 0 
+          
+      HEAD rlr.service_resource_cd
+          nResSecurityInd = 0                                                   
+          IF (rlr_exists = 1)
+              dServiceResourceCd = rlr.service_resource_cd                          
+              IF (IsResourceViewable(dServiceResourceCd))
+                  nResSecurityInd = 1
+                  nControlSecInd = 1
+                  ts_cnt = ts_cnt + 1
+                  IF (mod(ts_cnt, 5) = 1)
+                      stat = alterlist(reply->controls[c_cnt].testsites, ts_cnt + 5)
+                  ENDIF
+                  reply->controls[c_cnt]->testsites[ts_cnt].service_resource_cd = rlr.service_resource_cd
+              ENDIF                                                                 
+          ENDIF
+          a_cnt = 0
+          
+      HEAD arl.task_assay_cd
+          IF (rlr_exists = 1 and arl_exists = 1 and nResSecurityInd = 1)
+              a_cnt = a_cnt + 1
+              IF (mod(a_cnt, 5) = 1)
+                  stat = alterlist(reply->controls[c_cnt]->testsites[ts_cnt].assays, a_cnt + 5)
+              ENDIF
+              reply->controls[c_cnt]->testsites[ts_cnt]->assays[a_cnt].task_assay_cd = arl.task_assay_cd
+          ENDIF
+                                                      
+      DETAIL
+          a_cnt = a_cnt + 0
+          
+      FOOT arl.task_assay_cd
+          row + 0
+              
+      FOOT rlr.service_resource_cd
+          IF (nResSecurityInd = 1)                                              
+              stat = alterlist(reply->controls[c_cnt]->testsites[ts_cnt].assays,a_cnt)
+          ENDIF                                                                 
+          
+      FOOT cm.control_id
+          IF (nControlSecInd = 1) 
+              stat = alterlist(reply->controls[c_cnt]->testsites, ts_cnt)
+          ELSE
+              stat = alterlist(reply->controls[c_cnt]->testsites, 0)
+              IF (c_cnt > 0) 
+                  c_cnt = c_cnt - 1 
+              ENDIF 
+          ENDIF 
+          
+      FOOT REPORT 
+          stat = alterlist(reply->controls, c_cnt)          
+          
+      WITH nocounter
+
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+          set reply->status_data->status = "F"
+          set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+          go to exit_script
+      endif
+      if (curqual = 0)
+          go to testsite_failed
+      else
+          set reply->status_data->status = "S"
+      endif
+
+      set stat = alterlist(reply->controls,c_cnt)
+
+      go to exit_script
+
+/********************************************************************/
+/* Executed if get test site info is unsuccessful                   */
+/********************************************************************/
+     #testsite_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "get"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "resource_lot_r table"
+      set reply->status_data->status = "Z"
+
+      go to exit_script
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+
+
+      if ((reply->status_data->status != "F") and
+          (GetResourceSecurityStatus(0) != "S"))                         ;002
+        call PopulateResSecStatusBlock(0)                                ;002
+        set reply->status_data->status = GetResourceSecurityStatus(0)    ;002
+      endif
+
+END GO
+
+;Generated by GNU enscript 1.6.4.

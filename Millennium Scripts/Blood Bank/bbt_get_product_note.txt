@@ -1,0 +1,315 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Productnotes/BBT_GET_PRODUCT_NOTE.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2004 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+        Source file name:       bbt_get_product_note.prg
+        Object name:            bbt_get_product_note
+        Request #:              225103
+
+        Product:                PathNet
+        Product Team:           Blood Bank Transfusion
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Get all product notes for product_id.
+
+        Tables read:            product, bbhist_product, product_note
+        						long_text
+        Tables updated:         NONE
+        Executing from:         VB
+
+        Special Notes:          NONE
+******************************************************************************/
+
+;~DB~**************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG                *
+;    **************************************************************************
+;    *                                                                        *
+;    *Mod Date     Engineer                     Comment                       *
+;    *--- -------- -------------------- --------------------------------------*
+;    *000 06/26/96 Jon Weekes           Initial Release                       *
+;    *001 12/21/01 Chris Noe            Added logic to retrieve historical    *
+;    *                                  product comments.                     *
+;    *002 08/17/04 Jason Coy            Update to return a formatted product  *
+;    *                                  number in "product_nbr" of the reply. *
+;~DE~**************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  **********************
+
+drop program bbt_get_product_note:dba go
+create program bbt_get_product_note:dba
+
+/*
+record request
+(
+ 1  product_id                  = f8
+ 1  no_reply_ind                = i2
+)
+*/
+
+if (request->no_reply_ind != 1)
+    record reply
+    (
+     1  product_nbr                 = vc
+     1  product_cd                  = f8
+     1  product_disp                = c40
+     1  qual[1]
+         2  product_note_id         = f8
+         2  product_note            = vc
+         2  updt_cnt                = i4
+         2  long_text_id            = f8
+         2  long_text_updt_cnt      = i4
+	1 	historical_product_ind		= i2
+%i cclsource:status_block.inc
+    )
+else
+    record reply
+    (
+     1  product_note_ind            = i2
+%i cclsource:status_block.inc
+    )
+endif
+
+record reply_hd
+(
+ 1  product_nbr                 = vc
+ 1  product_cd                  = f8
+ 1  product_disp                = c40
+ 1  qual[1]
+     2  product_note_id         = f8
+     2  product_note            = vc
+     2  updt_cnt                = i4
+     2  long_text_id            = f8
+     2  long_text_updt_cnt      = i4
+ 1  product_note_ind        = i2
+ 1	historical_product_ind	= i2
+)
+
+;Initialize Global Variables
+set reply->status_data->status = "F"
+set note_cnt = 0
+set note = 0
+set count1 = 0
+
+#BEGIN_MAIN
+set reply->status_data->status = "I" ; Incomplete
+
+; Read the product table to see if the product_id passed in exists as a live product.
+select into "nl:"
+	p.product_nbr
+	, p.product_cd
+	, p.product_sub_nbr
+	, bp.supplier_prefix
+	, pn.product_note_id
+	, pn.updt_cnt
+	, lt.long_text_id
+	, lt.updt_cnt
+	, lt.long_text
+from
+	product p
+	, blood_product bp
+	, product_note pn
+	, long_text lt
+plan p
+	where p.product_id = request->product_id
+join bp
+	where bp.product_id = outerjoin(p.product_id)
+		and bp.active_ind = outerjoin(1)
+; Outerjoin to product_note & long_text tables.  Still want to return a row even if
+; a comment does not exist for the given product.
+join pn
+	where pn.product_id = outerjoin(p.product_id) 
+		and pn.active_ind = outerjoin(1)
+join lt
+	where lt.long_text_id = outerjoin(pn.long_text_id)
+		and lt.active_ind = outerjoin(1)
+order
+	p.product_id
+	, pn.product_note_id
+head report
+   	note_cnt = 0
+head p.product_id
+   	if (request->no_reply_ind != 1)
+       	reply_hd->product_nbr = concat(trim(bp.supplier_prefix), trim(p.product_nbr), " ", trim(p.product_sub_nbr))
+       	reply_hd->product_cd = p.product_cd
+       	reply_hd->historical_product_ind = 0
+   	endif
+head pn.product_note_id
+    if (pn.product_note_id > 0.0)
+	    note_cnt = note_cnt + 1
+	    /* only load first active note--DELETE when one row per note vs. current one row for all notes */
+		if (note_cnt = 1)
+			if (request->no_reply_ind != 1)
+				reply_hd->qual[note_cnt]->product_note_id      = pn.product_note_id
+				reply_hd->qual[note_cnt]->updt_cnt             = pn.updt_cnt
+				reply_hd->qual[note_cnt]->long_text_id         = lt.long_text_id
+				reply_hd->qual[note_cnt]->long_text_updt_cnt   = lt.updt_cnt
+				reply_hd->qual[note_cnt]->product_note         = lt.long_text
+			else
+				reply_hd->product_note_ind = 1
+			endif       ; endif no_reply_ind != 1
+		else
+			if (request->no_reply_ind = 1)
+				reply_hd->product_note_ind = 0
+			endif       ; endif no_reply_ind = 1
+		endif       	; endif note_cnt = 1
+	endif
+detail
+	row + 0
+foot pn.product_note_id
+	row + 0
+foot p.product_id
+	row + 0
+foot report
+	row + 0
+with nocounter
+
+if (curqual = 0)
+	select into "nl:"
+		bbhp.product_nbr
+		, bbhp.product_cd
+		, pn.product_note_id
+		, pn.updt_cnt
+		, lt.long_text_id
+		, lt.updt_cnt
+		, lt.long_text
+	from
+		bbhist_product bbhp
+		, product_note pn
+		, long_text lt
+	plan bbhp
+		where bbhp.product_id = request->product_id
+	; Outerjoin to product_note & long_text tables.  Still want to return a row even if
+	; a comment does not exist for the given product.
+	join pn
+		where pn.bbhist_product_id = outerjoin(bbhp.product_id)
+			and pn.active_ind = outerjoin(1)
+	join lt
+		where lt.long_text_id = outerjoin(pn.long_text_id)
+			and lt.active_ind = outerjoin(1)
+	order
+		bbhp.product_id
+		, pn.product_note_id
+	head report
+	   	note_cnt = 0
+	head bbhp.product_id
+	   	if (request->no_reply_ind != 1)
+	       	reply_hd->product_nbr = concat(trim(bbhp.supplier_prefix), trim(bbhp.product_nbr), " ", trim(bbhp.product_sub_nbr))
+	       	reply_hd->product_cd = bbhp.product_cd
+	       	reply_hd->historical_product_ind = 1
+	   	endif
+	head pn.product_note_id
+	    if (pn.product_note_id > 0.0)
+		    note_cnt = note_cnt + 1
+		    /* only load first active note--DELETE when one row per note vs. current one row for all notes */
+			if (note_cnt = 1)
+				if (request->no_reply_ind != 1)
+					reply_hd->qual[note_cnt]->product_note_id      = pn.product_note_id
+					reply_hd->qual[note_cnt]->updt_cnt             = pn.updt_cnt
+					reply_hd->qual[note_cnt]->long_text_id         = lt.long_text_id
+					reply_hd->qual[note_cnt]->long_text_updt_cnt   = lt.updt_cnt
+					reply_hd->qual[note_cnt]->product_note         = lt.long_text
+				else
+					reply_hd->product_note_ind = 1
+				endif       ; endif no_reply_ind != 1
+			else
+				if (request->no_reply_ind = 1)
+					reply_hd->product_note_ind = 0
+				endif       ; endif no_reply_ind = 1
+			endif       	; endif note_cnt = 1
+		endif
+	detail
+		row + 0
+	foot pn.product_note_id
+		row + 0
+	foot bbhp.product_id
+		row + 0
+	foot report
+		row + 0
+	with nocounter
+endif
+
+set stat = alter(reply_hd->qual, note_cnt)
+if (request->no_reply_ind != 1)
+    set reply->product_nbr                      = reply_hd->product_nbr,
+    set reply->product_cd                       = reply_hd->product_cd,
+    set reply->historical_product_ind			= reply_hd->historical_product_ind
+    set stat = alter(reply->qual, note_cnt)
+    for (note = 1 to note_cnt)
+        set reply->qual[note]->product_note_id      = reply_hd->qual[note]->product_note_id
+        set reply->qual[note]->updt_cnt             = reply_hd->qual[note]->updt_cnt
+        set reply->qual[note]->long_text_id         = reply_hd->qual[note]->long_text_id
+        set reply->qual[note]->long_text_updt_cnt   = reply_hd->qual[note]->updt_cnt
+        set reply->qual[note]->product_note         = reply_hd->qual[note]->product_note
+    endfor
+else
+    set reply->product_note_ind = reply_hd->product_note_ind
+endif
+
+if (curqual = 0)
+	set reply->status_data->status = "F"
+	set count1 = count1 + 1
+	if (count1 > size(reply->status_data->subeventstatus,5))
+		set stat = alter(reply->status_data, count1)
+	endif
+	set reply->status_data->subeventstatus[count1]->OperationName = "get product_note"
+	set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+	set reply->status_data->subeventstatus[count1]->TargetObjectName = "get product/product notes"
+	set reply->status_data->subeventstatus[count1]->TargetObjectValue  = build("invalid product_id:  ", request->product_id)
+else
+    if (note_cnt > 1)
+        set reply->status_data->status = "F"
+        set count1 = count1 + 1
+        if (count1 > size(reply->status_data->subeventstatus,5))
+            set stat = alter(reply->status_data, count1)
+        endif
+        set reply->status_data->subeventstatus[count1]->operationstatus = "F"
+        set reply->status_data->subeventstatus[count1]->operationname = "get product_note row"
+        set  reply->status_data->subeventstatus[count1]->targetobjectvalue
+            = "multiple active proudct_note rows exist for product_id"
+    endif
+endif       ; endif curqual = 0 product_note
+go to EXIT_SCRIPT
+#END_MAIN
+
+#EXIT_SCRIPT
+
+if (reply->status_data->status != "F")
+    set count1 = count1 + 1
+    if (count1 > size(reply->status_data->subeventstatus,5))
+        set stat = alter(reply->status_data->subeventstatus, count1)
+    endif
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_product_note"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue  = ""
+    if (note_cnt > 0)
+        set reply->status_data->status = "S"    ; Success
+        set reply->status_data->subeventstatus[count1]->OperationName = "Success"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "S"
+    else
+        set reply->status_data->status = "Z"    ; Partial Success
+        set reply->status_data->subeventstatus[count1]->OperationName = "Zero"
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue  = "No product_note rows for product_id"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "Z"
+    endif
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

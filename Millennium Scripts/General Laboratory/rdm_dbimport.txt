@@ -1,0 +1,308 @@
+ ;;Solution_Test/script/Database Architecture -- Tools/RDM GENERIC LOAD CHK/RDM_DBIMPORT.PRG Turn on black mode
+
+  drop program rdm_dbimport:dba go
+create program rdm_dbimport:dba
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       rdm_dbimport.PRG
+        Object name:            rdm_dbimport
+        Request #:              ?
+ 
+        Product:                Database Architecture - Access
+        Product Team:           Database Architecture - Access
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        This program creates a record structure
+                                based upon the headings row, of any
+                                inputed csv file.
+                                User passes in csv file name, min, and max
+                                number of rows to process as input.
+                                Min/max value mimics the old blocks to
+                                process functionality.
+ 
+        Tables read:            user_tab_columns
+ 
+        Tables updated:         none
+ 
+        Executing from:         dm_dbimport
+ 
+        Special Notes:          ?
+******************************************************************************/
+;~DB~************************************************************************
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date          Engineer    Comment                                 *
+;    *--- ------------- ----------- --------------------------------------- *
+;     000 12/20/2001    JM6512      Initial Release                         *
+;     001 05/06/2002    JM6512      Changed to RTL2 from RTL3.              *
+;     002 09/27/2002    JM6512      Eliminated rdm_dbimport_inc.inc         *
+;                                   Added declarations to dm_dbimport       *
+;     003 01/21/2003    JM6512      Made program backwards compatible       *
+;     004 03/07/2003    JM6512      Made logical dynamic                    *
+;     005 12/01/2003    JM6512      Added logic to handle larger csv        *
+;				  				    files using rtl3. Also elminiated       *
+;								    the problem of data carryover from      *
+;								    one row to another                      *
+;     006 12/14/04  	AG010103    Modified code to minimize	    	    *
+;				   				    memory leak. Requestin now defined and  *
+;				    				declared in parent.		        	    *
+;	  007 08/24/05  	SH011956    Modified SetDelim subroutine to			*
+;								    find correct delimiter if csv file 		*
+;								    begins with a quote. Changed SetDelim	*
+;									to macro.								*
+;     008 01/14/07      MC014342    Enhanced so that dm_dbimport loads can  *
+;                                   support tab-delimited files.            *
+;                                   CR 1-1673702555                         *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************/
+ 
+;002  %i cclsource:rdm_dbimport_inc.inc
+ 
+ 
+;contains all data from all rows in sequential order
+free record unit_data
+     record unit_data
+    (1 list_2[*]
+       2 found_field = vc 		;005 c32768
+    )
+;variable declarations moved from parent
+declare rdm_unit_cnt       = i4 with public     ;number of units
+declare rdm_while_cnt      = i4 with public     ;counter used in while loop
+declare rdm_num_rows       = i4 with public     ;number of rows in csv file
+declare rdm_rptcnt         = i4 with public     ;counter used in while loop
+declare rdm_field_number   = i4 with public     ;incrementer used for num of fields
+
+ 
+;006 replaces character variable
+free record rdm_found_field
+record rdm_found_field
+(1	str = vc)
+ 
+set rdm_unit_cnt     = 0
+set rdm_while_cnt    = 1
+set rdm_num_rows     = 1
+set rdm_rptcnt       = 0
+set rdm_field_number = 1
+ 
+set rdm_found_field->str  = " "
+ 
+ 
+/*********************************************
+***      Fill Structure via call parser    ***
+**********************************************/
+;005
+select if (dm_dbi_rtl3_ind = 1)
+          from rtl3t t
+         where t.line > " "
+       else
+          from rtl2t t
+         where t.line > " "
+       endif
+ 
+into "nl:"
+      t.line
+ 
+ head report
+   ;rdm_line_data->str = fillstring(32768," ")
+   rdm_line_data->str = " "
+   rdm_first_one = "Y"
+   rdm_stat = alterlist(unit_data->list_2,10)
+   rdm_line_cnt = 0
+   rdm_line_min = $2 + 1 ;parent script passes in min num rows value
+   rdm_line_max = $3 + 1 ;parent script passes in max num rows value
+                         ;add 1 to ignore header row in csv file
+;007 -->
+   macro(SETDELIM)
+		str_data->string_qual = replace(rdm_line_data->str," ","",0)
+		str_data->string_qual = substring(1, 1, rdm_line_data->str)
+	
+		if (str_data->string_qual != '"') ;check to see if first character is not a quote
+			if (findstring(",", rdm_line_data->str, 1, 0) > 0)
+		         delim = ","
+			  elseif (findstring(char(9),rdm_line_data->str, 1, 0) > 0)   ;008
+		         delim = char(9)  ;check if its a tab-delimited file
+		      elseif (findstring("|", rdm_line_data->str, 1, 0) > 0)
+		         delim = "|"
+		      elseif (findstring("@", rdm_line_data->str, 1, 0) > 0)
+		         delim = "@"
+		      elseif (findstring("~", rdm_line_data->str, 1, 0) > 0)
+		         delim = "~"
+		      elseif (findstring("$", rdm_line_data->str, 1, 0) > 0)
+		         delim = "$"
+		      elseif (findstring("^", rdm_line_data->str, 1, 0) > 0)
+		         delim = "^"
+		      elseif (findstring("*", rdm_line_data->str, 1, 0) > 0)
+		         delim = "*"
+		      elseif (findstring("#", rdm_line_data->str, 1, 0) > 0)
+		         delim = "#"
+		    endif
+		else ;find the matching quote, take next value as the delimiter
+			match = findstring('"', rdm_line_data->str, 2, 0) ;grabs position of matching quote
+			delim = substring(match + 1, 1, rdm_line_data->str) ;grabs value after end quote as delimiter
+		endif 
+		
+   endmacro;SetDelim  ;<-- 007
+   SETDELIM
+ detail
+  rdm_line_cnt = rdm_line_cnt + 1
+ 
+  If (rdm_line_cnt >= rdm_line_min and rdm_line_cnt <= rdm_line_max)
+     if (rdm_first_one = "N")
+        rdm_line_data->str    = t.line
+        rdm_line_len     = textlen(trim(rdm_line_data->str))
+        rdm_field_number = 1
+        rdm_check_pos    = 0
+ 		;call SetDelim(null) ;007 moved to head report section
+        while (rdm_field_number <= rdm_field_total)
+          rdm_unit_cnt = rdm_unit_cnt + 1
+ 
+          if (mod(rdm_unit_cnt,10) = 1 and rdm_unit_cnt != 1)
+             rdm_stat  = alterlist(unit_data->list_2,rdm_unit_cnt + 9)
+          endif
+ 
+ 
+          if ('"' = substring(1,1,rdm_line_data->str))
+             if ('""' = substring(2,2,rdm_line_data->str))
+                rdm_check_pos =
+                      findstring('""",',substring(2,rdm_line_len,rdm_line_data->str))
+ 
+                if (rdm_check_pos = 0)
+                   rdm_check_pos =
+                       findstring('"""',substring(4,rdm_line_len,rdm_line_data->str))
+                   rdm_found_field->str = substring(4,rdm_check_pos-1,rdm_line_data->str)
+                   rdm_line_data->str   = " "
+                else
+                   rdm_found_field->str = substring(4,rdm_check_pos-3,rdm_line_data->str)
+                   rdm_line_data->str   =
+                        substring(rdm_check_pos+5,rdm_line_len,rdm_line_data->str)
+                endif
+             else
+                rdm_check_pos =
+                        findstring('",',substring(2,rdm_line_len,rdm_line_data->str))
+                if (rdm_check_pos = 0)
+                   rdm_check_pos =
+                        findstring('"',substring(2,rdm_line_len,rdm_line_data->str))
+                   rdm_found_field->str = substring(2,rdm_check_pos-1,rdm_line_data->str)
+                   rdm_line_data->str = " "
+                else
+                   rdm_found_field->str = substring(2,rdm_check_pos-1,rdm_line_data->str)
+                   rdm_line_data->str   =
+                        substring(rdm_check_pos+3,rdm_line_len,rdm_line_data->str)
+                endif
+             endif
+ 
+          else
+             rdm_check_pos   = findstring(delim,rdm_line_data->str)
+ 
+             if (rdm_check_pos = 0)
+                 rdm_found_field->str = substring(1,rdm_line_len,rdm_line_data->str)
+                 rdm_line_data->str = " "
+             else
+                 rdm_found_field->str = substring(1,rdm_check_pos-1,rdm_line_data->str)
+                 rdm_line_data->str =
+                        substring(rdm_check_pos+1,rdm_line_len,rdm_line_data->str)
+             endif
+          endif
+ 
+ 
+          unit_data->list_2[rdm_unit_cnt].found_field = rdm_found_field->str
+ 
+          rec_info->list_0[rdm_field_number].assignment_line =
+                        concat("set requestin->list_0[rdm_num_rows]."
+                        ,trim(columns_1->list_1[rdm_field_number].field_name,3)
+                        ,"= rdm_found_field->str ")
+ 
+          rdm_field_number = rdm_field_number + 1
+        endwhile
+     endif
+;003  elseif (rdm_line_cnt > rdm_line_max)
+;003     call cancel(1)
+  endif
+ 
+  rdm_first_one = "N"
+with nocounter, maxcol = 32768 ;2100			;005
+;005
+if (dm_rr_debug_flag >= 2)
+	call echo("*")
+	call echo(build("**** MEMORY:", CURMEM, "- UNIT STR POPULATED - COPYING TO REQUESTIN, CALLING PARSER"))
+	call echo("*")
+endif
+set rdm_stat   = alterlist(unit_data->list_2,rdm_unit_cnt)
+set rdm_stat   = alterlist(requestin->list_0,10)
+set rdm_rptcnt = 1
+ 
+while (rdm_while_cnt <= rdm_unit_cnt)
+       if(rdm_rptcnt > rdm_field_total)
+          set rdm_rptcnt = 1
+          set rdm_num_rows   = rdm_num_rows + 1
+       endif
+ 
+       if (mod(rdm_num_rows,10) = 1 and rdm_num_rows != 1)
+          set rdm_stat = alterlist(requestin->list_0,rdm_num_rows + 9)
+       endif
+ 
+       set rdm_found_field->str = " "
+       set rdm_found_field->str = unit_data->list_2[rdm_while_cnt].found_field
+ 
+       ;elminates data carryover from one row to another
+       if (rdm_found_field->str = " " OR rdm_found_field->str = NULL)             ;005
+          set rdm_found_field->str = ""                                      ;005
+       endif                                                          ;005
+       call parser(rec_info->list_0[rdm_rptcnt].assignment_line)
+       call parser(" go")
+ 
+       set rdm_rptcnt = rdm_rptcnt + 1
+       set rdm_while_cnt  = rdm_while_cnt + 1
+endwhile
+ 
+;005
+if (dm_rr_debug_flag >= 2)
+	call echo("*")
+	call echo(build("**** MEMORY:", CURMEM, "- PARSER COMPLETE - REQUESTIN POPULATED"))
+	call echo("*")
+endif
+set rdm_stat = alterlist(requestin->list_0,rdm_num_rows)
+ 
+#exit_script
+free set rdm_unit_cnt
+free set rdm_while_cnt
+free set rdm_num_rows
+free set rdm_rptcnt
+free set rdm_field_number
+ 
+free record rdm_found_field
+ 
+free record unit_data
+ 
+if (rdm_status = "F")
+   call echo("*************************************************")
+   call echo("**********       Program Failed        **********")
+   call echo("******      Errors found in DATA file      ******") 
+   call echo("*************************************************")
+endif
+ 
+ 
+end
+go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,859 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBT_FOREIGN_SYSTEM_UPLOAD/BBT_ADD_HIST_PERSON_ABORH.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-2001 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       BBT_ADD_HIST_PERSON_ABORH.PRG
+        Object name:            bbt_add_hist_person_aborh
+        Request #:              225443
+
+        Product:                Blood Bank Transfusion
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Update the person's historical aborh to the
+                                person_aborh table (from history through HL7
+                                messages)
+
+        Tables read:            PERSON_ABORH, CODE_VALUE, PERSON
+        						BB_UPLOAD_REVIEW
+
+        Tables updated:         PERSON_ABORH, BB_UPLOAD_REVIEW
+        						BB_UPLOAD_PERSON_ABORH_R
+
+        Executing from:
+
+        Special Notes:          N/A
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 10/20/97 Lisa Grayson         Initial Release                     *
+;     002 12/28/98 David Hall           Major rewrite.                      *
+;     003 05/22/01 Doug Saus			Complete rewrite					*
+;     004 07/18/01 Doug Saus            Changed to call external script on  *
+;										multiple person_aborh active rows   *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_add_hist_person_aborh:dba go
+create program bbt_add_hist_person_aborh:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+/*
+record request
+   1 contributor_system_cd  	= f8
+   1 active_status_prsnl_id 	= f8
+   1 qual[*]
+     2 person_id            	= f8
+     2 aborh_cd             	= f8
+     2 aborh_dt_tm     			= dq8
+     2 aborh_prsnl_id 	= f8
+*/
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+record reply
+(
+%I CCLSOURCE:STATUS_BLOCK.INC
+)
+
+
+/*************************/
+/* Variable declarations */
+/*************************/
+declare SCRIPT_NAME = c40 with public, constant("bbt_add_hist_person_aborh") ;name of this script
+declare abo_cd_new = f8 with public, noconstant(0.0) ;used to store current abo_cd associated with current aborh_cd
+declare rh_cd_new = f8 with public, noconstant(0.0) ;used to store current rh_cd associated with current aborh_cd
+declare multiple_actives_exist_ind = i2 with public, noconstant(0) ;filled out by subroutine
+declare actives_exist_ind = i2 with public, noconstant(0) ;filled out by subroutine
+declare person_aborh_rows_exist_ind = i2 with public, noconstant(0) ;filled out by subroutine
+declare unreviewed_record_exists_ind = i2 with public, noconstant(0) ;filled out by subroutine check_for_unreviewed_upload_review
+declare new_person_aborh_id = f8 with public, noconstant(0.0)
+declare new_upload_review_id = f8 with public, noconstant(0.0)
+declare i = i4 with public, noconstant(0) ;loop counter
+declare j = i4 with public, noconstant(0) ;loop counter
+declare exit_loop_ind = i4 with public, noconstant(0) ;indicator to exit while loop early
+declare item_aborh_prsnl_id = f8 with private, noconstant(0.0) ;holds aborh_prsnl_id for current item
+declare item_aborh_dt_tm = q8 with private, noconstant(cnvtdatetime(curdate,curtime3)) ;holds aborh_dt_tm for current item
+
+declare CS_ABORH_RESULT = i4 with public, constant(1643)
+declare CS_STANDARD_ABORH = i4 with public, constant(1640)
+declare ABO_ONLY = c12 with public, constant("ABOOnly_cd")
+declare RH_ONLY = c12 with public, constant("RhOnly_cd")
+declare ABORH = c12 with public, constant("ABORH_cd")
+
+execute srvrtl
+execute crmrtl
+
+record PersonAborhs
+(
+	1 PersonAborhList[*]
+		2 person_aborh_id 		= f8
+		2 active_ind 			= i2
+		2 abo_cd 				= f8
+		2 rh_cd 				= f8
+		2 updt_cnt 				= i4
+		2 active_status_dt_tm 	= dq8
+)
+
+/****************/
+/* Main Program */
+/****************/
+
+if (not request->contributor_system_cd > 0.0)
+	call fill_out_status_data("F"
+							  , "Validate contrib_sys_cd"
+							  , "Contributor system code not > 0")
+	go to EXIT_SCRIPT
+endif
+
+;loop through all items in request
+for (i = 1 to size(request->qual,5))
+
+	;validate data
+	if (perform_data_validation(request->qual[i].person_id
+								, request->qual[i].aborh_cd) = 0)
+		go to EXIT_SCRIPT
+	endif
+
+	;get abo and rh code values
+	if (get_abo_and_rh_values(request->qual[i].aborh_cd) = 0)
+		go to EXIT_SCRIPT
+	endif
+
+
+	;get person's person aborh rows
+	if (fill_out_person_aborhs(request->qual[i].person_id) = 0)
+		go to EXIT_SCRIPT
+	endif
+
+	;set current item's aborh_prsnl_id
+	if (request->qual[i].aborh_prsnl_id > 0.0)
+		set item_aborh_prsnl_id = request->qual[i].aborh_prsnl_id
+	else
+		set item_aborh_prsnl_id = request->active_status_prsnl_id
+	endif
+
+	;set current item's aborh_dt_tm
+	if (request->qual[i].aborh_dt_tm > 0)
+		set item_aborh_dt_tm = request->qual[i].aborh_dt_tm
+	else
+		set item_aborh_dt_tm = cnvtdatetime(curdate,curtime3)
+	endif
+
+	;determine if any person aborh rows exist at all
+	if (person_aborh_rows_exist_ind = 0)
+		;none exist so write new active person aborh
+		if (insert_person_aborh_row(request->qual[i].person_id
+									, 1
+									, abo_cd_new
+									, rh_cd_new
+									, item_aborh_prsnl_id
+									, item_aborh_dt_tm) = 0)
+			go to EXIT_SCRIPT
+		endif
+	else
+		;rows exist, process them
+		if (multiple_actives_exist_ind = 1)
+			
+			;003 begin
+			;call external script to inactivate active aborhs and to write new
+			;bb_upload_review and bb_upload_person_aborh_r rows
+			if (update_multiple_active_aborh(request->qual[i].person_id) = 0)
+				go to EXIT_SCRIPT
+			endif
+			;003 end
+			
+			;fill out error and return
+			call fill_out_status_data("F"
+									  , "Validate person_aborh"
+									  , concat("Person "
+											, trim(cnvtstring(request->qual[i].person_id, 32, 0))
+											, " has multiple active person_aborh rows."
+											, " Upload cancelled, no person ABO/Rh"
+											, " upload data applied. Please resolve."))
+			go to EXIT_SCRIPT
+
+		else
+			;check for inactive rows
+			if (check_for_unreviewed_upload_review(0) = 0)
+				go to EXIT_SCRIPT
+			else
+				if (unreviewed_record_exists_ind = 1)
+					;return error?
+					call fill_out_status_data("F","Validate inactive UR"
+							,concat("Person "
+								, trim(cnvtstring(request->qual[i].person_id, 32, 0))
+								, " has active BB Review Queue rows."
+								, " Upload cancelled, no person ABO/Rh"
+								, " upload data applied."
+								, " Please investigate BB Review Queue."))
+					go to EXIT_SCRIPT
+				endif
+			endif
+
+			;if no actives exist, just insert an active person_aborh row
+			if (actives_exist_ind = 0)
+				;no actives, insert active row
+				if (insert_person_aborh_row(request->qual[i].person_id
+											, 1
+											, abo_cd_new
+											, rh_cd_new
+											, item_aborh_prsnl_id
+											, item_aborh_dt_tm) = 0)
+					go to EXIT_SCRIPT
+				endif
+			else
+				;if no inactive rows exist or no unreviewed rows exist, perform the following:
+				;process active row
+				;check if abo and rh match
+				set exit_loop_ind = 0
+				set j = 1
+				while (j <= size(PersonAborhs->PersonAborhList,5) and exit_loop_ind = 0)
+					if (PersonAborhs->PersonAborhList[j].active_ind = 1)
+						;process active row
+						;check if abo and rh match
+						if (insert_person_aborh_row(request->qual[i].person_id
+														, 0
+														, abo_cd_new
+														, rh_cd_new
+														, item_aborh_prsnl_id
+														, item_aborh_dt_tm) = 0)
+							go to EXIT_SCRIPT
+						endif
+						
+						if (PersonAborhs->PersonAborhList[j].abo_cd = abo_cd_new
+						  and PersonAborhs->PersonAborhList[j].rh_cd = rh_cd_new)
+							;do nothing
+							set j = j
+						else
+							  
+							;insert new review queue row
+	 						if (insert_upload_review_row(request->qual[i].person_id
+	 													, new_person_aborh_id
+	 													, PersonAborhs->PersonAborhList[j].person_aborh_id
+	 													, PersonAborhs->PersonAborhList[j].active_status_dt_tm) = 0)
+								go to EXIT_SCRIPT
+							endif
+	
+							;inactivate person aborh row
+							if (update_person_aborh_row(0
+														, PersonAborhs->PersonAborhList[j].person_aborh_id
+														, PersonAborhs->PersonAborhList[j].updt_cnt) = 0)
+								go to EXIT_SCRIPT
+							endif
+	
+							call fill_out_status_data(" "
+										  , "Conflicting aborh"
+										  , concat("Upload Abo/rh for person "
+												, trim(cnvtstring(request->qual[i].person_id, 32, 0))
+												, " conflicts with existing Abo/rh."))
+							
+
+						endif
+						;terminate out of loop since we just processed active record				
+						set exit_loop_ind = 1
+					endif
+					;increment counter
+					set j = j + 1
+				endwhile
+			endif
+		endif
+	endif
+endfor
+
+go to EXIT_SCRIPT
+
+/* End Main Program */
+
+/***********************************************/
+/*Function Declarations/Subroutine Definitions */
+/***********************************************/
+declare perform_data_validation(person_id_new = f8
+								, aborh_cd = f8) = i2
+subroutine perform_data_validation(	person_id_new
+									, aborh_cd)
+/*
+This routine will perform all data validation for current item.  Return 1 if successful, 0 if not
+*/
+	;validate person id
+	select into "nl:"
+		p.person_id
+	from
+		person p
+	where p.person_id = person_id_new
+	    and p.person_id > 0.0
+
+	with nocounter
+
+	;check for script errors
+	if (check_for_ccl_error("Select on person") = 0)
+		return(0)
+	else
+		if (curqual = 0)
+			;person id not valid
+			call fill_out_status_data("F", "Validate person_id"
+									, concat("Person "
+											, trim(cnvtstring(person_id_new, 32, 0))
+											, " does not exist on person table"))
+			return(0)
+		endif
+	endif
+
+	;validate aborh_cd is valid
+	select into "nl:"
+		cv.code_value
+		, cv.code_set
+	from
+		code_value cv
+	where cv.code_value = aborh_cd
+	    and cv.code_set = 1643
+	    and cv.code_value > 0.0
+
+	with nocounter
+
+	;check for script errors
+	if (check_for_ccl_error("Select on code_value") = 0)
+		return(0)
+	else
+		if (curqual = 0)
+			;code value not valid
+			call fill_out_status_data("F", "Validate aborh_cd"
+				, concat("Aborh_cd "
+						, trim(cnvtstring(aborh_cd, 32, 0))
+						, " for person "
+						, cnvtstring(person_id_new, 32, 0)
+						, " not found on code_set 1643"))
+			return(0)
+		endif
+	endif
+
+	;successful
+	return(1)
+
+end
+
+declare get_abo_and_rh_values(aborh_cd = f8) = i2
+subroutine get_abo_and_rh_values(aborh_cd)
+/*
+This routine will fill out the abo_cd and rh_cd with the corresponding
+values for the current item's aborh_cd. Return 1 if successful, 0 if not
+*/
+	set abo_cd_new = 0.0
+	set rh_cd_new = 0.0
+
+	select  into "nl:"
+		cve1.code_value
+		, cve2.code_value
+	from
+		code_value_extension cve1
+		, code_value_extension cve2
+	plan cve1 where cve1.code_value    	= aborh_cd
+				and cve1.code_set      	= CS_ABORH_RESULT
+				and cve1.field_name   	= ABORH
+	join cve2 where cve2.code_value    	= cnvtreal(cve1.field_value)
+				and cve2.code_set     	= CS_STANDARD_ABORH
+	detail
+		if (cve2.field_name = ABO_ONLY)
+			abo_cd_new = cnvtreal(cve2.field_value)
+		elseif (cve2.field_name = RH_ONLY)
+			rh_cd_new = cnvtreal(cve2.field_value)
+		endif
+	with nocounter
+
+	if (check_for_ccl_error("Select on code_value_extension") = 0)
+		return(0)
+	else
+		if (curqual = 0)
+			call fill_out_status_data("F"
+									  , "Retrieval abo and rh"
+									  , concat("Abo and Rh code values not found for aborh_cd "
+									  			, trim(cnvtstring(aborh_cd, 32, 0))))
+			return(0)
+		endif
+	endif
+
+	;successful
+	return(1)
+
+end
+
+declare fill_out_person_aborhs(person_id_new = f8) = i2
+subroutine fill_out_person_aborhs(person_id_new)
+/*
+This routine will fill out the PersonAborhs record structure with
+all the current person's person_aborh rows.
+Return 1 if successful, 0 if not
+*/
+	set multiple_actives_exist_ind = 0
+	set actives_exist_ind = 0
+	set person_aborh_rows_exist_ind = 0
+	
+	select into "nl:"
+		pa.person_aborh_id
+	from
+		person_aborh pa
+	where pa.person_id = person_id_new
+	    and pa.person_id > 0.0
+	head report
+		count = 0
+		active_cnt = 0
+		stat = alterlist(PersonAborhs->PersonAborhList,count)
+	detail
+		person_aborh_rows_exist_ind = 1
+		count = count + 1
+		stat = alterlist(PersonAborhs->PersonAborhList,count)
+		if (pa.active_ind = 1)
+			active_cnt = active_cnt + 1
+			actives_exist_ind = 1
+		endif
+		PersonAborhs->PersonAborhList[count].person_aborh_id = pa.person_aborh_id
+		PersonAborhs->PersonAborhList[count].active_ind = pa.active_ind
+		PersonAborhs->PersonAborhList[count].abo_cd = pa.abo_cd
+		PersonAborhs->PersonAborhList[count].rh_cd = pa.rh_cd
+		PersonAborhs->PersonAborhList[count].updt_cnt = pa.updt_cnt
+		PersonAborhs->PersonAborhList[count].active_status_dt_tm = pa.active_status_dt_tm
+	foot report
+		stat = alterlist(PersonAborhs->PersonAborhList,count)
+		if (active_cnt > 1)
+			multiple_actives_exist_ind = 1
+		endif
+	with nocounter, nullreport
+
+	if  (check_for_ccl_error("Select person_aborh") = 0)
+		return(0)
+	endif
+
+	;successful
+	return(1)
+end
+
+declare check_for_ccl_error(target_object_name = c25) = i2
+subroutine check_for_ccl_error(target_object_name)
+/*
+This routine will check for any ccl errors from the most recent select/insert/update.
+Return 1 if successful, 0 if not.
+*/
+	declare error_msg = c132 with private, noconstant(FILLSTRING(132," "))
+	declare new_error = c132 with private, noconstant(FILLSTRING(132," "))
+	declare error_ind = i4 with private, noconstant(0) ;
+
+	set error_ind = ERROR(new_error, 0)
+	if (error_ind != 0)
+		while (error_ind != 0)
+			set error_msg = concat(error_msg, " ", new_error)
+			set error_ind = ERROR(new_error, 0)
+		endwhile
+		call fill_out_status_data("F", target_object_name, error_msg)
+		return(0)
+	else
+		return(1)
+	endif
+end
+
+declare fill_out_status_data(status = c1
+								,target_object_name = c25
+								, target_object_value = vc) = NULL
+subroutine fill_out_status_data(status
+								,target_object_name
+								, target_object_value)
+/*
+This routine will fill out the status block with parameters passed.
+*/
+	set reply->status_data->status = status
+    set reply->status_data.subeventstatus[1].OperationStatus = status
+	set reply->status_data.subeventstatus[1].OperationName = SCRIPT_NAME
+    set reply->status_data.subeventstatus[1].TargetObjectName = target_object_name
+    set reply->status_data.subeventstatus[1].TargetObjectValue = target_object_value
+end
+
+declare insert_person_aborh_row(person_id_new = f8
+								,active_ind_new = i2
+								, abo_cd_new = f8
+								, rh_cd_new = f8
+								, aborh_prsnl_id = f8
+								, aborh_dt_tm = dq8) = i2
+subroutine insert_person_aborh_row( person_id_new
+									, active_ind_new
+									, abo_cd_new
+									, rh_cd_new
+									, aborh_prsnl_id
+									, aborh_dt_tm)
+/*
+This routine will insert a person aborh row using data passed.  Return 1 if successful, 0 if not
+*/
+	set new_person_aborh_id = 0.0
+
+	;generate new id
+	select into "nl:"
+		seqn        = seq(pathnet_seq,nextval)
+	from
+		dual
+	detail
+		 new_person_aborh_id        = seqn
+	with format, nocounter
+
+	;insert new person aborh row
+	insert into person_aborh pa
+		set pa.person_aborh_id = new_person_aborh_id
+		, pa.abo_cd = abo_cd_new
+		, pa.rh_cd = rh_cd_new
+		, pa.active_ind = active_ind_new
+		, pa.person_id = person_id_new
+		, pa.active_status_cd = if (active_ind_new = 1)
+									reqdata->active_status_cd
+							    else
+							    	reqdata->inactive_status_cd
+							    endif
+		, pa.active_status_prsnl_id = aborh_prsnl_id
+		, pa.active_status_dt_tm = cnvtdatetime(aborh_dt_tm)
+		, pa.begin_effective_dt_tm = cnvtdatetime(aborh_dt_tm)
+		, pa.end_effective_dt_tm =  if (active_ind_new = 1)
+										cnvtdatetime("31-DEC-2100 23:59:00")
+								    else
+								    	cnvtdatetime(curdate,curtime3)
+								    endif
+		, pa.contributor_system_cd = request->contributor_system_cd
+		, pa.updt_cnt = 0
+		, pa.updt_task = reqinfo->updt_task
+		, pa.updt_applctx = reqinfo->updt_applctx
+		, pa.updt_dt_tm = cnvtdatetime(curdate,curtime3)
+		, pa.updt_id = reqinfo->updt_id
+
+	with nocounter
+
+	if (check_for_ccl_error("Insert person_aborh") = 0)
+		return(0)
+	else
+		if (curqual = 0)
+			call fill_out_status_data("F", "Insert person_aborh"
+				, concat("Unable to insert person-aborh row for person "
+						, trim(cnvtstring(person_id_new, 32, 0))))
+			return(0)
+		endif
+	endif
+
+	;successful
+	return(1)
+
+end
+
+declare update_person_aborh_row(active_ind_new = i2
+								, sub_person_aborh_id = f8
+								, updt_cnt = i4) = i2
+subroutine update_person_aborh_row(	active_ind_new
+									, sub_person_aborh_id
+									, updt_cnt)
+/*
+This routine will update a person aborh row using the data passed. Return 1 if successful, 0 if not
+*/
+	select into "nl:"
+		pa.person_aborh_id
+	from person_aborh pa
+	where pa.person_aborh_id = sub_person_aborh_id
+	  and pa.updt_cnt = updt_cnt
+	with nocounter, forupdate(pa)
+
+	if (check_for_ccl_error("lock person_aborh") = 0)
+		return(0)
+	else
+		if (curqual = 0)
+			call fill_out_status_data("F"
+									  , "lock person_aborh"
+									  , concat("Unable to lock person_aborh row "
+									  		, trim(cnvtstring(sub_person_aborh_id, 32, 0))
+									  		, " for update"))
+			return(0)
+		endif
+	endif
+
+
+	update into person_aborh pa
+		set pa.active_ind = active_ind_new
+		, pa.active_status_cd = if (active_ind_new = 1)
+									reqdata->active_status_cd
+							    else
+							    	reqdata->inactive_status_cd
+							    endif
+		, pa.active_status_prsnl_id = reqinfo->updt_id
+		, pa.active_status_dt_tm = cnvtdatetime(curdate,curtime3)
+		, pa.updt_cnt = updt_cnt + 1
+		, pa.updt_task = reqinfo->updt_task
+		, pa.updt_applctx = reqinfo->updt_applctx
+		, pa.updt_dt_tm = cnvtdatetime(curdate,curtime3)
+		, pa.updt_id = reqinfo->updt_id
+
+	where pa.person_aborh_id = sub_person_aborh_id
+	    and pa.updt_cnt = updt_cnt
+	with nocounter
+
+	if (check_for_ccl_error("update person_aborh") = 0)
+		return(0)
+	else
+		if (curqual = 0)
+			call fill_out_status_data("F", "update person_aborh"
+					, concat("Person_aborh row "
+							, trim(cnvtstring(sub_person_aborh_id, 32, 0))
+							, " not updated."))
+			return(0)
+		endif
+	endif
+
+	;successful
+	return(1)
+
+end
+
+declare insert_upload_review_row(person_id_new = f8
+								, upload_person_aborh_id_new = f8
+								, demog_person_aborh_id_new = f8
+								, demog_dt_tm = dq8) = i2
+subroutine insert_upload_review_row(person_id_new
+									, upload_person_aborh_id_new
+									, demog_person_aborh_id_new
+									, demog_dt_tm)
+/*
+This routine will insert a row to the bb_upload_review table using the information passed. Return 1 if successful, 0 if not
+*/
+	set new_upload_review_id  = 0.0
+
+	;generate new id
+	select into "nl:"
+		seqn        = seq(pathnet_seq,nextval)
+	from
+		dual
+	detail
+		 new_upload_review_id        = seqn
+	with format, nocounter
+
+	;insert new upload review row
+	insert into bb_upload_review bur
+		set bur.bb_upload_review_id = new_upload_review_id
+		, bur.person_id = person_id_new
+		, bur.upload_person_aborh_id = upload_person_aborh_id_new
+		, bur.demog_person_aborh_id = demog_person_aborh_id_new
+		, bur.upload_dt_tm = cnvtdatetime(curdate,curtime3)
+		, bur.demog_aborh_dt_tm = cnvtdatetime(demog_dt_tm)
+		, bur.reviewed_ind = 0
+		, bur.updt_cnt = 0
+		, bur.updt_task = reqinfo->updt_task
+		, bur.updt_applctx = reqinfo->updt_applctx
+		, bur.updt_dt_tm = cnvtdatetime(curdate,curtime3)
+		, bur.updt_id = reqinfo->updt_id
+
+	with nocounter
+
+	if (check_for_ccl_error("Insert bb_upload_review") = 0)
+		return(0)
+	else
+		if (curqual = 0)
+			call fill_out_status_data("F", "Insert bb_upload_review"
+					, concat("Unable to insert upload_review row for person "
+							, trim(cnvtstring(person_id_new, 32, 0))))
+			return(0)
+		endif
+	endif
+
+	;successful
+	return(1)
+end
+
+
+
+declare check_for_unreviewed_upload_review(dummy = i2) = i2
+subroutine check_for_unreviewed_upload_review(dummy)
+/*
+This routine will check for unreviewed upload review records for all inactive person aborhs. Return 1 if successful, 0 if not.
+*/
+
+	set exit_script_ind = 0
+	set  unreviewed_record_exists_ind = 0
+
+	;check bb_upload_review for unreviewed records
+	select into "nl:"
+		bur.bb_upload_review_id
+		, d.seq
+	from
+	 	bb_upload_review bur
+	 	, (dummyt d with seq = value(size(PersonAborhs->PersonAborhList,5)))
+
+	plan d where PersonAborhs->PersonAborhList[d.seq].active_ind = 0
+
+	join bur where ((bur.upload_person_aborh_id = PersonAborhs->PersonAborhList[d.seq].person_aborh_id)
+	 		     or  (bur.demog_person_aborh_id = PersonAborhs->PersonAborhList[d.seq].person_aborh_id))
+				and (bur.reviewed_ind = 0)
+
+	detail
+		unreviewed_record_exists_ind = 1
+	with nocounter
+
+	if (check_for_ccl_error("Select bb_upload_review") = 0)
+		return(0)
+	endif
+
+	;check bb_upload_person_aborh_r table for corresponding unreviewed records
+	select into "nl:"
+		bur.bb_upload_review_id
+		, bupa.bb_upload_person_aborh_r_id
+		, d.seq
+	from
+		bb_upload_review bur
+	 	, bb_upload_person_aborh_r bupa
+	 	, (dummyt d with seq = value(size(PersonAborhs->PersonAborhList,5)))
+
+	plan d where PersonAborhs->PersonAborhList[d.seq].active_ind = 0
+
+	join bupa where bupa.person_aborh_id = PersonAborhs->PersonAborhList[d.seq].person_aborh_id
+
+	join bur where bur.bb_upload_review_id = bupa.bb_upload_review_id+0
+			   and bur.reviewed_ind = 0
+
+	detail
+		unreviewed_record_exists_ind = 1
+	with nocounter
+
+	if (check_for_ccl_error("Select bupa-bur") = 0)
+		return(0)
+	endif
+
+	return(1)
+
+end
+
+;003 new subroutine
+declare update_multiple_active_aborh(person_id_new = i2) = i2
+subroutine update_multiple_active_aborh(person_id_new)
+	declare crmStatus = i4 with noconstant(0)
+	declare app_number = i4 with noconstant(0)
+	declare task_number = i4 with noconstant(0)
+	declare req_number = i4 with noconstant(0)
+	declare hApp = i4 with noconstant(0)
+	declare hTask = i4 with noconstant(0)
+	declare hData = i4 with noconstant(0)	
+	declare hStatus = i4 with noconstant(0)
+	declare hStep = i4 with noconstant(0)
+	declare hReq = i4 with noconstant(0)
+	declare status_value = c1 with noconstant(" ")
+	declare error = vc
+	
+	set app_number = 225082
+	set crmStatus = uar_crmbeginapp( app_number, hApp )
+	if ( crmStatus )
+		if (request->debug_ind = 1)
+	        call echo( concat("Begin app failed with status: ", cnvtstring(crmStatus)))
+	    endif
+	    call fill_out_status_data("F","bb_upd_mult_act_aborh","Error beginning app")
+	    return(0)
+	endif
+
+	set task_number = 225568
+	set crmStatus = uar_crmbegintask( hApp, task_number, hTask )
+	if ( crmStatus )
+	    call uar_crmendapp( hApp )
+		if (request->debug_ind = 1)
+	        call echo( concat("Begin task failed with status: ", cnvtstring(crmStatus)))
+	    endif
+	    call fill_out_status_data("F","bb_upd_mult_act_aborh","Error beginning task")
+		return(0)
+	endif
+
+	set req_number = 225912
+	set crmStatus = uar_crmbeginreq( hTask, 0, req_number, hReq )
+	if ( crmStatus )
+	    call uar_crmendtask( hTask )
+	    call uar_crmendapp( hApp )
+		if (request->debug_ind = 1)
+	        call echo( concat("Begin request failed with status: ", cnvtstring(crmStatus)))
+	    endif
+	    call fill_out_status_data("F","bb_upd_mult_act_aborh","Error beginning request")
+	    return(0)
+	endif
+
+	set hData = uar_crmgetrequest(hReq)
+	set srvstat = uar_SrvSetDouble(hData,"person_id",person_id_new)
+	set crmStatus = uar_crmperform(hReq)
+	if (crmStatus)
+	    call uar_crmendreq(hReq)
+	    call uar_crmendtask(hTask)
+	    call uar_crmendapp(hApp)
+		if (request->debug_ind = 1)
+	        call echo( concat("Perform failed with status: ", cnvtstring(crmStatus)))
+	    endif
+	    call fill_out_status_data("F","bb_upd_mult_act_aborh","Error performing request")
+	    return(0)
+	endif 
+
+	if (request->debug_ind = 1)
+		call echo("Perform successful for bb_upd_mult_act_aborh")
+	endif
+
+	set hReply = uar_crmgetreply(hReq)
+    
+    set hData = uar_SrvGetStruct(hReply, "status_data")
+    set status_value = uar_SrvGetStringPtr(hData, "status")
+	
+	if (status_value = "F")
+		set hList = uar_srvgetitem(hData,"SubEventStatus",0)
+		;set error = uar_srvgetstringptr(hList,"TargetObjectValue")
+		call fill_out_status_data("F","bb_upd_mult_act_aborh",uar_srvgetstringptr(hList,"TargetObjectValue"))
+		call uar_crmendreq( hReq )
+		call uar_crmendtask ( hTask )
+	    call uar_crmendapp( hApp )
+		
+		return(0)
+	else
+		call uar_crmendreq(hReq)
+		call uar_crmendtask (hTask)
+	    call uar_crmendapp(hApp)
+
+		return(1)
+	endif
+
+end
+										
+#EXIT_SCRIPT
+
+;release memory used by structure
+free record PersonAborhs
+
+if (reply->status_data->status = "F")
+    set reqinfo->commit_ind = 0 ;003 removed use of commit_ind global variable
+else
+     set reply->status_data->status = "S"
+     set reqinfo->commit_ind = 1 ;003
+endif
+
+if (request->debug_ind = 1)
+	call echorecord(reply)
+	call echo(reply->status_data.subeventstatus[1].TargetObjectValue)
+endif
+
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

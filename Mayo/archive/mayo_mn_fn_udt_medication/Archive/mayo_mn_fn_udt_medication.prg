@@ -1,0 +1,509 @@
+/*****************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+      ***********************************************************************/
+/*****************************************************************************
+ 
+        Source file name:       mayo_mn_fn_udt_medication.PRG
+        Object name:            mayo_mn_fn_udt_medication
+        Request #:
+ 
+        Product:                SC custom discern programming
+        Product Team:           FirstNet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:
+ 
+        Tables read:			Orders, order_detail, oe_format_fields,code_value
+        Tables updated:         None
+        Executing from:			PowerChart
+ 
+        Special Notes:
+ 
+******************************************************************************/
+ 
+;****************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod    Date     	Engineer              Comment                       *
+;    *---   ------------ -------------------- ------------------------------*
+;     000   11/03/08 	 NT5990               Initial Release SR1-2094297910*
+;                                             start of script was based off *
+;                                             of FNGetHomeMedsHxTrans.prg   *
+;     001 	02/05/10	 Akcia				  reformatting of data			*
+;     002   09/28/11	 Akcia				  Add duration and change <,> to html
+;												so it displays properly
+;     003   11/01/11     Akcia - SE			  Make efficiency changes		*
+;	  004	09/19/12	 Akcia - SE			  Add check for "not taking" and not as prescribed and add
+;											  sentence to bottom of report
+;	  005	10/02/12	 Akcia - PEL		  Fixed words running together in message
+;   006 05/20/13   Akcia - SE			Add recon note that was new with .16 code
+;   007 06/26/13   Akcia - SE			fix to only pull back most recent compliance row instead of all of them
+;****************************************************************************
+drop program mayo_mn_fn_udt_medication:dba go
+create program mayo_mn_fn_udt_medication:dba
+ 
+%i cclsource:mayo_mn_html.inc
+/**************************************************************
+; DVDev DECLARED VARIABLES
+**************************************************************/
+ 
+declare dOrderedCd = f8 with NOCONSTANT(0.0)
+declare sText = vc
+declare sOrderName = vc
+declare sRoute = vc
+declare sFreq = vc
+declare sStrengthDose = vc
+declare sStrengthDoseUnit = vc
+declare sVolumeDose = vc
+declare sVolumeDoseUnit = vc
+declare sFreeTextDose = vc
+declare sDuration = vc
+declare sDurationUnit = vc
+declare sPrnInstructions = vc
+declare sPrnReason = vc
+declare freqPRN = vc
+declare sSpecialInstructions = vc
+declare sRefills = vc
+declare sprnspec = vc
+declare ordcmt = vc
+declare sIndications = vc
+declare recon_note = vc			;006
+declare ldose = vc
+declare udose = vc
+declare l_udose = vc
+declare lunit = vc
+ 
+ 
+declare nRecorded = i4 with CONSTANT(2)
+declare nOwnMeds = i4 with CONSTANT(3)
+declare nNormal0 = i4 with CONSTANT(0)
+declare nNormal1 = i4 with CONSTANT(1)
+declare ord_comment_cd      = f8 with public, noconstant(0.0)
+declare hard_stop_cd = f8 with public, constant(uar_get_code_by("MEANING",4009,"DRSTOP"))		;002
+declare physician_stop_cd = f8 with public, constant(uar_get_code_by("MEANING",4009,"HARD"))	;002
+declare not_taking_cd = f8 with public, constant(uar_get_code_by("MEANING",30254,"NOTTAKING"))	;004
+declare not_as_prescribed_cd = f8 with public, constant(uar_get_code_by("MEANING",30254,"TAKINGNOTRX"))	;004
+ 
+declare nRoute = i4 with CONSTANT(2050)
+declare nFreq = i4 with CONSTANT(2011)
+declare nStrengthDose = i4 with CONSTANT(2056)
+declare nStrengthDoseUnit = i4 with CONSTANT(2057)
+declare nVolumeDose = i4 with CONSTANT(2058)
+declare nVolumeDoseUnit = i4 with CONSTANT(2059)
+declare nFreeTextDose = i4 with CONSTANT(2063)
+declare nDuration = i4 with CONSTANT(2061)
+declare nDurationUnit = i4 with CONSTANT(2062)
+declare nPRN = i4 with CONSTANT(2101)
+declare nPRNReason = i4 with CONSTANT(142)
+declare nSpecialInstructs = i4 with CONSTANT(1103)
+declare nRefills = i4 with CONSTANT(67)
+ 
+declare nActSeq = i4 with NOCONSTANT(0)
+declare bOdFlag = i1 with NOCONSTANT(0)
+ 
+declare nMedCount = i4 with NOCONSTANT(0)
+declare populate = i2 with NOCONSTANT(0)
+ 
+declare not_taking_flag = c1			;004
+set not_taking_flag = "N"				;004
+ 
+/**************************************************************
+; DVDev Start Coding
+**************************************************************/
+ 
+set dOrderedCd = UAR_GET_CODE_BY("MEANING", 6004, "ORDERED")
+set ord_comment_cd = UAR_GET_CODE_BY("MEANING", 14, "ORD COMMENT")
+declare sStyleCenter = vc
+with constant(" style='text-align: center;font-size:8.0pt;font-family:Tahoma,sans-serif;font-weight:bold;'>")
+ 
+;set sText = BUILD(csBegin, csParagraph,csTable)
+set sText = BUILD(csBegin, "<TABLE border ='1' cellpadding=2")   ;csTable)  ;001
+set sText = build(sText,"<TR>","<td width=150", sStyleCenter, ;001
+								"<b>Medication/Strength</b>", csSpanEnd, csTableDefEnd)
+set sText = build(sText,"<td width=90", sStyleCenter, ;001
+								"<b>Dose</b>", csSpanEnd, csTableDefEnd)
+set sText = build(sText,"<td width=90", sStyleCenter, ;001
+								"<b>Route</b>", csSpanEnd, csTableDefEnd)
+set sText = build(sText,"<td width=90", sStyleCenter, ;001
+								"<b>Frequency</b>", csSpanEnd, csTableDefEnd)
+set sText = build(sText,"<td width=290", sStyleCenter, ;001
+;006								"<b>Indications/Special Instructions/Comments</b>", csSpanEnd, csTableDefEnd)
+								"<b>Indications/Special Instructions/Comments/Notes</b>", csSpanEnd, csTableDefEnd)			;006
+ 
+ 
+ 
+select  into "nl:"
+o.order_id ,
+;oeff.oe_format_id,
+od.oe_field_id,
+oc.action_sequence
+from orders o,
+;     order_compliance ocp,			;004
+     order_compliance_detail ocd,	;004
+     dummyt d,   					;003
+     order_detail od ,
+     /*  start 003
+     oe_format_fields oeff,
+     order_entry_fields oef,
+     (dummyt d2 with seq = 1),
+     code_value cv, end 003*/
+     order_comment oc,
+     long_text lt,
+     order_recon_detail ord,  		;006
+     dummyt d1   									;006
+      ,dummyt d2									;007
+ 
+ 
+plan o
+    where o.person_id = request->person_id
+    and o.order_status_cd+0 = dOrderedCd
+    and o.catalog_type_cd = 2516								;003
+    and o.active_ind = 1
+    and o.orig_ord_as_flag in (nRecorded,nOwnMeds,nNormal1)		;003
+;003        (o.orig_ord_as_flag+0 = nRecorded
+;003         OR
+;003         o.orig_ord_as_flag+0 = nOwnMeds
+;003         OR
+;003         o.orig_ord_as_flag+0 = nNormal1)
+;003
+ 
+/*start 003
+join oeff
+    where oeff.oe_format_id = o.oe_format_id
+    and oeff.oe_field_id = od.oe_field_id
+    ;and oeff.action_type_cd = 2534
+ 
+join oef
+    where oef.oe_field_id = oeff.oe_field_id
+    end 003*/
+ 
+;007  join ocd													;004
+;007  where ocd.order_nbr = outerjoin(o.order_id)					;004
+ 
+join oc
+    where oc.order_id = outerjoin(o.order_id)
+    and oc.comment_type_cd = outerjoin(ord_comment_cd)
+ 
+join lt
+    where lt.long_text_id = outerjoin(oc.long_text_id)
+    and lt.active_ind = outerjoin(1)
+ 
+join d2
+join ocd																																					;007
+where ocd.order_nbr = o.order_id																								  ;007
+  and ocd.compliance_capture_dt_tm = (select max(ocd2.compliance_capture_dt_tm)		;007
+  										from order_compliance_detail ocd2														;007
+  										  where ocd2.order_nbr = ocd.order_nbr)											;007
+ 
+join d1																				;006
+join ord																			;006
+where ord.order_nbr = o.order_id													;006
+  and exists (select ore.order_recon_id from order_recon ore 						;006
+  				where ore.order_recon_id = ord.order_recon_id						;006
+  				  and ore.encntr_id = request->encntr_id)							;006
+ 
+join d																				;003
+join od
+    where od.order_id = o.order_id
+      and od.oe_field_meaning_id in (2050,2011,2062,2061,2055,2101,142,1103,67      ;003
+										,15,2056,2058,2063,2057,2059)				;003
+ 
+ 
+/*start 003
+join d2
+join cv
+    where cv.code_set = oef.codeset
+    and trim(cv.display) = od.oe_field_display_value
+    and trim(cv.display) > " "
+ end 003 */
+ 
+ 
+    order o.order_id desc,
+    ;003  oeff.group_seq, oeff.field_seq,
+    od.oe_field_id, od.action_sequence desc
+    ,ocd.compliance_capture_dt_tm desc   		;004
+ 		,ord.updt_dt_tm desc										;006
+ 
+    head od.order_id
+        populate = 1
+        nMedCount = nMedCount + 1
+        sRoute = ""
+        sFreq = ""
+        sStrengthDose = ""
+        sStrengthDoseUnit = ""
+        sVolumeDose = ""
+        sVolumeDoseUnit = ""
+        sFreeTextDose = ""
+        sDuration = ""
+        sDurationUnit = ""
+        sPrnInstructions = ""
+        sPrnReason = ""
+        freqPRN = ""
+        sSpecialInstructions = ""
+        sRefills = ""
+        sprnspec = ""
+        ordcmt = ""
+        sIndications = ""
+        ldose = ""
+        lunit = ""
+        udose = ""
+        l_udose = ""
+        if (ocd.compliance_status_cd in (not_as_prescribed_cd,not_taking_cd))			;004
+          o_mnem = concat("<B>*</b>",trim(o.order_mnemonic))							;004
+          not_taking_flag = "Y"															;004
+        else																			;004
+          o_mnem = trim(o.order_mnemonic)
+        endif																			;004
+        o_as_mnem = trim(o.ordered_as_mnemonic)
+ 		hard_stop_flag = 0										;002
+        sText = BUILD(sText, "<TR>","<td width=150>",csTableDef,o_mnem,"&nbsp;","(", o_as_mnem, ")",
+                           csSpanEnd, csTableDefEnd)
+        call echo(BUILD("MNEMONIC:",o_MNEM))
+ 				recon_note = ord.recon_note_txt						;006
+ 
+    head od.oe_field_id
+        nActSeq = od.action_sequence
+        bOdFlag = TRUE
+ 
+    head od.action_sequence
+        if(nActSeq != od.action_sequence)
+            bOdFlag = FALSE
+        endif
+ 
+    detail
+ 
+        if(bOdFlag = TRUE)
+            if(od.oe_field_meaning_id = nRoute)
+              sRoute = uar_get_code_description(od.oe_field_value)   ;003
+;003                if(cv.code_value > 0)
+;003                    sRoute = trim(cv.description)
+;003                else
+;003                    sRoute = trim(od.oe_field_display_value)
+;003                endif
+            elseif(od.oe_field_meaning_id = nFreq)
+            	sFreq = uar_get_code_description(od.oe_field_value)   ;003
+;003                if(cv.code_value > 0)
+;003                    sFreq = trim(cv.description)
+;003                else
+;003                    sFreq = trim(od.oe_field_display_value)
+;003                endif
+            ;nt5990 pulled out original code due to it pulling incorrectly
+            ;elseif(od.oe_field_meaning_id = nStrengthDose)
+            ;    sStrengthDose = trim(od.oe_field_display_value)
+            ;elseif(od.oe_field_meaning_id = nStrengthDoseUnit)
+            ;    if(cv.code_value > 0)
+            ;        sStrengthDoseUnit = trim(cv.description)
+            ;    else
+            ;        sStrengthDoseUnit = trim(od.oe_field_display_value)
+            ;    endif
+            ;elseif(od.oe_field_meaning_id = nVolumeDose)
+            ;    sVolumeDose = trim(od.oe_field_display_value)
+            ;elseif(od.oe_field_meaning_id = nVolumeDoseUnit)
+            ;    if(cv.code_value > 0)
+            ;        sVolumeDoseUnit = trim(cv.description)
+            ;    else
+            ;        sVolumeDoseUnit = trim(od.oe_field_display_value)
+            ;    endif
+            ;elseif(od.oe_field_meaning_id = nFreeTextDose)
+            ;    sFreeTextDose = trim(od.oe_field_display_value)
+            ;elseif(od.oe_field_meaning_id = nDuration)
+            ;    sDuration = trim(od.oe_field_display_value)
+    ;002          elseif(od.oe_field_meaning_id = nDurationUnit)
+ 			elseif(od.oe_field_meaning = "DURATIONUNIT")				;002
+ 			  sDurationUnit = uar_get_code_description(od.oe_field_value)   	;003
+;003                if(cv.code_value > 0)
+;003                    sDurationUnit = trim(cv.description)
+;003                else
+;003                    sDurationUnit = trim(od.oe_field_display_value)
+;003                endif
+            elseif(od.oe_field_meaning = "DURATION")				;002
+            	sDuration = od.oe_field_display_value				;002
+            elseif(od.oe_field_meaning = "STOPTYPE")				;002
+            	if (od.oe_field_value in (hard_stop_cd,physician_stop_cd))	;002
+             		hard_stop_flag = 1										;002
+             	endif														;002
+            ;elseif(od.oe_field_meaning_id = nPRN)
+            ;    sPrnInstructions = trim(od.oe_field_display_value)
+            elseif(od.oe_field_meaning_id = nPRN)
+                sPrnReason = trim(od.oe_field_display_value)
+            elseif(od.oe_field_meaning_id = nPRNReason)
+                sPrnReason = trim(od.oe_field_display_value)
+            elseif(od.oe_field_meaning_id = nSpecialInstructs)
+                sSpecialInstructions = trim(od.oe_field_display_value)
+ 
+            elseif(od.oe_field_meaning_id = nRefills)
+                sRefills = trim(od.oe_field_display_value)
+            elseif (od.oe_field_meaning_id = 15)
+                sIndications = trim(od.oe_field_display_value)
+            endif
+ 
+ 
+ 
+ 
+     		case (od.oe_field_meaning)
+ 
+        		of "STRENGTHDOSE":      sStrengthDose           = od.oe_field_display_value
+        		of "VOLUMEDOSE":        sVolumeDose             = od.oe_field_display_value
+        		of "FREETXTDOSE":       sFreeTextDose           = od.oe_field_display_value
+        		of "STRENGTHDOSEUNIT":  sStrengthDoseUnit       = od.oe_field_display_value
+        		of "VOLUMEDOSEUNIT":    sVolumeDoseUnit         = od.oe_field_display_value
+    		endcase
+ 
+ 
+ 		endif
+    foot od.order_id
+    	if (sStrengthDose > " ")
+        	ldose = sStrengthDose
+    	elseif(sVolumeDose > " ")
+        	ldose = sVolumeDose
+    	elseif(sFreeTextDose > " ")
+        	ldose = sFreeTextDose
+        	lunit= " "
+    	endif
+ 		if (sStrengthDoseUnit > " ")
+        	lunit = sStrengthDoseUnit
+    	elseif(sVolumeDoseUnit > " ")
+        	lunit = sVolumeDoseUnit
+    	endif
+ 
+        if (o.order_comment_ind > 0)
+               ordcmt = trim(lt.long_text)
+        else
+               ordcmt = ""
+        endif
+ 
+        if (trim(sIndications) > " ")
+          if (trim(sSpecialInstructions) > " ")
+            if(trim(ordcmt) > " ")
+              sprnspec = concat(trim(sIndications)," / ",trim(sSpecialInstructions)," / ", trim(ordcmt))
+            else
+              sprnspec = concat(trim(sIndications)," / ",trim(sSpecialInstructions))
+            endif
+          else
+            if (trim(ordcmt) > " ")
+               sprnspec = concat(trim(sIndications)," / ", trim(ordcmt))
+            else
+               sprnspec = trim(sIndications)
+            endif
+          endif
+        else
+          if (trim(sSpecialInstructions) > " ")
+            if (trim(ordcmt) > " ")
+               sprnspec = concat(trim(sSpecialInstructions)," / ", trim(ordcmt))
+            else
+               sprnspec = trim(sSpecialInstructions)
+            endif
+          else
+            if (trim(ordcmt) > " ")
+               sprnspec = trim(ordcmt)
+            else
+               sprnspec = ""
+            endif
+          endif
+        endif
+        ;start 006
+        if (sprnspec > " ")
+        	if (recon_note > " ")
+        	  sprnspec = concat(trim(sprnspec)," / ",trim(recon_note))
+        	endif
+        else
+          if (recon_note > " ")
+        	  sprnspec = recon_note
+        	endif
+        endif
+        ;end 006
+ SPRNSPEC = REPLACE(SPRNSPEC, "<" , "&lt;" )
+ SPRNSPEC = REPLACE(SPRNSPEC, ">" , "&gt;" )
+        if(ldose > " ")
+          l_udose = concat (ldose," ", lunit)
+          sText = BUILD(sText, "<td width=90>",csTableDef, l_udose, csSpanEnd, csTableDefEnd)
+        else
+          sText = BUILD(sText, "<td width=90>",csTableDef, csSpanEnd, csTableDefEnd)
+        endif
+ 
+        if(trim(sRoute) > " ")
+            sText = BUILD(sText, "<td width=90>",csTableDef, sRoute,csSpanEnd, csTableDefEnd);sRoute
+        else
+            sText = BUILD(sText, "<td width=90>",csTableDef, csSpanEnd, csTableDefEnd)
+        endif
+        if(trim(sFreq) > " ")
+          if (trim(sPrnReason) > " ")
+            freqPRN = build2(sFreq, " as needed for ", sPrnReason)
+            sText = BUILD(sText, "<td width=90>",csTableDef, freqPRN,csSpanEnd, csTableDefEnd)
+          else
+            freqPRN = sFreq
+            if ((sduration > " ") and (sdurationunit > " ") and (hard_stop_flag = 1))  	;002
+            	freqprn = concat(sfreq," for ", sduration," ",sdurationunit )			;002
+			endif																		;002
+            sText = BUILD(sText, "<td width=90>",csTableDef, freqPRN,csSpanEnd, csTableDefEnd)
+          endif
+        else
+          if (trim(sPrnReason) > " ")
+            freqPRN = sPrnReason
+            sText = BUILD(sText, "<td width=90>",csTableDef, freqPRN,csSpanEnd, csTableDefEnd)
+          else
+            sText = BUILD(sText, "<td width=90>",csTableDef, csSpanEnd, csTableDefEnd)
+          endif
+        endif
+ 
+ 
+        if (trim(sprnspec) > " ")
+            sText = BUILD(sText,"<td width=290>",csTableDef, sprnspec,csSpanEnd, csTableDefEnd)
+        else
+            sText = BUILD(sText, "<td width=290>",csTableDef, csSpanEnd, csTableDefEnd) ;000
+        endif
+ 
+        sText = BUILD(sText, "</TR>")
+ 
+with nocounter
+,outerjoin = d2			;007
+,dontcare = ocd			;007
+,outerjoin = d1			;006
+,dontcare = ord			;006
+,outerjoin = d			;003
+;003  , outerjoin = d2
+ ;start 004
+if (not_taking_flag = "Y")
+;005  set sText = BUILD(sText, "<TR>",csTableDef1, "<b>*</B>  You have let us know that you are not taking this medication as ",
+;005  						"listed.  Please talk with your primary care provider or the health care provider who prescribed the ",
+;005  						"medication as soon as possible.",csSpanEnd, csTableDefEnd,"</TR>")
+  set sText = BUILD(sText, "<TR>",csTableDef1,                                                                  ;005
+                        concat( "<b>*</B>  You have let us know that you are not taking this medication as ",   ;005
+  						"listed.  Please talk with your primary care provider or the health care provider who prescribed the ",
+  						"medication as soon as possible."),csSpanEnd, csTableDefEnd,"</TR>")                    ;005
+ 
+endif
+;end 004
+ 
+if(populate = 0)
+  set sText = BUILD(sText, "<TR>",csTableDef1, "No Medications found",csSpanEnd, csTableDefEnd)
+endif
+ 
+set sText = BUILD(sText,csTableEnd, csEnd)
+ 
+set reply->text = sText
+set reply->format = 1 ; this means HTML so the caller will know how to handle
+ 
+call echo(reply->text) ;FE Added so that I can get the html piece and see what it looks like
+ ;*/with format,separator = " "
+set MOD = "003 Akcia 11/01/2011"
+ 
+end
+go

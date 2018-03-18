@@ -1,0 +1,326 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Scripttransfusionhistory/BBT_GET_TRANSFUSION_HIST.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_get_transfusion_hist.prg
+        Object name:            bbt_get_transfusion_hist
+        Request #:              225107
+
+        Product:                Pathnet                        
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Retrieve patient transfusion history info
+
+        Tables read:            product, blood_product, transfusion, person_name_hist
+        Tables updated:         none
+        Executing from:         
+
+        Special Notes:          this script will retrieve the transfusion 
+                                history for a specific patient
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 07/01/96 Mike Goings          Initial Release                     *
+;     002 03/03/98 David Hall           Add scan on bbhist tables.          *
+;     003 04/27/99 Doug Saus            Replaced code value select          *
+;     004 12/28/00 John Rieck           Retrieve historical product info    *
+;     005 11/24/03 Jason Coy            Include unit of measure in reply.   *
+;     006 12/19/03 Jason Coy            Added order clause to selects.      *
+;     007 09/06/05 JA7516				Added electronic_entry_flag to reply*
+;     008 11/01/05 Paul Lessin          Return historical name              *
+;     009 03/03/09 Kiran Vankadaru      Populate historic names after person*
+;                                       combine based on the preference set *
+;                                       at facility level                   *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+Drop Program   BBT_GET_TRANSFUSION_HIST : dba go
+Create Program  BBT_GET_TRANSFUSION_HIST : dba
+
+/*
+Record request
+(
+  1 person_id = f8
+  1 facility_cd = f8
+)
+*/
+
+Record  Reply
+(
+  1 historical_demog_ind            = i2        
+  1 qual [*]
+    2  donation_number              = c20
+    2  product_id                   = f8
+    2  product_cd                   = f8 
+    2  product_cd_disp              = c40
+    2  abo_cd                       = f8
+    2  abo_cd_disp                  = c40
+    2  rh_cd                        = f8 
+    2  rh_cd_disp                   = c40
+    2  trans_dt_tm                  = dq8
+    2  trans_vol                    = i4 
+    2  unit_meas_cd                 = f8
+    2  unit_meas_disp               = c40
+    2  history_upload_ind           = i2
+    2  cross_reference              = vc ; Cross reference number from the BBHIST_PRODUCT table
+    2  contributor_system_cd        = f8 ; Contributor system code value from the BBHIST_PRODUCT table
+    2  contributor_system_disp      = c40 ; Contributor system display value from the BBHIST_PRODUCT table
+    2  upload_dt_tm                 = dq8 ; Upload date and time from the BBHIST_PRODUCT table     
+    2  product_sub_nbr              = c5 ; Returns the live or historical product sub number
+    2  supplier_prefix              = c5 ; Returns the live or historical supplier prefix
+    2  electronic_entry_flag        = i2 ;
+    2  historical_name              = c40
+%i cclsource:status_block.inc
+)
+ 
+%i cclsource:bbt_getBBPreference.inc        ;for historic demographics
+ 
+declare lReplyCnt          = i4 with protect, noconstant(0)
+declare lIdx               = i4 with protect, noconstant(0)
+declare dCurrentPersonId = f8 with protect, noconstant(0.0)
+ 
+;Slightly < one minute, expressed as a fraction of a day, used for rounding up
+declare dMINUTE            = f8  with protect, constant(1/1440.0)
+ 
+declare dCurrentNameTypeCd = f8 with protect, noconstant(0.0)
+declare dCombineAddCd      = f8 with protect, noconstant(0.0)
+declare dActiveStatusCd    = f8 with protect, noconstant(0.0)
+declare lAntigenCnt        = i4 with protect, noconstant(0,0)
+declare sScriptName        = vc with protect, constant("bbt_get_antigens_for_person")
+ 
+set reply -> status_data -> status  =  "F" 
+
+set stat = alterlist(reply->qual,10)
+
+;003 begin
+declare transfused_event_type_cd = f8
+declare cdf_meaning = c12
+set transfused_event_type_cd = 0.0                                     ;MOD 002
+
+set uar_failed = 0
+set cdf_meaning = fillstring(12," ")
+set cdf_meaning = "7"
+set transfused_event_type_cd = 0.0
+set stat = uar_get_meaning_by_codeset(1610,cdf_meaning,1,transfused_event_type_cd)
+if (stat = 1)
+    set uar_failed = 1    
+    go to END_SCRIPT
+endif
+;003 end
+ 
+set stat = uar_get_meaning_by_codeset(213, "CURRENT", 1, dCurrentNameTypeCd)
+if (stat = 1)
+    set uar_failed = 1    
+    go to END_SCRIPT
+endif
+
+set stat = uar_get_meaning_by_codeset(327, "ADD", 1, dCombineAddCd)
+if (stat = 1)
+    set uar_failed = 1    
+    go to END_SCRIPT
+endif
+
+set stat = uar_get_meaning_by_codeset(48, "ACTIVE", 1, dActiveStatusCd)
+if (stat = 1)
+    set uar_failed = 1    
+    go to END_SCRIPT
+endif
+
+/**********************************************************
+*       Determine whether client stores historical records 
+*/
+set reply->historical_demog_ind = BbtGetHistoricInfoPreference(request->facility_cd)
+ 
+/********************************************/                       ;DHEnd MOD 002
+select into  "nl:"
+  p.*
+from  transfusion t,
+      product p,
+      blood_product bp,
+      derivative d,
+      (dummyt d1 with seq = 1),
+      product_event pe
+
+plan t  where request->person_id = t.person_id and
+              t.active_ind = 1
+join pe where t.product_event_id = pe.product_event_id
+join p  where t.product_id  = p.product_id
+join (d1 where d1.seq = 1
+    join (bp where bp.product_id  = p.product_id and
+                bp.active_ind = 1)
+    orjoin (d where d.product_id  = p.product_id and
+                d.active_ind = 1))
+
+order pe.event_dt_tm
+
+HEAD REPORT
+  lReplyCnt = 0
+  
+detail 
+  lReplyCnt = lReplyCnt + 1
+  if (mod(lReplyCnt,10) = 1)
+    stat = alterlist(reply->qual, lReplyCnt + 9)
+  endif,
+  reply->qual[lReplyCnt]->donation_number    = p.product_nbr
+  reply->qual[lReplyCnt]->product_id 		 = p.product_id
+  reply->qual[lReplyCnt]->product_sub_nbr    = p.product_sub_nbr
+  reply->qual[lReplyCnt]->product_cd         = p.product_cd
+  reply->qual[lReplyCnt]->supplier_prefix    = bp.supplier_prefix
+  reply->qual[lReplyCnt]->abo_cd             = bp.cur_abo_cd
+  reply->qual[lReplyCnt]->rh_cd              = bp.cur_rh_cd
+  reply->qual[lReplyCnt]->trans_dt_tm        = pe.event_dt_tm
+  reply->qual[lReplyCnt]->trans_vol          = t.transfused_vol
+  reply->qual[lReplyCnt]->unit_meas_cd       = p.cur_unit_meas_cd
+  reply->qual[lReplyCnt]->history_upload_ind = 0
+  reply->qual[lReplyCnt]->electronic_entry_flag = p.electronic_entry_flag
+
+FOOT REPORT
+  row+0
+
+with nocounter
+  
+if (curqual != 0) 
+	;Get historical names if history is stored 
+   if (reply->historical_demog_ind = 1)
+ 
+     for (lIdx = 1 To lReplyCnt)
+        set dCurrentPersonId = request->person_id
+        select into "nl:"
+            pc.from_person_id
+        from person_combine_det pcd
+             , transfusion t
+             , person_combine pc
+        plan t where t.product_id = reply->qual[lIdx]->product_id
+        join pcd where pcd.entity_id = t.product_event_id
+                 and pcd.entity_name = "TRANSFUSION"
+        join pc where pc.person_combine_id = pcd.person_combine_id
+                 and pc.active_status_cd = dActiveStatusCd
+                 and pc.active_status_dt_tm >= cnvtdatetime(reply->qual[lIdx]->trans_dt_tm)
+                 and pc.active_ind = 1
+ 
+        order by pc.active_status_dt_tm
+ 
+        Head Report
+            dCurrentPersonId = pc.from_person_id
+        with nocounter
+ 
+        select into "nl:"
+            pnh.name_full
+        from transfusion t,
+             person_name_hist pnh
+ 
+        plan t where t.product_id = reply->qual[lIdx].product_id
+        join pnh where pnh.person_id = dCurrentPersonId
+             and pnh.name_type_cd = dCurrentNameTypeCd
+             and pnh.transaction_dt_tm <= cnvtdatetime(datetimeadd(reply->qual[lIdx]->trans_dt_tm, dMINUTE))
+             and not exists (select
+                                 pcd.entity_id
+                             from person_combine_det pcd
+                             where pcd.entity_id = pnh.person_name_hist_id
+                                   and pcd.entity_name = "PERSON_NAME_HIST"
+                                   and pcd.combine_action_cd = dCombineAddCd)
+ 
+		order by pnh.transaction_dt_tm desc
+		Head Report
+             reply->qual[lIdx].historical_name = pnh.name_full
+		with nocounter
+     endfor
+   endif
+	
+	set reply->status_data->status = "S"        
+else  
+	set reply->status_data->status = "Z"
+endif
+
+/********************************************/                                        ;DHBegin MOD 002
+/* find transfused products on history uploads table */
+
+select into "nl:"
+  hp.*
+  , hpe.*
+
+from bbhist_product_event hpe
+	  , bbhist_product hp
+
+plan hpe where hpe.person_id = request->person_id and
+					hpe.event_type_cd = transfused_event_type_cd and
+               hpe.active_ind = 1
+               
+join hp where hp.product_id  = hpe.product_id
+
+order hpe.event_dt_tm
+
+detail 
+  lReplyCnt = lReplyCnt + 1
+  if (mod(lReplyCnt,10) = 1)
+    stat = alterlist(reply -> qual, lReplyCnt + 9)
+  endif,
+  reply->qual[lReplyCnt]->donation_number        = hp.product_nbr
+  reply->qual[lReplyCnt]->product_sub_nbr        = hp.product_sub_nbr
+  reply->qual[lReplyCnt]->supplier_prefix        = hp.supplier_prefix
+  reply->qual[lReplyCnt]->product_cd             = hp.product_cd
+  reply->qual[lReplyCnt]->abo_cd                 = hp.abo_cd
+  reply->qual[lReplyCnt]->rh_cd                  = hp.rh_cd
+  reply->qual[lReplyCnt]->cross_reference        = hp.cross_reference
+  reply->qual[lReplyCnt]->upload_dt_tm           = hp.upload_dt_tm
+  reply->qual[lReplyCnt]->contributor_system_cd  = hp.contributor_system_cd 
+  reply->qual[lReplyCnt]->trans_dt_tm            = hpe.event_dt_tm
+  reply->qual[lReplyCnt]->trans_vol              = hpe.volume
+  reply->qual[lReplyCnt]->unit_meas_cd           = hp.unit_meas_cd
+  reply->qual[lReplyCnt]->history_upload_ind     = 1
+  reply->qual[lReplyCnt]->electronic_entry_flag  = 0
+with nocounter
+
+if ((curqual != 0) or (reply->status_data->status = "S"))
+  set reply->status_data->status = "S"        
+else  
+  set reply->status_data->status = "Z"
+endif
+/********************************************/                                     ;DHEnd MOD 002
+
+set stat = alterlist(reply->qual, lReplyCnt)    
+;003 begin
+#END_SCRIPT
+if (uar_failed = 1)
+  set reply->status_data->status = "F"
+endif
+;003 end
+call echo(reply->status_data->status)
+
+end go
+
+
+
+
+
+
+
+;Generated by GNU enscript 1.6.4.

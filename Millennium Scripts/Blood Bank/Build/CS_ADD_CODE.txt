@@ -1,0 +1,493 @@
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       cs_add_code.prg
+        Object name:            cs_add_code
+        Request #:              12024
+
+        Product:                CPM
+        Product Team:           Tablerock
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Add code values to a code_set
+
+        Tables read:            code_set_extension
+        Tables updated:         code_value
+                                code_value_extension
+        Executing from:         Code Maintenance
+
+        Special Notes:          none
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 99/99/99 Unknown              Initial Release                     *
+;     002 11/17/95 Stephanie Adam       Updated to match current standards  *
+;     003 11/28/95 Stephanie Adam       Added display_key to reply          *
+;     004 12/01/95 Stephanie Adam       Added insert of code_value_extension*
+;     005 12/14/95 Stephanie Adam       Added insert of code_set_extension  *
+;                                       and internal record structure       *
+;     006 03/19/96 David Price          Allow a code value to be inserted   *
+;                                       with a blank cdfMeaning if no       *
+;                                       meanings have been built.           *
+;     007 06/05/96 Stephanie Adam       Added validate for reply            *
+;     008 06/10/96 Stephanie Adam       Changed sizing of reply to accomodate
+;                                       return of failed code_values        *
+;     009 06/12/96 Stephanie Adam       Added return of P status            *
+;     010 07/16/96 David Price          update active_type_cd               *
+;     011 10/21/96 Doug Powell		reflect database changes	    *
+;     012 12/11/02 Darren Coughenour    changed script to use with replace()*
+;     013 02/25/04 sc4299               fix syntex error when string has single
+;                                       or double quote                      
+;     014 07/27/04 SL8281               replace count1 with y so that the reply
+;                                       structure can be populate correctly          
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program cs_add_code:dba go
+create program cs_add_code:dba
+
+/************************/
+/*    Request record    */
+/************************/
+/*
+record request
+( 1 code_set = i4
+  1 qual[x]
+    2 cdf_meaning = c12
+    2 display = c40
+    2 display_key = c40
+    2 description = vc
+    2 definition = vc
+    2 collation_seq = i4
+    2 active_type_cd = f8
+    2 active_ind = i2
+    2 authentic_ind = i2
+    2 extension_cnt = i4
+    2 extension_data[x]
+      3 field_name = c32
+      3 field_type = i4
+      3 field_value = vc
+ )
+*/
+
+/************************/
+/*   Internal record    */
+/************************/
+record internal
+(
+  1 qual[1]
+    2 field_name = c32
+    2 field_type = i4
+)
+
+/************************/
+/*     Reply record     */
+/************************/
+if (not validate(reply,0))
+  record reply
+  (
+    1 qual[1]                   ;012
+      2 code_value = f8
+      2 display_key = c40
+      2 rec_status = C1
+;%i status_block.inc
+  1 status_data
+    2 status = c1
+    2 subeventstatus[1]
+      3 OperationName = c25
+      3 OperationStatus = c1
+      3 TargetObjectName = c25
+      3 TargetObjectValue = vc
+
+
+  )
+endif
+
+/************************/
+/* Initialize variables */
+/************************/
+set reply->status_data->status = "F"
+set number_to_add = size(request->qual,5)
+set number_of_ext = 0
+set number_of_csext = 0
+set stat = alter(reply->qual, number_to_add)   ;012
+set failures = 0
+set count1 = 0
+set dupes = 0
+set code_value = 0.0
+set y = 1
+set next_code = 0.0
+set display_key_dup_ind=0
+set cdf_meaning_dup_ind=0
+set active_ind_dup_ind=0
+set display_dup_ind = 0
+set add_access_ind = 0
+set authentic_cd = 0.00
+set dup = 0
+set unauthentic_cd = 0.00
+set authcnt = 0
+
+set cw_req = fillstring(40, " ") ;013
+set cw_type = fillstring(15, " ") ;013
+call echorecord (request)
+
+
+/*******delete after reqdata update for authentic *****/
+select into 'nl:'
+    c.code_value,
+    c.cdf_meaning
+from code_value c
+where c.code_set = 8
+  and c.cdf_meaning in ("AUTH","UNAUTH")
+order c.cdf_meaning
+detail
+if (authcnt = 0)
+   authentic_cd = c.code_value
+   authcnt = 1
+else
+   unauthentic_cd = c.code_value
+endif
+with nocounter
+
+
+call echo ("Selecting extensions")
+
+/************************/
+/*   Select extensions  */
+/************************/
+select into "nl:"
+  cse.field_name,
+  cse.field_type
+from code_set_extension cse
+where cse.code_set = request->code_set
+detail
+  number_of_csext = number_of_csext + 1
+  stat = alter(internal->qual, number_of_csext)
+  internal->qual[number_of_csext]->field_name = cse.field_name
+  internal->qual[number_of_csext]->field_type = cse.field_type
+with nocounter
+
+
+call echo ("Select dup indicators")
+/************************/
+/*   Select dup indicators  */
+/************************/
+select into 'nl:'
+		cvs.add_access_ind,
+                cvs.display_key_dup_ind,
+                cvs.cdf_meaning_dup_ind,
+                cvs.active_ind_dup_ind,
+		cvs.display_dup_ind
+   from code_value_set cvs
+  where cvs.code_set = request->code_set
+detail
+		add_access_ind = cvs.add_access_ind
+                display_key_dup_ind=cvs.display_key_dup_ind
+                cdf_meaning_dup_ind=cvs.cdf_meaning_dup_ind
+                active_ind_dup_ind=cvs.active_ind_dup_ind
+		display_dup_ind = cvs.display_dup_ind
+with nocounter
+
+#start_loop
+for (y = y to number_to_add)   ;012
+set dup = 0
+;Parse together select statement for duplicate cv check.
+set parser_buffer[15] = fillstring(132," ")		;011 start
+set parser_number = 0
+set new_code_value = 0
+
+set parser_buffer[1] = 'select into "nl:" c.*'
+set parser_buffer[2] = "from code_value c"
+set parser_buffer[3] = concat ("where c.code_set = ", cnvtstring(request->code_set))   ;012
+set parser_number = 3
+if (display_key_dup_ind = 1)
+  set parser_number = parser_number + 1
+  
+  call cac_where(request->qual[y]->display_key, 'display_key') ;013
+
+  ;013 set parser_buffer[parser_number] =
+  ;013	    concat ("  and c.display_key = '", request->qual[y]->display_key, "'")   ;012
+endif
+
+if (display_dup_ind = 1)
+  set parser_number = parser_number + 1
+  ;call sub for display
+  call cac_where(request->qual[y]->display, 'display') ;013  
+
+  ;013 set parser_buffer[parser_number] =
+  ;013		concat ("  and c.display = '", request->qual[y]->display, "'")   ;012
+endif
+
+if (cdf_meaning_dup_ind = 1)
+  if (request->qual[y]->cdf_meaning > "")
+    set parser_number = parser_number + 1
+    
+    call cac_where(request->qual[y]->cdf_meaning, 'cdf_meaning') ;013     
+    
+    ;013 set parser_buffer[parser_number]=
+	;013		concat ("  and c.cdf_meaning = '", request->qual[y]->cdf_meaning, "'")   ;012
+  else
+    set parser_number = parser_number + 1
+    set parser_buffer[parser_number] = "  and c.cdf_meaning = NULL"
+  endif
+endif
+
+if (active_ind_dup_ind = 1)
+  set parser_number = parser_number + 1
+  set parser_buffer[parser_number] =
+			concat ("  and c.active_ind = ", cnvtstring(request->qual[y]->active_ind))    ;012
+endif
+
+if (display_dup_ind = 0 and
+    display_key_dup_ind = 0 and
+    cdf_meaning_dup_ind = 0 and
+    active_ind_dup_ind = 0)
+      set parser_number = parser_number + 1
+      set parser_buffer[parser_number] =
+			concat("  and c.display = '", request->qual[y]->display, "'")   ;012
+endif
+
+set parser_number = parser_number + 1
+set parser_buffer[parser_number] = "detail"
+set parser_number = parser_number + 1
+set parser_buffer[parser_number] = "  new_code_value = c.code_value"
+set parser_number = parser_number + 1
+set parser_buffer[parser_number] = "with nocounter go"
+
+for (z = 1 to parser_number)
+   call parser(parser_buffer[z],1)
+endfor
+
+If (curqual > 0)
+	 call echo ("Found Duplicate")
+   set reply->qual[y]->display_key = request->qual[y]->display_key
+   set reply->qual[y]->rec_status = "D"
+   set dup = 1
+   go to get_next_code
+endif                                                       ;011 end
+
+
+  /************************/
+  /* Get sequence number  */
+  /************************/
+  call echo ("Executing cpm_next_code")
+  execute cpm_next_code
+
+	call echo ("next_code")
+	
+  /************************/
+  /*    Insert record     */
+  /************************/
+  insert into code_value c set
+    c.code_value = next_code,
+    c.code_set = request->code_set,
+    c.cdf_meaning = if (request->qual[y]->cdf_meaning > " ")
+                       request->qual[y]->cdf_meaning
+                    else
+                       NULL
+                    endif,
+    c.display = request->qual[y]->display,
+;011    c.display_key = trim(cnvtupper(request->qual[y]->display)),
+    c.display_key =							;011
+	trim(cnvtupper(cnvtalphanum(request->qual[y]->display))),  	;011
+    c.description = request->qual[y]->description,
+    c.definition = request->qual[y]->definition,
+    c.collation_seq = request->qual[y]->collation_seq,
+    c.active_ind = request->qual[y]->active_ind,
+    c.active_type_cd = if (request->qual[y]->active_ind = 1)
+                          reqdata->active_status_cd
+                       else
+                          reqdata->inactive_status_cd
+                       endif,
+    c.data_status_cd = if (request->qual[y]->authentic_ind = 1)
+                          authentic_cd
+                       else
+                          unauthentic_cd
+                       endif,
+    c.active_dt_tm = if (request->qual[y]->active_ind = 1)
+                       cnvtdatetime(curdate,curtime3)
+                      else
+                       NULL
+                     endif,
+    c.inactive_dt_tm = if (request->qual[y]->active_ind = 0)
+                         cnvtdatetime(curdate,curtime3)
+                       else
+                         NULL
+                       endif,
+    c.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+    c.updt_id = reqinfo->updt_id,
+    c.updt_cnt = 0,
+    c.updt_task = reqinfo->updt_task,
+    c.updt_applctx = reqinfo->updt_applctx,
+    c.begin_effective_dt_tm = cnvtdatetime(curdate,curtime3),    ;011
+    c.end_effective_dt_tm = cnvtdatetime("31-DEC-2100")         ;011
+
+
+  with nocounter
+
+
+  /************************/
+  /*   Check status       */
+  /************************/
+  set count1 = count1 + 1
+ 	if (curqual = 0)
+    go to get_next_code
+  else
+    ;014 set reply->qual[count1]->code_value = next_code
+    ;014 set reply->qual[count1]->display_key = request->qual[y]->display_key
+    
+    set reply->qual[y]->code_value = next_code                            ;014
+    set reply->qual[y]->display_key = request->qual[y]->display_key       ;014
+  endif
+
+  /************************/
+  /*  Insert extensions   */
+  /************************/
+  if (request->qual[y]->extension_cnt > 0)
+
+    set number_of_ext = request->qual[y]->extension_cnt
+
+    insert into code_value_extension cve,
+                (dummyt d with seq = value(number_of_ext)) set
+      cve.code_set = request->code_set,
+      cve.code_value = next_code,
+      cve.field_name = request->qual[y]->extension_data[d.seq]->field_name,
+      cve.field_type = request->qual[y]->extension_data[d.seq]->field_type,
+      cve.field_value = request->qual[y]->extension_data[d.seq]->field_value,
+      cve.updt_cnt = 0,
+      cve.updt_id = reqinfo->updt_id,
+      cve.updt_task = reqinfo->updt_task,
+      cve.updt_applctx = reqinfo->updt_applctx,
+      cve.updt_dt_tm = cnvtdatetime(curdate, curtime3)
+    plan d
+    join cve  where cve.code_set = request->code_set
+                and cve.code_value = next_code
+                and cve.field_name =
+                           request->qual[y]->extension_data[d.seq]->field_name
+    with nocounter, outerjoin = d, dontexist
+
+    if (curqual != number_of_ext)
+      set reply->qual[y]->rec_status = "E"
+      go to get_next_code
+    endif
+
+  else
+
+    set number_of_ext = number_of_csext
+
+                /* if functions improperly when joined to an array */
+    for (x = 1 to number_of_ext)
+
+      insert into code_value_extension cve set
+        cve.code_set = request->code_set,
+        cve.code_value = next_code,
+        cve.field_name = internal->qual[x]->field_name,
+        cve.field_type = internal->qual[x]->field_type,
+        cve.field_value = if (internal->qual[x]->field_type = 1)
+                            "0"
+                          elseif (internal->qual[x]->field_type = 2)
+                            " "
+                          endif,
+        cve.updt_cnt = 0,
+        cve.updt_id = reqinfo->updt_id,
+        cve.updt_task = reqinfo->updt_task,
+        cve.updt_applctx = reqinfo->updt_applctx,
+        cve.updt_dt_tm = cnvtdatetime(curdate, curtime3)
+      where cve.code_set = request->code_set
+        and cve.code_value = next_code
+        and cve.field_name =
+                     internal->qual[x]->field_name
+      with nocounter, outerjoin = d, dontexist
+
+      if (curqual = 0)
+	set reply->qual[y]->rec_status = "S"
+        go to get_next_code
+      endif
+
+    endfor
+
+  endif
+
+  commit
+
+endfor
+
+go to exit_script
+
+/************************/
+/*    get_next_code     */
+/************************/
+#get_next_code
+if (dup != 1)
+  set failures = failures + 1
+  /* set code_value to 0 if the code was not added */
+  ;014set reply->qual[count1]->code_value = 0.0
+  ;014set reply->qual[count1]->display_key = request->qual[y]->display_key
+  
+  set reply->qual[y]->code_value = 0.0
+  set reply->qual[y]->display_key = request->qual[y]->display_key
+  rollback
+endif
+  set y = y + 1
+  go to start_loop
+
+
+/************************/
+/*    exit_script       */
+/************************/
+#exit_script
+  if (failures = 0)
+    set reply->status_data->status = "S"
+  elseif(failures > 0 and failures != number_to_add)
+    set reply->status_data->status = "P"
+  endif
+  
+  call echorecord(reply)
+
+;013...  
+subroutine cac_where(cw_req, cw_type)  
+  if (findstring("^",cw_req) = 0)
+    ;call echo('^')
+    set parser_buffer[parser_number] =
+			concat ('  and c.',trim(cw_type),' = ^', trim(cw_req), '^')			
+  elseif(findstring('"',cw_req) = 0)
+    ;call echo('"')
+    set parser_buffer[parser_number] =
+			concat ('  and c.',trim(cw_type),' = "', trim(cw_req), '"')	  
+  elseif(findstring("'",cw_req) = 0) 
+    ;call echo("'") 
+    set parser_buffer[parser_number] =
+			concat ("  and c.",trim(cw_type)," = '", trim(cw_req), "'")  
+  endif 
+  ;call echo(parser_buffer[parser_number])
+end
+
+end go

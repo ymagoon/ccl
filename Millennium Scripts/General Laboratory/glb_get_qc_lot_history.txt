@@ -1,0 +1,182 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_qc_lot_history/glb_get_qc_lot_history.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_QC_LOT_HISTORY.PRG
+        Object name:            GLB_GET_QC_LOT_HISTORY
+        Request #:              
+
+        Product:                General Lab - Quality Control           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Retrieve the lot history for a control
+
+        Tables read:            n/a
+
+        Tables updated:         control_lot
+                                control_material
+                                resource_lot_r
+                                resource_accession_r
+                                assay_resource_lot
+
+        Executing from:         General Lab QC Lot History DLL
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 01/13/00 Gary Runde           Initial Release                     *
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_QC_LOT_HISTORY:dba go    
+             create program GLB_GET_QC_LOT_HISTORY:dba
+
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+;      record request
+;      ( 
+;         1  control_id               = f8
+;         1  service_resource_cd      = f8
+;         1  begin_dt_tm              = dq8
+;         1  end_dt_tm                = dq8
+;      )
+
+      record reply
+      ( 
+          1  control_name                    = vc
+          1  lots[*]
+             2  lot_id                       = f8
+             2  lot_description              = vc
+             2  receive_dt_tm                = dq8
+             2  expiration_dt_tm             = dq8
+             2  TestSites[*]
+                3  service_resource_cd       = f8
+                3  service_resource_disp     = vc
+                3  active_dt_tm              = dq8
+                3  inactive_dt_tm            = dq8
+%i cclsource:status_block.inc
+)
+
+
+      set reply->status_data->status = "F"
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+/********************************************************************/ 
+/* SELECT QC LOT HISTORY INFORMATION                                */
+/********************************************************************/
+
+    SELECT 
+       into "nl:"
+         cm.control_id,
+         cm.short_description,
+         cl.lot_id,
+         cl.lot_number,
+         rlr.service_resource_cd
+       FROM
+         control_material cm,
+         control_lot cl,
+         (dummyt d1 with seq = 1),
+         resource_lot_r rlr
+       PLAN cm 
+          where cm.control_id = request->control_id
+       JOIN cl
+          where cl.control_id = cm.control_id and
+          ((cl.receive_dt_tm between cnvtdatetime(request->begin_dt_tm) and cnvtdatetime(request->end_dt_tm)) or
+           (cl.expiration_dt_tm between cnvtdatetime(request->begin_dt_tm) and cnvtdatetime(request->end_dt_tm)) or
+           (cl.receive_dt_tm < cnvtdatetime(request->begin_dt_tm) and cl.expiration_dt_tm > cnvtdatetime(request->end_dt_tm)))
+       JOIN d1
+          where d1.seq = 1
+       JOIN rlr
+          where rlr.lot_id = cl.lot_id
+          and   ((rlr.service_resource_cd = request->service_resource_cd) or
+                 (request->service_resource_cd = 0))
+       ORDER BY 
+          cl.lot_id, 
+          rlr.service_resource_cd
+       HEAD REPORT
+          ;set the control ID and name
+          reply->control_name = cm.short_description
+          lot_cnt = 0
+       HEAD cl.lot_id
+          ;set the lot information
+          lot_cnt = lot_cnt + 1
+          if (mod(lot_cnt, 10) = 1)
+              stat = alterlist(reply->lots, lot_cnt + 10)
+          endif
+          reply->lots[lot_cnt].lot_id = cl.lot_id
+          reply->lots[lot_cnt].lot_description = cl.lot_number
+          reply->lots[lot_cnt].receive_dt_tm = cl.receive_dt_tm
+          reply->lots[lot_cnt].expiration_dt_tm = cl.expiration_dt_tm
+          ts_cnt = 0
+       HEAD rlr.service_resource_cd                 
+          ;set this controls service resource codes
+          ts_cnt = ts_cnt + 1
+          if (mod(ts_cnt, 5) = 1)
+              stat = alterlist(reply->lots[lot_cnt].testsites, ts_cnt + 5)
+          endif
+          reply->lots[lot_cnt].testsites[ts_cnt].service_resource_cd = rlr.service_resource_cd
+          reply->lots[lot_cnt].testsites[ts_cnt].active_dt_tm = rlr.defined_active_dt_tm
+          reply->lots[lot_cnt].testsites[ts_cnt].inactive_dt_tm = rlr.defined_inactive_dt_tm
+       FOOT cl.lot_id
+          if (ts_cnt > 0)
+              stat = alterlist(reply->lots[lot_cnt].testsites, ts_cnt)
+          endif
+       FOOT REPORT
+          if (lot_cnt > 0)
+              stat = alterlist(reply->lots, lot_cnt)
+          endif
+       WITH NOCOUNTER, 
+          outerjoin = d1
+
+       set error_check = ERROR(sErrorMsg,0)   ;get error message
+       if (error_check != 0)
+          set reply->status_data->status = "F"
+          set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+          go to exit_script
+       endif
+
+       if (curqual = 0)
+          set reply->status_data->status = "Z"
+       else
+          set reply->status_data->status = "S"
+       endif
+
+/********************************************************************/ 
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+
+END GO     
+                           
+
+ 
+          
+              
+          
+
+;Generated by GNU enscript 1.6.4.

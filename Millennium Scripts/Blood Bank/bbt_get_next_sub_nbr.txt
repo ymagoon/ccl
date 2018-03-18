@@ -1,0 +1,491 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Modifyproducts/BBT_GET_NEXT_SUB_NBR.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2002 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_next_sub_nbr.prg
+        Object name:            bbt_get_next_sub_nbr
+        Request #:              225373
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Blood Bank Transfusion
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Gets the highest sub id number or division
+                                character for any product with the same 
+                                product number, product type, and supplier ID.
+                                
+        Tables read:            product
+        Tables updated:         none
+        Executing from:         Receive Products
+                                Modify Products
+                                
+        Special Notes:          
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 07/11/97 Doug Saus            Initial Release                     *
+;     002 07/11/00 John Rieck	          Updated to retrieve the highest ISBT*
+;                                       division unit.                      *
+;    *003 10/16/02 Hal Patchen          Updated to retrieve the highest     *
+;    *                                  Non-ISBT for 2 level splits.        *
+;    *004 01/15/03 John Rieck           Updated to allow "blank" OR "00" as *
+;                                       valid ISBT primary divisions.       *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program bbt_get_next_sub_nbr:dba go
+create program bbt_get_next_sub_nbr:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+/*
+record request
+(
+   1 product_nbr        = c20
+   1 product_cd         = f8
+   1 cur_supplier_id    = f8
+   1 isbt_ind           = i2 ;indicates if the product sent in is ISBT
+   1 division_level     = i2 ;1 = first division, 2 = second division
+   1 division_unit      = c2 ;(Optional) the division number of an ISBT product
+   1 product_sub_nbr    = vc ;(Optional) the sub id number for Non-ISBT level 2 splits
+   1 default_sub_id_flag = i2 ;(Optional) 1 = Uppercase, 2 = Lowercase, 3 = Numeric
+)
+*/
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+record reply
+(
+ 1 highest_sub_nbr = c5
+ 1 status_data
+    2 status       = c1
+)
+
+/****************************************************************************
+*       Initialize Variables                                                *
+*****************************************************************************/
+
+declare highest_sub_nbr     = c5
+declare highest_alpha_sub_nbr   = c5 with protect
+declare highest_numeric_sub_nbr = c5 with protect
+declare highest_alpha_sub_lvl   = c5 with protect
+declare highest_numeric_sub_lvl = c5 with protect
+declare sub_id_level1       = vc with protect
+declare sub_id_level2       = vc with protect
+declare level1_size         = i2 with protect, noconstant(0)
+
+set highest_sub_nbr = ""
+set product_nbr = cnvtupper(request->product_nbr)
+
+/****************************************************************************
+*       Select rows and load reply record                                   *
+*****************************************************************************/
+
+;* Process ISBT-128 division.
+if (request->isbt_ind = 1)
+   select into "nl:"
+        p.product_id
+   from product p 
+        
+   plan p where p.product_nbr = product_nbr and
+                p.cur_supplier_id +0 = request->cur_supplier_id and
+                p.product_cd = request->product_cd and
+              ((request->division_level = 1 and
+                substring(2,1,p.product_sub_nbr) = "0") or
+               (request->division_level = 2 and 
+                substring(1,1,p.product_sub_nbr) = substring(1,1,request->division_unit))) 
+
+   order by p.product_sub_nbr  
+        
+   detail
+      ; If a sub number is defined as "00", we don't want to consider it
+      ; as the "highest sub number".
+      if (trim(p.product_sub_nbr) != "00")
+         if (trim(p.product_sub_nbr) > highest_sub_nbr)
+            highest_sub_nbr = trim(p.product_sub_nbr)
+         endif
+      endif
+   with counter
+   go to Build_Reply
+endif
+
+;* Process Non-ISBT for level 2 splits.
+if (validate(request->product_sub_nbr, "^") != "^"
+and request->division_level between 1 and 2)
+   ;* Parse sub id number into first level split portion and second
+   ;* level split portion, if any.
+   set sub_id_level1 = GetSubIdLevel1(request->product_sub_nbr)
+   set sub_id_level2 = GetSubIdLevel2(request->product_sub_nbr)
+   ;* Validate that the sub id is not user defined.
+   if (build(sub_id_level1,sub_id_level2) != build(request->product_sub_nbr))
+      go to Process_User_Defined
+   endif
+   set level1_size = size(sub_id_level1, 1)
+   ;* Search for highest sub id number associated with the split level.
+   select into "nl:"
+   from product p 
+        
+   plan p where p.product_nbr = product_nbr and
+                p.cur_supplier_id +0 = request->cur_supplier_id and
+                p.product_cd = request->product_cd and
+              ((request->division_level = 1) or
+               (request->division_level = 2 and 
+                substring(1,level1_size,p.product_sub_nbr) = substring(1,level1_size,request->product_sub_nbr))) 
+
+   order by p.product_sub_nbr  
+        
+   head report
+      ;* Declare variables
+      ascii = 0
+      ptr = 0
+      parse_size = 0
+      subid_size = 0
+      numeric_found_ind = 0
+      
+   detail
+      ;* Search for highest sub id, but treat numeric sub id's higher
+      ;* in value than alphabetic.  Hierachy should be in the following
+      ;* order: A, B, C...a, b, c...1, 2, 3...
+      
+      if (request->division_level = 1)
+         sub_id_level1 = " "
+         numeric_found_ind = 0
+         ascii = ichar(substring(1,1,p.product_sub_nbr))
+   
+         ;* Determine if character is numeric.  If so,
+         ;* parse numeric portion of sub id number.
+         if (ascii >= 48 and ascii <= 57)
+            parse_size = 1
+            for (ptr = 2 to size(p.product_sub_nbr,1))
+               ascii = ichar(substring(ptr,1,p.product_sub_nbr))
+               if (ascii >= 48 and ascii <= 57)
+                  parse_size = parse_size + 1
+               else
+                  ptr = size(p.product_sub_nbr, 1)
+               endif
+            endfor
+            sub_id_level1 = substring(1, parse_size, p.product_sub_nbr)
+            numeric_found_ind = 1
+
+         ;* If processing an uppercase alpha sub id (default_sub_id_flag = 1), 
+         ;* determine if character is uppercase alpha.
+         ;* If so, parse uppercase alpha portion of sub id number.
+         elseif (request->default_sub_id_flag = 1
+         and    (ascii >= 65 and ascii <= 90))
+            sub_id_level1 = substring(1,1, p.product_sub_nbr)
+
+         ;* If processing an lowercase alpha sub id (default_sub_id_flag = 2), 
+         ;* determine if character is lowercase alpha.
+         ;* If so, parse lowercase alpha portion of sub id number.
+         elseif (request->default_sub_id_flag = 2
+         and    (ascii >= 97 and ascii <= 122))
+            sub_id_level1 = substring(1,1, p.product_sub_nbr)
+
+         ;* Otherwise ignore the sub id.
+         else
+            sub_id_level1 = " "
+         endif
+
+         if (sub_id_level1 > " ")
+            if (numeric_found_ind = 1)
+               if (cnvtint(sub_id_level1) > cnvtint(highest_numeric_sub_lvl))
+                  highest_numeric_sub_lvl = sub_id_level1
+                  highest_numeric_sub_nbr = trim(p.product_sub_nbr)
+               endif
+            else
+               if (trim(sub_id_level1) > trim(highest_alpha_sub_lvl))
+                  highest_alpha_sub_lvl = sub_id_level1
+                  highest_alpha_sub_nbr = trim(p.product_sub_nbr)
+               endif
+            endif
+         endif
+      endif
+      
+      if (request->division_level = 2)
+         sub_id_level2 = " "
+         numeric_found_ind = 0
+         ;* Check last character in sub id number to determine
+         ;* whether it's alpha or numeric.  Also validate that
+         ;* a second level sub id can exist (i.e. size > 1).
+         subid_size = 0
+         for (ptr = 1 to size(p.product_sub_nbr,1))
+            if (substring(ptr, 1, p.product_sub_nbr) > " ")
+               subid_size = subid_size + 1
+            endif
+         endfor
+         if (subid_size > 1)
+            ascii = ichar(substring(subid_size,1,p.product_sub_nbr))
+         else
+            ascii = 32
+         endif
+   
+         ;* Determine if character is numeric.  If so,
+         ;* parse numeric portion of sub id number.
+         if (ascii >= 48 and ascii <= 57)
+            parse_size = 1
+            ptr = subid_size - 1
+            while (ptr > 0)
+               ascii = ichar(substring(ptr, 1, p.product_sub_nbr))
+               if (ascii >= 48 and ascii <= 57)
+                  parse_size = parse_size + 1
+               else
+                  ptr = 0
+               endif
+               ptr = ptr - 1
+            endwhile
+            ;* Validate entire sub id is not numeric.  If it is,
+            ;* the number must be from the first level.
+            if (parse_size = subid_size)
+               sub_id_level2 = " "
+            else
+               ptr = subid_size - parse_size + 1
+               sub_id_level2 = substring(ptr, parse_size, p.product_sub_nbr)
+               numeric_found_ind = 1
+            endif
+   
+         ;* If processing an uppercase alpha sub id (default_sub_id_flag = 1), 
+         ;* determine if character is uppercase alpha.
+         ;* If so, parse uppercase alpha portion of sub id number.
+         elseif (request->default_sub_id_flag = 1
+         and    (ascii >= 65 and ascii <= 90))
+            sub_id_level2 = substring(subid_size, 1, p.product_sub_nbr)
+
+         ;* If processing an lowercase alpha sub id (default_sub_id_flag = 2), 
+         ;* determine if character is lowercase alpha.
+         ;* If so, parse lowercase alpha portion of sub id number.
+         elseif (request->default_sub_id_flag = 2
+         and    (ascii >= 97 and ascii <= 122))
+            sub_id_level2 = substring(subid_size, 1, p.product_sub_nbr)
+
+         ;* Otherwise ignore the sub id.
+         else
+            sub_id_level2 = " "
+         endif
+
+         ;* Reassemble the sub id to validate it can be used.
+         if (build(sub_id_level1, sub_id_level2) != build(p.product_sub_nbr))
+            sub_id_level2 = " "
+         endif
+         
+         if (sub_id_level2 > " ")
+            if (numeric_found_ind = 1)
+               if (cnvtint(sub_id_level2) > cnvtint(highest_numeric_sub_lvl))
+                  highest_numeric_sub_lvl = sub_id_level2
+                  highest_numeric_sub_nbr = trim(p.product_sub_nbr)
+               endif
+            else
+               if (trim(sub_id_level2) > trim(highest_alpha_sub_lvl))
+                  highest_alpha_sub_lvl = sub_id_level2
+                  highest_alpha_sub_nbr = trim(p.product_sub_nbr)
+               endif
+            endif
+         endif
+      endif
+
+   foot report
+      ;* Determine highest sub number for uppercase alpha.
+      if (request->default_sub_id_flag = 1)
+         ascii = ichar(substring(1,1,highest_alpha_sub_nbr))
+         ;* Determine if Z was found.  If so, return highest numeric
+         ;* value if found.  Otherwise, return the highest uppercase alpha.
+         if (ascii = 90)
+            if (trim(highest_numeric_sub_nbr) > " ")
+               highest_sub_nbr = highest_numeric_sub_nbr
+            else
+               highest_sub_nbr = highest_alpha_sub_nbr
+            endif
+         else
+            highest_sub_nbr = highest_alpha_sub_nbr
+         endif
+      endif
+   
+      ;* Determine highest sub number for lowercase alpha.
+      if (request->default_sub_id_flag = 2)
+         ascii = ichar(substring(1,1,highest_alpha_sub_nbr))
+         ;* Determine if z was found.  If so, return highest numeric
+         ;* value if found.  Otherwise, return the highest uppercase alpha.
+         if (ascii = 122)
+            if (trim(highest_numeric_sub_nbr) > " ")
+               highest_sub_nbr = highest_numeric_sub_nbr
+            else
+               highest_sub_nbr = highest_alpha_sub_nbr
+            endif
+         else
+            highest_sub_nbr = highest_alpha_sub_nbr
+         endif
+      endif
+   
+      ;* Determine highest sub number for numeric.
+      if (request->default_sub_id_flag = 3)
+         highest_sub_nbr = highest_numeric_sub_nbr
+      endif
+   
+   with counter
+   
+   
+   go to Build_Reply
+endif
+
+
+;* Process user defined sub id numbers.
+#Process_User_Defined
+   select into "nl:"
+        p.product_id
+   from product p 
+        
+   plan p where p.product_nbr = product_nbr and
+                p.cur_supplier_id +0 = request->cur_supplier_id and
+                p.product_cd = request->product_cd
+
+   order by p.product_sub_nbr  
+        
+   detail
+      if (trim(p.product_sub_nbr) > highest_sub_nbr)
+         highest_sub_nbr = trim(p.product_sub_nbr)
+      endif
+   with counter
+
+
+#Build_Reply
+if (curqual = 0)
+   set reply->highest_sub_nbr = ""
+else
+   set reply->highest_sub_nbr = highest_sub_nbr 
+endif
+
+set reply->status_data->status = "S"
+go to Exit_Script
+   
+/****************************************************************************
+*       Declare GetSubIdLevel1                                              *
+****************************************************************************/
+;* Subroutine to parse and return the first level portion of a sub id number.
+;* SubIdNbr - The current sub id character associate with the product.
+declare GetSubIdLevel1(SubIdNbr = vc) = vc
+
+subroutine GetSubIdLevel1(SubIdNbr)
+   declare ascii       = i2 with protect, noconstant(0)
+   declare ptr         = i2 with protect, noconstant(0)
+   declare parse_size  = i2 with protect, noconstant(0)
+   
+   ;* Validate a sub id number was passed.
+   if (SubIdNbr = " " or SubIdNbr = "")
+      return(" ")
+   endif
+   
+   set ascii = ichar(substring(1,1,SubIdNbr))
+   
+   ;* Determine if character is numeric.  If so,
+   ;* parse numeric portion of sub id number.
+   if (ascii >= 48 and ascii <= 57)
+      set parse_size = 1
+      for (ptr = 2 to size(SubIdNbr,1))
+         set ascii = ichar(substring(ptr,1,SubIdNbr))
+         if (ascii >= 48 and ascii <= 57)
+            set parse_size = parse_size + 1
+         else
+            set ptr = size(SubIdNbr, 1)
+         endif
+      endfor
+      return(substring(1, parse_size, SubIdNbr))
+   endif
+   
+   ;* Determine if character is uppercase or lowercase alpha.
+   ;* If so, parse uppercase/lowercase alpha portion of sub id number.
+   if ((ascii >= 65 and ascii <= 90)
+   or  (ascii >= 97 and ascii <= 122))
+      return(substring(1,1, SubIdNbr))
+   endif
+   
+end
+      
+/****************************************************************************
+*       Declare GetSubIdLevel2                                              *
+****************************************************************************/
+;* Subroutine to parse and return the second level portion of a sub id number.
+;* SubIdNbr - The current sub id character associate with the product.
+declare GetSubIdLevel2(SubIdNbr = vc) = vc
+
+subroutine GetSubIdLevel2(SubIdNbr)
+   declare ascii      = i2 with protect, noconstant(0)
+   declare ptr        = i2 with protect, noconstant(0)
+   declare subid_size = i2 with protect, noconstant(0)
+   declare parse_size = i2 with protect, noconstant(0)
+   
+   ;* Validate a sub id number was passed and at least
+   ;* 2 characters in length.
+   set subid_size = size(SubIdNbr,1)
+   if (subid_size < 2)
+      return(" ")
+   endif
+   
+   set ascii = ichar(substring(subid_size,1,SubIdNbr))
+   
+   ;* Determine if character is numeric.  If so,
+   ;* parse numeric portion of sub id number.
+   if (ascii >= 48 and ascii <= 57)
+      set parse_size = 1
+      set ptr = subid_size - 1
+      while (ptr > 0)
+         set ascii = ichar(substring(ptr, 1, SubIdNbr))
+         if (ascii >= 48 and ascii <= 57)
+            set parse_size = parse_size + 1
+         else
+            set ptr = 0
+         endif
+         set ptr = ptr - 1
+      endwhile
+      ;* Validate entire sub id is not numeric.  If it is,
+      ;* the number must be from the first level.
+      if (parse_size = subid_size)
+         return(" ")
+      endif
+      set ptr = subid_size - parse_size + 1
+      return(substring(ptr, parse_size, SubIdNbr))
+   endif
+   
+   ;* Determine if character is uppercase or lowercase alpha.
+   ;* If so, parse uppercase/lowercase alpha portion of sub id number.
+   if ((ascii >= 65 and ascii <= 90) 
+   or  (ascii >= 97 and ascii <= 122))
+      return(substring(subid_size, 1, SubIdNbr))
+   endif
+
+end
+
+#Exit_Script
+
+end go  
+  
+
+;Generated by GNU enscript 1.6.4.

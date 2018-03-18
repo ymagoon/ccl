@@ -1,0 +1,707 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Getperson/bbt_get_person.prg Turn on black mode
+
+/****************************************************************************
+ *                                                                      *
+ *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+ *                              Technology, Inc.                        *
+ *       Revision      (c) 1984-1995 Cerner Corporation                 *
+ *                                                                      *
+ *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+ *  This material contains the valuable properties and trade secrets of *
+ *  Cerner Corporation of Kansas City, Missouri, United States of       *
+ *  America (Cerner), embodying substantial creative efforts and        *
+ *  confidential information, ideas and expressions, no part of which   *
+ *  may be reproduced or transmitted in any form or by any means, or    *
+ *  retained in any storage or retrieval system without the express     *
+ *  written permission of Cerner.                                       *
+ *                                                                      *
+ *  Cerner is a registered mark of Cerner Corporation.                  *
+ *                                                                      *
+ ************************************************************************
+ 
+          Date Written:       02/01/96
+          Source file name:   bbt_GET_PERSON
+          Object name:        bbt_GET_PERSON
+          Request #:          225091
+ 
+          Product:            PathNet BB Transfusion 
+          Product Team:       PathNet BB
+          HNA Version:        V500
+          CCL Version:
+ 
+          Program purpose:    Returns an entire PERSON row
+                              when sent a PERSON_ID
+ 
+          Tables read:        PERSON, encounter, person_aborh, person_antibody,
+                              person_trans_req, blood_bank_comments, 
+                              encntr_person_reltn, person_alias, diagnosis,
+                              auto_directed
+          Tables updated:     None
+          Executing from:
+ 
+          Special Notes:
+ 
+ ***********************************************************************
+ *                  GENERATED MODIFICATION CONTROL LOG                 *
+ ***********************************************************************
+ *                                                                     *
+ *Mod Date     Engineer             Comment                            *
+ *--- -------- -------------------- -----------------------------------*
+  000 12/12/96 Teresa Davis         initial release
+  001 01/24/97 Jon Weekes           Modified to retrieve MRN regardless
+                                    of using_ptselect_ind
+  002 03/05/97 Teresa Davis         Change to retrieve MRN from 
+                                    encntr_alias
+  003 03/03/98 David Hall           Add scan on bbhist tables for 
+                                    transfusion history.
+  004 08/24/98 Doug Saus            Added return of significance_ind for
+                                    antibodies
+  005 11/19/98 Shellie Ninemire     Performance changes 
+  006 09/07/00 John Rieck			Need an additional order by in order
+  									for Dispense Assign to work with
+  									patients that have duplicate 
+  									antibodies. (CAPEP00020383)
+  007 11/23/01 Scott Farrimond      Added CNVTALIAS function for MRN and
+                                    SSN aliases  							
+  008 07/01/02 Ronda Zheng          Returned attending doctor if admitting 
+                                    doc is not found.             
+  009 09/30/02 Christi Ditmars      Add unknown_age_ind to correct defect
+                                    CAPEP00057796.       
+  010 04/09/03 Ronda Zheng          UTC phase II, add birth_tz to reply *    
+  011 05/21/03 Ronda Zheng          Retrieve donor's aborh and antibody info.    
+  012 12/03/03 Scott Farrimond      Changed Admit Doc join from PERSON table
+                                    to PRSNL table.
+  013 12/18/08 Jacob Anderson       Remove selects from donor_aborh and donor_antibody tables
+  014 09/12/13 Fitsum Abebe         Returned excluded/inapplicable product category info for 
+                                    transfusion requirements.
+ ***********************************************************************
+ 
+ ******************  END OF ALL MODCONTROL BLOCKS  ********************/
+drop program bbt_GET_PERSON:dba go
+create program bbt_GET_PERSON:dba
+%i cclsource:pcs_format_age.inc         ;For FormatAge function
+
+/*
+record request
+( 1  person_id                    = f8
+  1  encntr_id                    = f8
+  1  using_ptselect_ind           = i2
+  1  get_aliaslist_ind            = i2
+  1  called_from_script_ind       = i2  ; Used to pass to scripts called from this script
+)
+*/
+
+%I cclsource:PM_HEADER_CCL.INC
+
+record reply
+( 
+  1 person_id                    =     F8.0
+  1 name_full_formatted          =     C100.0
+  1 birth_dt_cd                  =     F8.0
+  1 birth_dt_tm                  =     DQ8.0
+  1 age                          =     vc
+  1 birth_tz                     =     i4  
+  1 race_cd                      =     F8.0
+  1 race_disp                    =     c40
+  1 sex_cd                       =     F8.0
+  1 sex_disp                     =     c40
+;-------------------------------------Encounter
+  1 encntr_id                  =     f8.0
+  1 location_cd                =     F8.0
+  1 location_disp              =     c40.0
+  1 loc_facility_cd            =     F8.0
+  1 loc_facility_disp          =     c40.0
+  1 loc_building_cd            =     F8.0
+  1 loc_building_disp          =     c40.0
+  1 loc_nurse_unit_cd          =     F8.0
+  1 loc_nurse_unit_disp        =     c40.0
+  1 loc_room_cd                =     F8.0
+  1 loc_room_disp              =     c40.0
+  1 loc_bed_cd                 =     F8.0
+  1 loc_bed_disp               =     c40.0
+  1 reason_for_visit           =     vc
+;-----------------------------------------ADMIT DR & Attend Dr.
+  1 admit_dr_id                  =    f8
+  1 admit_dr_disp                =    vc
+  1 attend_dr_id                 =    f8
+  1 attend_dr_disp               =    vc
+;-----------------------------------------ALIAS
+  1 alias_MRN                    =    vc
+  1 alias_SSN                    =    vc
+;-----------------------------------------COMMENTS
+  1 bb_comment[*]
+    2 comment                    =     vc
+    2 bb_comment_id              =     f8
+    2 bb_comment_updt_cnt        =     i4
+;-----------------------------------------ABORH
+  1 abo_cd                       =     f8
+  1 abo_disp                     =     c15
+  1 rh_cd                        =     f8
+  1 rh_disp                      =     c15
+  1 person_aborh_id              =     f8
+  1 person_aborh_updt_cnt        =     i4
+;-----------------------------------------ANTIBODIES
+  1 antibody[*]
+    2 antibody_cd                =     f8
+    2 antibody_disp              =     c40
+    2 antibody_desc              =     c40
+    2 antibody_seq               =     i4
+    2 antigenneg_cnt             =     i4
+    2 anti_d_ind                 =     i2
+    2 significance_ind           =     i2 ;004
+
+    2 antigen_neg_list[*]
+      3 antigen_cd               =     f8
+      3 antigen_disp             =     c40
+      3 antigen_seq              =     i4
+      3 warn_ind                 =     i2
+      3 allow_override_ind       =     i2
+;----------------------------------------TRANSFUSION REQUIREMENTS
+  1 reqs[*]
+    2 REQUIREMENT_cd               =     f8
+    2 REQUIREMENT_disp             =     c40
+    2 REQUIREMENT_desc             =     c40
+    2 REQUIREMENT_seq              =     i4
+    2 antigenneg_cnt               =     i4
+    2 antigen_neg_list[*]
+      3 antigen_cd                 =     f8
+      3 antigen_disp               =     c40
+      3 antigen_seq                =     i4
+      3 warn_ind                   =     i2
+      3 allow_override_ind         =     i2
+      3 antigen_mean             =     vc
+      3 isbt_mean                =     vc
+    2 excluded_product_category_list[*]
+      3 product_cat_cd             =     f8
+      3 product_cat_disp           =     vc
+;----------------------------------------TRAMSFUSION HISTORY EXISTS
+  1 transfusions_ind             =     i2
+;-----------------------------------------DONOR ABORH
+  1 donor_abo_cd                 =     f8
+  1 donor_abo_disp               =     c15
+  1 donor_abo_desc               =     c15
+  1 donor_rh_cd                  =     f8
+  1 donor_rh_disp                =     c15
+  1 donor_rh_desc                =     c15
+  1 donor_aborh_id               =     f8
+  1 donor_aborh_updt_cnt         =     i4
+;-----------------------------------------DONOR ANTIBODIES
+  1 donor_antibody[*]
+    2 antibody_cd                =     f8
+    2 antibody_disp              =     c40
+    2 antibody_desc              =     c40
+;----------------------------------------PERSON ALIAS     
+  1 aliaslist[*]
+    2 alias_type_cd                  = f8
+    2 alias_type_disp                = vc
+    2 alias_type_mean                = c12
+    2 alias                          = vc
+    2 alias_formatted                = vc
+  1 species_cd                       = f8
+  1 species_disp                     = vc
+  1 age_in_minutes                   = f8
+  1 unknown_age_ind                  = i2
+
+%i cclsource:status_block.inc
+)
+
+declare anti_cnt = i4 with protect, noconstant(0)
+
+  set reply->status_data->status = "I"
+
+  if (request->using_ptselect_ind = 1)
+    go to GET_ENCOUNTER_BY_ID
+  endif
+/***************************************************************************/
+  /* do the person select */
+  select into "nl:"
+    p.*
+  from person p
+  where p.person_id = request->person_id
+    and p.active_ind = 1 
+    and p.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3) 
+    and p.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3) 
+
+  detail
+    reply->person_id = p.person_id
+    reply->name_full_formatted = p.name_full_formatted
+    reply->birth_dt_cd = p.birth_dt_cd
+    reply->birth_dt_tm = p.birth_dt_tm
+    reply->age = FormatAge(p.birth_dt_tm, p.deceased_dt_tm, "CHRONOAGE")
+    reply->birth_tz    = validate(p.birth_tz,0)
+    reply->race_cd = p.race_cd
+    reply->sex_cd = p.sex_cd
+    reply->species_cd = p.species_cd
+    reply->age_in_minutes
+        = cnvtmin2(curdate, curtime, 1)
+            - cnvtmin2(cnvtdate2(format(p.birth_dt_tm,"mm/dd/yyyy;;d"),"mm/dd/yyyy"),
+                cnvtint(format(p.birth_dt_tm,"hhmm;;m")))
+    if (p.birth_dt_tm = null)
+        reply->unknown_age_ind = 1
+    else
+        reply->unknown_age_ind = 0
+    endif
+
+  with nocounter
+
+  if (curqual = 0)
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[1]->OperationName = "SELECT"
+    set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectName = "TABLE"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue = "PERSON"
+    go to EXIT_PROGRAM
+  endif
+
+
+/***************************************************************************/
+#GET_ENCOUNTER_BY_ID
+  if (request->encntr_id = 0) 
+      go to CONTINUE
+  endif
+  select into "nl:"
+    e.*
+  from encounter e
+  where e.encntr_id = request->encntr_id
+    and e.active_ind = 1 
+    and e.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3) 
+    and e.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3) 
+  detail
+    reply->encntr_id            = e.encntr_id
+    reply->location_cd          = e.location_cd
+    reply->loc_facility_cd      = e.loc_facility_cd
+    reply->loc_building_cd      = e.loc_building_cd
+    reply->loc_nurse_unit_cd    = e.loc_nurse_unit_cd
+    reply->loc_room_cd          = e.loc_room_cd
+    reply->loc_bed_cd           = e.loc_bed_cd
+    reply->reason_for_visit     = e.reason_for_visit
+
+   with nocounter
+
+   if (curqual = 0)
+       set reply->encntr_id = 0
+       set reply->location_cd = 0
+       set reply->loc_facility_cd = 0
+       set reply->loc_building_cd = 0
+       set reply->loc_nurse_unit_cd = 0
+       set reply->loc_room_cd = 0
+       set reply->loc_bed_cd  = 0
+       set reply->reason_for_visit = ""
+       go to CONTINUE
+   endif
+
+/***************************************************************************/
+
+#GET_MRN
+;**begin 005
+set code_cnt = 1
+set meaning_cd = 0.0
+set stat = uar_get_meaning_by_codeset(319,"MRN",code_cnt,meaning_cd)
+if (meaning_cd = 0.0)
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[1]->OperationName = "UAR_GET_MEANING_BY_CODESET"
+    set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectName = "TABLE"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue = "MRN"
+    go to EXIT_PROGRAM
+endif   
+  select into "nl:"
+  from encntr_alias ea
+  
+  where ea.encntr_id = request->encntr_id
+           and ea.encntr_alias_type_cd = meaning_cd 
+           and ea.active_ind = 1 
+           and ea.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3) 
+           and ea.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3) 
+  detail
+    reply->alias_MRN = cnvtalias(ea.alias,ea.alias_pool_cd)
+  with nocounter
+;**end 005
+
+/***************************************************************************/
+#GET_ADMIT_DOC
+;**begin 005
+declare attendDoc_cd = f8 with protected, noconstant(0.0)
+set code_cnt = 1
+set admitdoc_cd = 0.0
+set attendDoc_cd = 0.0
+set stat = uar_get_meaning_by_codeset(333,"ADMITDOC", code_cnt, admitdoc_cd)
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(333,"ATTENDDOC", code_cnt, attendDoc_cd)
+
+if (admitdoc_cd = 0.0)
+
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[1]->OperationName = "UAR_GET_MEANING_BY_CODESET"
+    set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectName = "TABLE"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue = "ADMITDOC"
+    go to EXIT_PROGRAM
+endif
+
+if (attendDoc_cd = 0.0)
+
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[1]->OperationName = "UAR_GET_MEANING_BY_CODESET"
+    set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectName = "TABLE"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue = "ATTENDDOC"
+    go to EXIT_PROGRAM
+endif
+
+
+  select into "nl:"
+     p.person_id,
+     p.name_full_formatted,
+     epr.seq
+  from
+
+     encntr_prsnl_reltn epr,
+     prsnl p                                        
+
+  plan epr
+      where ((admitdoc_cd = epr.encntr_prsnl_r_cd or attenddoc_cd = epr.encntr_prsnl_r_cd)
+        and reply->encntr_id = epr.encntr_id)
+  join p
+      where (p.person_id = epr.prsnl_person_id)
+  detail
+      if (admitdoc_cd = epr.encntr_prsnl_r_cd)
+         reply->admit_dr_id          = p.person_id
+         reply->admit_dr_disp        = p.name_full_formatted
+      elseif (attenddoc_cd = epr.encntr_prsnl_r_cd)
+         reply->attend_dr_id          = p.person_id
+         reply->attend_dr_disp        = p.name_full_formatted
+      endif
+  with counter
+
+  if (curqual = 0)
+      set reply->admit_dr_id          = 0
+      set reply->admit_dr_disp        = ""
+      set reply->attend_dr_id          = 0
+      set reply->attend_dr_disp        = ""
+  endif
+;**end 005
+
+/***************************************************************************/
+#CONTINUE
+;/JOW/Removed this if so that MRN will always be returned.  Patient Select OCX
+;     does not return MRN if in PersonSelect mode
+;if (request->using_ptselect_ind = 1)
+;  go to GET_SSN
+;endif
+/***************************************************************************/
+/******************* Remove; Change to get Encounter MRN  *****************
+#GET_MRN
+;**begin 005
+set code_cnt = 1
+set meaning_cd = 0.0
+set stat = uar_get_meaning_by_codeset(4, "MRN", code_cnt, meaning_cd)
+if (meaning_cd = 0.0)
+
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[1]->OperationName = "UAR_GET_MEANING_BY_CODESET"
+    set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectName = "TABLE"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue = "MRN"
+    go to EXIT_PROGRAM
+endif
+
+
+  select into "nl:"
+  from person_alias p
+
+  where p.person_id = request->person_id
+           and p.person_alias_type_cd = meaning_cd
+           and p.active_ind = 1 
+           and p.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3) 
+           and p.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3) 
+  detail
+    reply->alias_MRN = p.alias
+  with nocounter
+;**end 005
+****************************************************************************/
+
+/***************************************************************************/
+#GET_SSN
+;**begin 005
+set code_cnt = 1
+set meaning_cd = 0.0
+set stat = uar_get_meaning_by_codeset(4, "SSN", code_cnt, meaning_cd)
+if (meaning_cd = 0.0)
+
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[1]->OperationName = "UAR_GET_MEANING_BY_CODESET"
+    set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectName = "TABLE"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue = "SSN"
+    go to EXIT_PROGRAM
+endif
+
+  select into "nl:"
+       p.seq
+  from person_alias p
+
+  where (p.person_id = request->person_id
+           and p.person_alias_type_cd = meaning_cd
+           and p.active_ind = 1 
+           and p.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3) 
+           and p.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3)) 
+  detail
+    reply->alias_SSN = cnvtalias(p.alias, p.alias_pool_cd)
+  with nocounter
+;**end 005
+
+/***************************************************************************/
+#GET_BB_COMMENTS
+select into "nl:"
+     b.bb_comment_id
+from blood_bank_comment b,
+     long_text lt
+plan b where b.person_id = request->person_id
+         and b.active_ind = 1
+join lt where lt.long_text_id = b.long_text_id
+          and lt.active_ind = 1
+head report
+   com_cnt = 0
+detail
+      com_cnt = com_cnt + 1
+      stat = alterlist(reply->bb_comment,com_cnt)
+      reply->bb_comment[com_cnt]->bb_comment_id = b.bb_comment_id
+      reply->bb_comment[com_cnt]->bb_comment_updt_cnt = b.updt_cnt
+      reply->bb_comment[com_cnt]->comment = lt.long_text
+with nocounter
+
+
+/***************************************************************************/
+#GET_ABORH
+  select into "nl:"
+      p.*
+  from
+      person_aborh p
+  plan p where p.person_id = request->person_id
+           and p.active_ind = 1
+  detail
+      reply->abo_cd                = p.abo_cd
+      reply->rh_cd                 = p.rh_cd
+      reply->person_aborh_id       = p.person_aborh_id
+      reply->person_aborh_updt_cnt = p.updt_cnt
+
+  with counter
+  if (curqual = 0)
+     set reply->abo_cd = 0
+     set reply->rh_cd  = 0
+  endif
+
+
+/***************************************************************************/
+#ANTIBODIES
+set anti_cnt = 0
+set neg_cnt = 0
+set max_anti = 0
+set max_neg = 0
+
+/******************************************************
+*        Instructions
+******************************************************/
+select distinct into "nl:"
+     p.antibody_cd,
+     t.special_testing_cd
+from person_antibody p,
+     transfusion_requirements tr,
+     dummyt d,
+     trans_req_r t
+
+plan p where (p.person_id = request->person_id
+         and p.active_ind = 1)
+join tr where (p.antibody_cd = tr.requirement_cd)
+join d where (d.seq = 1)
+join t where (p.antibody_cd = t.requirement_cd
+         and  t.active_ind = 1)
+
+order by p.antibody_cd,
+			t.special_testing_cd
+			
+head p.antibody_cd
+
+   neg_cnt = 0
+   anti_cnt = anti_cnt + 1
+   stat = alterlist(reply->antibody, anti_cnt)
+   reply->antibody[anti_cnt].antibody_cd               = p.antibody_cd
+   reply->antibody[anti_cnt].anti_d_ind                = tr.anti_d_ind
+   reply->antibody[anti_cnt].significance_ind          = tr.significance_ind ;004
+
+
+detail
+   if (t.special_testing_cd > 0)
+      neg_cnt = neg_cnt + 1
+      stat = alterlist(reply->antibody[anti_cnt]->antigen_neg_list,neg_cnt)
+
+      call echo (t.special_testing_cd)
+      reply->antibody[anti_cnt]->antigen_neg_list[neg_cnt].antigen_cd 
+                = t.special_testing_cd
+      reply->antibody[anti_cnt]->antigen_neg_list[neg_cnt].warn_ind = t.warn_ind
+      reply->antibody[anti_cnt]->antigen_neg_list[neg_cnt].ALLOW_OVERRIDE_IND 
+                = t.ALLOW_OVERRIDE_IND
+   endif
+foot p.antibody_cd
+   reply->antibody[anti_cnt].antigenneg_cnt            = neg_cnt
+with nocounter, outerjoin=d
+
+
+/***************************************************************************/
+#GET_TRANSFUSION_REQUIREMENTS
+select distinct into "nl:"
+     p.REQUIREMENT_cd,
+     a.special_testing_cd
+from person_trans_req p,
+     (dummyt d with seq = 1),
+     trans_req_r a,
+     bb_isbt_attribute_r biar,
+     bb_isbt_attribute bia
+ 
+plan p where (p.person_id = request->person_id
+         and p.active_ind = 1)
+join d where (d.seq = 1)
+join a where (p.REQUIREMENT_cd = a.requirement_cd
+         and  a.active_ind = 1)
+join biar where (biar.attribute_cd = outerjoin(a.special_testing_cd)
+         and biar.active_ind = outerjoin(1))
+join bia where (bia.bb_isbt_attribute_id = outerjoin(biar.bb_isbt_attribute_id)
+         and bia.active_ind =outerjoin(1))
+order by p.requirement_cd,
+			a.special_testing_cd
+			
+head p.REQUIREMENT_cd
+   neg_cnt = 0
+   anti_cnt = anti_cnt + 1
+   stat = alterlist(reply->reqs, anti_cnt)
+   reply->reqs[anti_cnt].REQUIREMENT_cd = p.REQUIREMENT_cd
+
+detail
+   if (a.special_testing_cd > 0)
+      neg_cnt = neg_cnt + 1
+      stat = alterlist(reply->reqs[anti_cnt]->antigen_neg_list,neg_cnt)
+      reply->reqs[anti_cnt]->antigen_neg_list[neg_cnt].antigen_cd 
+                = a.special_testing_cd
+      reply->reqs[anti_cnt]->antigen_neg_list[neg_cnt].warn_ind = a.warn_ind
+      reply->reqs[anti_cnt]->antigen_neg_list[neg_cnt].ALLOW_OVERRIDE_IND 
+                = a.ALLOW_OVERRIDE_IND
+      reply->reqs[anti_cnt]->antigen_neg_list[neg_cnt].isbt_mean = bia.standard_display
+      reply->reqs[anti_cnt]->antigen_neg_list[neg_cnt].antigen_mean = UAR_GET_CODE_MEANING(a.special_testing_cd)
+   endif
+foot p.REQUIREMENT_cd
+   reply->reqs[anti_cnt].antigenneg_cnt            = neg_cnt
+with nocounter, outerjoin=d
+
+;Retrieve inapplicable/excluded product categories for each transfusion requirement.
+set excld_prod_cat_cnt = 0
+
+select into "nl:"  
+from excld_trans_req_prod_cat_r etp,
+     (dummyt d with seq = value(size(reply->reqs, 5)))
+      
+plan d 
+join etp where (etp.requirement_cd = reply->reqs[d.seq].REQUIREMENT_cd
+         and etp.active_ind = 1)
+order by etp.requirement_cd 
+
+head  etp.requirement_cd 
+   excld_prod_cat_cnt = 0
+   
+detail
+
+   if (etp.product_cat_cd > 0)
+      excld_prod_cat_cnt = excld_prod_cat_cnt + 1
+      stat = alterlist(reply->reqs[d.seq]->excluded_product_category_list, excld_prod_cat_cnt)
+      reply->reqs[d.seq]->excluded_product_category_list[excld_prod_cat_cnt].product_cat_cd 
+                = etp.product_cat_cd
+      reply->reqs[d.seq]->excluded_product_category_list[excld_prod_cat_cnt].product_cat_disp
+                = uar_get_code_display(etp.product_cat_cd)
+   endif
+
+with nocounter
+
+/***************************************************************************/
+#TRANSFUSION_HISTORY
+select into  "nl:"
+  t.*
+from  transfusion t
+plan t  where request->person_id = t.person_id
+          and t.active_ind = 1
+with counter
+if (curqual = 0)
+   set reply->transfusions_ind = 0
+else
+   set reply->transfusions_ind = 1  
+endif
+
+;DH Begin MOD 003
+/* find tranfused event type code */
+;**begin 005
+set code_cnt = 1
+set transfused_event_type_cd = 0.0
+set stat = uar_get_meaning_by_codeset(1610, "7", code_cnt, transfused_event_type_cd)
+if (transfused_event_type_cd = 0.0)
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[1]->OperationName = "UAR_GET_MEANING_BY_CODESET"
+    set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectName = "TABLE"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue = "7"
+    go to EXIT_PROGRAM
+
+endif
+
+
+;**end 005
+/********************************************/
+/* find transfused products on history uploads table */
+
+select into "nl:"
+  hp.product_id
+  , hp.product_nbr
+  , hp.product_sub_nbr
+  , hp.product_cd
+  , hp.abo_cd
+  , hp.rh_cd
+  , hpe.product_event_id
+  , hpe.event_type_cd
+  , hpe.event_dt_tm
+  , hpe.volume
+
+from bbhist_product hp
+     , bbhist_product_event hpe
+
+plan hpe where hpe.event_type_cd = transfused_event_type_cd and
+               hpe.person_id = request->person_id and
+               hpe.active_ind = 1
+join hp where hpe.product_id  = hp.product_id
+with nocounter
+
+if (curqual != 0)
+   set reply->transfusions_ind = 1
+endif
+
+;DH End MOD 003
+
+/********************************************/
+
+call echo(request->get_aliaslist_ind)
+if (request->get_aliaslist_ind = 1)
+   call echo("GET ALIAS LIST")
+   set request->called_from_script_ind = 1
+   execute bbt_get_person_alias_list
+endif
+
+
+
+
+#DIAGNOSIS
+;?????????????????NEED DIAGNOSIS??????????????????????????????
+
+#Exit_PROGRAM
+   if (reply->status_data->status = "I")
+       set reply->status_data->status = "S"
+   endif
+end go 
+
+;Generated by GNU enscript 1.6.4.

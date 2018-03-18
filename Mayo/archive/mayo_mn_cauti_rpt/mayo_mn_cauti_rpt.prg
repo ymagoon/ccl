@@ -1,0 +1,477 @@
+/************************************************************************
+          Date Written:       04/28/11
+          Source file name:   mayo_mn_cauti_rpt.prg
+          Object name:        mayo_mn_cauti_rpt
+          Request #:
+ 
+          Program purpose:   30 day readmission report
+ 
+          Executing from:     Explorer Menu
+ 
+ ***********************************************************************
+ *                  GENERATED MODIFICATION CONTROL LOG                 *
+ ***********************************************************************
+ *                                                                     *
+ *Mod Date     Engineer             Comment                            *
+ *--- -------- -------------------- -----------------------------------*
+ *000 12/02/14 Akcia      initial release                              *
+ ***********************************************************************
+ 
+  ******************  END OF ALL MODCONTROL BLOCKS  ********************/
+ 
+drop program mayo_mn_cauti_rpt:dba go
+create program mayo_mn_cauti_rpt:dba
+ 
+prompt
+	"Output to File/Printer/MINE" = "MINE"   ;* Enter or select the printer or file name to send this report to.
+	, "Start Date" = CURDATE
+	, "End Date" = CURDATE
+	, "Region" = ""
+ 
+with OUTDEV, start_date, end_date, Region
+ 
+ 
+declare mrn_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 319, "MRN"))
+declare cath_enter_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 72, "DATETIMECATHETERINSERTION"))
+declare cath_remove_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 72, "DATETIMECATHETERDISCONTINUED"))
+declare temp_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 72, "TEMPERATURECORE"))
+declare cult_urin_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 72, "CULTUREURINE"))
+declare urin_cult_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 72, "URINECULTUREBARRONOSSEO"))
+declare cult_urin_mcc_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 72, "CULTUREURINEPERFORMEDATMCC"))
+declare cult_urin_colony_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 72, "CULTUREURINECOLONYCOUNT"))
+declare final_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 72, "FINAL"))
+declare ua_leuk_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 72, "UALEUKEST"))
+declare ua_nitrite_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 72, "UANITRITE"))
+ 
+declare ecnt = i4
+declare temp_res = vc
+ 
+record data (
+1 qual[*]
+  2 encntr_id = f8
+  2 person_id = f8
+  2 order_id = f8
+  2 uc_event_id = f8
+  2 accession = vc
+  2 qualifies = c1
+  2 mrn = c20
+  2 pat_name = c50
+  2 dob = c8
+  2 admit_date = c15
+  2 temp = c10
+  2 cath_enter_date = dq8
+  2 cath_remove_date = dq8
+  2 cath_remove_formatted = c15
+  2 loc_at_coll = c40
+  2 coll_dt = c15
+  2 result_dt = c15
+  2 result_dt_tm = dq8
+  2 pathogen_name = c50
+  2 culture_result = vc
+  2 ua_nitrite = vc
+  2 ua_leuk_est = vc
+  2 gu_stated = vc
+)
+ 
+declare fac_idx = i2
+record fac (
+1 qual[*]
+  2 fac_cd = f8
+)
+ declare prefix1 = c5
+ declare prefix2 = c5
+ declare prefix3 = c5
+ declare prefix4 = c5
+ declare prefix5 = c5
+ declare prefix6 = c5
+ declare prefix7 = c5
+ 
+if ($Region = "SWMN")
+call echo("inside")
+  set prefix1 = "MA*"
+  set prefix2 = "FA*"
+  set prefix3 = "MA*"
+  set prefix4 = "MA*"
+  set prefix5 = "MA*"
+  set prefix6 = "MA*"
+  set prefix7 = "MA*"
+elseif ($Region = "SEMN")
+  set prefix1 = "AL*"
+  set prefix2 = "AU*"
+  set prefix3 = "CA*"
+  set prefix4 = "LC*"
+  set prefix5 = "OW*"
+  set prefix6 = "RW*"
+  set prefix7 = "FB*"
+elseif ($Region = "NWWI")
+  set prefix1 = "EU*"
+  set prefix2 = "ME*"
+  set prefix3 = "ME*"
+  set prefix4 = "ME*"
+  set prefix5 = "ME*"
+  set prefix6 = "ME*"
+  set prefix7 = "ME*"
+elseif ($Region = "SWWI")
+  set prefix1 = "LA*"
+  set prefix2 = "LA*"
+  set prefix3 = "LA*"
+  set prefix4 = "LA*"
+  set prefix5 = "LA*"
+  set prefix6 = "LA*"
+  set prefix7 = "LA*"
+endif
+ 
+ 
+select into "nl:"
+from
+code_value cv
+ 
+plan cv
+where cv.code_set = 220
+and cv.active_ind = 1
+and cv.cdf_meaning = "FACILITY"
+and (cv.display_key in ( patstring(prefix1),patstring(prefix2) ,patstring(prefix3))
+     or cv.display_key in ( patstring(prefix4),patstring(prefix5) ,patstring(prefix6))
+     or cv.display_key in ( patstring(prefix7)))
+and not cv.display_key in  ("MAYOMHS","LOCATORROOMSONLYDONOTUSE")
+;"RWPCC","ALEXPRESSCARE","ALEYECLINIC","ALFCTRMKTOOUTR",
+;							"ALFOUNTCTRAUST","ALFOUNTCTRCDTC","ALFOUNTCTRFARI","ALFOUNTCTRFMT","ALFOUNTCTRJACK",
+;							"ALFOUNTCTRMKTO","ALFOUNTCTROWAT","ALFOUNTCTRROCH","ALFOUNTCTRWASE","ALHEALTHREACH",
+;							"ALWELLSEYE","AUEYECLINIC","EUBEHAVHLTH","EUEXPRCARESP","EUHOMEHEALTH","EUMENOMONIEEYE",
+;							"EUPAINCLINIC","FABLUEEARTHPS","FALUTZWINGNH","FAWALMARTCL","LAARCADIANH","LARESIDNTLTRMT",
+;							,"MAEXPRCAREBP","MAEXPRCARENP","MERCBEHAVHLTH")
+;and cv.display_key in  ("*HOSP*")
+ 
+head report
+cnt = 0
+ 
+detail
+cnt = cnt + 1
+stat = alterlist(fac->qual,cnt)
+fac->qual[cnt].fac_cd = cv.code_value
+ 
+ 
+with nocounter
+ 
+select into "nl:"
+from
+clinical_event ce,
+encounter e
+ 
+plan ce
+where ce.performed_dt_tm between cnvtdatetime(cnvtdate($start_date),0) and cnvtdatetime(curdate,235959)
+;and cnvtdatetime(cnvtdate($end_date),0)
+  and ce.event_cd in (cath_enter_cd,cath_remove_cd)
+  and ce.valid_until_dt_tm > sysdate
+  and ce.result_status_cd != 31
+ 
+join e
+where e.encntr_id = ce.encntr_id
+  and expand(fac_idx,1,size(fac->qual,5),e.loc_facility_cd,fac->qual[fac_idx]->fac_cd)
+ 
+order ce.encntr_id, ce.event_end_dt_tm
+ 
+head report
+ecnt = 0
+done = "N"
+ 
+head ce.encntr_id
+done = "N"
+call echo(ce.encntr_id)
+ 
+detail
+call echo(uar_get_code_display(event_cd))
+if (ce.event_cd = cath_enter_cd)
+    done = "N"
+	if ((ecnt = 0 or data->qual[ecnt].cath_remove_formatted > " ") and
+	  (ce.event_end_dt_tm < cnvtdatetime(cnvtdate($end_date),235959)))
+	  ecnt = ecnt + 1
+	  stat = alterlist(data->qual,ecnt)
+	else
+	  if (not ce.event_end_dt_tm < cnvtdatetime(cnvtdate($end_date),235959))
+	    done = "Y"
+	  endif
+	endif
+	if (done = "N")
+		data->qual[ecnt].encntr_id = ce.encntr_id
+		data->qual[ecnt].person_id = ce.person_id
+	    data->qual[ecnt].cath_enter_date = ce.event_end_dt_tm
+	endif
+else
+  if (done = "N" and ecnt > 0)
+    data->qual[ecnt].cath_remove_date = ce.event_end_dt_tm
+    data->qual[ecnt].cath_remove_formatted = format(ce.event_end_dt_tm,"mm/dd/yy hh:mm;;d")
+;    call echo(datetimediff(ce.event_end_dt_tm,cnvtdatetime(data->qual[ecnt].cath_enter_date)))
+ if ((cnvtdate(format(ce.event_end_dt_tm,"mmddyyyy;;d"))-cnvtdate(format(data->qual[ecnt].cath_enter_date,"mmddyyyy;;d"))) >= 1)
+      data->qual[ecnt].qualifies = "Y"
+    else
+      data->qual[ecnt].qualifies = "N"
+    endif
+ call echo(data->qual[ecnt].qualifies)
+ call echo(ecnt)
+  endif
+endif
+ 
+with nocounter
+ 
+select into "nl:"
+from
+(dummyt d with seq = size(data->qual,5)),
+clinical_event ce1,
+clinical_event ce2
+ 
+plan d
+where data->qual[d.seq].qualifies = "Y"
+ 
+join ce2
+where ce2.encntr_id = data->qual[d.seq].encntr_id
+  and ce2.person_id = data->qual[d.seq].person_id
+  and ce2.event_cd in (cult_urin_cd,urin_cult_cd,cult_urin_mcc_cd,cult_urin_colony_cd)
+  and ce2.valid_until_dt_tm > sysdate
+  and ce2.result_status_cd != 31
+  and ce2.event_tag = "POS"
+ 
+join ce1
+where ce1.encntr_id = ce2.encntr_id
+  and ce1.person_id = ce2.person_id
+  and ce1.event_cd = temp_cd
+  and ce1.valid_until_dt_tm > sysdate
+  and ce1.result_status_cd != 31
+ 
+ 
+ 
+order d.seq, ce2.event_id, ce1.event_end_dt_tm
+ 
+head report
+positive = "N"
+temp = "N"
+temp_res = " "
+ 
+head d.seq
+positive = "N"
+temp = "N"
+temp_res = " "
+data->qual[d.seq].qualifies = "N"
+call echo(data->qual[d.seq].encntr_id)
+ 
+head ce2.event_id
+temp = "N"
+ 
+detail
+if (temp = "N" and cnvtreal(ce1.result_val) >= 38.0)
+  temp = "Y"
+  if (data->qual[d.seq].temp > " ")
+    ecnt = ecnt + 1
+	stat = alterlist(data->qual,ecnt)
+	data->qual[ecnt].encntr_id = data->qual[d.seq].encntr_id
+	data->qual[ecnt].person_id = data->qual[d.seq].person_id
+	data->qual[ecnt].cath_enter_date = data->qual[d.seq].cath_enter_date
+    data->qual[ecnt].cath_remove_date = data->qual[d.seq].cath_remove_date
+    data->qual[ecnt].order_id = ce2.order_id
+    data->qual[ecnt].temp = ce1.result_val
+    data->qual[ecnt].accession = ce2.accession_nbr
+    data->qual[ecnt].result_dt = format(ce2.event_end_dt_tm,"mm/dd/yy hh:mm;;d")
+    data->qual[ecnt].result_dt_tm = ce2.event_end_dt_tm
+    data->qual[ecnt].uc_event_id = ce2.event_id
+    data->qual[ecnt].qualifies = "Y"
+ 
+  else
+    data->qual[d.seq].temp = ce1.result_val
+    data->qual[d.seq].order_id = ce2.order_id
+    data->qual[d.seq].accession = ce2.accession_nbr
+    data->qual[d.seq].result_dt = format(ce2.event_end_dt_tm,"mm/dd/yy hh:mm;;d")
+    data->qual[d.seq].result_dt_tm = ce2.event_end_dt_tm
+    data->qual[d.seq].uc_event_id = ce2.event_id
+    data->qual[d.seq].qualifies = "Y"
+ 
+  endif
+endif
+  call echo(data->qual[d.seq].qualifies)
+ 
+;foot d.seq
+;if (temp = "Y" and positive = "Y")
+;  data->qual[d.seq].qualifies = "Y"
+;endif
+with nocounter
+ call echorecord(data)
+declare blobout = vc
+declare newsize = i4
+ 
+;get culture result
+select into "nl:"
+from
+(dummyt d with seq = size(data->qual,5)),
+clinical_event ce2,
+ce_blob ceb
+ 
+plan d
+where data->qual[d.seq].qualifies = "Y"
+  and data->qual[d.seq].temp > " "
+ 
+join ce2
+where ce2.accession_nbr = data->qual[d.seq].accession
+  and ce2.event_cd = final_cd
+  and ce2.valid_until_dt_tm > sysdate
+  and ce2.result_status_cd != 31
+ 
+join ceb
+where ceb.event_id = ce2.event_id
+  and ceb.valid_until_dt_tm > sysdate
+ 
+order d.seq, ceb.valid_from_dt_tm desc
+ 
+head d.seq
+if (ceb.compression_cd = 727)
+   data->qual[d.seq].culture_result = replace(ceb.blob_contents,"ocf_blob"," ")
+else
+  blob_un = uar_ocf_compress(ceb.blob_contents,size(ceb.blob_contents),blobout,newsize)
+  data->qual[d.seq].culture_result = replace(blobout,"ocf_blob"," ")
+endif
+ 
+with nocounter
+ 
+;get ua tests
+select into "nl:"
+from
+(dummyt d with seq = size(data->qual,5)),
+clinical_event ce2
+ 
+plan d
+where data->qual[d.seq].qualifies = "Y"
+  and data->qual[d.seq].temp > " "
+ 
+join ce2
+where ce2.encntr_id = data->qual[d.seq].encntr_id
+  and ce2.person_id = data->qual[d.seq].person_id
+  and ce2.event_cd in (ua_leuk_cd ,ua_nitrite_cd)
+  and ce2.valid_until_dt_tm > sysdate
+  and ce2.result_status_cd != 31
+  and ce2.event_end_dt_tm >= cnvtdatetime(data->qual[d.seq].result_dt_tm)
+ 
+order d.seq, ce2.event_cd, ce2.event_end_dt_tm
+ 
+head d.seq
+col + 0
+ 
+head ce2.event_cd
+if (ce2.event_cd = ua_leuk_cd)
+  data->qual[d.seq].ua_leuk_est = ce2.result_val
+else
+  data->qual[d.seq].ua_nitrite = ce2.result_val
+endif
+ 
+with nocounter
+ 
+select into "nl:"
+from
+(dummyt d with seq = size(data->qual,5)),
+ce_microbiology cem,
+ce_specimen_coll csc,
+dummyt d1,
+encntr_loc_hist elh
+ 
+plan d
+where data->qual[d.seq].qualifies = "Y"
+  and data->qual[d.seq].temp > " "
+ 
+join cem
+where cem.event_id = data->qual[d.seq].uc_event_id
+  and cem.valid_until_dt_tm > sysdate
+ 
+join csc
+where csc.event_id = outerjoin(cem.event_id)
+  and csc.valid_until_dt_tm > outerjoin(sysdate)
+ 
+join d1
+join elh
+where elh.encntr_id = data->qual[d.seq].encntr_id
+  and elh.beg_effective_dt_tm <= csc.collect_dt_tm
+  and elh.end_effective_dt_tm >= csc.collect_dt_tm
+;  and elh.depart_dt_tm = NULL
+ 
+order d.seq,cem.valid_from_dt_tm desc, elh.beg_effective_dt_tm
+ 
+head d.seq
+data->qual[d.seq].pathogen_name = uar_get_code_description(cem.organism_cd)
+data->qual[d.seq].loc_at_coll = uar_get_code_display(elh.loc_nurse_unit_cd)
+data->qual[d.seq].coll_dt = format(csc.collect_dt_tm,"mm/dd/yy;;d")
+ 
+ 
+with nocounter, outerjoin = d1
+ 
+select into "nl:"
+from
+(dummyt d with seq = size(data->qual,5)),
+person p,
+encntr_alias ea,
+encounter e
+ 
+plan d
+where data->qual[d.seq].qualifies = "Y"
+  and data->qual[d.seq].temp > " "
+ 
+join p
+where p.person_id = data->qual[d.seq].person_id
+ 
+join e
+where e.encntr_id = data->qual[d.seq].encntr_id
+ 
+join ea
+where ea.encntr_id = data->qual[d.seq].encntr_id
+  and ea.encntr_alias_type_cd = mrn_cd
+  and ea.active_ind = 1
+  and ea.end_effective_dt_tm > sysdate
+ 
+order d.seq
+ 
+head d.seq
+data->qual[d.seq].mrn = cnvtalias(ea.alias,ea.alias_pool_cd)
+data->qual[d.seq].pat_name =  p.name_full_formatted
+data->qual[d.seq].dob = format(p.birth_dt_tm,"mm/dd/yy hh:mm;;d")
+data->qual[d.seq].admit_date = format(e.reg_dt_tm,"mm/dd/yy hh:mm;;d")
+ 
+with nocounter
+ 
+;select into "nl:"
+;from
+;(dummyt d with seq = size(data->qual,5)),
+;clinical_event ce
+;
+;plan d
+;
+;join ce
+;where
+;
+;with nocounter
+ 
+select into $outdev
+MRN = data->qual[d.seq].mrn,
+Patient_Name = data->qual[d.seq].pat_name,
+DOB = data->qual[d.seq].dob,
+Admit_Date = data->qual[d.seq].admit_date,
+Temp = data->qual[d.seq].temp,
+Catheter_Enter_Date = format(data->qual[d.seq].cath_enter_date,"mm/dd/yy hh:mm;;d"),
+Catheter_Remove_Date = format(data->qual[d.seq].cath_remove_date,"mm/dd/yy hh:mm;;d"),
+Location_at_Collect = data->qual[d.seq].loc_at_coll ,
+Collect_Date = data->qual[d.seq].coll_dt,
+Result_Date = data->qual[d.seq].result_dt,
+Pathogen_Name = data->qual[d.seq].pathogen_name,
+Culture_Result = data->qual[d.seq].culture_result,
+UA_Nitrite = data->qual[d.seq].ua_nitrite ,
+UA_Leuk_est = data->qual[d.seq].ua_leuk_est
+;,GU_Stated_Symptoms = data->qual[d.seq].gu_stated   waiting for example, code has not been added, removing to see if they notice
+ 
+ 
+from
+(dummyt d with seq = size(data->qual,5))
+ 
+plan d
+where data->qual[d.seq].qualifies = "Y"
+  and data->qual[d.seq].temp > " "
+ 
+with format, separator = " "
+ 
+ 
+ 
+end go
+ 

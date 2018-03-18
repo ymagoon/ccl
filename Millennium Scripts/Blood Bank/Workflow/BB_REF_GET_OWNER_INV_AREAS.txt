@@ -1,0 +1,201 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/R_BBRefOwnerInventory/BB_REF_GET_OWNER_INV_AREAS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1997 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Request #:              225807
+
+        Product:                PathNet
+        Product Team:           BB Transfusion
+
+        Program purpose:        Retrieve locations based on root, parent
+                                and child
+
+        Executing from:         include\BBRefOwnerInventorys.cls
+        Special Notes:
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 05/19/00 Lawrence Dsouza      Initial Release                     *
+;     001 01/09/02 Sasi Gandham         Add Order By for the Head           *
+;     002 11/27/06 Jim Jensen           Add Org_id, restrict_ind to reply   *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+DROP PROGRAM bb_ref_get_owner_inv_areas:DBA GO
+CREATE PROGRAM bb_ref_get_owner_inv_areas:DBA
+
+/*
+RECORD request
+(
+
+)
+*/
+
+RECORD reply
+(
+   1 ownerlist[*]
+     2 owner_cd         = f8
+     2 owner_disp       = vc
+     2 invlist[*]
+       3 inventory_cd   = f8
+       3 inventory_disp = vc
+       3 org_id         = f8
+       3 restrict_ind   = i2
+
+%i cclsource:status_block.inc
+)
+
+%i cclsource:scs_script_common.inc
+/***********************************************************************
+*   Script                                                             *
+***********************************************************************/
+declare GetAccessInd (OrgId               = f8 ) = i2
+declare nCheckSecurityFlag                       = i2   with protect, noconstant(0)
+
+DECLARE d222_BBOWNERROOT_cd = f8
+DECLARE sCDF_Meaning = c12
+
+SET sErrorMsg = FILLSTRING(255," ")
+SET sError_Check = ERROR(sErrorMsg,1)
+
+SET d222_BBOWNERROOT_cd = 0.0
+SET nOwnerCnt = 0
+SET nInvCnt = 0
+
+/* Check Security if needed   */
+call ScsCheckOrgSecAndConfid(NULL)
+if (encntr_org_sec_ind = 1 or confid_sec_ind = 1)
+%i cclsource:sacrtl_org.inc
+ set nCheckSecurityFlag = 1
+endif
+
+
+/* Get location_group_type_cd */
+SET sCDF_Meaning = "BBOWNERROOT"
+SET STAT =  uar_get_meaning_by_codeset(222,sCDF_Meaning,1,d222_BBOWNERROOT_cd)
+IF (d222_BBOWNERROOT_cd = 0)
+   SET reply->status_data.status = "F"
+   SET reply->status_data.subeventstatus[1].TargetObjectValue = "Code lookup for BBOWNERROOT in codeset 222 failed"
+   GO TO EXIT_SCRIPT
+ENDIF
+
+SELECT INTO "nl:"
+   l.location_cd,
+   lg.location_group_type_cd
+  ,cv.code_value
+FROM
+	 location l,
+   location_group lg
+  ,code_value cv
+  ,location l2
+
+PLAN l  WHERE	l.location_type_cd = d222_BBOWNERROOT_cd
+				AND l.active_ind = 1
+      	AND l.beg_effective_dt_tm <= CNVTDATETIME(CURDATE, CURTIME3)
+      	AND l.end_effective_dt_tm >= CNVTDATETIME(CURDATE, CURTIME3)
+
+JOIN lg WHERE lg.parent_loc_cd = l.location_cd
+     		AND lg.active_ind = 1
+     		AND lg.beg_effective_dt_tm <= CNVTDATETIME(CURDATE, CURTIME3)
+     		AND lg.end_effective_dt_tm >= CNVTDATETIME(CURDATE, CURTIME3)
+
+JOIN cv WHERE lg.child_loc_cd = cv.code_value
+     		AND cv.cdf_meaning = "BBINVAREA"
+     		AND cv.active_ind = 1
+     		
+join l2 where l2.location_cd = lg.child_loc_cd
+
+ORDER BY lg.parent_loc_cd,
+         lg.child_loc_cd
+
+HEAD REPORT
+   nOwnerCnt = 0
+   stat = ALTERLIST(reply->ownerlist, 10)
+
+HEAD lg.parent_loc_cd
+   nOwnerCnt = nOwnerCnt + 1
+   IF (MOD(nOwnerCnt, 10) = 1 AND nOwnerCnt != 1)
+      STAT = ALTERLIST(reply->ownerlist, nOwnerCnt + 9)
+   ENDIF
+
+   nInvCnt = 0
+   STAT = ALTERLIST(reply->ownerlist[nOwnerCnt].invlist, 5)
+
+   reply->ownerlist[nOwnerCnt].owner_cd    = lg.parent_loc_cd
+
+HEAD lg.child_loc_cd
+   nInvCnt = nInvCnt + 1
+   if (mod(nInvCnt, 5) = 1 and nInvCnt != 1)
+      STAT = ALTERLIST(reply->ownerlist[nOwnerCnt].invlist, nInvCnt + 4)
+   endif
+
+   reply->ownerlist[nOwnerCnt].invlist[nInvCnt].inventory_cd   = lg.child_loc_cd
+   reply->ownerlist[nOwnerCnt].invlist[nInvCnt].org_id         = l2.organization_id
+   
+   ;Determine user's security to view.
+    if (nCheckSecurityFlag = 0)
+        reply->ownerlist[nOwnerCnt].invlist[nInvCnt].restrict_ind = 0
+    else
+        reply->ownerlist[nOwnerCnt].invlist[nInvCnt].restrict_ind = GetAccessInd(l2.organization_id)
+    endif
+
+FOOT lg.parent_loc_cd
+     STAT = ALTERLIST(reply->ownerlist[nOwnerCnt].invlist, nInvCnt)
+
+FOOT REPORT
+     STAT = ALTERLIST(reply->ownerlist, nOwnerCnt)
+WITH NOCOUNTER
+
+SET sError_Check = ERROR(sErrorMsg,0)   ;get error message
+
+IF (sError_Check = 0)
+   IF (CURQUAL > 0)
+      SET reply->status_data.status = "S"
+   ELSE
+      SET reply->status_data.status = "Z"
+   ENDIF
+ELSE
+   SET reply->status_data.status = "F"
+   SET reply->status_data.subeventstatus[1].TargetObjectValue = sErrorMsg
+ENDIF
+
+
+subroutine GetAccessInd(dOrgId)
+  declare lIdx           = i4   with protect, noconstant(0)
+  declare lCnt           = i4   with protect, noconstant(0)
+  
+  set lCnt = size(sac_org->organizations, 5)
+  for (lIdx = 1 to lCnt)
+    if (dOrgId = sac_org->organizations[lIdx].organization_id)
+        return (0)
+    endif
+  endfor
+  
+  return (1)
+end
+
+#EXIT_SCRIPT
+END GO
+
+;Generated by GNU enscript 1.6.4.

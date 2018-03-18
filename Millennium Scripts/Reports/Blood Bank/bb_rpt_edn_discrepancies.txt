@@ -1,0 +1,412 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/bb_rpt_edn_discrepancies/bb_rpt_edn_discrepancies.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                          *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &            *
+  *                              Technology, Inc.                            *
+  *       Revision      (c) 1984-2006 Cerner Corporation                     *
+  *                                                                          *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.             *
+  *  This material contains the valuable properties and trade secrets of     *
+  *  Cerner Corporation of Kansas City, Missouri, United States of           *
+  *  America (Cerner), embodying substantial creative efforts and            *
+  *  confidential information, ideas and expressions, no part of which       *
+  *  may be reproduced or transmitted in any form or by any means, or        *
+  *  retained in any storage or retrieval system without the express         *
+  *  written permission of Cerner.                                           *
+  *                                                                          *
+  *  Cerner is a registered mark of Cerner Corporation.                      *
+  *                                                                          *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bb_rpt_edn_discrepancies.prg
+        Object name:            bb_rpt_edn_discrepancies
+        Request #:              225954
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Generates a list of EDN products that are discrepant:
+                                 - Product label does not match data in electronic file.
+                                 - Products received but not in electronic file.
+                                 - Products in electronic file but not received.
+                                
+
+        Tables read:            bb_exception, bb_edn_dscrpncy_ovrd, bb_edn_admin, product, prsnl
+
+        Tables updated:         none
+
+        Executing from:         ReportSelection/OpsView/BBReceiveProducts
+
+        Special Notes:          none
+************************************************************************************/
+;~DB~********************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG                      *
+;    ********************************************************************************
+;    *                                                                              *
+;    *Mod Date     Engineer             Comment                                     *
+;    *--- -------- -------------------- --------------------------------------------*
+;     000 12/15/06 Jason Osborn         Initial Release of Report.                  *
+;~DE~********************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ***************************/
+
+drop program   bb_rpt_edn_discrepancies:dba go
+create program bb_rpt_edn_discrepancies:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+        /*
+        record request
+        (
+         1 bb_edn_id           = f8
+         1 beg_dt_tm           = dq8   
+         1 end_dt_tm           = dq8
+         1 cur_owner_area_cd   = f8
+         1 printer_name        = vc  
+         1 batch_selection     = c100  
+         1 output_dist         = c100  
+         1 null_ind            = i2
+         1 ops_date            = dq8
+         1 address_location_cd = f8 
+        )
+        */
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+
+        record reply
+        (
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+        )
+
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc                										  
+                                                                       
+set i18nHandle = 0                                                     
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)   
+
+/*****************************************************************************
+* Report Captions                                                            *
+*****************************************************************************/
+record captions                                                        
+(                                                                      
+  1 report_header           = vc	
+  1 time                    = vc
+  1 as_of_date              = vc
+  1 beg_date                = vc
+  1 end_date                = vc
+  1 bb_owner                = vc
+  1 order_number            = vc
+  1 order_dt_tm             = vc
+  1 product_nbr             = vc
+  1 product_type            = vc
+  1 reason                  = vc
+  1 tech                    = vc
+  1 receive_date            = vc
+  1 page_nbr                = vc
+  1 end_of_report           = vc
+  1 page_nbr                = vc
+)      																					  
+
+set captions->report_header = uar_i18ngetmessage(i18nHandle, "report_name", "Electronic Blood Order Discrepancy Report")
+set captions->time = uar_i18ngetmessage(i18nHandle, "time", "Time:")
+set captions->as_of_date = uar_i18ngetmessage(i18nHandle, "as_of_date", "As of Date:")
+set captions->beg_date = uar_i18ngetmessage(i18nHandle, "beg_date", "Beginning Date:")
+set captions->end_date = uar_i18ngetmessage(i18nHandle, "end_date", "Ending Date:")
+set captions->bb_owner = uar_i18ngetmessage(i18nHandle, "bb_owner", "Blood Bank Owner:")
+set captions->order_number = uar_i18ngetmessage(i18nHandle, "order_number", "Order Number")
+set captions->order_dt_tm = uar_i18ngetmessage(i18nHandle, "order_dt_tm", "Order Date/Time")
+set captions->product_nbr = uar_i18ngetmessage(i18nHandle, "product_nbr", "Product Number")
+set captions->product_type = uar_i18ngetmessage(i18nHandle, "product_type", "Product Type")
+set captions->reason = uar_i18ngetmessage(i18nHandle, "reason", "Reason")
+set captions->tech = uar_i18ngetmessage(i18nHandle, "tech", "Tech")
+set captions->receive_date = uar_i18ngetmessage(i18nHandle, "receive_date", "Receive Date")
+set captions->page_nbr = uar_i18ngetmessage(i18nHandle, "page_nbr", "Page:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle, "end_of_report", "* * * End of Report * * *")
+set captions->page_nbr = uar_i18ngetmessage(i18nHandle, "page_nbr", "Page:")
+
+/*****************************************************************************
+* Variable Declarations                                                      *
+*****************************************************************************/
+declare sOrg_Name          = c112 with protect, noconstant(" ")                  ;Receiving Organization Display
+declare sProduct_Type_Disp = c25  with protect, noconstant(" ")                  ;Product Type Display
+declare sOvrd_Reason_Disp  = c30  with protect, noconstant(" ")                  ;Override Reason Display
+declare sTech_Id           = c11  with protect, noconstant(" ")                  ;BBReceiveProducts Tech Username
+declare sFill_Line         = c130 with protect, constant(fillstring(130, "-"))   ;Separation Line
+declare iRpt_Cnt           = i2   with protect, noconstant(0)                    ;Report Count
+declare EXCEPTION_TYPE_CS  = i4   with protect, constant(14072)                  ;Exception Type Code Set
+declare EDN_DISCREP_MEAN   = c11  with protect, constant("EDN_DISCREP")          ;EDN Discrepancy CDF_Meaning 
+declare edn_discrep_cd     = f8   with protect, noconstant(0.0)                  ;EDN Discrepancy Code Value
+declare begday             = dq8  with protect, noconstant(0.0)                  ;Batch Param Processing Variable 
+declare endday             = dq8  with protect, noconstant(0.0)                  ;Batch Param Processing Variable 
+declare iErrorCd           = i4   with protect, noconstant(0)                    ;Error() Code Check Variable
+declare sErrorMsg          = c132 with protect, noconstant(" ")                  ;Error() Code Check Variable
+declare iStat              = i4   with protect, noconstant(0)                    ;Utility Variable
+declare iIsQueue           = i4   with protect, noconstant(0)                    ;Printer Queue Validity Check
+
+/*****************************************************************************
+* Set up Message Logging                                                     *
+*****************************************************************************/
+%i cclsource:glb_script_logging.inc
+set log_program_name = "bb_rpt_edn_discrepancies"
+
+/* check for logging override */
+set log_override_ind = 0
+select into "nl:"
+  dm.info_char
+from dm_info dm
+where dm.info_domain = "PATHNET BLOOD BANK"
+  and dm.info_name   = "OVERRIDE BB_RPT_EDN_DISCREPANCIES"
+detail
+  if (dm.info_char = "L")
+    log_override_ind = 1
+  else
+    log_override_ind = 0
+  endif
+with nocounter
+ 
+call log_message("BB_RPT_EDN_DISCREPANCIES: STARTING", log_level_debug)
+
+/*****************************************************************************
+* Batch Transfusion Parameters                                               *
+*****************************************************************************/
+%i cclsource:bbt_ops_parm_passed.inc
+if (size(trim(request->batch_selection),1) > 0)
+   call log_message("BB_RPT_EDN_DISCREPANCIES: Call from Ops, processing Batch Params", log_level_debug)
+   set temp_string = cnvtupper(trim(request->batch_selection))
+   call CHECK_LOCATION_CD ("bb_rpt_edn_discrepancies")
+   call CHECK_OWNER_CD("bb_rpt_edn_discrepancies")
+   call CHECK_OPT_DATE_PASSED("bb_rpt_edn_discrepancies")
+   set request->beg_dt_tm = begday
+   set request->end_dt_tm = endday
+   call CHECK_NULL_REPORT("bb_rpt_edn_discrepancies")
+   if (reply->status_data.status = "F")
+      call log_message("BB_RPT_EDN_DISCREPANCIES: Batch Params Processing Failed", log_level_debug)
+      go to exit_script
+   endif
+endif
+
+/*****************************************************************************
+* Get Location Information                                                   *
+*****************************************************************************/
+%i cclsource:bbt_get_location_info.inc
+set modify predeclare
+
+/*****************************************************************************
+* Code Value Retrieval                                                       *
+*****************************************************************************/
+set edn_discrep_cd = uar_get_code_by("MEANING", EXCEPTION_TYPE_CS, nullterm(EDN_DISCREP_MEAN))
+if (edn_discrep_cd <= 0.0)
+  call log_message("BB_RPT_EDN_DISCREPANCIES: Error Loading EDN_DISCREP Code Value.", log_level_debug)
+  set reply->status_data->status = "F"
+  set reply->status_data->subeventstatus[1].OperationName = "UAR failed for CS14072"
+  set reply->status_data->subeventstatus[1].OperationStatus = "Failed"
+  set reply->status_data->subeventstatus[1].TargetObjectName = "EDN_DISCREP not found"
+  set reply->status_data->subeventstatus[1].TargetObjectValue = "0"
+  go to exit_script
+else ;The endif for this is after the report select. The With Clause needs to be in the "Select If" to
+     ;control whether or not NullReport is set.  Because the With Clause isn't the last statement in this
+     ;Select, CCL doesn't know where the Select code stops.  The EndIf serves that purpose.
+/*****************************************************************************
+* Report Generation                                                          *
+*****************************************************************************/  
+   set sOrg_Name = uar_get_code_display(request->cur_owner_area_cd)
+   execute cpm_create_file_name_logical "bb_edn_discrpncy", "txt", "x" 									  
+   call log_message("BB_RPT_EDN_DISCREPANCIES: Entering Main Report Select", log_level_debug)
+   select 
+          if ((request->bb_edn_id = 0.0) and (request->null_ind = 1)) 
+          ;Call from Ops or ReportSelection, null report on  
+            plan bb where edn_discrep_cd = bb.exception_type_cd and
+                          bb.active_status_dt_tm between 
+                             cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm) and
+                          bb.active_ind+0 = 1
+             join bed where bed.exception_id = bb.exception_id
+             join bea where bea.bb_edn_admin_id = bed.bb_edn_admin_id   
+                        and bea.destination_loc_cd+0 = request->cur_owner_area_cd      
+             join pr where pr.person_id = bed.updt_id 
+             join p where p.product_id = outerjoin(bed.product_id)
+                order by bea.admin_dt_tm, bea.order_nbr_ident
+                with  nocounter,maxrow = 64,nullreport
+          elseif (request->bb_edn_id = 0.0)
+          ;Call from Ops or ReportSelection, null report off
+            plan bb where edn_discrep_cd = bb.exception_type_cd and
+                          bb.active_status_dt_tm between 
+                             cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm) and
+                          bb.active_ind+0 = 1
+             join bed where bed.exception_id = bb.exception_id
+             join bea where bea.bb_edn_admin_id = bed.bb_edn_admin_id 
+                        and bea.destination_loc_cd+0 = request->cur_owner_area_cd         
+             join pr where pr.person_id = bed.updt_id 
+             join p where p.product_id = outerjoin(bed.product_id)
+                order by bea.admin_dt_tm, bea.order_nbr_ident
+                with  nocounter,maxrow =64        
+          else ;request->bb_edn_id > 0, 
+          ;Call from BBReceiveProducts, null report always off.
+             plan bea where bea.bb_edn_admin_id = request->bb_edn_id 
+                        and bea.destination_loc_cd+0 = request->cur_owner_area_cd          
+             join bed where bed.bb_edn_admin_id = bea.bb_edn_admin_id
+             join bb where bed.exception_id = bb.exception_id
+                       and bb.active_ind = 1
+             join pr where pr.person_id = bed.updt_id            
+             join p where p.product_id = outerjoin(bed.product_id) 
+                order by bea.admin_dt_tm, bea.order_nbr_ident
+                with  nocounter,maxrow = 64
+          endif
+   
+   into cpm_cfn_info->file_name_logical
+       bea.admin_dt_tm
+      ,bea.order_nbr_ident
+      ,bed.edn_product_nbr_ident
+      ,sProduct_Type_Disp = uar_get_code_display(bed.product_cd) "#########################"
+      ,sOvrd_Reason_Disp = uar_get_code_display(bed.ovrd_reason_cd) "##############################"
+
+  from bb_exception bb
+      ,bb_edn_dscrpncy_ovrd bed
+      ,bb_edn_admin bea
+      ,product p
+      ,prsnl pr
+  
+   head report
+       beg_dt_tm    = cnvtdatetime(request->beg_dt_tm)
+       end_dt_tm    = cnvtdatetime(request->end_dt_tm)
+
+   head page
+%i cclsource:bbt_print_location_info.inc
+       row 0, 
+           col 45  captions->report_header,
+           col 113 captions->time,
+           col 124 curtime"HH:MM;;M"
+             
+       row + 1 ;row 1
+           col 113 captions->as_of_date,
+           col 124 curdate"DDMMMYY;;D"
+             
+       row + 1 ;row 2
+       if (request->bb_edn_id = 0.0)
+           ;Date Range not relevant if calling app is BBReceiveProducts.
+           col 35  captions->beg_date,
+           col 51  beg_dt_tm"DDMMMYY HH:MM;;D",
+           col 71  captions->end_date,
+           col 84  end_dt_tm"DDMMMYY HH:MM;;D"
+       endif
+          
+       row + 2 ;row 4
+           col 1  captions->bb_owner,
+           col 19 sOrg_Name
+             
+       row + 2 ;row 6
+           col 1  captions->order_dt_tm
+              
+       row + 1 ;row 7
+           col 4   captions->order_number,
+           col 20  captions->receive_date,
+           col 39  captions->product_nbr,
+           col 57  captions->product_type,
+           col 85  captions->reason,
+           col 118 captions->tech
+      
+       row + 1 ;row 11
+           col 1 sFill_Line
+
+   head bea.admin_dt_tm
+       if (row > 56)
+          break
+       endif
+      
+       row + 1
+           col 1 bea.admin_dt_tm"MM/DD/YY  HH:MM;;Q"
+       row + 1
+        
+   head bea.order_nbr_ident
+       row + 0
+      
+   detail
+       if (row > 59)
+          break
+       endif
+        
+       row + 1
+           col 4   bea.order_nbr_ident
+      
+       if (bed.product_id > 0.0)
+           col 20  p.recv_dt_tm
+       endif
+      
+           col 39  bed.edn_product_nbr_ident,
+           col 57  sProduct_Type_Disp,
+           col 85  sOvrd_Reason_Disp, 
+           col 118 pr.username "############"
+       row + 1
+      
+   foot bea.order_nbr_ident
+       row + 0
+
+   foot bea.admin_dt_tm
+       row + 0
+      
+   foot page
+       row 61
+          col 1 sFill_Line
+       row + 1
+          col 1   cpm_cfn_info->file_name,
+          col 122 captions->page_nbr,
+          col 128 curpage "###"
+         
+   foot report
+       row 63
+          col 53 captions->end_of_report
+
+
+endif
+
+;Check for CCL Errors in the Select
+set iErrorCd = error(sErrorMsg, 0)
+if (iErrorCd != 0)
+   set reply->status_data.status = "F"
+   set reply->status_data->subeventstatus[1].OperationName = "Report Select Failed"
+   set reply->status_data->subeventstatus[1].TargetObjectName = sErrorMsg
+   call log_message(build("BB_RPT_EDN_DISCREPANCIES: Error() returned: ", sErrorMsg), log_level_debug)
+   go to exit_script 
+endif
+
+;If the report is blank, and BBReceive is the calling app, Return Z status, don't print the report.
+if ((curqual = 0) and (request->bb_edn_id > 0.0))
+   set reply->status_data.status = "Z"
+   go to exit_script
+endif
+
+;Report Generated, set up Successful Reply
+set reply->status_data.status = "S"
+set iRpt_Cnt = iRpt_Cnt + 1
+set iStat = alterlist(reply->rpt_list, iRpt_Cnt)
+set reply->rpt_list[iRpt_Cnt].rpt_filename = cpm_cfn_info->file_name_path
+
+;If call came from Ops, send the report to the specified printer
+if (size(trim(request->batch_selection),1) > 0)
+   set iIsQueue =  checkqueue(trim(request->output_dist))
+   if (iIsQueue = 0)
+      set reply->status_data.status = "F"
+      set reply->status_data->subeventstatus[1].OperationName = "Failed"
+      set reply->status_data->subeventstatus[1].TargetObjectName = "Invalid Printer Specified."
+      ;Print the report
+   else
+      set spool value(reply->rpt_list[iRpt_Cnt].rpt_filename) value(request->output_dist)
+   endif
+endif
+
+#exit_script         
+call log_message("BB_RPT_EDN_DISCREPANCIES: EXITING", log_level_debug)                
+
+end 
+go
+
+;Generated by GNU enscript 1.6.4.

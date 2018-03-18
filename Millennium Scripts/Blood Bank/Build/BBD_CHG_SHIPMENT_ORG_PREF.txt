@@ -1,0 +1,420 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBDShippingTool/BBD_CHG_SHIPMENT_ORG_PREF.PRG Turn on black mode
+
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbd_chg_shipment_org_pref.prg
+        Object name:            bbd_chg_shipment_org_pref
+        Request #:              225621
+
+        Product:                CPM                           
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Maintain organization preferences
+
+        Tables read:            
+        Tables updated:         org_shipment, accept_quar_reason, accept_quar_prod_r
+
+        Executing from:         Shipping Tool
+
+        Special Notes:          
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 04/05/99 Jose Suarez          Initial Release                     *
+;     002 04/19/05 Jason Coy            Added logic within the insert to    *
+;                                       set accept_expired_prod_ind.        *
+;    *002 05/03/06 Tom Brecht           Added inventory area to request     *
+;    *003 12/18/08 Jacob Anderson       Removed references to Donor         *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbd_chg_shipment_org_pref:dba go
+create program bbd_chg_shipment_org_pref:dba
+
+/************************/
+/*    Request record    */
+/************************/
+/*
+record request
+( 
+  1 organization_id             = f8
+  1 update_org_shipment         = i2 ; 1 to indicate update org_shipment table
+  1 org_shipment_id             = f8
+  1 updt_cnt                    = i4
+  1 chg_destroy_expired_ind     = i2 ; 1 to indicate that field has change
+  1 chg_accept_expired_ind      = i2 ; 1 to indicate that field has changed
+  1 chg_req_testing_ind         = i2 ; 1 to indicate that field has change
+  1 chg_accept_pos_result_ind   = i2 ; 1 to indicate that field has change
+  1 chg_accept_quar_products_ind = i2 ; 1 to indicate that field has change
+  1 add_org_shipment            = i2 ; 1 to indicate create org_shipment_id, new row
+  1 destroy_expired_ind         = i2 ; value for new row or update row
+  1 accept_expired_ind          = i2 ; value for new row or update row
+  1 req_testing_ind             = i2 ; value for new row or update row
+  1 accept_pos_result_ind       = i2 ; value for new row or update row
+  1 accept_quar_products_ind    = i2 ; value for new row or update row
+
+  1 task_assay_count            = i2
+  1 assayqual[x]
+    2 accept_pos_test_id        = f8
+    2 org_shipment_id           = f8
+    2 task_assay_cd             = f8
+    2 updt_cnt                  = i4
+    2 add_row                   = i2  ; 1 to indicate a new record
+  
+  1 quar_reason_count           = i2
+  1 reasonqual[x]
+    2 accept_quar_reason_id     = f8
+    2 org_shipment_id           = f8
+    2 quar_reason_cd            = f8
+    2 updt_cnt                  = i4
+    2 add_row                   = i2  ; 1 to indicate a new record
+  1 inventory_area_cd           = f8
+ )
+*/
+
+/************************/
+/*     Reply record     */
+/************************/
+record reply
+(
+    1 org_shipment_id           = f8
+    1 new_task_assay_count      = i2
+    1 assayqual[*]
+        2 accept_pos_test_id    = f8
+        2 task_assay_cd         = f8
+            
+    1 new_quar_reason_count     = i2
+    1 reasonqual[*]
+        2 accept_quar_reason_id = f8
+        2 quar_reason_cd        = f8
+   
+%I cclsource:BBD_STATUS_DATA.INC
+)
+
+/************************/
+/* Initialize variables */
+/************************/
+set y = 0
+set new_accept_pos_test_id = 0.0
+set new_accept_quar_reason_id = 0.0
+set new_org_shipment_id = 0.0
+set reply->status_data->status = "F"
+set failed = "F"
+declare stat = i2  with protect, noconstant(0)
+
+if (request->add_org_shipment = 1)
+  /************************/
+  /* Get sequence number  */
+  /************************/
+%i cclsource:bbt_get_pathnet_seq.inc
+set new_org_shipment_id = new_pathnet_seq
+
+set reply->org_shipment_id = new_org_shipment_id
+  /******************************************************/
+  /* Insert organization shipment                       */
+  /******************************************************/
+  insert into org_shipment o set
+    o.org_shipment_id = new_org_shipment_id,
+    o.organization_id = request->organization_id,
+    o.destroy_once_expired_ind = request->destroy_expired_ind,
+    o.req_testing_complete_ind = request->req_testing_ind,
+    o.accept_expired_prod_ind = request->accept_expired_ind,
+    o.accept_pos_result_ind = request->accept_pos_result_ind,
+    o.accept_quarantined_prod_ind = request->accept_quar_products_ind,
+    o.active_ind = 1,
+    o.active_status_cd =  reqdata->active_status_cd,
+    o.active_status_dt_tm = cnvtdatetime(curdate,curtime3),
+    o.active_status_prsnl_id = reqinfo->updt_id,
+    o.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+    o.updt_id = reqinfo->updt_id,
+    o.updt_cnt = 0,
+    o.updt_task = reqinfo->updt_task,
+    o.updt_applctx = reqinfo->updt_applctx,
+    o.inventory_area_cd = request->inventory_area_cd
+  with nocounter 
+    
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+    set reply->status_data->subeventstatus[1]->OperationName
+               = "insert",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "org_shipment",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = "organization preference insert",
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+    go to exit_script
+  endif
+endif
+
+if (request->update_org_shipment = 1)
+set reply->org_shipment_id = request->org_shipment_id
+  /******************************************************/
+  /* lock organization shipment                         */
+  /******************************************************/
+   select into "nl:"
+        o.*
+    from
+        org_shipment o
+    where
+        o.org_shipment_id = request->org_shipment_id and
+        o.updt_cnt = request->updt_cnt
+    with counter, forupdate(o)
+
+    if (curqual = 0)
+      set failed = "T",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+             = "script",
+      set reply->status_data->subeventstatus[1]->OperationName
+             = "lock",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+             = "org_shipment",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+             = "organization preference lock",
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+             = 1,
+      go to exit_script
+    endif
+
+    /********************************/
+    /*  Update org_shipment         */
+    /********************************/
+    update into org_shipment o set
+      o.destroy_once_expired_ind = if (request->chg_destroy_expired_ind = 1 )
+                                        request->destroy_expired_ind
+                                   else
+                                        o.destroy_once_expired_ind
+                                   endif,
+      o.req_testing_complete_ind = if (request->chg_req_testing_ind = 1 )
+                                        request->req_testing_ind
+                                   else
+                                        o.req_testing_complete_ind
+                                   endif,
+      o.accept_expired_prod_ind = if (request->chg_accept_expired_ind = 1 )
+                                        request->accept_expired_ind
+                                   else
+                                        o.accept_expired_prod_ind
+                                   endif,
+      o.accept_pos_result_ind = if (request->chg_accept_pos_result_ind = 1 )
+                                     request->accept_pos_result_ind
+                                else
+                                     o.accept_pos_result_ind
+                                endif,
+      o.accept_quarantined_prod_ind = if (request->chg_accept_quar_products_ind = 1 )
+                                          request->accept_quar_products_ind
+                                      else
+                                          o.accept_quarantined_prod_ind
+                                      endif,
+      o.active_status_dt_tm = cnvtdatetime(curdate,curtime3),
+      o.active_status_prsnl_id =  reqinfo->updt_id,
+      o.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+      o.updt_id = reqinfo->updt_id,
+      o.updt_cnt = request->updt_cnt + 1,
+      o.updt_task = reqinfo->updt_task,
+      o.updt_applctx = reqinfo->updt_applctx
+    where
+        o.org_shipment_id = request->org_shipment_id and
+        o.updt_cnt = request->updt_cnt
+    with nocounter
+
+    if (curqual = 0)
+      set failed = "T",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+                 = "script",
+      set reply->status_data->subeventstatus[1]->OperationName
+                 = "update",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+                 = "org_shipment",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                 = "update organization preference",
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+                 = 1,
+      go to exit_script
+    endif
+endif
+
+
+
+
+
+
+
+
+/******************************/
+/* Process quarantine reason  */
+/******************************/
+for (y = 1 to request->quar_reason_count)
+ if (request->reasonqual[y].add_row = 1)
+  /************************/
+  /* Get sequence number  */
+  /************************/
+%i cclsource:bbt_get_pathnet_seq.inc
+set new_accept_quar_reason_id = new_pathnet_seq
+
+set reply->new_quar_reason_count = reply->new_quar_reason_count + 1
+set stat = alterlist(reply->reasonqual, reply->new_quar_reason_count)
+set reply->reasonqual[reply->new_quar_reason_count].accept_quar_reason_id = new_accept_quar_reason_id
+set reply->reasonqual[reply->new_quar_reason_count].quar_reason_cd = request->reasonqual[y].quar_reason_cd
+  /******************************************************/
+  /* Insert quarantine reason relationship              */
+  /******************************************************/
+  insert into accept_quar_reason r set
+    r.accept_quar_reason_id = new_accept_quar_reason_id,
+    r.org_shipment_id = if (request->add_org_shipment = 1 )
+                           new_org_shipment_id
+                        else
+                           request->reasonqual[y].org_shipment_id
+                        endif,
+    r.quar_reason_cd = request->reasonqual[y].quar_reason_cd,
+    r.active_ind = 1,
+    r.active_status_cd =  reqdata->active_status_cd,
+    r.active_status_dt_tm = cnvtdatetime(curdate,curtime3),
+    r.active_status_prsnl_id = reqinfo->updt_id,
+    r.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+    r.updt_id = reqinfo->updt_id,
+    r.updt_cnt = 0,
+    r.updt_task = reqinfo->updt_task,
+    r.updt_applctx = reqinfo->updt_applctx
+  with nocounter 
+
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+    set reply->status_data->subeventstatus[1]->OperationName
+               = "insert",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "accept_quar_reason",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = "organization preference insert",
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+    go to exit_script
+  endif
+ else
+    /*******************************/
+    /*  lock accept_quar_reason    */
+    /*******************************/
+    select into "nl:"
+       r.*
+    from
+        accept_quar_reason r
+    where
+        r.accept_quar_reason_id = request->reasonqual[y].accept_quar_reason_id and
+        r.updt_cnt = request->reasonqual[y].updt_cnt
+    with counter, forupdate(r)
+
+    if (curqual = 0)
+      set failed = "T",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+             = "script",
+      set reply->status_data->subeventstatus[1]->OperationName
+             = "lock",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+             = "accept_quar_reason",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+             = "organization preference lock",
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+             = 1,
+      go to exit_script
+    endif
+
+    /***********************************/
+    /*  Update accept_quar_reason      */
+    /***********************************/
+    update into accept_quar_reason r set
+      r.active_status_cd =  reqdata->inactive_status_cd,
+      r.active_ind = 0,
+      r.active_status_dt_tm = cnvtdatetime(curdate,curtime3),
+      r.active_status_prsnl_id =  reqinfo->updt_id,
+      r.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+      r.updt_id = reqinfo->updt_id,
+      r.updt_cnt = request->reasonqual[y].updt_cnt + 1,
+      r.updt_task = reqinfo->updt_task,
+      r.updt_applctx = reqinfo->updt_applctx
+    where
+        r.accept_quar_reason_id = request->reasonqual[y].accept_quar_reason_id and
+        r.updt_cnt = request->reasonqual[y].updt_cnt
+    with nocounter
+
+    if (curqual = 0)
+      set failed = "T",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+                 = "script",
+      set reply->status_data->subeventstatus[1]->OperationName
+                 = "update",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+                 = "accept_quar_reason",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                 = "update organization preference",
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+                 = 1,
+      go to exit_script
+    endif
+
+    /***********************************/
+    /*  Update accept_quar_prod_r      */
+    /***********************************/
+    update into accept_quar_prod_r q set
+      q.active_status_cd =  reqdata->inactive_status_cd,
+      q.active_ind = 0,
+      q.active_status_dt_tm = cnvtdatetime(curdate,curtime3),
+      q.active_status_prsnl_id =  reqinfo->updt_id,
+      q.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+      q.updt_id = reqinfo->updt_id,
+      q.updt_cnt = q.updt_cnt + 1,
+      q.updt_task = reqinfo->updt_task,
+      q.updt_applctx = reqinfo->updt_applctx
+    where
+        q.accept_quar_reason_id = request->reasonqual[y].accept_quar_reason_id and
+        q.active_ind = 1
+    with nocounter
+
+  endif
+endfor
+
+#exit_script
+
+if (failed = "T")
+   rollback,
+   set reply->status_data->status = "F" 
+else
+   commit,
+   set reply->status_data->status = "S"
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

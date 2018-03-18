@@ -1,0 +1,136 @@
+/**************************************************************************
+                      MODIFICATION CONTROL LOG                 *
+**************************************************************************
+ Mod Date     Engineer      Comment
+ --- -------- ------------  ---------------------------------------
+ 000 11/11/11 Akcia - SE    Initial release
+ 001 07/05/12 Akcia - SE	make facility 4 characters instead of 2
+ 002 07/15/12 Akcia - SE	add code_set qualification to drive to a better index
+ 003 07/19/12 Akcia - SE    add specialty and date range column
+*************************************************************************/
+drop program mayo_mn_med_rec_mu_det:dba go
+create program mayo_mn_med_rec_mu_det:dba
+ 
+prompt
+	"Output to File/Printer/MINE" = "MINE"
+	, "Start Date" = CURDATE
+	, "End Date" = CURDATE
+	, "Site" = ""
+ 
+with OUTDEV, start_date, end_date, site
+ 
+declare attending_cd = f8 with protect, constant(uar_get_code_by("MEANING", 333, "ATTENDDOC"))
+declare inpatient_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 71, "INPATIENT"))
+declare day_surg_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 71, "DAYSURGERY"))
+declare emergency_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 71, "EMERGENCY"))
+declare observation_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 71, "OBSERVATION"))
+declare respite_care_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 71, "RESPITECARE"))
+declare user_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 263, "USERLOCATION"))
+declare fin_cd = f8 with protect, constant(uar_get_code_by("MEANING", 319, "FIN NBR"))
+declare npi_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 263, "NPI"))
+ 
+declare ops_ind = c1 with noconstant("N")
+set ops_ind =  validate(request->batch_selection, "Z")
+ 
+if (ops_ind = "Z")
+	set beg_dt = cnvtdatetime(cnvtdate($start_date),0)
+  	set end_dt = cnvtdatetime(cnvtdate($end_date),235959)
+else
+	set beg_dt = datetimefind(cnvtlookbehind("1,M",sysdate),"M","B","B")
+  	set end_dt = datetimefind(cnvtlookbehind("1,M",sysdate),"M","E","E")
+endif
+ 
+select distinct into $outdev
+;001  Facility_Name = substring(1,2,pa.alias),
+Date_Range = concat(format(cnvtdate($start_date),"mm/dd/yy;;d")," - ",format(cnvtdate($end_date),"mm/dd/yy;;d")),  ;003
+Facility_Name = substring(1,4,pa.alias),		;001
+Patient_Name = p.name_full_formatted,
+FIN = cnvtalias(ea.alias,ea.alias_pool_cd),
+Disch_Date = format(e.disch_dt_tm,"mm/dd/yy;;d"),
+Attending_Provider = pl.name_full_formatted,
+NPI = pa1.alias,
+Admit_Med_Rec_Signature =
+					if (e.encntr_type_cd in (inpatient_cd,observation_cd,respite_care_cd))
+						if (ore.order_recon_id > 0)
+							"Yes"
+					  	else
+					  	   "No"
+					  	endif
+					 else
+					   "  "
+					 endif,
+Disch_Med_Rec_Signature = if (ore1.order_recon_id > 0)
+						"Yes"
+				  	else
+				  	   "No"
+				  	endif,
+Nurse_unit = uar_get_code_description(e.loc_nurse_unit_cd),
+Specialty = pa.alias					;003
+from
+encounter e,
+person p,
+encntr_alias ea,
+encntr_prsnl_reltn epr,
+prsnl pl,
+prsnl_alias pa,
+prsnl_alias pa1,
+order_recon ore,
+order_recon ore1
+ 
+plan e
+where e.disch_dt_tm between cnvtdatetime(beg_dt) and cnvtdatetime(end_dt)
+  and e.active_ind = 1
+  and e.loc_facility_cd = (select cv.code_value from code_value cv where cv.code_value = e.loc_facility_cd
+ 					 		and cv.code_set = 220					;002
+ 					 		and cv.display_key = value(concat(trim($site,3),"*"))
+ 					 		and cv.description = "*Hospital*")
+  and e.encntr_type_cd in (inpatient_cd,observation_cd,respite_care_cd,day_surg_cd,emergency_cd)
+ 
+join epr
+where epr.encntr_id = e.encntr_id
+  and epr.encntr_prsnl_r_cd = attending_cd
+  and epr.end_effective_dt_tm > sysdate
+  and epr.active_ind = 1
+ 
+join pl
+where pl.person_id = epr.prsnl_person_id
+ 
+join p
+where p.person_id = e.person_id
+ 
+join ea
+where ea.encntr_id = e.encntr_id
+  and ea.encntr_alias_type_cd = fin_cd
+  and ea.end_effective_dt_tm > sysdate
+  and ea.active_ind = 1
+ 
+ 
+join pa
+where pa.person_id = outerjoin(pl.person_id)
+  and pa.alias_pool_cd = outerjoin(user_cd)
+  and pa.active_ind = outerjoin(1)
+  and pa.end_effective_dt_tm > outerjoin(sysdate)
+ 
+join pa1
+where pa1.person_id = outerjoin(pl.person_id)
+  and pa1.alias_pool_cd = outerjoin(npi_cd)
+  and pa1.active_ind = outerjoin(1)
+  and pa1.end_effective_dt_tm > outerjoin(sysdate)
+ 
+join ore
+where ore.encntr_id = outerjoin(e.encntr_id)
+  and ore.recon_type_flag = outerjoin(1)
+ 
+ 
+join ore1
+where ore1.encntr_id = outerjoin(e.encntr_id)
+  and ore1.recon_type_flag = outerjoin(3)
+ 
+ 
+order Facility_Name, pl.name_full_formatted, e.encntr_id, disch_date, attending_provider
+ 
+ 
+with nocounter,format, separator = " "
+ 
+ 
+end go

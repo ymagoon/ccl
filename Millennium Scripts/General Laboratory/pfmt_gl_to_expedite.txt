@@ -1,0 +1,367 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_gl_to_expedite/pfmt_gl_to_expedite.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       pfmt_gl_to_expedite.prg
+        Object name:            pfmt_gl_to_expedite
+        Request #:              n/a
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Send an expedite to the chart server
+
+        Tables read:            encounter
+
+        Tables updated:         none
+
+        Executing from:         Process Server
+
+        Special Notes:          Triggered from Request 250074.
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 09/21/01 Gary Runde           Initial Release of rewrite          *
+;    *001 03/20/02 Gary Runde           Result Recovery Logic               *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program pfmt_gl_to_expedite:dba go
+create program pfmt_gl_to_expedite:dba
+
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC
+%i cclsource:expedite_request.inc
+
+SET LOG_PROGRAM_NAME = "pfmt_gl_to_expedite"
+
+  /***********************************************************************
+  * Begin Script                                                         *
+  ***********************************************************************/
+  call LOG_MESSAGE ("Starting GL to Expedite", LOG_LEVEL_DEBUG)
+
+  /***********************************************************************
+  * check for failure from prolog script                                 *
+  ***********************************************************************/
+  if ( CD->failure_occurred_ind = 1 )
+    call LOG_MESSAGE("Exit script because CD->failure_occurred_ind = 1", log_level_warning)
+    set reqinfo->commit_ind = 0
+    go to EXIT_SCRIPT
+  endif
+
+  /***********************************************************************
+  * Verify client has result recovery logic installed,                   *
+  * if not call old pfmt_gl_to_expedite script                              *
+  ***********************************************************************/
+  if ( validate( pn_results->list_idx, -1 ) = -1 )
+
+    call LOG_MESSAGE("PN_RESULTS structure does not exist, call old pfmt_gl_to_expedite", 
+            log_level_debug)
+
+    execute pfmt_gl_to_expedite_old
+    go to EXIT_SCRIPT
+  endif
+
+  ;check for orders to process
+  if ( size(pn_results->orders, 5) = 0 )  
+     call LOG_MESSAGE("Exit script because no orders found to process", log_level_debug)
+     set reqinfo->commit_ind = 0
+     go to EXIT_SCRIPT
+  endif
+
+  /***********************************************************************
+  * Build the expedites record                                           *
+  ***********************************************************************/
+  record expedites (
+    1 accessions[*]
+      2 accession              = vc
+      2 pn_results_idxs[*]
+        3 pn_results_idx       = i4
+  )
+  
+  declare acc_cnt = i4 with public, noconstant(0)
+  declare process_acc_cnt = i4 with public, noconstant(0)
+  declare pr_cnt  = i4 with public, noconstant(0)
+  declare stat   = i4 with public, noconstant(0)
+    
+  select into "nl:"
+    d1.seq,
+    accession = pn_results->orders[d1.seq].accession,
+    event_dt_tm = cnvtdatetime(pn_results->orders[d1.seq].event_dt_tm)
+  from 
+    (dummyt d1 with seq = value(size(pn_results->orders, 5)))
+  plan d1
+    where pn_results->orders[d1.seq].success_ind = 1
+  order by accession, event_dt_tm
+  head report
+    row +0
+  head accession
+    row +0
+  head event_dt_tm
+    ;found unique accession / event_dt_tm so add this item
+    ;to the expedites->accessions list
+    acc_cnt = acc_cnt + 1
+    if (acc_cnt > value(size(expedites->accessions, 5)))
+      stat = alterlist(expedites->accessions, acc_cnt + 4)
+    endif
+    expedites->accessions[acc_cnt]->accession = pn_results->orders[d1.seq].accession
+    pr_cnt = 0
+
+  detail
+    ;for each item under this accession / event_dt_tm combonation, add the index to pn_results
+    ;to the expedites->accessions[acc_cnt]->pn_results_idxs list
+    pr_cnt = pr_cnt + 1
+    if (pr_cnt > value(size(expedites->accessions[acc_cnt]->pn_results_idxs, 5)))
+      stat = alterlist(expedites->accessions[acc_cnt]->pn_results_idxs, pr_cnt + 4)
+    endif
+    expedites->accessions[acc_cnt]->pn_results_idxs[pr_cnt]->pn_results_idx = d1.seq
+
+  foot event_dt_tm
+    
+    ;alter the pn_results_idxs list to the correct value
+    if (pr_cnt > 0)
+      stat = alterlist(expedites->accessions[acc_cnt]->pn_results_idxs, pr_cnt)
+    endif
+
+  foot report
+
+    ;alter the accessions list to the correct value
+    if (acc_cnt > 0)
+      stat = alterlist(expedites->accessions, acc_cnt)
+    endif
+
+  with nocounter
+  
+  if (error_message(0) > 0)
+    go to exit_script
+  endif
+
+  call log_message(build("number of expedites->accessions==", acc_cnt), log_level_debug)
+  
+  ;call the process_expedite_request subroutine for each item in
+  ;expedites->accessions if any items in expedites->accessions.
+  if (acc_cnt > 0)
+    for (process_acc_cnt = 1 to acc_cnt)
+
+      call log_message(build("Process expedites->accessions index of ==", process_acc_cnt), log_level_debug)
+    
+      call process_expedite_request (process_acc_cnt)      
+      
+      ;call program to create the expedite chart.
+      execute pfmt_expedite_processing
+
+    endfor
+  endif
+
+  free set expedites
+ 
+/* Subroutines */
+
+  declare process_expedite_request ( sub_AccnIdx = i4 ) = i2
+  subroutine process_expedite_request ( sub_AccnIdx )
+    declare process_idx_cnt      = i4 with public, noconstant(0)
+    declare sub_assaycnt        = i4 with public, noconstant(0)
+    declare exp_OrderCnt        = i4 with public, noconstant(0)
+    declare exp_assaycnt        = i4 with public, noconstant(0)
+    declare exp_report_priority_cd = f8 with public, noconstant(0.0)
+    
+    if (validate( requestin->reply->status_data->status, "X" ) = "X")
+      set request->status = "S"
+    else
+      set request->status = requestin->reply->status_data->status
+    endif
+
+    set request->calling_program = "pfmt_gl_to_expedite"
+    
+    ;loop through all of the pn_results->orders indexes in the expedites list    
+    for (process_idx_cnt = 1 to value(size(expedites->accessions[sub_AccnIdx]->pn_results_idxs, 5)))
+      
+      ;process this order
+      set sub_oidx = expedites->accessions[sub_AccnIdx]->pn_results_idxs[process_idx_cnt]->pn_results_idx
+
+      set request->event_dt_tm = pn_results->orders[sub_oidx]->event_dt_tm
+    
+      call LOG_MESSAGE(build("order id to expedite: ", pn_results->orders[sub_oidx]->order_id), LOG_LEVEL_DEBUG)   ;007
+
+      set request->person_id = pn_results->orders[sub_oidx]->person_id
+      set request->encntr_id = pn_results->orders[sub_oidx]->encntr_id
+      set request->accession = pn_results->orders[sub_oidx]->accession
+      set exp_OrderCnt = exp_OrderCnt + 1
+      
+      if (exp_OrderCnt > value(size(request->orders, 5)))
+        set stat = alterlist(request->orders, exp_OrderCnt + 9)
+      endif
+      set request->orders[exp_OrderCnt]->order_id = pn_results->orders[sub_oidx]->order_id
+      set request->orders[exp_OrderCnt]->order_complete_ind = pn_results->orders[sub_oidx]->complete_ind
+      set request->orders[exp_OrderCnt]->catalog_type_cd = pn_results->orders[sub_oidx]->catalog_type_cd
+      set request->orders[exp_OrderCnt]->activity_type_cd = 
+          process_activity_type_cd ( (pn_results->orders[sub_oidx]->catalog_cd) )
+      set request->orders[exp_OrderCnt]->catalog_cd = pn_results->orders[sub_oidx]->catalog_cd
+      set exp_report_priority_cd = process_report_priority_cd ( (pn_results->orders[sub_oidx]->order_id) )
+  
+      ;process this order's assays 
+      set sub_assaycnt = size( pn_results->orders[sub_oidx]->assays, 5 )
+      set sub_aidx = 1
+      set exp_assaycnt = 0
+      while (sub_aidx <= sub_assaycnt)
+        call LOG_MESSAGE(build("process assay: ", 
+                  pn_results->orders[sub_oidx]->assays[sub_aidx]->task_assay_cd), LOG_LEVEL_DEBUG)   ;007
+
+        if ((pn_results->orders[sub_oidx]->assays[sub_aidx]->result_status_cd = CD->verify_status_cd
+        or   pn_results->orders[sub_oidx]->assays[sub_aidx]->result_status_cd = CD->auto_verify_status_cd
+        or   pn_results->orders[sub_oidx]->assays[sub_aidx]->result_status_cd = CD->correct_status_cd)
+        and (pn_results->orders[sub_oidx]->assays[sub_aidx]->fail_reason_flag != 4))
+
+          set exp_assaycnt = exp_assaycnt + 1
+          if (exp_assaycnt > value(size(request->orders[exp_OrderCnt]->assays, 5)))
+            set stat = alterlist(request->orders[exp_OrderCnt]->assays, exp_assaycnt + 5)
+          endif
+    
+          set request->orders[exp_OrderCnt]->assays[exp_assaycnt]->task_assay_cd = 
+                    pn_results->orders[sub_oidx]->assays[sub_aidx]->task_assay_cd
+          set request->orders[exp_OrderCnt]->assays[exp_assaycnt]->report_priority_cd = 
+                    exp_report_priority_cd
+          set request->orders[exp_OrderCnt]->assays[exp_assaycnt]->result_range_cd =
+               process_result_range_cd ( (pn_results->orders[sub_oidx]->assays[sub_aidx]->normal_cd),
+                                         (pn_results->orders[sub_oidx]->assays[sub_aidx]->critical_cd) )
+          set request->orders[exp_OrderCnt]->assays[exp_assaycnt]->result_status_cd =
+              process_result_status_cd ( (pn_results->orders[sub_oidx]->assays[sub_aidx]->result_status_cd) )
+          set request->orders[exp_OrderCnt]->assays[exp_assaycnt]->result_cd = 0 ;Micro only
+          set request->orders[exp_OrderCnt]->assays[exp_assaycnt]->result_nbr = 0 ;Micro only
+          set request->orders[exp_OrderCnt]->assays[exp_assaycnt]->report_processing_cd = 0 ;Micro/RadNet only
+          set request->orders[exp_OrderCnt]->assays[exp_assaycnt]->report_processing_nbr = 0 ;Micro/RadNet only
+          set request->orders[exp_OrderCnt]->assays[exp_assaycnt]->service_resource_cd = 
+                     pn_results->orders[sub_oidx]->assays[sub_aidx]->service_resource_cd
+          if (pn_results->orders[sub_oidx]->assays[sub_aidx]->nomenclature_id > 0.0)
+            set stat = alterlist(request->orders[exp_OrderCnt]->assays[exp_assaycnt]->coded_resp, 1)
+            set request->orders[exp_OrderCnt]->assays[exp_assaycnt]->coded_resp[1]->nomenclature_id =
+                     pn_results->orders[sub_oidx]->assays[sub_aidx]->nomenclature_id
+          endif
+        endif
+        set sub_aidx = sub_aidx + 1
+      endwhile                                  ;while (sub_aidx <= sub_assaycnt)
+   
+      if (exp_assaycnt > 0)
+        set stat = alterlist(request->orders[exp_OrderCnt]->assays, exp_assaycnt)
+      endif
+   
+    endfor                                    ;for (process_idx_cnt
+    
+    if (exp_OrderCnt > 0)
+      set stat = alterlist(request->orders, exp_OrderCnt)
+    endif
+
+    return(1)
+
+  end
+  
+  declare process_activity_type_cd ( sub_catalog_cd ) = f8
+  subroutine process_activity_type_cd ( sub_catalog_cd )
+    set sel_activity_type_cd = 0.0
+    select into "nl:"
+      oc.activity_type_cd
+    from order_catalog oc
+    plan oc
+     where oc.catalog_cd = sub_catalog_cd
+    detail
+     sel_activity_type_cd = oc.activity_type_cd
+    with
+     nocounter
+    CALL ERROR_MESSAGE(0)
+    return(sel_activity_type_cd)
+  end
+  
+  declare process_report_priority_cd ( sub_order_id ) = f8
+  subroutine process_report_priority_cd ( sub_order_id )
+    set sel_report_priority_cd = 0.0
+    select into "nl:"
+      ol.report_priority_cd
+    from order_laboratory ol
+    plan ol
+     where ol.order_id = sub_order_id
+    detail
+     sel_report_priority_cd = ol.report_priority_cd
+    with
+     nocounter
+    CALL ERROR_MESSAGE(0)
+    return(sel_report_priority_cd)
+  end
+  
+  declare process_result_range_cd ( sub_norm_cd, sub_crit_cd ) = f8
+  subroutine process_result_range_cd ( sub_norm_cd, sub_crit_cd )
+    set sel_result_range_cd = 0.0
+  
+    if ((sub_crit_cd = CD->num_critical_cd) or
+        (sub_crit_cd = CD->alp_critical_cd))
+      set sel_result_range_cd = CD->exp_crit_cd
+    else
+      if (sub_norm_cd = CD->alp_abnormal_cd)
+        set sel_result_range_cd = CD->exp_abn_cd
+      else
+        if (sub_norm_cd = CD->num_low_cd)
+          set sel_result_range_cd = CD->exp_low_cd
+        else
+          if (sub_norm_cd = CD->num_high_cd)
+            set sel_result_range_cd = CD->exp_high_cd
+          endif
+        endif
+      endif
+    endif
+    CALL ERROR_MESSAGE(0)
+    return(sel_result_range_cd)
+  end
+  
+  declare process_result_status_cd ( sub_result_status_cd ) = f8
+  subroutine process_result_status_cd ( sub_result_status_cd )
+    set sel_result_status_cd = 0.0
+  
+    if ((sub_result_status_cd = CD->verify_status_cd) or
+        (sub_result_status_cd = CD->auto_verify_status_cd))
+      set sel_result_status_cd = CD->exp_verf_cd
+    else
+      if (sub_result_status_cd = CD->correct_status_cd)
+        set sel_result_status_cd = CD->exp_corr_cd
+      endif
+    endif
+  
+    CALL ERROR_MESSAGE(0)
+  
+    return(sel_result_status_cd)
+  end
+  
+  call uar_SysDestroyHandle(hSys)
+
+#EXIT_SCRIPT
+  call LOG_MESSAGE ("GL TO EXPEDITE processing complete", LOG_LEVEL_DEBUG)
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

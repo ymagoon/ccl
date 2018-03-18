@@ -1,0 +1,1501 @@
+ ;;Solution_Test/script/Charge Services and Workload/AFC_ADD_REFERENCE_API/AFC_ADD_REFERENCE_API.PRG Turn on black mode
+
+drop program afc_add_reference_api:dba go
+create program afc_add_reference_api:dba
+    /*************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+      ************************************************************************
+
+
+        Source file name:       AFC_ADD_REFERENCE_API.prg
+        Object name:            AFC_ADD_REFERENCE_API
+        Request #:              951010
+
+        Product:                Charge Services
+        Product Team:           Charge Services
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:
+
+        Tables read:            PRICE_SCHED_ITEMS
+        Tables updated:         BILL_ITEM
+        Executing from:         variety
+
+        Special Notes:
+ ************************************************************************
+ *                      GENERATED MODIFICATION CONTROL LOG              *
+ ************************************************************************
+ *                                                                      *
+ *Mod Date     Engineer             Comment                             *
+ *--- -------- -------------------- ----------------------------------- *
+  000 05/04/01 Amee Hamilton        Make script readable
+  001 06/08/01 Amee Hamilton        Fix lost activity types
+  002 06/13/01 Amee Hamilton        Fix reactivating default children
+  003 06/25/02 Amee Hamilton        Added barcode functionality for ProCure
+  004 10/14/02 Jeff Griffith        Added late_chrg_excl_ind to bill_item request
+  005 10/14/02 Will Griggs	  		Forced selects/updates to hit primary field in the index by adding +0
+  006 03/10/03 Jeremy Moore         Added new request items for afc_add_price_sched_item
+  007 04/03/03 Will Griggs			Fixes to mod 005, forcing different indexes to be used
+  008 01/22/04 Jeff Griffith        Add new request items for afc_add_price_sched_item
+ ************************************************************************
+  Feature Mod Date     Engineer     Comment
+  43405   009 07/15/04 Tim Flowers	 Capture Misc_ind
+  53045   010 02/17/05 Justin Hall   Add new request item for afc_add_price_sched_item
+  64578   011 06/06/05 Joe Medlin    Correction to identiy Children to update 
+  68547   012 08/10/05 Vince Barkman Remove UAR calls to make 7.8 compatible
+  128917  013 06/12/07 JM012065      1-1153019273 - Change (request,ensbillitemrequest) to ("REQUEST","ENSBILLITEMREQUEST")
+  138579  014 06/06/07 JM012065      1-874731469 - correction to prevent excessive updates to the BILL_ITEM table
+  128917  015 06/21/07 JM012065			 1-1153019273 - Change all replace(), this was started with mod 13.
+  285851  016 02/04/10 Albert Ponraj Added logical domain support
+  293524  017 06/01/11 SB013708      Changed the implementation for mod 016
+  323720  018 03/21/12 AG023125      Big Sequence Fix
+                                     https://connect.ucern.com/docs/DOC-179446
+  344930  019 11/06/12 AM019318      Added code to read multiple barcodes from procure
+  345723  020 11/14/12 RR025558      Modified code to accept more child items
+  371863  021 07/11/13 RR025558      child_seq reference removed.
+ ************************************************************************
+
+ ******************  END OF ALL MODCONTROL BLOCKS  ********************/
+;//NOTE: Changes to this structure also need to be made to the AFC_LOAD series
+;                of scripts.
+
+if ("Z" = validate(afc_add_reference_api_vrsn, "Z")) ;009 start
+  declare afc_add_reference_api_vrsn = vc with noconstant("345723.020")
+endif
+ 
+set afc_add_reference_api_vrsn = "371863.021" ;009  end
+ 
+ 
+record holdreq  ;this is the request structure 951010
+(
+1  nbr_of_recs                    = i2
+1  Qual[*]
+   2  Action                      = i2.0
+   2  ext_id                      = f8.0
+   2  ext_contributor_cd          = f8.0
+   2  parent_qual_ind             = f8.0
+   2  careset_ind                 = i2.0
+   2  ext_owner_cd                = f8.0
+   2  ext_description             = c100
+   2  ext_short_desc              = c50
+   2  workload_only_ind           = i2.0
+   2  price_qual                  = i2.0
+   2  prices[*]
+      3  price_sched_id           = f8.0
+      3  price                    = f8.0
+   2  billcode_qual               = i2.0
+   2  billcodes[*]
+      3  billcode_sched_cd        = f8.0
+      3  billcode                 = c25
+      3  bim1_int				  = f8 ;019
+   2  child_qual                  = i4.0 ;020
+   2  Children[*]
+      3  ext_id                   = f8.0
+      3  ext_contributor_cd       = f8.0
+      3  ext_description          = c100
+      3  ext_short_desc           = c50
+      3  child_seq                = i4.0
+      3  bi_id                    = f8.0
+      3  ext_owner_cd             = f8.0
+1  logical_domain_id              = f8.0 ;016
+)
+
+;call echorecord(request)
+
+declare codeset = i4
+declare cdf_meaning = c12
+declare cnt = i4
+declare taskcat = f8
+declare billcodecd = f8
+declare count1 = i4
+declare barcodecd = f8       ;003
+declare item_master_cd = f8  ;003
+declare supplies_cd = f8     ;003
+declare logicalDomainEnabledInd  = i2 with protect, noconstant(0) ;017
+
+;012	set codeset = 13016
+;012	set cdf_meaning = "TASKCAT"
+;012	set cnt = 1
+;012	set stat = uar_get_meaning_by_codeset(codeset, cdf_meaning, cnt, taskcat)
+;012	call echo(build("the taskcat code is : ", taskcat))
+
+set code_set = 13016			;012
+set code_value = 0.0			;012
+set cdf_meaning = "TASKCAT"		;012
+execute cpm_get_cd_for_cdf		;012
+set taskcat = code_value		;012
+
+if (validate(reply->status_data->status, "Z") = "Z")
+free set reply
+record reply
+(
+  1 bill_item_qual      = i4
+  1 bill_item[*]
+    2 bill_item_id      = f8.0
+  1 qual[*]
+    2 bill_item_id      =       f8.0
+  1 PRICE_SCHED_ITEMS_QUAL         =    I2
+  1 PRICE_SCHED_ITEMS[*]
+     2 PRICE_SCHED_ID               =    F8
+     2 PRICE_SCHED_ITEMS_ID         =    F8
+  1 BILL_ITEM_MODIFIER_QUAL        =    I2
+  1 BILL_ITEM_MODIFIER[10]
+     2 BILL_ITEM_MOD_ID             =    F8.0
+  1 actioncnt = i2
+  1 actionlist[*]
+    2 action1 = vc
+    2 action2 = vc
+  1 status_data
+    2 status = c1
+    2 subeventstatus[1]
+      3 OperationName = c15
+      3 OperationStatus = c20
+      3 TargetObjectName = c15
+      3 TargetObjectValue = vc
+)
+endif
+
+SET UPDATE_CHILDREN_START = cnvtdatetime(curdate,curtime3)
+SET UPDATE_CHILDREN_END = cnvtdatetime(curdate,curtime3)
+SET UPDATE_CHILDREN_COUNT = 0
+set count1 = 0
+
+SET LOAD_START = cnvtdatetime(curdate,curtime3)
+SET LOAD_END = cnvtdatetime(curdate,curtime3)
+;//Loop through request to find the largest child qual
+CALL ECHO("FIND LARGESTCHILDQUAL")
+set LargestChildQual = 0
+
+for (X = 1 to request->nbr_of_recs)
+  if (size(request->qual[x]->children, 5) > LargestChildQual)
+    set LargestChildQual = size(request->qual[x]->children, 5)
+     endif
+endfor
+
+CALL ECHO(BUILD("LARGESTCHILDQUAL: ",LARGESTCHILDQUAL))
+
+;// Join to request to make sure that contributor code is filled out.
+
+set EndFlag = 0
+
+CALL ECHO("JOIN TO FIND 0 CONT CD")
+
+select
+  into "nl:"
+        d1.seq, d2.seq
+  from (dummyt d1 with seq=value(request->nbr_of_recs)),
+       (dummyt d2 with seq=value(LargestChildQual))
+  plan d1 where size(request->qual[d1.seq]->children,5) > 0
+  join d2 where d2.seq <= size(request->qual[d1.seq]->children,5)
+  detail
+      if ((request->qual[d1.seq]->ext_id > 0) and
+          (request->qual[d1.seq]->ext_contributor_cd = 0) or
+          (request->qual[d1.seq]->children[d2.seq]->ext_id > 0) and
+          (request->qual[d1.seq]->children[d2.seq]->ext_contributor_cd = 0))
+          call echo("External ID sent with no contributor....ending program.")
+          EndFlag = 1
+      endif
+with nocounter
+if (EndFlag = 1)
+    go to END_PROGRAM
+endif
+
+
+set psub = 0
+set ttlpsub = request->nbr_of_recs
+set stat = alterlist(reply->qual,request->nbr_of_recs)
+call echo("Initialize")
+call initialize("init") ;copies request to holdreq
+
+;// Get the code_value for bill_code from 13019
+;012set cdf_meaning = "BILL CODE"
+;012set codeset = 13019
+;012set cnt = 1
+;012set stat = uar_get_meaning_by_codeset(codeset, cdf_meaning, cnt, billcodecd)
+;012call echo(build("the billcodecd is : ", billcodecd))
+set code_set = 13019				;012
+set code_value = 0.0				;012
+set cdf_meaning = "BILL CODE"		;012
+execute cpm_get_cd_for_cdf			;012
+set billcodecd = code_value			;012
+
+;begin 003
+;012set cdf_meaning = "BARCODE"
+;012set codeset = 13019
+;012set cnt = 1
+;012set stat = uar_get_meaning_by_codeset(codeset, cdf_meaning, cnt, barcodecd)
+;012call echo(build("the barcodecd is : ", barcodecd))
+set code_set = 13019				;012
+set code_value = 0.0				;012
+set cdf_meaning = "BARCODE"			;012
+execute cpm_get_cd_for_cdf			;012
+set barcodecd = code_value			;012
+
+;012set cdf_meaning = "ITEM MASTER"
+;012set codeset = 13016
+;012set cnt = 1
+;012set stat = uar_get_meaning_by_codeset(codeset, cdf_meaning, cnt, item_master_cd)
+;012call echo(build("the item master code is : ", item_master_cd))
+set code_set = 13016				;012
+set code_value = 0.0				;012
+set cdf_meaning = "ITEM MASTER"		;012
+execute cpm_get_cd_for_cdf			;012
+set item_master_cd = code_value		;012
+
+;012set cdf_meaning = "GENERAL CARE"
+;012set codeset = 106
+;012set cnt = 1
+;012set stat = uar_get_meaning_by_codeset(codeset, cdf_meaning, cnt, supplies_cd)
+;012call echo(build("the supplies code is : ", supplies_cd))
+set code_set = 106					;012
+set code_value = 0.0				;012
+set cdf_meaning = "GENERAL CARE"	;012
+execute cpm_get_cd_for_cdf			;012
+set supplies_cd = code_value		;012
+;end 003
+
+go to INITIALIZE_REQUEST
+
+#AFTER_INIT_REQUEST
+
+for (psub = 1 to ttlpsub)
+
+    call echo(concat("============  qual[",cnvtstring(psub),"]  ============="))
+
+    if (holdreq->qual[psub]->ext_id != 0)
+        if (holdreq->qual[psub]->parent_qual_ind = 1)
+        ;it's a group
+            if (holdreq->qual[psub]->action = 3)
+               call Check_Del_Item( "Group", holdreq->qual[psub]->ext_id,
+                                             holdreq->qual[psub]->ext_contributor_cd )
+               call delete_children("")
+               set holdreq->qual[psub]->child_qual = 0
+            else
+               call echo("CheckAddItem parent")
+               call Check_Add_Item( "Group", holdreq->qual[psub]->ext_id,
+                                             holdreq->qual[psub]->ext_contributor_cd )
+               if (holdreq->qual[psub]->price_qual != 0)
+                   for (i = 1 to holdreq->qual[psub]->price_qual)
+                        call echo("call Check_add_price")
+                        call Check_add_price( reply->qual[psub]->bill_item_id,
+                                              holdreq->qual[psub]->prices[i]->price_sched_id,
+                                              holdreq->qual[psub]->prices[i]->price )
+                   endfor
+               endif
+               if (holdreq->qual[psub]->billcode_qual != 0)
+                   call echo("call Check_add_billcode")
+                   for (i = 1 to holdreq->qual[psub]->billcode_qual)
+;003                        call Check_add_billcode( reply->qual[psub]->bill_item_id,
+;003                                                 holdreq->qual[psub]->billcodes[i]->billcode_sched_cd,
+;003                                                 holdreq->qual[psub]->billcodes[i]->billcode,
+;003                                                 holdreq->qual[psub]->ext_description)
+/*
+;019 Begin
+				    call Check_add_billcode( reply->qual[psub]->bill_item_id,                      ;003
+								     holdreq->qual[psub]->billcodes[i]->billcode_sched_cd, ;003
+								     holdreq->qual[psub]->billcodes[i]->billcode,          ;003
+								     holdreq->qual[psub]->ext_description,                 ;003
+                                                     holdreq->qual[psub]->ext_contributor_cd,              ;003
+                                                     holdreq->qual[psub]->ext_owner_cd)                    ;003*/
+				    call Check_add_billcode( reply->qual[psub]->bill_item_id,                      
+								     holdreq->qual[psub]->billcodes[i]->billcode_sched_cd, 
+								     holdreq->qual[psub]->billcodes[i]->billcode,          
+								     holdreq->qual[psub]->ext_description,                 
+                                     holdreq->qual[psub]->ext_contributor_cd,              
+                                     holdreq->qual[psub]->ext_owner_cd,                    
+                                     holdreq->qual[psub]->billcodes[i].bim1_int)
+;019 End                                                     
+                   endfor
+               endif
+            endif
+            if (holdreq->qual[psub]->child_qual > 0)
+                if (holdreq->qual[psub]->careset_ind = 1)
+                    call Careset_Cleanup_Children("")
+                    commit
+                    call Careset_Update_Children("")
+                    commit
+                    call Careset_Add_Children("")
+                    commit
+               else
+                    call Cleanup_Children("")
+                    commit
+                    call Update_Children("")
+                    commit
+                    call Add_Children("")
+                    commit
+               endif
+            endif
+        else
+            if (holdreq->qual[psub]->action = 3)
+               call Check_Del_Item( "Detail", holdreq->qual[psub]->ext_id,
+                   holdreq->qual[psub]->ext_contributor_cd )
+            else
+               call Check_Add_Item( "Detail", holdreq->qual[psub]->ext_id,
+                   holdreq->qual[psub]->ext_contributor_cd )
+            endif
+        endif
+    endif
+endfor
+
+
+GO TO END_PROGRAM
+
+SUBROUTINE DELETE_CHILDREN( STR )
+        call echo("DELETE CHILDREN BEGIN")
+        set count1 = 0
+        set ensbillitemrequest->bill_item_qual = count1
+        ;delete all children of parent
+
+        select into "nl:"
+             b.bill_item_id,
+             b.active_status_cd,
+             b.ext_description,
+             b.ext_short_desc,
+             b.ext_child_reference_id
+        from bill_item b
+        where b.ext_child_reference_id+0 != 0 and 	;007
+
+             (b.ext_parent_reference_id = holdreq->qual[psub]->ext_id and
+              b.ext_parent_contributor_cd =			;007
+                             holdreq->qual[psub]->ext_contributor_cd ) and
+              b.active_ind+0 = 1  ;005
+        detail
+              ;actually delete it here
+              count1 = count1 + 1
+              stat = alterlist(ensbillitemrequest->bill_item,count1)
+              ensbillitemrequest->bill_item_qual = count1
+              ensbillitemrequest->bill_item[count1]->BILL_ITEM_ID = B.BILL_ITEM_ID
+              ensbillitemrequest->bill_item[count1]->ACTIVE_STATUS_cd
+                                             = B.ACTIVE_STATUS_CD
+              ensbillitemrequest->bill_item[count1]->action_type = "DEL"
+        with nocounter
+        if (ensbillitemrequest->bill_item_qual > 0)
+           set ACTION_BEGIN = 1
+           SET ACTION_END = ensbillitemREQUEST->BILL_ITEM_QUAL
+           call echo("Execute AFC_DEL_BILL_ITEM")
+           ;013 execute afc_DEL_bill_item with replace(request,ensbillitemrequest)
+           execute afc_DEL_bill_item with replace("REQUEST","ENSBILLITEMREQUEST") ;013
+        endif
+END  ;Delete_children sub
+
+SUBROUTINE Cleanup_CHILDREN( STR )
+        call echo("CLEANUP_CHILDREN BEGIN")
+        set count1 = 0
+        set ensbillitemrequest->bill_item_qual = count1
+        ;delete items not in children but in database
+
+        select into "nl:"
+             d1.seq,
+             b.bill_item_id,
+             b.active_status_cd,
+             b.ext_description,
+             b.ext_short_desc,
+             b.ext_child_reference_id
+         from bill_item b,
+              (dummyt d1 with seq = value(holdreq->qual[psub]->child_qual))
+         plan b
+              where b.ext_child_reference_id+0 != 0 and					;007
+               (b.ext_parent_reference_id = holdreq->qual[psub]->ext_id and
+                b.ext_parent_contributor_cd =							;007
+                             holdreq->qual[psub]->ext_contributor_cd ) and
+                b.active_ind+0 = 1								;005
+         join d1
+                where
+;011                 b.ext_parent_reference_id+0 > 0 and						;007
+                 b.ext_parent_reference_id+0 = holdreq->qual[psub]->ext_id and                   ;011
+            	 b.ext_parent_contributor_cd+0 > 0 and						;005
+            	 b.ext_child_reference_id =							;007
+                 holdreq->qual[psub]->children[d1.seq]->ext_id and
+                 b.ext_child_contributor_cd =						;007
+                 holdreq->qual[psub]->children[d1.seq]->ext_contributor_cd and
+                 b.active_ind+0 = 1								;005
+          detail
+                CALL ECHO("B.EXT_CHILD_CONTRIBUTOR_CD: ",0)
+                CALL ECHO(B.EXT_CHILD_CONTRIBUTOR_CD)
+                CALL ECHO("HOLDREQ->QUAL[PSUB]->CHILDREN[D1.SEQ]->EXT_CONTRIBUTOR_CD: ",0)
+                CALL ECHO(HOLDREQ->QUAL[PSUB]->CHILDREN[D1.SEQ]->EXT_CONTRIBUTOR_CD)
+                if (b.ext_child_contributor_cd =
+                                holdreq->qual[psub]->children[d1.seq]->ext_contributor_cd)
+                    ;actually delete it here
+                    call echo(concat("to delete: ",cnvtstring(b.bill_item_id, 17, 2)))
+                    count1 = count1 + 1
+                    stat = alterlist(ensbillitemrequest->bill_item,count1)
+                    ensbillitemrequest->bill_item_qual = count1
+                    ensbillitemrequest->bill_item[count1]->BILL_ITEM_ID = B.BILL_ITEM_ID
+                    ensbillitemrequest->bill_item[count1]->ACTIVE_STATUS_cd
+                                             = B.ACTIVE_STATUS_CD
+                    ensbillitemrequest->bill_item[count1]->action_type = "DEL"
+                endif
+          with outerjoin=b,dontexist,nocounter
+          if (ensbillitemrequest->bill_item_qual > 0)
+              call echo("*****THERE ARE ITEMS TO DELETE*****")
+              set ACTION_BEGIN = 1
+              SET ACTION_END = ensbillitemREQUEST->BILL_ITEM_QUAL ;016
+              call echo("Execute AFC_DEL_BILL_ITEM")
+              ;015 execute afc_del_bill_item with replace (request,ensbillitemrequest)
+              execute afc_del_bill_item with replace ("REQUEST","ENSBILLITEMREQUEST") ;015
+        endif
+END ;Cleanup_children sub
+
+SUBROUTINE UPDATE_CHILDREN( STR )
+        CALL ECHO("UPDATE_CHILDREN BEGIN")
+        set UPDATE_CHILDREN_START = CNVTDATETIME(CURDATE,CURTIME3)
+        set count1 = 0
+        set ensbillitemrequest->bill_item_qual = count1
+        SET UPDATE_CHILDREN_COUNT = UPDATE_CHILDREN_COUNT + SIZE(HOLDREQ->QUAL[PSUB]->CHILDREN)
+        if (UPDATE_CHILDREN_COUNT = 0)
+            CALL ECHO("NO CHILDREN TO UPDATE")
+        else
+            select into "nl:"
+                from  bill_item B,
+                (dummyt d2 with seq = value(holdreq->qual[psub]->child_qual))
+            plan d2 where holdreq->qual[psub]->children[d2.seq]->ext_id != 0 ;012
+            join b where
+ ;011                       b.ext_parent_reference_id+0 > 0 and  ;002
+                        b.ext_parent_reference_id+0 = holdreq->qual[psub]->ext_id and  ;011
+                        b.ext_parent_contributor_cd+0 > 0 and					;007
+                        b.ext_child_reference_id =					;007
+                                holdreq->qual[psub]->children[d2.seq]->ext_id and
+                        b.ext_child_contributor_cd =						;007
+                                holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd
+;014 begin                            
+                        AND(
+                             b.ext_description != holdreq->qual[psub]->children[d2.seq]->ext_description
+                          OR b.ext_short_desc != holdreq->qual[psub]->children[d2.seq]->ext_short_desc
+                          OR b.ext_owner_cd != holdreq->qual[psub]->children[d2.seq]->ext_owner_cd
+                          OR b.active_ind=0)                         
+;014 end
+            ORDER BY B.EXT_PARENT_REFERENCE_ID
+            detail
+                  holdreq->qual[psub]->children[d2.seq]->bi_id = b.bill_item_id
+            with nocounter
+
+            update into bill_item B,
+                (dummyt d2 with seq = value(holdreq->qual[psub]->child_qual))
+                 set b.active_ind =
+                       evaluate(b.bill_item_id, holdreq->qual[psub]->children[d2.seq]->bi_id, 1, b.active_ind),
+                     b.ext_description  = holdreq->qual[psub]->children[d2.seq]->ext_description,
+                     b.ext_short_desc = holdreq->qual[psub]->children[d2.seq]->ext_short_desc,
+                     b.ext_owner_cd =
+                       if (holdreq->qual[psub]->children[d2.seq]->ext_owner_cd > 0)  ;001
+                           holdreq->qual[psub]->children[d2.seq]->ext_owner_cd
+                       else                                                          ;001
+                           b.ext_owner_cd                                            ;001
+                       endif,                                                        ;001
+                     b.updt_cnt = b.updt_cnt + 1,
+                     b.updt_dt_tm = cnvtdatetime(curdate,curtime),
+                     b.updt_id = reqinfo->updt_id,
+                     b.updt_applctx = reqinfo->updt_applctx,
+                     b.updt_task = reqinfo->updt_task
+            plan d2 where holdreq->qual[psub]->children[d2.seq]->ext_id != 0
+            join b where
+;011            			b.ext_parent_reference_id+0 > 0 and		;007
+                                b.ext_parent_reference_id+0 = holdreq->qual[psub]->ext_id and   ;011
+            			b.ext_parent_contributor_cd+0 > 0 and	;005
+                        b.ext_child_reference_id =				;007
+                                holdreq->qual[psub]->children[d2.seq]->ext_id and
+                        b.ext_child_contributor_cd =  ;007
+                                holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd
+            with nocounter
+
+            ;now update defaults begin 002
+            select into "nl:"
+                from  bill_item B,
+                (dummyt d2 with seq = value(holdreq->qual[psub]->child_qual))
+            plan d2 where holdreq->qual[psub]->children[d2.seq]->ext_id != 0 ;012
+            join b where
+                        b.ext_parent_reference_id+0 = 0 and  ;007
+                        b.ext_parent_contributor_cd+0 = 0 and	;005
+                        b.ext_child_reference_id =				;007
+                                holdreq->qual[psub]->children[d2.seq]->ext_id and
+                        b.ext_child_contributor_cd =			;007
+                                holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd
+;014 begin                            
+                        AND(
+                             b.ext_description != holdreq->qual[psub]->children[d2.seq]->ext_description
+                          OR b.ext_short_desc != holdreq->qual[psub]->children[d2.seq]->ext_short_desc
+                          OR b.ext_owner_cd != holdreq->qual[psub]->children[d2.seq]->ext_owner_cd
+                          OR b.active_ind=0)
+;014 end    
+            ORDER BY B.EXT_PARENT_REFERENCE_ID
+            detail
+                  holdreq->qual[psub]->children[d2.seq]->bi_id = b.bill_item_id
+            with nocounter
+
+            update into bill_item B,
+                (dummyt d2 with seq = value(holdreq->qual[psub]->child_qual))
+                 set b.active_ind =
+                       evaluate(b.bill_item_id, holdreq->qual[psub]->children[d2.seq]->bi_id, 1, b.active_ind),
+                     b.ext_description  = holdreq->qual[psub]->children[d2.seq]->ext_description,
+                     b.ext_short_desc = holdreq->qual[psub]->children[d2.seq]->ext_short_desc,
+                     b.ext_owner_cd =
+                       if (holdreq->qual[psub]->children[d2.seq]->ext_owner_cd > 0)  ;001
+                           holdreq->qual[psub]->children[d2.seq]->ext_owner_cd
+                       else                                                          ;001
+                           b.ext_owner_cd                                            ;001
+                       endif,                                                        ;001
+                     b.updt_cnt = b.updt_cnt + 1,
+                     b.updt_dt_tm = cnvtdatetime(curdate,curtime),
+                     b.updt_id = reqinfo->updt_id,
+                     b.updt_applctx = reqinfo->updt_applctx,
+                     b.updt_task = reqinfo->updt_task
+            plan d2 where holdreq->qual[psub]->children[d2.seq]->ext_id != 0
+            join b where
+  ;011             			b.ext_parent_reference_id+0 > 0 and		;007
+                               b.ext_parent_reference_id+0 = 0 and                   ;011
+ ;011           			b.ext_parent_contributor_cd+0 > 0 and	;005
+                        b.ext_parent_contributor_cd+0 = 0 and                           ;011
+                        b.ext_child_reference_id =				;007
+                                holdreq->qual[psub]->children[d2.seq]->ext_id and
+                        b.ext_child_contributor_cd =			;007
+                                holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd
+            with nocounter              ;end 002
+        endif
+
+        SET UPDATE_CHILDREN_END = CNVTDATETIME(CURDATE,CURTIME3)
+        call echo("UPDATE_CHILDREN START: ",0)
+        call echo(format(UPDATE_CHILDREN_START,"hh:mm:ss;;s"));
+        call echo("UPDATE_CHILDREN END: ",0)
+        call echo(format(UPDATE_CHILDREN_END,"hh:mm:ss;;s"));
+END ;Update_children sub
+
+
+SUBROUTINE ADD_CHILDREN( STR )
+       call echo("Add_Children")
+
+       ;********************************************************************
+       ;   Add any new parent/children
+       ;********************************************************************
+       set count1 = 0
+       set ensbillitemrequest->bill_item_qual = count1
+       select into "nl:"
+           D2.SEQ,
+           HOLDREQ->qual[psub]->CHILDREN[D2.SEQ]->EXT_DESCRIPTION,
+           HOLDREQ->qual[psub]->CHILDREN[D2.SEQ]->EXT_SHORT_DESC,
+           b.bill_item_id,
+           b.ext_description,
+           b.ext_short_desc
+        from bill_item b,
+                        (dummyt d2 with seq = value(holdreq->qual[psub]->child_qual))
+        plan d2
+        join b where
+                     (b.ext_parent_reference_id =
+                                                holdreq->qual[psub]->ext_id and
+                      b.ext_parent_contributor_cd =								;007
+                                                holdreq->qual[psub]->ext_contributor_cd) and
+                     (b.ext_child_reference_id =								;007
+                                                holdreq->qual[psub]->children[d2.seq]->ext_id and
+                      b.ext_child_contributor_cd =								;007
+                      holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd) and
+                      b.active_ind+0 = 1									;005
+        detail
+
+             if (holdreq->qual[psub]->children[d2.seq]->ext_id != 0)
+                count1 = count1 + 1
+                stat = alterlist(ensbillitemrequest->bill_item,count1)
+                ensbillitemrequest->bill_item_qual = count1
+                ensbillitemrequest->bill_item[count1]->ext_owner_cd =
+                    if (holdreq->qual[psub]->children[d2.seq]->ext_owner_cd > 0)  ;001
+                        holdreq->qual[psub]->children[d2.seq]->ext_owner_cd
+                    else                                                          ;001
+                        holdreq->qual[psub]->ext_owner_cd                         ;001
+                    endif                                                         ;001
+                ensbillitemrequest->bill_item[count1]->workload_only_ind =
+                    holdreq->qual[psub]->workload_only_ind
+                ensbillitemrequest->bill_item[count1]->ext_parent_reference_id =
+                    holdreq->qual[psub]->ext_id
+                ensbillitemrequest->bill_item[count1]->ext_parent_contributor_cd =
+                    holdreq->qual[psub]->ext_contributor_cd
+                ensbillitemrequest->bill_item[COUNT1]->EXT_CHILD_REFERENCE_ID =
+                    HOLDREQ->qual[psub]->CHILDREN[D2.SEQ]->EXT_ID
+                ensbillitemrequest->bill_item[count1]->ext_child_contributor_cd =
+                    holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd
+                ensbillitemrequest->bill_item[count1]->ext_description =
+                    holdreq->qual[psub]->children[d2.seq]->ext_description
+                ensbillitemrequest->bill_item[count1]->ext_short_desc =
+                    holdreq->qual[psub]->children[d2.seq]->ext_short_desc
+                ensbillitemrequest->bill_item[count1]->parent_qual_ind = 0
+                ensbillitemrequest->bill_item[count1]->active_ind_ind = 1
+                ensbillitemrequest->bill_item[count1]->active_ind = 1
+                ensbillitemrequest->bill_item[count1]->action_type = "ADD"
+             endif
+        with outerjoin=d2,dontexist,nocounter
+        ;if some to add, show me.
+        select
+             into "nl:"
+             d1.seq
+             from bill_item b, ( dummyt d1 with seq = value (ensbillitemrequest->bill_item_qual ))
+             plan d1
+             JOIN b where (b.ext_parent_reference_id =
+                                 ensbillitemrequest->bill_item[d1.seq]->ext_child_reference_id and
+                           b.ext_parent_contributor_cd =			;007
+                                 ensbillitemrequest->bill_item[d1.seq]->ext_child_contributor_cd and
+                           b.ext_child_reference_id+0 = 0 and		;005
+                           b.ext_child_contributor_cd+0 = 0 )		;005
+             detail
+                   ensbillitemrequest->bill_item[d1.seq]->parent_qual_ind = 1
+        with nocounter
+
+        if (ensbillitemrequest->bill_item_qual > 0)
+            set ACTION_BEGIN = 1
+            SET ACTION_END = ensbillitemREQUEST->BILL_ITEM_QUAL
+            set ensbillitemrequest->logical_domain_id = holdreq->logical_domain_id ;016
+            set ensbillitemrequest->logical_domain_enabled_ind = logicalDomainEnabledInd ;017
+
+            call echo("Execute AFC_ADD_BILL_ITEM")
+            ;015 execute afc_add_bill_item with replace(request,ensbillitemrequest)
+            execute afc_add_bill_item with replace("REQUEST","ENSBILLITEMREQUEST") ;015
+        ELSE
+            CALL ECHO("NO CHILDREN TO ADD")
+        endif
+
+        ;********************************************************************
+        ;   Add any new Null/children
+        ;********************************************************************
+
+        set count1 = 0
+        set ensbillitemrequest->bill_item_qual = count1
+
+        select into "nl:"
+            D2.SEQ,
+            HOLDREQ->qual[psub]->CHILDREN[D2.SEQ]->EXT_DESCRIPTION,
+            HOLDREQ->qual[psub]->CHILDREN[D2.SEQ]->EXT_SHORT_DESC,
+            b.bill_item_id,
+            b.ext_description,
+            b.ext_short_desc
+        from bill_item b,
+            (dummyt d2 with seq = value(holdreq->qual[psub]->child_qual))
+        plan d2
+                        where (holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd !=
+                                TASKCAT)
+        join b where
+
+             ( b.ext_parent_reference_id+0 = 0 and
+             b.ext_parent_contributor_cd+0 = 0 and	;005
+             b.ext_child_reference_id =				;007
+                  holdreq->qual[psub]->children[d2.seq]->ext_id and
+             b.ext_child_contributor_cd =			;007
+                  holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd ) or
+                        ( b.ext_parent_reference_id  =
+                  holdreq->qual[psub]->children[d2.seq]->ext_id and
+             b.ext_parent_contributor_cd =			;007
+                  holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd and
+             b.ext_child_reference_id+0 = 0 and			;005
+             b.ext_child_contributor_cd+0  = 0 ) and	;005
+             b.active_ind+0 = 1		;005
+        detail
+            if (holdreq->qual[psub]->children[d2.seq]->ext_id != 0)
+                count1 = count1 + 1
+                stat = alterlist(ensbillitemrequest->bill_item,count1)
+                ensbillitemrequest->bill_item_qual = count1
+                ensbillitemrequest->bill_item[count1]->ext_owner_cd =
+                     if (holdreq->qual[psub]->children[d2.seq]->ext_owner_cd > 0)  ;001
+                         holdreq->qual[psub]->children[d2.seq]->ext_owner_cd
+                     else                                                          ;001
+                         holdreq->qual[psub]->ext_owner_cd                         ;001
+                     endif                                                         ;001
+                ensbillitemrequest->bill_item[count1]->workload_only_ind =
+                     holdreq->qual[psub]->workload_only_ind
+                ensbillitemrequest->bill_item[count1]->ext_parent_reference_id = 0
+                ensbillitemrequest->bill_item[count1]->ext_parent_contributor_cd = 0
+                ensbillitemrequest->bill_item[COUNT1]->EXT_CHILD_REFERENCE_ID =
+                     HOLDREQ->qual[psub]->CHILDREN[D2.SEQ]->EXT_ID
+                ensbillitemrequest->bill_item[count1]->ext_child_contributor_cd =
+                     holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd
+                ensbillitemrequest->bill_item[count1]->ext_description =
+                     holdreq->qual[psub]->children[d2.seq]->ext_description
+                ensbillitemrequest->bill_item[count1]->ext_short_desc =
+                     holdreq->qual[psub]->children[d2.seq]->ext_short_desc
+                ensbillitemrequest->bill_item[count1]->parent_qual_ind = 0
+                ensbillitemrequest->bill_item[count1]->active_ind_ind = 1
+                ensbillitemrequest->bill_item[count1]->active_ind = 1
+                ensbillitemrequest->bill_item[count1]->action_type = "ADD"
+            endif
+        with outerjoin=d2,dontexist,nocounter
+
+        if (ensbillitemrequest->bill_item_qual > 0)
+           set ACTION_BEGIN = 1
+           SET ACTION_END = ensbillitemREQUEST->BILL_ITEM_QUAL
+           set ensbillitemrequest->logical_domain_id = holdreq->logical_domain_id ;016
+           set ensbillitemrequest->logical_domain_enabled_ind = logicalDomainEnabledInd ;017
+
+           ;015 execute afc_add_bill_item with replace(request,ensbillitemrequest)
+           execute afc_add_bill_item with replace("REQUEST","ENSBILLITEMREQUEST") ;015
+        ELSE
+           CALL ECHO("NO DEFAULT CHILDREN TO ADD")
+        endif
+END ;Add_children sub
+
+
+SUBROUTINE CARESET_Cleanup_CHILDREN( STR )
+        call echo("CARESET_CLEANUP_CHILDREN BEGIN")
+        set count1 = 0
+        set ensbillitemrequest->bill_item_qual = count1
+        ;delete items not in children but in database
+
+        select into "nl:"
+             d1.seq,
+             b.bill_item_id,
+             b.active_status_cd,
+             b.ext_description,
+             b.ext_short_desc,
+             b.ext_child_reference_id
+         from bill_item b,
+              (dummyt d1 with seq = value(holdreq->qual[psub]->child_qual))
+         plan b
+              where b.ext_child_reference_id+0 != 0 and			;005
+                   (b.ext_parent_reference_id = holdreq->qual[psub]->ext_id and
+                    b.ext_parent_contributor_cd =		;007
+                             holdreq->qual[psub]->ext_contributor_cd ) and
+                    b.active_ind+0 = 1	;005
+         join d1
+              where
+    ;011        		b.ext_parent_reference_id+0 > 0 and
+                        b.ext_parent_reference_id+0 = holdreq->qual[psub]->ext_id and    ;011
+            		b.ext_parent_contributor_cd+0 > 0 and	;005
+              		b.ext_child_reference_id = holdreq->qual[psub]->children[d1.seq]->ext_id and	;005
+                    b.ext_child_contributor_cd = holdreq->qual[psub]->children[d1.seq]->ext_contributor_cd and ;005
+                    b.active_ind+0 = 1
+         detail
+               if (b.ext_child_contributor_cd = holdreq->qual[psub]->children[d1.seq]->ext_contributor_cd)
+                  ;actually delete it here
+                  call echo(concat("to delete: ",cnvtstring(b.bill_item_id, 17, 2)))
+                  count1 = count1 + 1
+                  stat = alterlist(ensbillitemrequest->bill_item,count1)
+                  ensbillitemrequest->bill_item_qual = count1
+                  ensbillitemrequest->bill_item[count1]->BILL_ITEM_ID = B.BILL_ITEM_ID
+                  ensbillitemrequest->bill_item[count1]->ACTIVE_STATUS_cd  = B.ACTIVE_STATUS_CD
+                  ensbillitemrequest->bill_item[count1]->action_type = "DEL"
+               endif
+         with outerjoin=b,dontexist,nocounter
+         if (ensbillitemrequest->bill_item_qual > 0)
+             set ACTION_BEGIN = 1
+             SET ACTION_END = ensbillitemREQUEST->BILL_ITEM_QUAL
+             call echo("Execute AFC_DEL_BILL_ITEM")
+             ;013 execute afc_DEL_bill_item with replace(request,ensbillitemrequest)
+             execute afc_DEL_bill_item with replace("REQUEST","ENSBILLITEMREQUEST") ;013
+        endif
+END  ;Careset_cleanup_children sub
+
+SUBROUTINE CARESET_UPDATE_CHILDREN( STR )
+        CALL ECHO("CARESET_UPDATE_CHILDREN BEGIN")
+        set UPDATE_CHILDREN_START = CNVTDATETIME(CURDATE,CURTIME3)
+        set count1 = 0
+        set ensbillitemrequest->bill_item_qual = count1
+        SET UPDATE_CHILDREN_COUNT = UPDATE_CHILDREN_COUNT + SIZE(HOLDREQ->QUAL[PSUB]->CHILDREN)
+        call echo("update careset children")
+        if (UPDATE_CHILDREN_COUNT = 0)
+            CALL ECHO("NO CHILDREN TO UPDATE")
+        else
+            select into "nl:"
+                   from  bill_item B,
+                         (dummyt d2 with seq = value(holdreq->qual[psub]->child_qual))
+                   plan d2 where holdreq->qual[psub]->children[d2.seq]->ext_id != 0
+                   join b where
+;011            				   b.ext_parent_reference_id+0 > 0 and		;005
+                                           b.ext_parent_reference_id+0 = holdreq->qual[psub]->ext_id and  ;011
+            				   b.ext_parent_contributor_cd+0 > 0 and				;005
+                               b.ext_child_reference_id   =							;007
+                                        holdreq->qual[psub]->children[d2.seq]->ext_id and
+                               b.ext_child_contributor_cd =							;007
+                                        holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd;014 begin
+                               AND(
+                                    b.ext_description != holdreq->qual[psub]->children[d2.seq]->ext_description
+                                 OR b.ext_short_desc != holdreq->qual[psub]->children[d2.seq]->ext_short_desc
+                                 OR b.ext_owner_cd != holdreq->qual[psub]->children[d2.seq]->ext_owner_cd
+                                 OR b.active_ind=0)
+;014 end   
+                   ORDER BY B.EXT_PARENT_REFERENCE_ID
+                   detail
+                         holdreq->qual[psub]->children[d2.seq]->bi_id = b.bill_item_id
+            with nocounter
+
+            update into bill_item B,
+                        (dummyt d2 with seq = value(holdreq->qual[psub]->child_qual))
+                        set b.active_ind =
+                              evaluate(b.bill_item_id, holdreq->qual[psub]->children[d2.seq]->bi_id, 1, b.active_ind),
+                            b.ext_description  = holdreq->qual[psub]->children[d2.seq]->ext_description,
+                            b.ext_short_desc = holdreq->qual[psub]->children[d2.seq]->ext_short_desc,
+                            b.ext_owner_cd =
+                                if (holdreq->qual[psub]->children[d2.seq]->ext_owner_cd > 0)  ;001
+                                    holdreq->qual[psub]->children[d2.seq]->ext_owner_cd
+                                else                                                          ;001
+                                    b.ext_owner_cd                                            ;001
+                                endif,                                                        ;001
+                            b.updt_cnt = b.updt_cnt + 1,
+                            b.updt_dt_tm = cnvtdatetime(curdate,curtime),
+                            b.updt_id = reqinfo->updt_id,
+                            b.updt_applctx = reqinfo->updt_applctx,
+                            b.updt_task = reqinfo->updt_task
+                   plan d2 where holdreq->qual[psub]->children[d2.seq]->ext_id != 0
+                   join b where
+;011                   			   b.ext_parent_reference_id+0 > 0 and	;005
+                                           b.ext_parent_reference_id+0 = holdreq->qual[psub]->ext_id and  ;011
+            				   b.ext_parent_contributor_cd+0 > 0 and				;005
+                               b.ext_child_reference_id = holdreq->qual[psub]->children[d2.seq]->ext_id and
+                               b.ext_child_contributor_cd  = holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd
+            with nocounter
+        endif
+
+        SET UPDATE_CHILDREN_END = CNVTDATETIME(CURDATE,CURTIME3)
+        call echo("UPDATE_CHILDREN START: ",0)
+        call echo(format(UPDATE_CHILDREN_START,"hh:mm:ss;;s"));
+        call echo("UPDATE_CHILDREN END: ",0)
+        call echo(format(UPDATE_CHILDREN_END,"hh:mm:ss;;s"));
+END ;Careset_update_children sub
+
+
+SUBROUTINE CARESET_ADD_CHILDREN( STR )
+        call echo("CARESET_Add_Children")
+
+        ;********************************************************************
+        ;   Add any new parent/children
+        ;********************************************************************
+        set count1 = 0
+        set ensbillitemrequest->bill_item_qual = count1
+
+        select into "nl:"
+           D2.SEQ,
+           HOLDREQ->qual[psub]->CHILDREN[D2.SEQ]->EXT_DESCRIPTION,
+           HOLDREQ->qual[psub]->CHILDREN[D2.SEQ]->EXT_SHORT_DESC,
+           b.bill_item_id,
+           b.ext_description,
+           b.ext_short_desc
+        from bill_item b, (dummyt d2 with seq = value(holdreq->qual[psub]->child_qual))
+        plan d2
+        join b where (b.active_ind+0 = 1) and		;005
+                     (b.ext_parent_reference_id = holdreq->qual[psub]->ext_id and
+                      b.ext_parent_contributor_cd = holdreq->qual[psub]->ext_contributor_cd) and  ;005
+                     (b.ext_child_reference_id = holdreq->qual[psub]->children[d2.seq]->ext_id and ;005
+                      b.ext_child_contributor_cd = holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd)
+        detail
+
+              if (holdreq->qual[psub]->children[d2.seq]->ext_id != 0)
+                  count1 = count1 + 1
+                  stat = alterlist(ensbillitemrequest->bill_item,count1)
+                  ensbillitemrequest->bill_item_qual = count1
+                  ensbillitemrequest->bill_item[count1]->ext_owner_cd
+                      = if (holdreq->qual[psub]->children[d2.seq]->ext_owner_cd > 0)  ;001
+                            holdreq->qual[psub]->children[d2.seq]->ext_owner_cd
+                        else                                                          ;001
+                            holdreq->qual[psub]->ext_owner_cd                         ;001
+                        endif                                                         ;001
+                  ensbillitemrequest->bill_item[count1]->workload_only_ind
+                      = holdreq->qual[psub]->workload_only_ind
+                  ensbillitemrequest->bill_item[count1]->ext_parent_reference_id
+                      = holdreq->qual[psub]->ext_id
+                  ensbillitemrequest->bill_item[count1]->ext_parent_contributor_cd
+                      = holdreq->qual[psub]->ext_contributor_cd
+                  ensbillitemrequest->bill_item[COUNT1]->EXT_CHILD_REFERENCE_ID
+                      = HOLDREQ->qual[psub]->CHILDREN[D2.SEQ]->EXT_ID
+                  ensbillitemrequest->bill_item[count1]->ext_child_contributor_cd
+                      = holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd
+                  ensbillitemrequest->bill_item[count1]->ext_description
+                      = holdreq->qual[psub]->children[d2.seq]->ext_description
+                  ensbillitemrequest->bill_item[count1]->ext_short_desc
+                      = holdreq->qual[psub]->children[d2.seq]->ext_short_desc
+                  ensbillitemrequest->bill_item[count1]->child_seq
+                      = holdreq->qual[psub]->children[d2.seq]->child_seq
+                  ensbillitemrequest->bill_item[count1]->parent_qual_ind = 0
+                  ensbillitemrequest->bill_item[count1]->active_ind_ind = 1
+                  ensbillitemrequest->bill_item[count1]->active_ind = 1
+                  ensbillitemrequest->bill_item[count1]->action_type = "ADD"
+              endif
+        with outerjoin=d2,dontexist,nocounter
+        ;if some to add, show me.
+        select
+              into "nl:"
+              d1.seq
+              from bill_item b, ( dummyt d1 with seq = value (ensbillitemrequest->bill_item_qual ))
+              plan d1
+              JOIN b where (b.ext_parent_reference_id =
+                                  ensbillitemrequest->bill_item[d1.seq]->ext_child_reference_id and
+                            b.ext_parent_contributor_cd =		;007
+                                  ensbillitemrequest->bill_item[d1.seq]->ext_child_contributor_cd and
+                            b.ext_child_reference_id+0 = 0 and				;005
+                            b.ext_child_contributor_cd+0 = 0 )				;005
+              detail
+                    ensbillitemrequest->bill_item[d1.seq]->parent_qual_ind = 1
+        with nocounter
+
+        if (ensbillitemrequest->bill_item_qual > 0)
+            set ACTION_BEGIN = 1
+            SET ACTION_END = ensbillitemREQUEST->BILL_ITEM_QUAL ;016
+            set ensbillitemrequest->logical_domain_id = holdreq->logical_domain_id ;016
+            set ensbillitemrequest->logical_domain_enabled_ind = logicalDomainEnabledInd ;017
+                        
+            call echo("Execute AFC_ADD_BILL_ITEM")
+            ;105 execute afc_add_bill_item with replace(request,ensbillitemrequest) ;016
+            execute afc_add_bill_item with replace("REQUEST","ENSBILLITEMREQUEST") ;015
+        ELSE
+            CALL ECHO("NO CHILDREN TO ADD")
+        endif
+
+        ;********************************************************************
+        ;   Add any new Null/children
+        ;********************************************************************
+
+        set count1 = 0
+        set ensbillitemrequest->bill_item_qual = count1
+
+        select into "nl:"
+            D2.SEQ,
+            HOLDREQ->qual[psub]->CHILDREN[D2.SEQ]->EXT_DESCRIPTION,
+            HOLDREQ->qual[psub]->CHILDREN[D2.SEQ]->EXT_SHORT_DESC,
+            b.bill_item_id,
+            b.ext_description,
+            b.ext_short_desc
+        from bill_item b,
+            (dummyt d2 with seq = value(holdreq->qual[psub]->child_qual))
+        plan d2
+             where (holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd != TASKCAT)
+        join b where
+             b.active_ind+0 = 1 and	;005
+             ( b.ext_parent_reference_id+0 = 0 and
+             b.ext_parent_contributor_cd+0 = 0 and	;005
+             b.ext_child_reference_id =	    ;007
+                  holdreq->qual[psub]->children[d2.seq]->ext_id and
+             b.ext_child_contributor_cd  =		;007
+                  holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd ) or
+            ( b.ext_parent_reference_id  =
+                  holdreq->qual[psub]->children[d2.seq]->ext_id and
+             b.ext_parent_contributor_cd =		;007
+                  holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd and
+             b.ext_child_reference_id+0    = 0 and		;005
+             b.ext_child_contributor_cd+0  = 0 )	;005
+        detail
+              if (holdreq->qual[psub]->children[d2.seq]->ext_id != 0)
+                  count1 = count1 + 1
+                  stat = alterlist(ensbillitemrequest->bill_item,count1)
+                  ensbillitemrequest->bill_item_qual = count1
+                  ensbillitemrequest->bill_item[count1]->ext_owner_cd =
+                      if (holdreq->qual[psub]->children[d2.seq]->ext_owner_cd > 0)  ;001
+                          holdreq->qual[psub]->children[d2.seq]->ext_owner_cd
+                      else                                                          ;001
+                          holdreq->qual[psub]->ext_owner_cd                         ;001
+                      endif                                                         ;001
+                  ensbillitemrequest->bill_item[count1]->workload_only_ind =
+                      holdreq->qual[psub]->workload_only_ind
+                  ensbillitemrequest->bill_item[count1]->ext_parent_reference_id = 0
+                  ensbillitemrequest->bill_item[count1]->ext_parent_contributor_cd = 0
+                  ensbillitemrequest->bill_item[COUNT1]->EXT_CHILD_REFERENCE_ID =
+                      HOLDREQ->qual[psub]->CHILDREN[D2.SEQ]->EXT_ID
+                  ensbillitemrequest->bill_item[count1]->ext_child_contributor_cd =
+                      holdreq->qual[psub]->children[d2.seq]->ext_contributor_cd
+                  ensbillitemrequest->bill_item[count1]->ext_description =
+                      holdreq->qual[psub]->children[d2.seq]->ext_description
+                  ensbillitemrequest->bill_item[count1]->ext_short_desc =
+                      holdreq->qual[psub]->children[d2.seq]->ext_short_desc
+                  ensbillitemrequest->bill_item[count1]->parent_qual_ind = 0
+                  ensbillitemrequest->bill_item[count1]->active_ind_ind = 1
+                  ensbillitemrequest->bill_item[count1]->active_ind = 1
+                  ensbillitemrequest->bill_item[count1]->action_type = "ADD"
+              endif
+        with outerjoin=d2,dontexist,nocounter
+
+        if (ensbillitemrequest->bill_item_qual > 0)
+           set ACTION_BEGIN = 1
+           SET ACTION_END = ensbillitemREQUEST->BILL_ITEM_QUAL
+           set ensbillitemrequest->logical_domain_id = holdreq->logical_domain_id ;016
+           set ensbillitemrequest->logical_domain_enabled_ind = logicalDomainEnabledInd ;017
+           
+           ;015 execute afc_add_bill_item with replace(request,ensbillitemrequest)
+           execute afc_add_bill_item with replace("REQUEST","ENSBILLITEMREQUEST") ;015
+        ELSE
+           CALL ECHO("NO DEFAULT CHILDREN TO ADD")
+        endif
+END ;Careset_add_children sub
+
+;003 SUBROUTINE Check_add_billcode( bi_id, bc_cd, bc, desc )
+;019 SUBROUTINE Check_add_billcode( bi_id, bc_cd, bc, desc, cont_cd, owner_cd )  ;003
+SUBROUTINE Check_add_billcode( bi_id, bc_cd, bc, desc, cont_cd, owner_cd, bim1_int )  ;019
+        ;//This will only add bill codes.  There is no good way to know if the
+        ;  existing billcode should be deleted without passing more info.
+
+        set stat = alterlist(ensbimrequest->bill_item_modifier,1)
+        set ensbimrequest->bill_item_modifier_qual = 1
+        set ensbimrequest->bill_item_modifier[1]->action_type = "ADD"
+        set ensbimrequest->bill_item_modifier[1]->bill_item_id = bi_id
+        set ensbimrequest->bill_item_modifier[1]->key1_id = bc_cd
+        set ensbimrequest->bill_item_modifier[1]->key6 = bc
+        set ensbimrequest->bill_item_modifier[1]->key7 = desc
+        if (cont_cd = item_master_cd and owner_cd = supplies_cd)                     ;003
+            set ensbimrequest->bill_item_modifier[1]->bill_item_type_cd = BARCODECD  ;003
+        else 											       ;003
+            set ensbimrequest->bill_item_modifier[1]->bill_item_type_cd = BILLCODECD
+        endif												 ;003
+        set ensbimrequest->bill_item_modifier[1]->bim1_int  = bim1_int ;019
+        set action_begin = 1
+        set action_end = 1
+        ;015 execute afc_add_bill_item_modifier with replace(request,ensbimrequest)
+        execute afc_add_bill_item_modifier with replace("REQUEST","ENSBIMREQUEST") ;015
+END  ;Check_add_billcode sub
+
+SUBROUTINE Check_add_price( bitem_id, ps_id, in_price  )
+        set psi_id = 0.0 
+        ;//If I find an item, I need to mark end_effective_dt_tm on existing record
+        select into "nl:"
+                     p.price_sched_items_id
+              from price_sched_items p
+              where p.bill_item_id = bitem_id
+                    and p.price_sched_id = ps_id
+                    and p.active_ind = 1
+                    and p.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime)
+                    and p.end_effective_dt_tm >= cnvtdatetime(curdate,curtime)
+              detail
+                    psi_id = p.price_sched_items_id
+        with nocounter
+
+        set price_count = 1
+        set enspsirequest->price_sched_items_qual = price_count
+        set stat = alterlist(enspsirequest->price_sched_items, price_count)
+        if (curqual = 0)
+                ;//add new psi
+                set enspsirequest->price_sched_items[price_count]->action_type = "ADD"
+        else
+                ;//inactivate the old one, add new one
+                set enspsirequest->price_sched_items[price_count]->action_type = "DEL"
+                set enspsirequest->price_sched_items[price_count]->price_sched_items_id = psi_id
+                set enspsirequest->price_sched_items[price_count]->price_sched_id = ps_id
+                set enspsirequest->price_sched_items[price_count]->bill_item_id = bitem_id
+                set enspsirequest->price_sched_items[price_count]->end_effective_dt_tm_ind = 1
+                set enspsirequest->price_sched_items[price_count]->end_effective_dt_tm = cnvtdatetime(curdate,curtime)
+                set price_count = price_count + 1
+                set enspsirequest->price_sched_items_qual = price_count
+                set stat = alterlist(enspsirequest->price_sched_items, price_count)
+                set enspsirequest->price_sched_items[price_count]->action_type = "ADD"
+        endif
+        set enspsirequest->price_sched_items[price_count]->price_sched_id = ps_id
+        set enspsirequest->price_sched_items[price_count]->bill_item_id = bitem_id
+        set enspsirequest->price_sched_items[price_count]->price = in_price
+        set action_begin = 1
+        set action_end = 1
+        if (enspsirequest->price_sched_items[price_count]->action_type = "ADD")
+                ;015 execute afc_add_price_sched_item with replace(request,enspsirequest)
+                execute afc_add_price_sched_item with replace("REQUEST","ENSPSIREQUEST") ;015
+        elseif (enspsirequest->price_sched_items[price_count]->action_type = "DEL")
+                ;015 execute afc_del_price_sched_item with replace(request,enspsirequest)
+                execute afc_del_price_sched_item with replace("REQUEST","ENSPSIREQUEST") ;015
+        else
+                call echo(concat("Invalid action_type ", enspsirequest->price_sched_items[price_count]->action_type))
+        endif
+end ;Check_add_price
+
+SUBROUTINE Check_Add_Item( str, tmp_id, tmp_cd )
+        call echo(concat("%%%%%   str: ",str," item_id: ",
+                cnvtstring(tmp_id)," item_cd: ",cnvtstring(tmp_cd), "  %%%%%"))
+
+        set ensbillitemrequest->bill_item_qual = 1
+        set stat = alterlist(ensbillitemrequest->bill_item,1)
+        set ensbillitemrequest->bill_item[1]->bill_item_id = 0.0  
+        set ensbillitemrequest->bill_item[1]->action_type = "ADD"
+
+        if (str = "Group")
+
+            select into "nl:"
+                   b.bill_item_id,
+                   b.ext_description,
+		   b.misc_ind, ;009
+                   b.ext_short_desc
+
+                   from bill_item b
+                                  where b.ext_parent_reference_id   = tmp_id and
+                                        b.ext_parent_contributor_cd = tmp_cd and ;007
+                                        b.ext_child_reference_id+0 = 0	;005
+                   detail
+                         call echo(concat("## b.bill_item_id = ",cnvtstring(b.bill_item_id, 17, 2)))
+                         ensbillitemrequest->bill_item[1]->bill_item_id = b.bill_item_id
+                         ensbillitemrequest->bill_item[1]->action_type = "UPT"
+                         reply->qual[psub]->bill_item_id = b.bill_item_id
+			 ensbillitemrequest->bill_item[1]->misc_ind = b.misc_ind ;009
+            with nocounter
+        else
+            select into "nl:"
+                   b.bill_item_id,
+                   b.ext_description,
+                   b.misc_ind, ;009
+                   b.ext_short_desc
+                   from bill_item b
+                                  where b.ext_parent_reference_id+0 = 0 and
+                                        b.ext_child_reference_id = tmp_id and		;005
+                                        b.ext_child_contributor_cd = tmp_cd and		;005
+                                        b.active_ind+0 = 1			;005
+                   detail
+                         ensbillitemrequest->bill_item[1]->bill_item_id = b.bill_item_id
+                         ensbillitemrequest->bill_item[1]->active_ind_ind = 1
+                         ensbillitemrequest->bill_item[1]->active_ind = 1
+                         ensbillitemrequest->bill_item[1]->action_type = "UPT"
+                         reply->qual[psub]->bill_item_id = b.bill_item_id
+			 ensbillitemrequest->bill_item[1]->misc_ind = b.misc_ind ;009
+            with nocounter
+        endif
+
+        if (str = "Group")
+            set ensbillitemrequest->bill_item[1]->ext_parent_reference_id = tmp_id
+            set ensbillitemrequest->bill_item[1]->ext_parent_contributor_cd = tmp_cd
+            set ensbillitemrequest->bill_item[1]->ext_child_reference_id = 0.0 
+            set ensbillitemrequest->bill_item[1]->ext_child_contributor_cd = 0.0 
+            set ensbillitemrequest->bill_item[1]->parent_qual_ind = 1
+        else
+            set ensbillitemrequest->bill_item[1]->ext_parent_reference_id = 0.0 
+            set ensbillitemrequest->bill_item[1]->ext_parent_contributor_cd = 0.0 
+            set ensbillitemrequest->bill_item[1]->ext_child_reference_id = tmp_id
+            set ensbillitemrequest->bill_item[1]->ext_child_contributor_cd = tmp_cd
+            set ensbillitemrequest->bill_item[1]->parent_qual_ind = 0
+        endif
+
+        set ensbillitemrequest->bill_item[1]->ext_description = holdreq->qual[psub]->ext_description
+        set ensbillitemrequest->bill_item[1]->ext_short_desc = holdreq->qual[psub]->ext_short_desc
+        set ensbillitemrequest->bill_item[1]->ext_owner_cd = holdreq->qual[psub]->ext_owner_cd
+        set ensbillitemrequest->bill_item[1]->workload_only_ind =  holdreq->qual[psub]->workload_only_ind
+        set ACTION_BEGIN = 1
+        SET ACTION_END = 1
+
+
+       ;no row found
+       if (curqual = 0)
+           call echo("afc_add_bill_item")
+           ;015 execute afc_add_bill_item with replace(request,ensbillitemrequest)
+           set ensbillitemrequest->logical_domain_id = holdreq->logical_domain_id ;016
+           set ensbillitemrequest->logical_domain_enabled_ind = logicalDomainEnabledInd ;017           
+           
+           execute afc_add_bill_item with replace("REQUEST","ENSBILLITEMREQUEST") ;015
+           set reply->qual[psub]->bill_item_id = ensbillitemrequest->bill_item[1]->bill_item_id
+       else
+           call echo("afc_upt_bill_item")
+           set ensbillitemrequest->logical_domain_id = holdreq->logical_domain_id ;016
+           set ensbillitemrequest->logical_domain_enabled_ind = logicalDomainEnabledInd ;017
+           
+           ;015 execute afc_upt_bill_item with replace(request,ensbillitemrequest)
+           execute afc_upt_bill_item with replace("REQUEST","ENSBILLITEMREQUEST") ;015
+       endif
+       set parent_id = reply->qual[psub]->bill_item_id
+END  ;Check_add_item sub
+
+
+SUBROUTINE Check_Del_Item( str, tmp_id, tmp_cd )
+       call echo("CHECK_DEL_ITEM BEGIN")
+       set stat = alterlist(ensbillitemrequest->bill_item,1)
+       set ensbillitemrequest->bill_item[1]->bill_item_id = 0.0 
+
+       if (str = "Group")
+           set ensbillitemrequest->bill_item_qual = 1
+           select into "nl:"
+                  b.bill_item_id
+                  from bill_item b
+                                  where b.ext_parent_reference_id = tmp_id and
+                                        b.ext_parent_contributor_cd = tmp_cd and		;007
+                                        b.ext_child_reference_id+0 = 0 and			;005
+                                        b.active_ind+0 = 1					;005
+                  detail
+                        ensbillitemrequest->bill_item[1]->bill_item_id = b.bill_item_id
+                        ensbillitemrequest->bill_item[count1]->action_type = "DEL"
+           with nocounter
+       else
+           set count1 = 0
+           set ensbillitemrequest->bill_item_qual = count1
+           select into "nl:"
+                  b.bill_item_id
+                  from bill_item b
+                                  where
+                                       b.ext_parent_reference_id+0 > 0 and  ;007
+            						   b.ext_parent_contributor_cd +0 > 0 and	;005
+                                       b.ext_child_reference_id = tmp_id and  ;007
+                                       b.ext_child_contributor_cd = tmp_cd and	;007
+                                       b.active_ind+0 = 1						;005
+                  detail
+                        count1 = count1 + 1
+                        stat = alterlist(ensbillitemrequest->bill_item,count1)
+                        ensbillitemrequest->bill_item_qual = count1
+                        ensbillitemrequest->bill_item[count1]->bill_item_id = b.bill_item_id
+                        ensbillitemrequest->bill_item[count1]->action_type = "DEL"
+           with nocounter
+       endif
+
+       set ACTION_BEGIN = 1
+       SET ACTION_END = ensbillitemrequest->bill_item_qual
+
+       ;row found
+       if (curqual > 0)
+           ;013 execute afc_del_bill_item with replace(request,ensbillitemrequest)
+           execute afc_DEL_bill_item with replace("REQUEST","ENSBILLITEMREQUEST") ;013
+           set reply->qual[psub]->bill_item_id = ensbillitemrequest->bill_item[1]->bill_item_id
+       endif
+END  ;Check_del_item sub
+
+SUBROUTINE INITIALIZE( str )
+declare ridx = i2 with protect, noconstant(0)
+    call echo("Initialize begin")
+    set reply->status_data->status = "F"
+    set reply->actioncnt = 0
+
+    set stat = alterlist(holdreq->qual,request->nbr_of_recs)
+    for (psub = 1 to request->nbr_of_recs)
+        ; copy request buffer to holdreq
+        set holdreq->qual[psub]->action = request->qual[psub]->action
+        if (request->qual[psub]->ext_id = 0)
+           set holdreq->qual[psub]->ext_id = 0.0 
+        else
+           set holdreq->qual[psub]->ext_id = request->qual[psub]->ext_id
+        endif
+        if (request->qual[psub]->ext_contributor_cd = 0)
+           set holdreq->qual[psub]->ext_contributor_cd = 0.0 
+        else
+           set holdreq->qual[psub]->ext_contributor_cd = request->qual[psub]->ext_contributor_cd
+        endif
+        set holdreq->qual[psub]->ext_owner_cd = request->qual[psub]->ext_owner_cd
+        set holdreq->qual[psub]->ext_description = request->qual[psub]->ext_description
+        set holdreq->qual[psub]->ext_short_desc = request->qual[psub]->ext_short_desc
+        set holdreq->qual[psub]->careset_ind = request->qual[psub]->careset_ind
+        if (validate(request->qual[psub]->workload_only_ind,999)!=999)
+            set holdreq->qual[psub]->workload_only_ind = request->qual[psub]->workload_only_ind
+        endif
+        
+        set holdreq->qual[psub]->parent_qual_ind = request->qual[psub]->parent_qual_ind
+        if ( request->qual[psub]->price_qual > 0 )
+             call echo ("Price_Qual is present")
+             set holdreq->qual[psub]->price_qual = request->qual[psub]->price_qual
+             set stat = alterlist(holdreq->qual[psub]->prices, holdreq->qual[psub]->price_qual)
+             for (i = 1 to request->qual[psub]->price_qual)
+                  set holdreq->qual[psub]->prices[i]->price_sched_id = request->qual[psub]->prices[i]->price_sched_id
+                  set holdreq->qual[psub]->prices[i]->price = request->qual[psub]->prices[i]->price
+             endfor
+        else
+             set holdreq->qual[psub]->price_qual = 0
+        endif
+        if ( request->qual[psub]->billcode_qual > 0 )
+             call echo ("BillCode_Qual is present")
+             set holdreq->qual[psub]->billcode_qual = request->qual[psub]->billcode_qual
+             set stat = alterlist(holdreq->qual[psub]->billcodes, holdreq->qual[psub]->billcode_qual)
+             for (i = 1 to request->qual[psub]->billcode_qual)
+                  set holdreq->qual[psub]->billcodes[i]->billcode_sched_cd
+                                        = request->qual[psub]->billcodes[i]->billcode_sched_cd
+                  set holdreq->qual[psub]->billcodes[i]->billcode
+                                        = request->qual[psub]->billcodes[i]->billcode
+				  set holdreq->qual[psub]->billcodes[i]->bim1_int 
+				  					    = validate(request->qual[psub]->billcodes[i].bim1_int,0);019
+             endfor
+        else
+             set holdreq->qual[psub]->billcode_qual = 0
+        endif
+ 
+        if (request->qual[psub]->careset_ind = 1)
+            select into "nl:"
+            ext_id = request->qual[psub]->children[d1.seq]->ext_id
+            from (dummyt d1 with seq = value(request->qual[psub]->child_qual))
+            plan d1
+            where request->qual[psub]->children[d1.seq]->ext_id > 0.0
+            order by ext_id
+            head ext_id
+               ridx = ridx + 1
+               stat = alterlist(holdreq->qual[psub]->children, ridx)
+                 holdreq->qual[psub]->children[ridx]->ext_id =
+                                    request->qual[psub]->children[d1.seq]->ext_id
+               if (request->qual[psub]->children[d1.seq]->ext_contributor_cd = 0)
+                 holdreq->qual[psub]->children[ridx]->ext_contributor_cd = 0.0
+               else
+                 holdreq->qual[psub]->children[ridx]->ext_contributor_cd =
+                                    request->qual[psub]->children[d1.seq]->ext_contributor_cd
+               endif
+                 holdreq->qual[psub]->children[ridx]->ext_description =
+                                    request->qual[psub]->children[d1.seq]->ext_description
+                 holdreq->qual[psub]->children[ridx]->ext_short_desc  =
+                                    request->qual[psub]->children[d1.seq]->ext_short_desc
+                 holdreq->qual[psub]->children[ridx]->ext_owner_cd =
+                                    request->qual[psub]->children[d1.seq]->ext_owner_cd
+           with nocounter
+           set holdreq->qual[psub]->child_qual = ridx
+ 
+         else
+ 
+         
+ 
+            set holdreq->qual[psub]->child_qual = size(request->qual[psub]->children, 5)
+            set stat = alterlist(holdreq->qual[psub]->children, holdreq->qual[psub]->child_qual)
+            for (i = 1 to holdreq->qual[psub]->child_qual)
+                 if (request->qual[psub]->children[i]->ext_id = 0)
+                     set holdreq->qual[psub]->children[i]->ext_id = 0.0
+                 else
+                     set holdreq->qual[psub]->children[i]->ext_id = request->qual[psub]->children[i]->ext_id
+                endif
+                if (request->qual[psub]->children[i]->ext_contributor_cd = 0)
+                   set holdreq->qual[psub]->children[i]->ext_contributor_cd = 0.0
+                else
+                   set holdreq->qual[psub]->children[i]->ext_contributor_cd =
+                       request->qual[psub]->children[i]->ext_contributor_cd
+                endif
+                set holdreq->qual[psub]->children[i]->ext_description =
+                    request->qual[psub]->children[i]->ext_description
+                set holdreq->qual[psub]->children[i]->ext_short_desc  =
+                    request->qual[psub]->children[i]->ext_short_desc
+                set holdreq->qual[psub]->children[i]->ext_owner_cd =
+                    request->qual[psub]->children[i]->ext_owner_cd
+            endfor
+      endif
+ endfor
+ 
+   
+    ;016 Begin
+    ;1.If this script gets called inside ccl using request structure with only logicalDomainId not the logicaldomainind flag
+    ;  then we will be setting logical_domain_enabled indicator to True ,Eg. because supply chain is under logical domain but
+    ;  they have only logicalDomainID in the request structure , so if they add any bill item it should be logical domain based
+    ;2.If this script gets called through task method (csa) , then store whatever value passed in logical_domain_enabled_ind
+    ;  Eg. for now if you add any new bill item thorugh DCPtools that will be shared billitem , but in future if they want to be 
+    ;  under logical domain dcptools has to fill the logical_domain_enabled_ind flag to True.
+    
+    if (validate(request->logical_domain_id))
+      if (validate(request->logical_domain_enabled_ind))
+        set logicalDomainEnabledInd = request->logical_domain_enabled_ind 
+      else
+        set logicalDomainEnabledInd = TRUE 
+      endif
+      
+      set holdreq->logical_domain_id = request->logical_domain_id
+    endif
+    ;016 End
+END ;initialize sub
+
+
+#INITIALIZE_REQUEST
+
+    record ensbillitemrequest (
+     1 BILL_ITEM_QUAL = I2
+     1 BILL_ITEM[*]
+       2 ACTION_TYPE = C3
+       2 BILL_ITEM_ID = F8
+       2 EXT_PARENT_REFERENCE_ID = F8
+       2 EXT_PARENT_CONTRIBUTOR_CD = F8
+       2 EXT_CHILD_REFERENCE_ID = F8
+       2 EXT_CHILD_CONTRIBUTOR_CD = F8
+       2 EXT_DESCRIPTION = C100
+       2 EXT_SHORT_DESC = C50
+       2 EXT_OWNER_CD = F8
+       2 PARENT_QUAL_IND = F8
+       2 ACTIVE_IND_IND = I2
+       2 ACTIVE_IND = I2
+       2 ACTIVE_STATUS_CD = F8
+       2 ACTIVE_STATUS_PRSNL_ID = F8
+       2 ACTIVE_STATUS_DT_TM = DQ8
+       2 BEG_EFFECTIVE_DT_TM = DQ8
+       2 END_EFFECTIVE_DT_TM = DQ8
+       2 CHARGE_POINT_CD = F8
+       2 WORKLOAD_ONLY_IND = I2
+       2 UPDT_CNT = I4
+       2 MISC_IND = I2
+       2 STATS_ONLY_IND = I2
+       2 CHILD_SEQ = I4
+       2 LATE_CHRG_EXCL_IND = i2 ;004
+     1 LOGICAL_DOMAIN_ID = F8  ;016
+	 1 LOGICAL_DOMAIN_ENABLED_IND = i2 ;017
+ 
+    )
+
+    record enspsirequest (
+     1 PRICE_SCHED_ITEMS_QUAL = I2
+     1 PRICE_SCHED_ITEMS[*]
+             2 ACTION_TYPE = VC
+             2 PRICE_SCHED_ID = F8
+             2 BILL_ITEM_ID = F8
+             2 PRICE_SCHED_ITEMS_ID = F8
+             2 PRICE_IND = I2
+             2 PRICE = F8
+             2 PERCENT_REVENUE = I4
+             2 CHARGE_LEVEL_CD = F8
+             2 INTERVAL_TEMPLATE_CD = F8
+             2 DETAIL_CHARGE_IND_IND = I2
+             2 DETAIL_CHARGE_IND = I2
+             2 ACTIVE_IND_IND = I2
+             2 ACTIVE_IND = I2
+             2 ACTIVE_STATUS_CD = F8
+             2 ACTIVE_STATUS_DT_TM = DQ8
+             2 ACTIVE_STATUS_PRSNL_ID = F8
+             2 BEG_EFFECTIVE_DT_TM = DQ8
+             2 END_EFFECTIVE_DT_TM_IND = I2
+             2 END_EFFECTIVE_DT_TM = DQ8
+             2 UPDT_CNT = I2
+             2 UNITS_IND = I2
+             2 UNITS_IND_IND = I2
+             2 stats_only_ind = I2        ;006
+             2 stats_only_ind_ind = I2    ;006
+             2 CAPITATION_IND = I2        ;006
+             2 REFERRAL_REQ_IND = I2      ;006
+	     2 ALLOWABLE = F8             ;006
+	     2 EXCLUSIVE_IND_IND = I2     ;008
+	     2 EXCLUSIVE_IND = I2         ;008
+	     2 TAX = F8                   ;008
+	     2 COST_ADJ_AMT = F8          ;008
+	     2 BILLING_DISCOUNT_PRIORITY = I4 ;010	     	
+    )
+
+    record ensbimrequest (
+     1 bill_item_modifier_qual = I2
+     1 bill_item_modifier[*]
+             2 action_type = C3
+             2 bill_item_mod_id = F8
+             2 bill_item_id = F8
+             2 bill_item_type_cd = F8
+             2 key1_id = F8
+             2 key2_id = F8
+             2 key3_id = F8
+             2 key4_id = F8
+             2 key5_id = F8
+             2 key6 = VC
+             2 key7 = VC
+             2 key8 = VC
+             2 key9 = VC
+             2 key10 = VC
+             2 key11 = VC
+             2 key12 = VC
+             2 key13 = VC
+             2 key14 = VC
+             2 key15 = VC
+             2 key11_id = F8
+             2 key12_id = F8
+             2 key13_id = F8
+             2 key14_id = F8
+             2 key15_id = F8
+             2 bim1_int = F8
+             2 bim2_int = F8
+             2 bim_ind = I2
+             2 bim1_ind = I2
+             2 bim1_nbr = F8
+             2 active_ind_ind = I2
+             2 active_ind = I2
+             2 active_status_cd = F8
+             2 active_status_dt_tm = DQ8
+             2 active_status_prsnl_id = F8
+             2 beg_effective_dt_tm = DQ8
+             2 end_effective_dt_tm = DQ8
+             2 updt_cnt = I2
+    )
+
+    set parent_id = -1
+    go to AFTER_INIT_REQUEST
+#END_PROGRAM
+    free set holdreq
+    SET LOAD_END = cnvtdatetime(curdate,curtime3)
+    call echo("LOAD START: ",0)
+    call echo(format(LOAD_START,"hh:mm:ss;;s"))
+    call echo("LOAD END: ",0)
+    call echo(format(LOAD_END,"hh:mm:ss;;s"))
+    call echo("Total Children: ",0)
+    call echo(UPDATE_CHILDREN_COUNT,0)
+end go
+
+;Generated by GNU enscript 1.6.4.

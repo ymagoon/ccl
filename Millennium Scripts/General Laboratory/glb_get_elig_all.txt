@@ -1,0 +1,1104 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_elig_all/glb_get_elig_all.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2002 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_ELIG_ALL.PRG
+        Object name:            GLB_GET_ELIG_ALL
+        Request #:              250083
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Get all orders for all group and detail procedures that
+                                are eligible to be included in a given worklist.
+
+        Tables read:            accession_order_r
+                                code_value
+                                encntr_alias
+                                orders
+                                order_laboratory
+                                order_procedure_exception
+                                order_serv_res_container
+                                pending_collection
+                                person
+                                profile_task_r
+                                resource_group
+                                worklist
+                                worklist_order_r
+                                worklist_ref
+
+        Tables updated:         n/a
+
+        Executing from:         General Lab worklist request application
+
+        Special Notes:          This script assumes that the set of catalog_cds and the
+                                set of task_assay_cds are disjoint.
+                                If request->worklist_ref_id is equal to 0 then
+                                a worklist is being created on the fly with no
+                                corresponding worklist ref record.
+
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 05/23/96 Newton Hughes        Initial Release                     *
+;    *001 10/13/97 Jeff Fry             Select sub-section service_resource_*
+;    *                                  cd's along with testsite cd's       *
+;    *002 03/18/98 Kurt Gugler          change in_lab from location compare *
+;    *                                  to status_flag validation           *
+;    *003 03/27/98 Kurt Gugler          make reply testsite_cds same as     *
+;    *                                  request testsite_cd                 *
+;    *004 08/18/98 Bryan Muehlmeier     Add person_id, order_status_disp,   *
+;    *                                  and report_priority_disp to reply   *
+;    *005 10/19/98 Hal Patchen          Performance enhancements            *
+;    *006 10/22/98 Hal Patchen          Check for order status of In Process*
+;    *007 11/02/98 Hal Patchen          Check for containers crossing       *
+;    *                                  service resources for an order      *
+;    *008 06/29/99 Kevin Power          Remove OraHints for performance     *
+;    *009 07/28/99 Kevin Winkel         Return persons MRN                  *
+;    *010 07/12/99 Hal Patchen          Additional performance enhancements *
+;    *011 03/22/00 Hal Patchen          Qualify orders by routing resource  *
+;    *P01 12/19/00 Kasie Sly            Performance enhancements            *
+;    *012 08/21/02 Mark Brooks          Use service resource security       *
+;    *013 10/18/04 Scott Sundahl        Return Order Status Meaning         *************
+;    *014 05/02/06 Joe Troy             WorklistRequest enhancement for feature 87458.  *
+;                                       Additional data will need to be retrieved. Also *
+;                                       severe modifications for performance.           *
+;    *015 9/15/06  Scott Haven          Add logic to return case groups.    *************
+;    *016 1/23/07  Paul Lessin          Split joins on request ID, container*
+;                                       into separate Selects.              *
+;    *017 3/16/07  Paul Lessin          Get reply from include file         *
+;    *017 2/21/07  Matt Schile          Added related_worklists             *
+;    *018 04/17/08 Oliver Barbara       Added code to handle client_alias   *
+;    *019 09/08/08 Matt Hlavaty         performance tuning                  *
+;    *020 11/24/09 Ryan Manuel          Added code to load one accession    *
+;    *021 02/02/10 Antony Greetan	Fix for feature# 238736	            *
+;    *022 08/06/13 Fitsum Abebe         returned order image indicator      *
+;~DE~************************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************************
+
+      DROP PROGRAM glb_get_elig_all:dba GO
+      CREATE PROGRAM glb_get_elig_all:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      RECORD request
+      (
+%i cclsource:glb_get_elig_all_req.inc      
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+   if (validate(reply->n_orders, -1) = -1)
+      RECORD reply
+      (
+%i cclsource:glb_get_elig_all_rep.inc
+      )
+    endif
+
+%i cclsource:pcs_resource_security.inc
+%i cclsource:glb_get_wklst_case_groups.inc
+%i cclsource:i18n_uar.inc
+%i cclsource:pcs_subevent.inc
+; list of orders
+
+      RECORD ords
+      (
+        1 qual[*]
+          2 order_id    = f8
+          2 ignoreme    = i2    ; 1: ignore this order; 0: include this order in reply
+          2 order_status_cd = f8
+          2 dept_status_cd  = f8
+          2 order_mnemonic  = vc
+          2 catalog_cd      = f8
+          2 person_id       = f8
+          2 encntr_id       = f8
+          2 physician_id    = f8
+          2 order_dt_tm     = dq8
+          2 activity_type_cd = f8
+          2 route_level     = i2
+      )
+      
+      record catalog_cds
+      (
+        1 qual[*]
+          2 catalog_cd = f8
+      )
+      
+      record req1052579 (
+           1 context = i2
+           1 id_cnt = i4
+           1 id_qual[*]
+             2 id = f8
+      )       
+
+      /* Initialize service resource security */
+      call InitResourceSecurity(1)                                     ;012
+      if (IsResourceViewable(request->service_resource_cd) = False)    ;012
+        go to Exit_Script                                              ;012
+      endif                                                            ;012
+      
+      ; constants
+      declare ENCNTR_ALIAS_CS     = i4 with protect, constant(319)
+      declare ORDER_STATUS_CS     = i4 with protect, constant(6004)
+      declare COMMENT_TYPE_CS     = i4 with protect, constant(14)
+      declare INFO_TYPE_CS        = i4 with protect, constant(355)
+      declare ALIAS_TYPE_CS       = i4 with protect, constant(334)
+      declare ACTIVITY_SUBTYPE_CS = i4 with protect, constant(5801)
+      declare BATCH_SIZE          = i4 with protect, constant(100)
+      declare SMALL_BATCH_SIZE    = i4 with protect, constant(20)
+      declare ORDER_CONTEXT      = i2 with protect, constant(0)
+      
+      ; code values
+      declare dMRNCd              = f8 with protect, noconstant(0.0)
+      declare dFINCd              = f8 with protect, noconstant(0.0)
+      declare dOrdStatCd          = f8 with protect, noconstant(0.0)
+      declare dOrdStatInProcessCd = f8 with protect, noconstant(0.0)
+      declare dOrdCommentCd       = f8 with protect, noconstant(0.0)
+      declare dOrdNoteCd          = f8 with protect, noconstant(0.0)
+      declare dInfoCommentCd      = f8 with protect, noconstant(0.0)
+      declare dInfoNoteCd         = f8 with protect, noconstant(0.0)
+      declare dClientOrgCd        = f8 with protect, noconstant(0.0)
+      declare dHelixChargeOrderCd = f8 with protect, noconstant(0.0)
+      
+      ; variable declarations
+      declare x                   = i4 with protect, noconstant(0)
+      declare sRet                = vc with protect, noconstant(" ")
+      declare nords               = i4 with protect, noconstant(0)
+      declare ord_cnt             = i4 with protect, noconstant(0)
+      declare no_op               = i4 with protect, noconstant(0)
+      declare npris               = i4 with protect, noconstant(0)
+      declare nprocs              = i4 with protect, noconstant(0)
+      declare nFactor             = i4 with protect, noconstant(0)
+      declare lStart              = i4 with protect, noconstant(0)
+      declare accn_cnt            = i4 with protect, noconstant(0)
+      declare rel_wkst_cnt        = i4 with protect, noconstant(0)
+      declare catalogCnt          = i4 with protect, noconstant(0)
+      declare nStatus             = i4 with protect, noconstant(0)
+      declare i18nHandle          = i4 with protect, noconstant(0)
+      declare sUnknownString      = vc with protect, noconstant("")
+      declare sStillbornString    = vc with protect, noconstant("")
+      declare eff_end_dt_tm       = dq8 with private, noconstant(0.0)
+      declare y                   = i4 with protect, noconstant(0)
+      set nStatus = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+      set sUnknownString = uar_i18ngetmessage(i18nHandle, "UNKNOWN_AGE", "Unknown")
+      set sStillbornString = uar_i18ngetmessage(i18nHandle, "STILLBORN_AGE", "Stillborn")
+      
+      SET reply->status_data->status = "F"
+      SET nprocs = size(request->procs, 5)
+      SET npris = size(request->pris, 5)
+
+      /* Get Code Values */
+      set dMRNCd              = uar_get_code_by("MEANING", ENCNTR_ALIAS_CS, "MRN")
+      set dFINCd              = uar_get_code_by("MEANING", ENCNTR_ALIAS_CS, "FIN NBR")
+      set dOrdStatCd          = uar_get_code_by("MEANING", ORDER_STATUS_CS, "ORDERED")
+      set dOrdStatInProcessCd = uar_get_code_by("MEANING", ORDER_STATUS_CS, "INPROCESS")
+      set dOrdCommentCd       = uar_get_code_by("MEANING", COMMENT_TYPE_CS, "ORD COMMENT")
+      set dOrdNoteCd          = uar_get_code_by("MEANING", COMMENT_TYPE_CS, "ORD NOTE")
+      set dInfoCommentCd      = uar_get_code_by("MEANING", INFO_TYPE_CS, "COMMENT")
+      set dInfoNoteCd         = uar_get_code_by("MEANING", INFO_TYPE_CS, "NOTE")
+      set dClientOrgCd        = uar_get_code_by("MEANING", ALIAS_TYPE_CS, "CLIENT")
+      set dHelixChargeOrderCd = uar_get_code_by("MEANING", ACTIVITY_SUBTYPE_CS, "HLX_CO")
+
+      ; check for code values not found
+      if(dMRNCd <= 0.0)
+        set sRet = "MRN"
+      elseif(dFINCd <= 0.0)
+        set sRet = "FIN NBR"
+      elseif(dOrdStatCd <= 0.0)
+        set sRet = "ORDERED"
+      elseif(dOrdStatInProcessCd <= 0.0)
+        set sRet = "INPROCESS"
+      elseif(dOrdCommentCd <= 0.0)
+        set sRet = "ORD COMMENT"
+      elseif(dInfoCommentCd <= 0.0)
+        set sRet = "COMMENT"
+      elseif(dOrdNoteCd <= 0.0)
+        set sRet = "ORD NOTE"
+      elseif(dInfoNoteCd <= 0.0)
+        set sRet = "NOTE"
+      elseif(dClientOrgCd <= 0.0)
+        set sRet = "CLIENT"
+      else
+        set sRet = " "
+      endif
+      
+      if(textlen(trim(sRet)) > 0)
+        set reply->status_data.subeventstatus[1].TargetObjectName = "no code for meaning"
+        set reply->status_data.subeventstatus[1].TargetObjectValue = sRet
+        go to Exit_Script
+      endif
+      
+      
+      ; get orders for all group and detail procedures
+      if(request->procedure_inc_flag = 0)                                 ;011
+        if (size(trim(request->accession), 1) = 0)
+          select 
+          if(request->in_lab_ind = 0)
+            plan osrc where
+              osrc.service_resource_cd = request->service_resource_cd and
+              osrc.status_flag in(0, 1)
+            join o where
+              o.order_id = osrc.order_id and
+              o.order_status_cd+0 in(dOrdStatCd, dOrdStatInProcessCd)
+            with nocounter
+          endif
+          into "nl:"
+          from
+            order_serv_res_container osrc,
+            orders o
+          plan osrc where
+            osrc.service_resource_cd = request->service_resource_cd and
+            osrc.status_flag = 1
+          join o where
+            o.order_id = osrc.order_id and
+            o.order_status_cd+0 in(dOrdStatCd, dOrdStatInProcessCd)
+          order o.order_id
+          head o.order_id
+            nords = nords + 1
+            if (mod(nords, 50) = 1)
+             stat = alterlist(ords->qual, nords + 49)
+            endif
+            ords->qual[nords].order_id = o.order_id
+            ords->qual[nords].encntr_id = o.encntr_id
+            ords->qual[nords].catalog_cd = o.catalog_cd
+            ords->qual[nords].dept_status_cd = o.dept_status_cd
+            ords->qual[nords].order_mnemonic = o.order_mnemonic
+            ords->qual[nords].order_status_cd = o.order_status_cd
+            ords->qual[nords].person_id = o.person_id
+            ords->qual[nords].physician_id = o.last_update_provider_id
+            ords->qual[nords].order_dt_tm = cnvtdatetime(o.orig_order_dt_tm)
+            ords->qual[nords].activity_type_cd = o.activity_type_cd
+          with nocounter
+        else
+          select 
+          if(request->in_lab_ind = 0)
+            plan aor where
+              aor.accession = request->accession and
+              aor.primary_flag+0 = 0
+            join o where
+              o.order_id = aor.order_id and
+              o.order_status_cd+0 in(dOrdStatCd, dOrdStatInProcessCd)
+            join osrc where
+              osrc.order_id = o.order_id and
+              osrc.service_resource_cd = request->service_resource_cd and
+              osrc.status_flag in(0, 1)
+            with nocounter
+          endif
+          into "nl:"
+          from
+            accession_order_r aor,
+            order_serv_res_container osrc,
+            orders o
+          plan aor where
+            aor.accession = request->accession and
+            aor.primary_flag+0 = 0
+          join o where
+            o.order_id = aor.order_id and
+            o.order_status_cd+0 in(dOrdStatCd, dOrdStatInProcessCd)
+          join osrc where
+            osrc.order_id = o.order_id and
+            osrc.service_resource_cd = request->service_resource_cd and
+            osrc.status_flag = 1
+          order o.order_id
+          head o.order_id
+            nords = nords + 1
+            if (mod(nords, 50) = 1)
+             stat = alterlist(ords->qual, nords + 49)
+            endif
+            ords->qual[nords].order_id = o.order_id
+            ords->qual[nords].encntr_id = o.encntr_id
+            ords->qual[nords].catalog_cd = o.catalog_cd
+            ords->qual[nords].dept_status_cd = o.dept_status_cd
+            ords->qual[nords].order_mnemonic = o.order_mnemonic
+            ords->qual[nords].order_status_cd = o.order_status_cd
+            ords->qual[nords].person_id = o.person_id
+            ords->qual[nords].physician_id = o.last_update_provider_id
+            ords->qual[nords].order_dt_tm = cnvtdatetime(o.orig_order_dt_tm)
+            ords->qual[nords].activity_type_cd = o.activity_type_cd
+          with nocounter
+        endif
+      ;* Load orders for specific orderables at test site
+      elseif(request->procedure_inc_flag = 1)                             ;012
+        if (size(trim(request->accession), 1) = 0)
+          select
+          if(request->in_lab_ind = 0)         
+            plan osrc where
+              osrc.service_resource_cd = request->service_resource_cd and
+              osrc.status_flag in(0, 1)
+            join o where
+              o.order_id = osrc.order_id and
+              o.order_status_cd+0 in(dOrdStatCd, dOrdStatInProcessCd) and
+              expand(x, 1, nprocs, o.catalog_cd, request->procs[x].procedure_cd, 0, request->procs[x].grpdetail)
+            with nocounter
+          endif
+          into "nl:"
+          from
+            order_serv_res_container osrc,
+            orders o
+          plan osrc where
+            osrc.service_resource_cd = request->service_resource_cd and
+            osrc.status_flag = 1
+          join o where
+            o.order_id = osrc.order_id and
+            o.order_status_cd+0 in(dOrdStatCd, dOrdStatInProcessCd) and
+            expand(x, 1, nprocs, o.catalog_cd+0, request->procs[x].procedure_cd, 0, request->procs[x].grpdetail)
+          order o.order_id
+          head o.order_id
+            nords = nords + 1
+            if (mod(nords, 50) = 1)
+             stat = alterlist(ords->qual, nords + 49)
+            endif
+            ords->qual[nords].order_id = o.order_id
+            ords->qual[nords].encntr_id = o.encntr_id
+            ords->qual[nords].catalog_cd = o.catalog_cd
+            ords->qual[nords].dept_status_cd = o.dept_status_cd
+            ords->qual[nords].order_mnemonic = o.order_mnemonic
+            ords->qual[nords].order_status_cd = o.order_status_cd
+            ords->qual[nords].person_id = o.person_id
+            ords->qual[nords].physician_id = o.last_update_provider_id
+            ords->qual[nords].order_dt_tm = cnvtdatetime(o.orig_order_dt_tm)
+            ords->qual[nords].activity_type_cd = o.activity_type_cd
+          with nocounter
+        else
+          select
+          if(request->in_lab_ind = 0)    
+            plan aor where
+              aor.accession = request->accession and
+              aor.primary_flag+0 = 0
+            join o where
+              o.order_id = aor.order_id and
+              o.order_status_cd+0 in(dOrdStatCd, dOrdStatInProcessCd) and
+              expand(x, 1, nprocs, o.catalog_cd, request->procs[x].procedure_cd, 0, request->procs[x].grpdetail)    
+            join osrc where
+              osrc.order_id = o.order_id and
+              osrc.service_resource_cd = request->service_resource_cd and
+              osrc.status_flag in(0, 1)
+            with nocounter
+          endif
+          into "nl:"
+          from
+            accession_order_r aor,
+            order_serv_res_container osrc,
+            orders o
+          plan aor where
+            aor.accession = request->accession and
+            aor.primary_flag+0 = 0
+          join o where
+            o.order_id = aor.order_id and
+            o.order_status_cd+0 in(dOrdStatCd, dOrdStatInProcessCd) and
+            expand(x, 1, nprocs, o.catalog_cd+0, request->procs[x].procedure_cd, 0, request->procs[x].grpdetail)
+          join osrc where
+            osrc.order_id = o.order_id and
+            osrc.service_resource_cd = request->service_resource_cd and
+            osrc.status_flag = 1
+          order o.order_id
+          head o.order_id
+            nords = nords + 1
+            if (mod(nords, 50) = 1)
+             stat = alterlist(ords->qual, nords + 49)
+            endif
+            ords->qual[nords].order_id = o.order_id
+            ords->qual[nords].encntr_id = o.encntr_id
+            ords->qual[nords].catalog_cd = o.catalog_cd
+            ords->qual[nords].dept_status_cd = o.dept_status_cd
+            ords->qual[nords].order_mnemonic = o.order_mnemonic
+            ords->qual[nords].order_status_cd = o.order_status_cd
+            ords->qual[nords].person_id = o.person_id
+            ords->qual[nords].physician_id = o.last_update_provider_id
+            ords->qual[nords].order_dt_tm = cnvtdatetime(o.orig_order_dt_tm)
+            ords->qual[nords].activity_type_cd = o.activity_type_cd
+          with nocounter
+        endif
+      ; load all orders with detail procedures only
+      elseif(request->procedure_inc_flag = 2)
+
+        ;Obtain the catalog_cds associated to the task_assay_cds passed in
+        select into "nl:"
+        from profile_task_r ptr
+        plan ptr where
+          expand(x, 1, nprocs, ptr.task_assay_cd, request->procs[x].procedure_cd, 1, request->procs[x].grpdetail)
+        order by ptr.catalog_cd
+        head ptr.catalog_cd
+          catalogCnt = catalogCnt + 1
+          if (mod(catalogCnt, 20) = 1)
+            stat = alterlist(catalog_cds->qual, catalogCnt + 19)
+          endif
+          catalog_cds->qual[catalogCnt].catalog_cd = ptr.catalog_cd
+        foot ptr.catalog_cd
+          row +0
+        with nocounter
+      
+        set nFactor = ceil(catalogCnt / cnvtreal(SMALL_BATCH_SIZE))
+        
+        set stat = alterlist(catalog_cds->qual, SMALL_BATCH_SIZE * nFactor)
+        
+        set lStart = 1
+      
+        if (size(trim(request->accession), 1) = 0)
+          select 
+            if(request->in_lab_ind = 0)
+              plan d
+                where assign(lStart, (d.seq - 1) * SMALL_BATCH_SIZE + 1)
+              join osrc where
+                osrc.service_resource_cd = request->service_resource_cd and
+                osrc.status_flag in(0, 1)
+              join o where
+                o.order_id = osrc.order_id and
+                o.order_status_cd+0 in(dOrdStatCd, dOrdStatInProcessCd) and
+                expand(x, lStart, lStart + (SMALL_BATCH_SIZE - 1), o.catalog_cd+0, catalog_cds->qual[x].catalog_cd)
+              join ol where
+                ol.order_id = o.order_id
+              with nocounter
+            endif
+          into "nl:"
+          from
+            (dummyt d with seq = value(nFactor)),
+            order_serv_res_container osrc,
+            orders o,
+            order_laboratory ol
+          plan d where
+            assign(lStart, (d.seq - 1) * SMALL_BATCH_SIZE + 1)
+          join osrc where
+            osrc.service_resource_cd = request->service_resource_cd and
+            osrc.status_flag = 1
+          join o where
+            o.order_id = osrc.order_id and
+            o.order_status_cd+0 in(dOrdStatCd, dOrdStatInProcessCd) and
+            expand(x, lStart, lStart + (SMALL_BATCH_SIZE - 1), o.catalog_cd+0, catalog_cds->qual[x].catalog_cd)
+          join ol where
+            ol.order_id = o.order_id
+          detail
+              nords = nords + 1
+              if (mod(nords, 50) = 1)
+                stat = alterlist(ords->qual, nords + 49)
+              endif
+              ords->qual[nords].order_id = o.order_id
+              ords->qual[nords].encntr_id = o.encntr_id
+              ords->qual[nords].catalog_cd = o.catalog_cd
+              ords->qual[nords].dept_status_cd = o.dept_status_cd
+              ords->qual[nords].order_mnemonic = o.order_mnemonic
+              ords->qual[nords].order_status_cd = o.order_status_cd
+              ords->qual[nords].person_id = o.person_id
+              ords->qual[nords].physician_id = o.last_update_provider_id
+              ords->qual[nords].order_dt_tm = cnvtdatetime(o.orig_order_dt_tm)
+              ords->qual[nords].activity_type_cd = o.activity_type_cd
+              ords->qual[nords].route_level = ol.resource_route_level_flag
+          with nocounter
+        else
+          select 
+            if(request->in_lab_ind = 0)
+              plan d
+                where assign(lStart, (d.seq - 1) * SMALL_BATCH_SIZE + 1)
+              join aor where
+                aor.accession = request->accession and
+                aor.primary_flag+0 = 0
+              join o where
+                o.order_id = aor.order_id and
+                o.order_status_cd+0 in(dOrdStatCd, dOrdStatInProcessCd) and
+                expand(x, lStart, lStart + (SMALL_BATCH_SIZE - 1), o.catalog_cd+0, catalog_cds->qual[x].catalog_cd)
+              join osrc where
+                osrc.order_id = o.order_id and
+                osrc.service_resource_cd = request->service_resource_cd and
+                osrc.status_flag in(0, 1)
+              join ol where
+                ol.order_id = o.order_id
+              with nocounter
+            endif
+          into "nl:"
+          from
+            (dummyt d with seq = value(nFactor)),
+            accession_order_r aor,
+            order_serv_res_container osrc,
+            orders o,
+            order_laboratory ol
+          plan d where
+            assign(lStart, (d.seq - 1) * SMALL_BATCH_SIZE + 1)
+          join aor where
+            aor.accession = request->accession and
+            aor.primary_flag+0 = 0
+          join o where
+            o.order_id = aor.order_id and
+            o.order_status_cd+0 in(dOrdStatCd, dOrdStatInProcessCd) and
+            expand(x, lStart, lStart + (SMALL_BATCH_SIZE - 1), o.catalog_cd+0, catalog_cds->qual[x].catalog_cd)
+          join osrc where
+            osrc.order_id = o.order_id and
+            osrc.service_resource_cd = request->service_resource_cd and
+            osrc.status_flag = 1
+          join ol where
+            ol.order_id = o.order_id
+          detail
+              nords = nords + 1
+              if (mod(nords, 50) = 1)
+                stat = alterlist(ords->qual, nords + 49)
+              endif
+              ords->qual[nords].order_id = o.order_id
+              ords->qual[nords].encntr_id = o.encntr_id
+              ords->qual[nords].catalog_cd = o.catalog_cd
+              ords->qual[nords].dept_status_cd = o.dept_status_cd
+              ords->qual[nords].order_mnemonic = o.order_mnemonic
+              ords->qual[nords].order_status_cd = o.order_status_cd
+              ords->qual[nords].person_id = o.person_id
+              ords->qual[nords].physician_id = o.last_update_provider_id
+              ords->qual[nords].order_dt_tm = cnvtdatetime(o.orig_order_dt_tm)
+              ords->qual[nords].activity_type_cd = o.activity_type_cd
+              ords->qual[nords].route_level = ol.resource_route_level_flag
+          with nocounter
+        endif
+        set stat = alterlist(catalog_cds->qual, catalogCnt)
+        
+        ; multiple factor for breaking up ords->qual into chunks of BATCH_SIZE for expand
+        set nFactor = ceil(nords / cnvtreal(BATCH_SIZE))
+        
+        ; grow array to ensure even integrals of BATCH_SIZE
+        set stat = alterlist(ords->qual, nFactor * BATCH_SIZE)
+        
+        ; fill in added entities with last entity's data
+        for(x = nords + 1 to nFactor * BATCH_SIZE)
+          set ords->qual[x].order_id = ords->qual[nords].order_id
+          set ords->qual[x].ignoreme = 1
+        endfor
+
+        set lStart = 1
+        select into "nl:"
+          lLocStart = lStart
+        from 
+          (dummyt d with seq = value(nFactor)),
+          order_procedure_exception ope
+        plan d where
+          assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+        join ope where 
+          expand(x, lStart, lStart + (BATCH_SIZE - 1), ope.order_id, ords->qual[x].order_id, 2, ords->qual[x].route_level) and
+          ope.service_resource_cd = request->service_resource_cd
+        order by ope.order_id
+        head ope.order_id
+          found = 0
+        detail
+          pos = locateval(x, 1, nprocs, ope.task_assay_cd, request->procs[x].procedure_cd)
+          if(pos > 0 )
+            found = 1
+          endif
+        foot ope.order_id
+          if(found = 0)
+            opos = locateval(x, lLocStart, lLocStart + (BATCH_SIZE - 1), ope.order_id, ords->qual[x].order_id)
+            ords->qual[opos].ignoreme = 1
+          endif
+        with nocounter
+      endif
+
+      ;* See if any eligible orders were found.
+      if(nords = 0)
+        set reply->status_data->status = "Z"
+        go to Exit_Script
+      endif            
+
+      if(request->procedure_inc_flag in (0,1))
+        ; multiple factor for breaking up ords->qual into chunks of BATCH_SIZE for expand
+        set nFactor = ceil(nords / cnvtreal(BATCH_SIZE))
+      
+        ; grow array to ensure even integrals of BATCH_SIZE
+        set stat = alterlist(ords->qual, nFactor * BATCH_SIZE)
+      
+        ; fill in added entities with last entity's data
+        for(x = nords + 1 to nFactor * BATCH_SIZE)
+          set ords->qual[x].order_id = ords->qual[nords].order_id
+          set ords->qual[x].ignoreme = 1
+        endfor
+      endif
+      
+      IF (request->cumulative_ind = 0 AND request->procedure_inc_flag = 2)
+        ;* If cumulative_ind = 0 then ignore orders that are already
+        ;* included in another worklist of the same worklist reference
+        ;* type.
+
+        set lStart = 1
+      	select into "nl:"
+      	from
+         worklist_order_r wor,
+         worklist_element we,
+         (dummyt d with seq = value(nFactor))
+        plan d where
+          assign(lStart, (d.seq - 1) * BATCH_SIZE + 1) 
+      	join wor where
+          expand(x, lStart, lStart + (BATCH_SIZE - 1), wor.order_id, ords->qual[x].order_id)
+      	join we where
+          we.worklist_id = wor.worklist_id and
+          we.order_id+0 = wor.order_id and
+      	  expand(x, 1, nprocs, we.task_assay_cd+0, request->procs[x].procedure_cd)
+      	detail
+      	  x = locateval(x, lStart, lStart + (BATCH_SIZE - 1), wor.order_id, ords->qual[x].order_id)
+      	  ords->qual[x].ignoreme = 1
+      	with nocounter
+
+      elseif(request->cumulative_ind = 0 and request->procedure_inc_flag != 2)
+      ;* Ignore group orders for this test site that are already included
+      ;* in another worklist with the same test site.  Don't
+      ;* execute this select if the worklist is details-only.
+        set lStart = 1
+        select into "nl:"
+        from
+          worklist_order_r wo,
+          worklist w,
+          worklist_ref wr,
+          (dummyt d with seq = value(nFactor))        
+        plan d where
+          assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+        join wo where
+          expand(x, lStart, lStart + (BATCH_SIZE - 1), wo.order_id, ords->qual[x]->order_id)
+        join w where
+          w.worklist_id = wo.worklist_id
+        join wr where
+          wr.worklist_ref_id = w.worklist_ref_id
+        detail
+          x = locateval(x, lStart, lStart + (BATCH_SIZE - 1), wo.order_id, ords->qual[x]->order_id)
+          ords->qual[x]->ignoreme = 1
+        with nocounter
+      endif
+      
+      ;* Exclude orders beyond look-ahead limit.
+      set lStart = 1
+      select into "nl:"
+        pc.scheduled_dt_tm
+      from
+        pending_collection pc,
+        (dummyt d with seq = value(nFactor))
+      plan d where
+        assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+      JOIN pc where
+        expand(x, lStart, lStart + (BATCH_SIZE - 1), 0, ords->qual[x]->ignoreme, pc.order_id, ords->qual[x]->order_id) and
+        pc.scheduled_dt_tm+0 > cnvtdatetime(request->lookahead_dt_tm_end)
+      detail
+        x = locateval(x, lStart, lStart + (BATCH_SIZE - 1), pc.order_id, ords->qual[x]->order_id)
+        ords->qual[x]->ignoreme = 1
+      with nocounter
+
+      ;* exclude all Helix Charge orders
+      set lStart = 1
+      select into "nl:"
+      from
+        order_catalog oc,
+        (dummyt d with seq = value(nFactor))
+      plan d 
+        where assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+      join oc 
+        where expand(x, lStart, lStart + (BATCH_SIZE - 1), 0, ords->qual[x]->ignoreme, oc.catalog_cd, ords->qual[x]->catalog_cd)
+          and oc.activity_subtype_cd + 0.0 = dHelixChargeOrderCd
+      detail
+        x = locateval(x, lStart, lStart + (BATCH_SIZE - 1), oc.catalog_cd, ords->qual[x]->catalog_cd)
+        while (x > 0)
+          ords->qual[x]->ignoreme = 1
+          x = locateval(x, x + 1, lStart + (BATCH_SIZE - 1), oc.catalog_cd, ords->qual[x]->catalog_cd)
+        endwhile
+      with nocounter
+      
+      ;* Get report priority, person name,
+      ;* and order status for each order in ords array.
+      ;********************************************************************
+      set lStart = 1
+      select
+        if(request->priority_ind = 1)
+          plan d where 
+            assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+          join o where
+            expand(x, lStart, lStart + (BATCH_SIZE - 1), 0, ords->qual[x]->ignoreme, o.order_id, ords->qual[x]->order_id)
+          join ol where
+            ol.order_id = o.order_id and
+            expand(x, 1, npris, ol.report_priority_cd+0, request->pris[x]->priority_cd)
+          join p where
+            p.person_id = o.person_id+0
+          join ps where
+            ps.person_id = o.last_update_provider_id+0
+          join e where
+            e.encntr_id = o.encntr_id+0
+        endif
+      into "nl:"
+        lLocStart = lStart
+      from
+        (dummyt d with seq = value(nFactor)),     ; array of orders
+        person p,
+        orders o,
+        order_laboratory ol,
+        encounter e,
+        prsnl ps
+      plan d where 
+        assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+      join o where
+        expand(x, lStart, lStart + (BATCH_SIZE - 1), 0, ords->qual[x]->ignoreme, o.order_id, ords->qual[x]->order_id)
+      join ol where
+        ol.order_id = o.order_id
+      join p where
+        p.person_id = o.person_id+0
+      join ps where
+        ps.person_id = o.last_update_provider_id+0
+      join e where
+        e.encntr_id = o.encntr_id+0
+      order o.order_id
+      head o.order_id
+        x = locateval(x, lLocStart, lLocStart + (BATCH_SIZE - 1), o.order_id, ords->qual[x]->order_id)
+        if(ords->qual[x].encntr_id = e.encntr_id and ords->qual[x].person_id = p.person_id 
+            and ords->qual[x].physician_id = ps.person_id)
+          ord_cnt = ord_cnt + 1
+          if(mod(ord_cnt, 50) = 1)
+            stat = alterlist(reply->qual, ord_cnt + 49)
+          endif
+          reply->qual[ord_cnt].order_id = ords->qual[x].order_id
+          reply->qual[ord_cnt].order_dt_tm = ords->qual[x].order_dt_tm
+          reply->qual[ord_cnt].encntr_id = ords->qual[x].encntr_id
+          reply->qual[ord_cnt].order_status_cd = ords->qual[x].order_status_cd
+          reply->qual[ord_cnt].dept_status_cd = ords->qual[x].dept_status_cd
+          reply->qual[ord_cnt].catalog_cd = ords->qual[x].catalog_cd
+          reply->qual[ord_cnt].order_mnemonic = ords->qual[x].order_mnemonic
+          reply->qual[ord_cnt].person_id = ords->qual[x].person_id
+          reply->qual[ord_cnt].birth_dt_tm = cnvtdatetime(p.birth_dt_tm)
+          reply->qual[ord_cnt].name_full_formatted = p.name_full_formatted
+          reply->qual[ord_cnt].sex_cd = p.sex_cd
+          reply->qual[ord_cnt].race_cd = p.race_cd
+          reply->qual[ord_cnt].report_priority_cd = ol.report_priority_cd
+          reply->qual[ord_cnt].service_resource_cd = request->service_resource_cd
+          reply->qual[ord_cnt].visit_reason = e.reason_for_visit
+          reply->qual[ord_cnt].location = concat(trim(uar_get_code_display(e.loc_facility_cd)), ",",
+                                                 trim(uar_get_code_display(e.loc_nurse_unit_cd)), ",",
+                                                 trim(uar_get_code_display(e.loc_room_cd)), ",",
+                                                 trim(uar_get_code_display(e.loc_bed_cd)))
+          reply->qual[ord_cnt].order_physician = ps.name_full_formatted
+          reply->qual[ord_cnt].activity_type_cd = ords->qual[x].activity_type_cd
+
+
+          eff_end_dt_tm = p.deceased_dt_tm
+          if(eff_end_dt_tm = NULL or eff_end_dt_tm = 0.00)
+            eff_end_dt_tm = cnvtdatetime(curdate, curtime3)
+          endif
+          
+          if((p.birth_dt_tm > eff_end_dt_tm) or (p.birth_dt_tm = NULL))
+            reply->qual[ord_cnt].age = sUnknownString
+          elseif(p.birth_dt_tm = p.deceased_dt_tm)
+            reply->qual[ord_cnt].age = sStillbornString
+          else
+            reply->qual[ord_cnt].age = cnvtage(p.birth_dt_tm, eff_end_dt_tm, 0)
+          endif
+        endif
+      with nocounter
+      
+      ; exit script if no orders retrieved
+      if (ord_cnt = 0)
+        set reply->status_data.status = "Z"
+        go to Exit_Script
+      endif
+      set nFactor = ceil(ord_cnt / cnvtreal(BATCH_SIZE))
+      
+      ; grow reply qual to nearest multiple of BATCH_SIZE
+      set stat = alterlist(reply->qual, nFactor * BATCH_SIZE)
+      for(x = ord_cnt + 1 to nFactor * BATCH_SIZE)
+        set reply->qual[x].order_id = reply->qual[ord_cnt].order_id
+        set reply->qual[x].person_id = reply->qual[ord_cnt].person_id
+        set reply->qual[x].encntr_id = reply->qual[ord_cnt].encntr_id
+      endfor
+
+      ; grab accession
+      ;************************************************************
+      set lStart = 1
+      select into "nl:"
+        lLocStart = lStart
+      from
+        accession_order_r aor,
+        (dummyt d with seq = value(nFactor))
+      plan d where
+        assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+      join aor where
+        expand(x, lStart, lStart + (BATCH_SIZE - 1), aor.order_id, reply->qual[x].order_id) and
+        aor.primary_flag+0 = 0
+      detail
+        x = locateval(x, lLocStart, lLocStart + (BATCH_SIZE - 1), aor.order_id, reply->qual[x].order_id)
+        reply->qual[x].accession = aor.accession
+        reply->qual[x].accession_id = aor.accession_id
+      with nocounter
+      
+      ; grab the request id
+      set lStart = 1
+      select into "nl:"
+				oror.order_id
+      from
+        ord_rqstn_ord_r oror,
+        ord_rqstn r,
+        (dummyt d with seq = value(nFactor))
+      plan d where
+        assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+      join oror where
+        expand(x, lStart, lStart + (BATCH_SIZE - 1), oror.order_id, reply->qual[x].order_id)
+      join r where
+        r.ord_rqstn_id = oror.ord_rqstn_id+0
+      detail
+        x = locateval(x, lStart, lStart + (BATCH_SIZE - 1), oror.order_id, reply->qual[x].order_id)
+        reply->qual[x].request_id = concat(r.client_alias_name, "-", format(r.seq_nbr, "##########;P0"))
+        reply->qual[x].order_request_id = r.ord_rqstn_id 
+      with nocounter
+      
+      ; grab specimen type and collected date/time
+      ;************************************************************
+      set lStart = 1
+      select into "nl:"
+        lLocStart = lStart
+      from
+        (dummyt d with seq = value(nFactor)),
+        order_container_r ocr,
+        container c
+      plan d where
+        assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+      join ocr where
+        expand(x, lStart, lStart + (BATCH_SIZE - 1), ocr.order_id, reply->qual[x].order_id)
+      join c where
+        c.container_id = ocr.container_id+0
+      detail
+        x = locateval(x, lLocStart, lLocStart + (BATCH_SIZE - 1), ocr.order_id, reply->qual[x].order_id)
+        reply->qual[x].specimen_type_cd = c.specimen_type_cd
+	      reply->qual[x].collected_dt_tm = cnvtdatetime(c.drawn_dt_tm)
+      with nocounter
+      
+      ; load related worklists
+      if(request->load_related_wklst_ind = 1 and request->worklist_ref_id > 0.0)
+        ;pad the accession_id
+        for(x = ord_cnt + 1 to nFactor * BATCH_SIZE)
+          set reply->qual[x].accession_id = reply->qual[ord_cnt].accession_id
+        endfor
+
+        set lStart = 1
+        select distinct into "nl:"
+        from
+          accession_order_r aor,
+          worklist_order_r wor,
+          worklist w,
+          prsnl p,
+          (dummyt d with seq = value(nFactor))
+        plan d where
+          assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+        join aor where
+          expand(x, lStart, lStart + (BATCH_SIZE - 1), aor.accession_id, reply->qual[x].accession_id)
+        join wor where
+          wor.order_id = aor.order_id
+        join w where
+          w.worklist_id = wor.worklist_id+0 and
+          w.worklist_ref_id +0 = request->worklist_ref_id
+        join p where
+          p.person_id = w.worklist_prsnl_id+0
+        order by aor.accession_id, w.worklist_dt_tm desc, w.worklist_id, 0
+        head report
+          accn_cnt = 0
+        head aor.accession_id
+          rel_wklst_cnt = 0
+          
+          accn_cnt = accn_cnt + 1
+          if(mod(accn_cnt, 10) = 1)
+            stat = alterlist(reply->accessions[accn_cnt], accn_cnt + 9)
+          endif
+          
+          reply->accessions[accn_cnt].accession = aor.accession
+          reply->accessions[accn_cnt].accession_id = aor.accession_id
+        detail
+          rel_wklst_cnt = rel_wklst_cnt + 1
+          if(mod(rel_wklst_cnt, 10) = 1)
+            stat = alterlist(reply->accessions[accn_cnt]->related_worklists, rel_wklst_cnt + 9)
+          endif
+          reply->accessions[accn_cnt].related_worklists[rel_wklst_cnt].worklist_id = wor.worklist_id
+          reply->accessions[accn_cnt].related_worklists[rel_wklst_cnt].worklist_alias = w.worklist_alias
+          reply->accessions[accn_cnt].related_worklists[rel_wklst_cnt].worklist_dt_tm = cnvtdatetime(w.worklist_dt_tm)
+          reply->accessions[accn_cnt].related_worklists[rel_wklst_cnt].worklist_prsnl_id = p.person_id
+          reply->accessions[accn_cnt].related_worklists[rel_wklst_cnt].worklist_prsnl_username = p.username
+        foot aor.accession_id
+          stat = alterlist(reply->accessions[accn_cnt]->related_worklists, rel_wklst_cnt)
+        foot report
+          stat = alterlist(reply->accessions, accn_cnt)
+        with nocounter
+      endif
+      
+      ; grab MRN/FIN data
+      ; *******************************************************
+      set lStart = 1
+      select into "nl:"
+        lLocStart = lStart
+      from
+        (dummyt d with seq = value(nFactor)),
+        encntr_alias ea
+      plan d where
+        assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+      JOIN ea where
+        expand(x, lStart, lStart + (BATCH_SIZE - 1), ea.encntr_id, reply->qual[x].encntr_id) and
+        ea.encntr_alias_type_cd+0 in(dMRNCd, dFINCd) and
+        ea.active_ind+0 = 1 and
+        (ea.beg_effective_dt_tm+0 <= cnvtdatetime(curdate, curtime3) and
+        (ea.end_effective_dt_tm+0 >= cnvtdatetime(curdate, curtime3) or
+        ea.end_effective_dt_tm+0 = NULL))
+      detail
+        x = locateval(x, lLocStart, lLocStart + (BATCH_SIZE - 1), ea.encntr_id, reply->qual[x].encntr_id)
+        while(x > 0)
+          if(ea.encntr_alias_type_cd = dMRNCd)
+            reply->qual[x]->med_rec_nbr =
+                    concat(reply->qual[x]->med_rec_nbr, trim(cnvtalias(ea.alias, ea.alias_pool_cd)), ",")
+          else
+            reply->qual[x]->fin =
+                    concat(reply->qual[x]->fin, trim(cnvtalias(ea.alias, ea.alias_pool_cd)), ",")
+          endif
+          x = locateval(x, x+1, lLocStart + (BATCH_SIZE - 1), ea.encntr_id, reply->qual[x].encntr_id)
+        endwhile
+      with nocounter
+
+      set lStart = 1
+      select into "nl:"
+      from
+        encounter e,
+        organization_alias oa,
+        (dummyt d with seq = value(nFactor))
+      plan d where
+        assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+      join e where
+        expand(x, lStart, lStart + (BATCH_SIZE - 1), e.encntr_id, reply->qual[x].encntr_id)
+      join oa where
+        oa.organization_id = e.organization_id+0 and
+        oa.org_alias_type_cd+0 = dClientOrgCd and 
+        oa.active_ind = 1 and
+        oa.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3) and
+        oa.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+      detail
+        x = locateval(x, lStart, lStart + (BATCH_SIZE - 1), e.encntr_id, reply->qual[x].encntr_id)
+        while(x > 0)
+          reply->qual[x].client_alias = cnvtalias(oa.alias, oa.alias_pool_cd)
+          x = locateval(x, x + 1, lStart + (BATCH_SIZE - 1), e.encntr_id, reply->qual[x].encntr_id)
+        endwhile
+      with nocounter
+      
+      ; see if order comments/notes exist
+      ;****************************************************
+      set lStart = 1
+      select into "nl:"
+      from
+        person_info pi,
+        (dummyt d with seq = value(nFactor))
+      plan d where
+        assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+      join pi where
+        expand(x, lStart, lStart + (BATCH_SIZE - 1), pi.person_id, reply->qual[x].person_id) and
+        pi.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3) and
+        pi.info_type_cd+0 in(dInfoCommentCd, dInfoNoteCd) and
+        pi.long_text_id+0 > 0.0
+      detail
+        x = locateval(x, lStart, lStart + (BATCH_SIZE - 1), pi.person_id, reply->qual[x].person_id)
+        while(x>0)
+          reply->qual[x].comment_ind = 1
+          x = locateval(x, x+1, lStart + (BATCH_SIZE - 1), pi.person_id, reply->qual[x].person_id)
+        endwhile
+      with nocounter
+      
+      set lStart = 1
+      select into "nl:"
+      from
+        order_comment oc,
+        (dummyt d with seq = value(nFactor))
+      plan d where
+        assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+      join oc where
+        expand(x, lStart, lStart + (BATCH_SIZE - 1), oc.order_id, reply->qual[x].order_id) and
+        oc.comment_type_cd in(dOrdCommentCd, dOrdNoteCd) and
+        oc.long_text_id+0 > 0.0
+      detail
+        x = locateval(x, lStart, lStart + (BATCH_SIZE - 1), oc.order_id, reply->qual[x].order_id)
+        reply->qual[x].comment_ind = 1
+      with nocounter
+      
+      set lStart = 1
+      select into "nl:"
+      from
+        encntr_info ei,
+        (dummyt d with seq = value(nFactor))
+      plan d where
+        assign(lStart, (d.seq - 1) * BATCH_SIZE + 1)
+      join ei where
+        expand(x, lStart, lStart + (BATCH_SIZE - 1), ei.encntr_id, reply->qual[x].encntr_id) and
+        ei.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3) and
+        ei.info_type_cd+0 in(dInfoCommentCd, dInfoNoteCd) and
+        ei.long_text_id+0 > 0.0
+      detail
+        x = locateval(x, lStart, lStart + (BATCH_SIZE - 1), ei.encntr_id, reply->qual[x].encntr_id)
+        while(x>0)
+          reply->qual[x].comment_ind = 1
+          x = locateval(x, x+1, lStart + (BATCH_SIZE - 1), ei.encntr_id, reply->qual[x].encntr_id)
+        endwhile
+      with nocounter
+      
+      ; set image indicator for each order
+      ;****************************************************     
+      set req1052579->context = ORDER_CONTEXT
+      set stat = alterlist(req1052579->id_qual, ord_cnt)
+      set req1052579->id_cnt = ord_cnt
+      ;add each order id from the reply structure to req1052579 record structure.
+      for(x = 1 to ord_cnt)     
+        set req1052579->id_qual[x].id = reply->qual[x].order_id
+      endfor
+      
+      execute pcs_get_nonclin_doc_alert with replace("REQUEST", "REQ1052579"), replace("REPLY", "REP1052579")
+      
+      if (rep1052579->status_data->status = "S" or rep1052579->status_data->status = "Z")
+          for(x = 1 to ord_cnt)
+             ;check to see if there are images for each order id in the reply structure.
+             set stat = locateval(y, 1, rep1052579->qual_cnt, reply->qual[x].order_id, rep1052579->alert_qual[y].entity_id)
+             if(stat > 0)
+                 set reply->qual[x]->order_image_ind = 1
+             endif              
+          endfor          
+        else
+          call subevent_add ("SCRIPT", "F", "pcs_get_nonclin_doc_alert", "Call to pcs_get_nonclin_doc_alert was unsuccessful.")
+      endif
+
+      set reply->status_data->status = "S"
+      set reply->n_orders = ord_cnt
+      ; shrink reply back to original size
+      set stat = alterlist(reply->qual, ord_cnt)
+
+      ; get case groups for worklist
+      ;****************************************************
+      call LoadCaseGroups(NULL)
+      
+#Exit_Script
+
+      IF ((reply->status_data->status != "F") And
+          (GetResourceSecurityStatus(0) != "S"))                         ;012
+        CALL PopulateResSecStatusBlock(0)                                ;012
+        SET reply->status_data->status = GetResourceSecurityStatus(0)    ;012
+      ENDIF
+      
+      free set catalog_cds
+      free set ords
+      free set req1052579
+      free set rep1052579
+    END GO
+
+
+
+;Generated by GNU enscript 1.6.4.

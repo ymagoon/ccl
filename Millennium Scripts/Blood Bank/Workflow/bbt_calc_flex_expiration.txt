@@ -1,0 +1,1286 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/bbt_calc_flex_expiration/bbt_calc_flex_expiration.inc Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2006 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~************************************************************************
+      *                   PathNet Blood Bank Transfusion                     *
+      *                           V500 Script                                *
+      *                     bbt_calc_flex_expiration.inc                     *
+      *                                                                      *
+      * PURPOSE:          This include file will be used to get specimen     *
+      *                   expiration date when flexible specimen preferences *
+      *                   are on.                                            *
+      *                                                                      *
+      * NOTES:  This include file requires the following include files:      *
+      *         - BBT_GetBBPreference.inc,                                   *
+      *         - glb_script_logging.inc (currently included via             *
+      *                                   BBT_GetBBPreference.inc)           *
+      ************************************************************************/
+;~DB~ ************************************************************************
+;     *                      GENERATED MODIFICATION CONTROL LOG              *
+;     ************************************************************************
+;     *                                                                      *
+;     *Mod Date     Engineer             Comment                             *
+;     *--- -------- -------------------- ----------------------------------- *
+;     *001 08/14/06 Jason Coy            Initial release                     *
+;     *002 06/04/08 Sachin Yadav         Added logic for two new preferencess*
+;     *003 06/12/08 Ronda Zheng          Added GetFlexMaxExpiration function *
+;     *004 12/18/08 Ronda Zheng          Corrected FlexMaxExpiration calculation*
+;                                        when there are multiple transfusion *
+;	  *005 01/31/14 Gayatri Samala       fix for CR 1-3910498727 (ability to extend
+;										 expired specimens                   *
+;     *006 04/15/14 Gayatri Samala       reading flex preferences only when  *
+;										 flex is ON
+;~DE~ ************************************************************************
+ 
+;******************************************************************************************
+;* flex_param_out record - (utilized by LoadFlexParams and LoadFlexPatient sub routines)  *
+;******************************************************************************************
+record flex_param_out
+(
+  1 testing_facility_cd           = f8  ; transfusion service facility code for encounter facility
+  1 flex_on_ind                   = i2
+  1 flex_param                    = i4
+  1 allo_param                    = i4
+  1 auto_param                    = i4
+  1 anti_flex_ind                 = i2
+  1 anti_param                    = i4
+  1 max_spec_validity             = i4
+  1 expiration_unit_type_mean     = c12
+  1 max_transfusion_end_range     = i4
+  1 transfusion_flex_params[*]
+    2 index                       = i4
+    2 start_range                 = i4
+    2 end_range                   = i4
+    2 flex_param                  = i4
+  1 extend_trans_ovrd_ind		  = i2
+  1 calc_trans_drawn_dt_ind       = i2
+  1 neonate_age					  = i4
+)
+ 
+;******************************************************************************************
+;* flex_patient_out record - (utilized by LoadFlexPatient sub routine)                    *
+;******************************************************************************************
+record flex_patient_out
+(
+  1 person_id                     = f8
+  1 encntr_id                     = f8
+  1 anti_exist_ind                = i2
+  1 transfusion[*]
+    2 transfusion_dt_tm           = dq8
+    2 critical_dt_tm              = dq8
+)
+ 
+;******************************************************************************************
+;* flex_codes record - (utilized to hold code values obtained by cdf meaning.             *
+;******************************************************************************************
+record flex_codes
+(
+  1 codes_loaded_ind              = i2
+  1 transfused_state_cd           = f8
+  1 blood_product_cd              = f8
+ 
+)
+ 
+ 
+;******************************************************************************************
+;* flex_max_out record - (utilized to hold flex max expiration date/time and flag)
+;******************************************************************************************
+record flex_max_out
+(
+  1 max_expire_dt_tm          = dq8
+  1 max_expire_flag           = i2
+)
+ 
+;******************************************************************************************
+;* FacilityInfo record - (utilized to hold flexible specimen preferences for a particular
+;                         transfusion service facility)
+;******************************************************************************************
+free set FacilityInfo
+ 
+record FacilityInfo
+(
+	1 Facilities[*]
+      2 testing_facility_cd         = f8  ; transfusion service facility code for encounter facility
+      2 flex_on_ind                 = i2
+      2 flex_param                  = i4
+  	  2 allo_param                  = i4
+      2 auto_param                  = i4
+      2 anti_flex_ind               = i2
+      2 anti_param                  = i4
+      2 max_spec_validity           = i4
+      2 expiration_unit_type_mean   = c12
+      2 max_transfusion_end_range   = i4
+      2 transfusion_flex_params[*]
+        3 index                     = i4
+        3 start_range               = i4
+        3 end_range                 = i4
+        3 flex_param                = i4
+      2 extend_trans_ovrd_ind		= i2
+      2 calc_trans_drawn_dt_ind     = i2
+      2 extend_expired_specimen     = i2  ; value set for extending expired specimens preference
+      2 neonate_age                 = i4
+      2 load_flex_params        = i2
+)
+ 
+;******************************************************************************************
+;* Declarations                                                                           *
+;******************************************************************************************
+declare LoadFlexParams (encntrFacilityCd = f8 (value)) = i2
+declare LoadFlexPatient (personId = f8 (value), encntrID = f8 (value)) = i2
+declare GetCriticalDtsTms () = i2
+declare GetFlexCodesByCDFMeaning () = i2
+declare GetFlexExpiration (personId = f8 (value), encntrId = f8 (value), drawnDtTm = dq8 (value),
+                           encntrFacilityCd = f8 (value), disregardDefaultInd = i2 (value)) = dq8
+declare GetFlexMaxExpiration(personId = f8 (value), encntrId = f8 (value), drawnDtTm = dq8 (value),
+                           encntrFacilityCd = f8 (value)) = i2
+; these subroutines will be called, if flex params for a facility is already retrieved.
+; LoadFlexParams() will not be called for each order, instead will be done at facility level to improve performance
+declare GetFlexExpirationForPerson (personId = f8 (value), encntrId = f8 (value), drawnDtTm = dq8 (value),
+                           encntrFacilityCd = f8 (value), disregardDefaultInd = i2 (value)) = dq8
+declare GetFlexMaxExpirationForPerson (personId = f8 (value), encntrId = f8 (value), drawnDtTm = dq8 (value),
+                           encntrFacilityCd = f8 (value)) = i2
+declare GetFlexSpecimenParams(facilityIndex = i4 (value), EncFacilityCd = f8 (value), AddReadInd = i2 (value),
+						   AppKey = c10 (value)) = null
+ 
+; variable declarations
+declare StatBBCalcFlex              = i2 with protect, noconstant(0)
+
+declare nTRANS_FLAG                 = i2   with protect, constant(1)
+declare nANTI_FLAG                  = i2   with protect, constant(2)
+declare nNEONATE_FLAG               = i2   with protect, constant(3)
+declare nMAX_PARAM_FLAG             = i2   with protect, constant(4)   
+ 
+;******************************************************************************************
+;* Initialization                                                                         *
+;******************************************************************************************
+;initialize the testing_facility_cd to -1 so that system level prefs can be loaded
+;the first time through the script.
+set flex_param_out->testing_facility_cd = -1
+ 
+;******************************************************************************************
+;* Subroutines                                                                            *
+;******************************************************************************************
+subroutine LoadFlexParams( encntrFacilityCd )
+;*************** FUNCTION DETAILS ***************
+    ; Loads flexible specimen preferences,
+;*************** LOCAL VARIABLES ****************
+    declare prefCount                  = i2  with protect, noconstant(0)
+    declare prefIndex                  = i2  with protect, noconstant(0)
+    declare testingFacilityCd          = f8  with protect, noconstant(0.0)
+;***************** INSTRUCTIONS *****************
+    ; Determine if correct preferences are loaded based on testing facility (transfusion service facility).
+    set testingFacilityCd = BbtGetFlexSpecTestingFacility(encntrFacilityCd)
+    if (testingFacilityCd = -1)
+        call log_message( "Error getting transfusion service facility preference.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    if (flex_param_out->testing_facility_cd = testingFacilityCd)
+        ; Correct preferences are loaded already, exit sub.
+        return (1)
+    endif
+ 
+    ; Initialize flex_param_out record.
+    set StatBBCalcFlex = initrec(flex_param_out)
+ 
+    ; Initialize flex_patient_out record since it is dependent on values loaded in this sub routine.
+    set StatBBCalcFlex = initrec(flex_patient_out)
+ 
+    set flex_param_out->flex_on_ind = BbtGetFlexSpecEnableFlexExpiration(testingFacilityCd)
+ 
+    case (flex_param_out->flex_on_ind)
+        of 0:
+            ; Flexible specimen is not turned on.
+            return (0)
+        of -1:
+            ; Error obtaining preference.
+            call log_message( "Error getting flex on preference.", LOG_LEVEL_ERROR)
+            return (-1)
+    endcase
+ 
+    set flex_param_out->allo_param = BbtGetFlexSpecXMAlloExpUnits(testingFacilityCd)
+    if (flex_param_out->allo_param = -1)
+        call log_message( "Error getting flex param preference.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    set flex_param_out->auto_param = BbtGetFlexSpecXMAutoExpUnits(testingFacilityCd)
+    if (flex_param_out->auto_param = -1)
+        call log_message( "Error getting auto param pref.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    set flex_param_out->anti_flex_ind = BbtGetFlexSpecDefClinSigAntibodyParams(testingFacilityCd)
+    if (flex_param_out->anti_flex_ind = -1)
+        call log_message( "Error getting anti_flex_ind.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    set flex_param_out->anti_param = BbtGetFlexSpecClinSigAntibodiesExpUnits(testingFacilityCd)
+    if (flex_param_out->anti_param = -1)
+        call log_message( "Error getting anti_param.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    set flex_param_out->max_spec_validity = BbtGetFlexSpecMaxSpecExpUnits(testingFacilityCd)
+    if (flex_param_out->max_spec_validity = -1)
+        call log_message( "Error getting max spec validity preference.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    set flex_param_out->expiration_unit_type_mean = BbtGetFlexSpecExpUnitTypeMean(testingFacilityCd)
+    if (size(flex_param_out->expiration_unit_type_mean, 1) <= 0)
+        call log_message( "Error getting expiration unit type preference.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    if (BbtGetFlexSpecTransfusionParameters(testingFacilityCd) = 1)
+        ; successful return on flexible specimen expiration parameters, copy over parameters.
+        set prefCount = size(FlexSpecTransParams->Params,5)
+ 
+        set StatBBCalcFlex = alterlist(flex_param_out->transfusion_flex_params, prefCount)
+ 
+        for (prefIndex = 1 to prefCount)
+            set flex_param_out->transfusion_flex_params[prefIndex].index
+                = FlexSpecTransParams->Params[prefIndex].Index
+ 
+            set flex_param_out->transfusion_flex_params[prefIndex].start_range
+                = FlexSpecTransParams->Params[prefIndex].TransfusionStartRange
+ 
+            set flex_param_out->transfusion_flex_params[prefIndex].end_range
+                = FlexSpecTransParams->Params[prefIndex].TransfusionEndRange
+ 
+            set flex_param_out->transfusion_flex_params[prefIndex].flex_param
+                = FlexSpecTransParams->Params[prefIndex].SpecimenExpiration
+ 
+            ; Determine the max transfusion end days while we are looping, should always be the last one but
+            ; checking in loop to be sure.
+            if (FlexSpecTransParams->Params[prefIndex].TransfusionEndRange > flex_param_out->max_transfusion_end_range)
+                ; Found a larger value, set new max.
+                set flex_param_out->max_transfusion_end_range = FlexSpecTransParams->Params[prefIndex].TransfusionEndRange
+            endif
+        endfor
+    else
+        call log_message( "Error getting transfusion flex params.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+ 	set flex_param_out->extend_trans_ovrd_ind = BbtGetFlexSpecExtendTransfOverride(testingFacilityCd)
+    if (flex_param_out->extend_trans_ovrd_ind = -1)
+        call log_message( "Error getting extend_trans_ovrd_ind.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+ 	set flex_param_out->calc_trans_drawn_dt_ind = BbtGetFlexSpecCalcPostTransfspecsFromDawnDt(testingFacilityCd)
+ 	if (flex_param_out->calc_trans_drawn_dt_ind = -1)
+        call log_message( "Error getting calc_trans_drawn_dt_ind.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+ 	set flex_param_out->neonate_age = BbtGetFlexSpecNeonateDaysDefined(testingFacilityCd)
+ 	if (flex_param_out->neonate_age = -1)
+        call log_message( "Error getting neonate days defined.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    ; Set transfusion service facility cd
+    set flex_param_out->testing_facility_cd = testingFacilityCd
+ 
+    return (1)
+ 
+end ; LoadFlexParams sub routine end.
+ 
+subroutine LoadFlexPatient( personId, encntrId )
+;*************** FUNCTION DETAILS ***************
+    ; Accepts a person id and encnctr id. Checks for clinically significant antibodies when flex_param_out->anti_flex_ind = 1.
+    ;
+    ; Also, loads transfusions that fall within two times the maximum transfusion end date.
+    ; Excludes autologous products, products that do not require a crossmatch and derivatives.
+    ;
+    ; NOTE: LoadFlexParams sub must be called prior to calling this one since we are checking preference values
+    ;       loaded by the LoadFlexParams sub routine.
+;*************** LOCAL VARIABLES ****************
+    declare CURRENT_DT_TM               = dq8 with protect, constant(cnvtdatetime(curdate,0))
+ 
+    declare transfusionCount            = i4  with protect, noconstant(0)
+    declare earliestTransfusionEndDtTm  = dq8 with protect, noconstant(0.0)
+;***************** INSTRUCTIONS *****************
+    set StatBBCalcFlex = initrec(flex_patient_out)
+ 
+    if (flex_param_out->anti_flex_ind = 1)
+        ; Determine if any clinically significant antibodies exist
+        select
+            if (encntrId > 0.0)
+                ; Filter with encntrId.
+                from
+                    person_antibody          pa,
+                    transfusion_requirements tr
+ 
+                plan pa where pa.encntr_id        = encntrId
+                          and pa.active_ind       = 1
+ 
+                join tr where tr.requirement_cd   = pa.antibody_cd
+                          and tr.significance_ind = 1
+ 
+            else
+                ; Do not filter with encntrId.
+                from
+                    person_antibody          pa,
+                    transfusion_requirements tr
+ 
+                plan pa where pa.person_id        = personId
+                          and pa.active_ind       = 1
+ 
+                join tr where tr.requirement_cd   = pa.antibody_cd
+                          and tr.significance_ind = 1
+ 
+            endif
+ 
+        into "nl:"
+ 
+        with nocounter
+ 
+        if (curqual > 0)
+            set flex_patient_out->anti_exist_ind = 1
+        endif
+    endif
+ 
+    ; Check if cdf meanings need to be loaded, and load if needed.
+    if (flex_codes->codes_loaded_ind != 1)
+        if (GetFlexCodesByCDFMeaning(null) != 1)
+            call log_message("Error calling GetFlexCodesByCDFMeaning.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+    endif
+ 
+    ; Determine the date for 2x the maximum transfusion end date.
+    set earliestTransfusionEndDtTm = dateTimeAdd(CURRENT_DT_TM, - (2 * flex_param_out->max_transfusion_end_range))
+ 
+    ; Find all transfusions within 2x the maximum transfusion end date. Exclude autologous products,
+    ; products that do not require a crossmatch and derivatives.
+    select into "nl:"
+ 
+    from
+        transfusion       t,
+        product           p,
+        product_index     pi,
+        product_category  pc,
+        product_event     pe
+ 
+    plan t  where t.person_id        = personId
+              and t.active_ind       = 1
+    join p  where p.product_id       = t.product_id
+              and p.product_class_cd = flex_codes->blood_product_cd
+              and p.active_ind       = 1
+    join pi where pi.product_cd      = p.product_cd
+              and pi.active_ind      = 1
+    join pc where pc.product_cat_cd  = pi.product_cat_cd
+              and pc.active_ind      = 1
+    join pe where pe.product_id      = p.product_id
+              and pe.event_type_cd   = flex_codes->transfused_state_cd
+              and pe.event_dt_tm    >= cnvtdatetime(earliestTransfusionEndDtTm)
+ 
+              and (((encntrId        > 0.0)
+                  and (pe.encntr_id  = encntrId))
+               or (encntrId          = 0.0))
+ 
+              and pe.active_ind      = 1
+ 
+    order by pe.event_dt_tm desc
+ 
+    head report
+        transfusionCount = 0
+ 
+    head pe.event_dt_tm
+        row + 0
+ 
+    detail
+        ; Check if product is autologous.
+        if (pi.autologous_ind = 0)
+            ; Product is not autologous, check if product requires crossmatch.
+            if (pc.xmatch_required_ind = 1)
+                ; Product requires crossmatch, add an item to transfusion array
+                transfusionCount = transfusionCount + 1
+ 
+                if (transfusionCount > size(flex_patient_out->transfusion, 5))
+                    StatBBCalcFlex = alterlist(flex_patient_out->transfusion, transfusionCount + 9)
+                endif
+ 
+                ; set transfusion date/time
+                flex_patient_out->transfusion[transfusionCount].transfusion_dt_tm = pe.event_dt_tm
+ 
+            endif
+        endif
+ 
+    foot pe.event_dt_tm
+        row + 0
+ 
+    foot report
+        StatBBCalcFlex = alterlist(flex_patient_out->transfusion, transfusionCount)
+ 
+    with nocounter
+ 
+    set flex_patient_out->person_id = personId
+    set flex_patient_out->encntr_id = encntrId
+ 
+    return (1)
+ 
+end ; LoadFlexPatient sub routine end.
+ 
+subroutine GetCriticalDtsTms(null)
+;*************** FUNCTION DETAILS ***************
+    ; This routine relies on the population of flex_param_out, flex_patient_out and flex_codes
+    ; to populate the critical dates and times.
+;*************** LOCAL VARIABLES ****************
+    declare criticalRange               = i4  with protect, noconstant(0)
+    declare transfusionFlexParamsCount  = i4  with protect, noconstant(0)
+    declare transfusionFlexParamsIndex  = i4  with protect, noconstant(0)
+    declare transCount                  = i4  with protect, noconstant(0)
+    declare transIndex                  = i4  with protect, noconstant(0)
+;***************** INSTRUCTIONS *****************
+    ; Check if cdf meanings need to be loaded, and load if needed.
+    if (flex_codes->codes_loaded_ind != 1)
+        if (GetFlexCodesByCDFMeaning(null) != 1)
+            call log_message("Error calling GetFlexCodesByCDFMeaning.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+    endif
+ 
+    ; Determine critical range
+    set transfusionFlexParamsCount = size(flex_param_out->transfusion_flex_params, 5)
+    for(transfusionFlexParamsIndex = 1 to transfusionFlexParamsCount)
+        if (flex_param_out->transfusion_flex_params[transfusionFlexParamsIndex].Index = 1)
+            set criticalRange = flex_param_out->transfusion_flex_params[transfusionFlexParamsIndex].end_range
+ 
+            ; exit for loop since found index 1.
+            set transfusionFlexParamsIndex = transfusionFlexParamsCount
+        endif
+    endfor
+ 
+    ; Obtain critical dates/times.
+    set transCount = size(flex_patient_out->transfusion, 5)
+    for(transIndex = 1 to transCount)
+        if (trim(flex_param_out->expiration_unit_type_mean) = "D")  ;"Days"
+            ; Set critical date/time which would be the nth days (criticalRange) past the
+            ; transfusion date at 235959.
+            set flex_patient_out->transfusion[transIndex].critical_dt_tm =
+                    datetimeadd(cnvtdatetime(cnvtdate(flex_patient_out->transfusion[transIndex].transfusion_dt_tm), 235959),
+                                criticalRange)
+ 
+        else ;(flex_param_out->expiration_unit_type_mean = "H") ;"Hours"
+            ; Set critical date/time which would be the nth days (criticalRange) past the
+            ; transfusion date/time.
+            set flex_patient_out->transfusion[transIndex].critical_dt_tm =
+                    datetimeadd(flex_patient_out->transfusion[transIndex].transfusion_dt_tm, criticalRange)
+ 
+        endif
+    endfor
+ 
+    return (1)
+ 
+end ; GetCriticalDtsTms sub routine end.
+ 
+subroutine GetFlexCodesByCDFMeaning(null)
+;*************** FUNCTION DETAILS ***************
+    ; Obtains code values by CDF meaning for any needed within this include file.
+    ; Populates the code values obtained into the flex_codes record defined above.
+;*************** LOCAL VARIABLES ****************
+    ; Transfused inventory state (event type)
+    declare BB_INVENTORY_STATES_CS      = i4  with protect, constant(1610) ; Blood Bank Inventory States code set 1610.
+    declare TRANSFUSED_STATE_MEAN       = c12 with protect, constant("7")
+ 
+    ; Blood products product class
+    declare PRODUCT_CLASS_CS            = i4  with protect, constant(1606) ; Product Class code set 1606.
+    declare BLOOD_PRODUCT_MEAN          = c12 with protect, constant("BLOOD")
+ 
+;***************** INSTRUCTIONS *****************
+    ; Initialize flex_codes record
+    set StatBBCalcFlex = initrec(flex_codes)
+ 
+    set flex_codes->codes_loaded_ind = 0
+ 
+    ; Obtain transfused inventory state code.
+    set flex_codes->transfused_state_cd = uar_get_code_by("MEANING", BB_INVENTORY_STATES_CS, nullterm(TRANSFUSED_STATE_MEAN))
+    if (flex_codes->transfused_state_cd <= 0.0)
+        call log_message( "Error getting transfused state cd.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    ; Obtain blood product cd
+    set flex_codes->blood_product_cd = uar_get_code_by("MEANING", PRODUCT_CLASS_CS, nullterm(BLOOD_PRODUCT_MEAN))
+    if (flex_codes->blood_product_cd <= 0.0)
+        call log_message( "Error getting blood product cd.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    set flex_codes->codes_loaded_ind = 1
+ 
+    return (1)
+ 
+end ; GetFlexCodesByCDFMeaning sub routine end.
+ 
+subroutine GetFlexExpiration( personId, encntrId, drawnDtTm, encntrFacilityCd, disregardDefaultInd )
+;*************** FUNCTION DETAILS ***************
+    ; Returns flexible specimen expiration date/time. The disregardDefaultInd value passed in will ignore the
+    ; default value when calculating when indicator is set to 1. If no transfusions or antibodies exist when
+    ; disregardDefaultInd is set to 1 we will return a null value as the date.
+    ; NOTE: any time make change in GetFlexExpiration function, need to evaluate if the change needs to make
+    ; in GetFlexMaxExpiration function.
+;*************** LOCAL VARIABLES ****************
+    declare expireDtTm                 = dq8 with protect, noconstant(0.0)
+    declare paramDtTm                  = dq8 with protect, noconstant(0.0)
+    declare transCount                 = i4  with protect, noconstant(0)
+    declare transIndex                 = i4  with protect, noconstant(0)
+    declare transDtTmDrawnDtTmDiff     = i4  with protect, noconstant(0)
+    declare transFlexParamsCount       = i2  with protect, noconstant(0)
+    declare transFlexParamsIndex       = i2  with protect, noconstant(0)
+    declare reCalcCriticalDtTmInd      = i2  with protect, noconstant(0)
+    declare prevTestingFacCdHold       = f8  with protect, noconstant(0.0)
+    declare useCritInd                 = i2  with protect, noconstant(0)
+;***************** INSTRUCTIONS *****************
+    ; Check if cdf meanings need to be loaded, and load if needed.
+    if (flex_codes->codes_loaded_ind != 1)
+        if (GetFlexCodesByCDFMeaning(null) != 1)
+            call log_message("Error calling GetFlexCodesByCDFMeaning.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+    endif
+ 
+    ; Store off the current testing facility cd prior to calling load flex params.
+    set prevTestingFacCdHold = flex_param_out->testing_facility_cd
+ 
+    ; Call LoadFlexParams to ensure correct preferences are loaded.
+    if (LoadFlexParams(encntrFacilityCd) != 1)
+        ; LoadFlexParams() returned a bad status. Log message, exit sub.
+        call log_message( "Error loading flex params.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    ; Check if testing facility cd changed to ensure we recalc critical date/times when needed.
+    if (prevTestingFacCdHold != flex_param_out->testing_facility_cd)
+        ; testing facility code changed, set recalc critical date/time indicator accordingly.
+        set reCalcCriticalDtTmInd = 1
+    endif
+ 
+    ; Determine if correct patient info is loaded based on personId and encntrId passed in.
+    if ((flex_patient_out->person_id != personId) or (flex_patient_out->encntr_id != encntrId))
+        ; Must load patient info since personId or encntrId do not match what is currently loaded.
+        if (LoadFlexPatient(personId, encntrId) != 1)
+            ; LoadFlexPatient() returned a bad status, log message, exit sub.
+            call log_message( "Error loading patient info.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+ 
+        set reCalcCriticalDtTmInd = 1
+    endif
+ 
+    ; Determine if must recalculate critical dates/times.
+    if (reCalcCriticalDtTmInd = 1)
+        ; Get critical dates.
+        if (GetCriticalDtsTms(null) != 1)
+            ; GetCriticalDtsTms() returned a bad status, log message and exit sub.
+            call log_message( "Error loading critical dates/times.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+    endif
+ 
+    if (disregardDefaultInd = 1)
+        ; Default value will not be considered in calculation, check if antibodies exist.
+        if (flex_patient_out->anti_exist_ind = 1)
+            ; At least one clinically significant antibody exists, set flex_param value equal to anti_param value.
+            set flex_param_out->flex_param = flex_param_out->anti_param
+        else
+            ; No clinically significant antibodies exist, set flex_param value equal to -1 since disregarding default
+            set flex_param_out->flex_param = -1
+        endif
+    else
+        ;Initialize flex_param to be the allo_param
+        set flex_param_out->flex_param = flex_param_out->allo_param
+ 
+        ; Default value will be considered in calculation, check if antibodies exist.
+        if (flex_patient_out->anti_exist_ind = 1)
+            ; At least one clinically significant antibody exists, determine if the clinically significant antibodies expire
+            ; units preference is shorter than crossmatch allogeneic expire units.
+            if (flex_param_out->anti_param < flex_param_out->flex_param)
+                ; clinically significant antibodies expire units preference is shorter than crossmatch allogeneic expire units,
+                ; set flex_param equal to the shorter.
+                set flex_param_out->flex_param = flex_param_out->anti_param
+            endif
+        endif
+    endif
+ 
+    ; Only set expirDtTm at this point if flex param value is not -1 (flex param value is only -1 when we chose to
+    ; disregard the default value and antibodies do not exist).
+    if (flex_param_out->flex_param != -1)
+        if (trim(flex_param_out->expiration_unit_type_mean) = "D")  ;"Days"
+            set expireDtTm = datetimeadd(cnvtdatetime(cnvtdate(drawnDtTm), 235959), flex_param_out->flex_param)
+ 
+        else ; (flex_param_out->expiration_unit_type_mean = "H") ;"Hours"
+            set expireDtTm = dateTimeAdd(drawnDtTm, flex_param_out->flex_param)
+        endif
+    endif
+ 
+    set transCount           = size(flex_patient_out->transfusion,5)
+    set transFlexParamsCount = size(flex_param_out->transfusion_flex_params, 5)
+ 
+    for (transIndex = 1 to transCount)
+        ; Evaluate this transfusion item.
+        set useCritInd = 0
+    	if (drawnDtTm < flex_patient_out->transfusion[transIndex].transfusion_dt_tm)
+    		set useCritInd = 1
+    	elseif (drawnDtTm < flex_patient_out->transfusion[transIndex].critical_dt_tm)
+    			if (flex_param_out->calc_trans_drawn_dt_ind = 0)
+    				set useCritInd = 1
+    			endif
+    	endif
+ 
+        If (useCritInd = 1)
+        	If((expireDtTm > flex_patient_out->transfusion[transIndex].critical_dt_tm) or (expireDtTm = 0.0))
+                ; Note: expireDtTm will be 0.0 at this point when we are disregarding the default, no clin sig antibodies exist
+                ; and it's the first time we hit a point where we can set expireDtTm.            
+        		set expireDtTm = flex_patient_out->transfusion[transIndex].critical_dt_tm
+			endif
+        else
+            ; Find difference between transfusion date/time and drawn date/time
+            set transDtTmDrawnDtTmDiff
+                = ceil(dateTimeDiff(drawnDtTm, flex_patient_out->transfusion[transIndex].transfusion_dt_tm))
+ 
+             ; Find parameter range to match difference
+            for (transFlexParamsIndex = 1 to transFlexParamsCount)
+                if ((transDtTmDrawnDtTmDiff >= flex_param_out->transfusion_flex_params[transFlexParamsIndex].start_Range)
+                and (transDtTmdrawnDtTmDiff <= flex_param_out->transfusion_flex_params[transFlexParamsIndex].end_range))
+                    ; Found parameter range that the difference between transfusion date/time and drawn date/time falls into.
+                    if (trim(flex_param_out->expiration_unit_type_mean) = "D" ) ;"Days"
+                        set paramDtTm = dateTimeAdd(cnvtdatetime(cnvtdate(drawnDtTm), 235959),
+                                                    flex_param_out->transfusion_flex_params[transFlexParamsIndex].flex_param)
+                    else ; (flex_param_out->expiration_unit_type_mean = "H") ;"Hours"
+                        set paramDtTm = dateTimeAdd(drawnDtTm,
+                                                    flex_param_out->transfusion_flex_params[transFlexParamsIndex].flex_param)
+                    endif
+ 
+                    if ((expireDtTm > paramDtTm) or (expireDtTm = 0.0))
+                        ; Note: expireDtTm will be 0.0 at this point when we are disregarding the default, no clin sig
+                        ; antibodies exist and it's the first time we hit a point where we can set expireDtTm.
+                        set expireDtTm = paramDtTm
+                    endif
+ 
+                    ; Exit for loop since found a match
+                    set transFlexParamsIndex = transFlexParamsCount
+                endif
+            endfor
+        endif
+    endfor
+ 
+    return (expireDtTm)
+ 
+end ; GetFlexExpiration sub routine end.
+ 
+ 
+subroutine GetFlexMaxExpiration( personId, encntrId, drawnDtTm, encntrFacilityCd )
+;*************** FUNCTION DETAILS ***************
+    ; Returns flexible specimen max expiration date/time and flag
+    ; NOTE: any time make change in GetFlexExpiration function, need to evaluate if the change needs to make
+    ; in GetFlexMaxExpiration function.
+;*************** LOCAL VARIABLES ****************
+    declare expireDtTm                 = dq8 with protect, noconstant(0.0)
+    declare paramDtTm                  = dq8 with protect, noconstant(0.0)
+    declare transCount                 = i4  with protect, noconstant(0)
+    declare transIndex                 = i4  with protect, noconstant(0)
+    declare transDtTmDrawnDtTmDiff     = i4  with protect, noconstant(0)
+    declare transFlexParamsCount       = i2  with protect, noconstant(0)
+    declare transFlexParamsIndex       = i2  with protect, noconstant(0)
+    declare reCalcCriticalDtTmInd      = i2  with protect, noconstant(0)
+    declare prevTestingFacCdHold       = f8  with protect, noconstant(0.0)
+    declare useCritInd                 = i2  with protect, noconstant(0)
+    declare maxParamExpireDtTm         = dq8 with protect, noconstant(0.0)
+    declare transExpireDtTm            = dq8 with protect, noconstant(0.0)
+    declare nAntiParamInd              = i2  with protect, noconstant(0)
+    declare nTransParamInd             = i2  with protect, noconstant(0)
+    declare calcFlexParam              = i4  with protect, noconstant(0)
+;***************** INSTRUCTIONS *****************    
+    ; Check if cdf meanings need to be loaded, and load if needed.
+    if (flex_codes->codes_loaded_ind != 1)
+        if (GetFlexCodesByCDFMeaning(null) != 1)
+            call log_message("Error calling GetFlexCodesByCDFMeaning.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+    endif
+ 
+    ; Initialize flex_max_out record.
+    set StatBBCalcFlex = initrec(flex_max_out)
+    
+    ; Store off the current testing facility cd prior to calling load flex params.
+    set prevTestingFacCdHold = flex_param_out->testing_facility_cd
+ 
+    ; Call LoadFlexParams to ensure correct preferences are loaded.
+    if (LoadFlexParams(encntrFacilityCd) != 1)
+        ; LoadFlexParams() returned a bad status. Log message, exit sub.
+        call log_message( "Error loading flex params.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    ; Check if testing facility cd changed to ensure we recalc critical date/times when needed.
+    if (prevTestingFacCdHold != flex_param_out->testing_facility_cd)
+        ; testing facility code changed, set recalc critical date/time indicator accordingly.
+        set reCalcCriticalDtTmInd = 1
+    endif
+ 
+    ; Determine if correct patient info is loaded based on personId and encntrId passed in.
+    if ((flex_patient_out->person_id != personId) or (flex_patient_out->encntr_id != encntrId))
+        ; Must load patient info since personId or encntrId do not match what is currently loaded.
+        if (LoadFlexPatient(personId, encntrId) != 1)
+            ; LoadFlexPatient() returned a bad status, log message, exit sub.
+            call log_message( "Error loading patient info.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+ 
+        set reCalcCriticalDtTmInd = 1
+    endif
+ 
+    ; Determine if must recalculate critical dates/times.
+    if (reCalcCriticalDtTmInd = 1)
+        ; Get critical dates.
+        if (GetCriticalDtsTms(null) != 1)
+            ; GetCriticalDtsTms() returned a bad status, log message and exit sub.
+            call log_message( "Error loading critical dates/times.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+    endif
+ 
+    ;Initialize calcFlexParam to be the max_param.
+    set calcFlexParam = flex_param_out->max_spec_validity
+    
+    ; Max expiration value will be considered in calculation, check if antibodies exist.
+    if (flex_patient_out->anti_exist_ind = 1)
+        ; At least one clinically significant antibody exists, determine if the clinically significant antibodies expire
+        ; units preference is shorter than crossmatch max expire units.
+        if (flex_param_out->anti_param < calcFlexParam)
+            ; clinically significant antibodies expire units preference is shorter than max parameter,
+            ; set calcFlexParam equal to the shorter.
+            set calcFlexParam = flex_param_out->anti_param
+            set nAntiParamInd = 1
+        endif
+    endif
+ 
+ 
+    if (trim(flex_param_out->expiration_unit_type_mean) = "D")  ;"Days"
+        set maxParamExpireDtTm = datetimeadd(cnvtdatetime(cnvtdate(drawnDtTm), 235959), calcFlexParam)
+    else ; (flex_param_out->expiration_unit_type_mean = "H") ;"Hours"
+        set maxParamExpireDtTm = dateTimeAdd(drawnDtTm, calcFlexParam)
+    endif
+ 
+    set transCount           = size(flex_patient_out->transfusion,5)
+    set transFlexParamsCount = size(flex_param_out->transfusion_flex_params, 5)
+    
+    set transExpireDtTm = maxParamExpireDtTm
+ 
+    for (transIndex = 1 to transCount)
+        ; Evaluate this transfusion item.
+        set useCritInd = 0
+    	if (drawnDtTm < flex_patient_out->transfusion[transIndex].transfusion_dt_tm)
+    		set useCritInd = 1
+    	elseif (drawnDtTm < flex_patient_out->transfusion[transIndex].critical_dt_tm)
+            if (flex_param_out->calc_trans_drawn_dt_ind = 0)
+                set useCritInd = 1
+            endif
+    	endif
+ 
+        If (useCritInd = 1)
+            If (transExpireDtTm > flex_patient_out->transfusion[transIndex].critical_dt_tm)
+                set transExpireDtTm = flex_patient_out->transfusion[transIndex].critical_dt_tm
+                set nTransParamInd = 1
+            endif
+        else
+            ; Find difference between transfusion date/time and drawn date/time
+            set transDtTmDrawnDtTmDiff
+                = ceil(dateTimeDiff(drawnDtTm, flex_patient_out->transfusion[transIndex].transfusion_dt_tm))
+ 
+             ; Find parameter range to match difference
+            for (transFlexParamsIndex = 1 to transFlexParamsCount)
+                if ((transDtTmDrawnDtTmDiff >= flex_param_out->transfusion_flex_params[transFlexParamsIndex].start_Range)
+                and (transDtTmdrawnDtTmDiff <= flex_param_out->transfusion_flex_params[transFlexParamsIndex].end_range))
+                    ; Found parameter range that the difference between transfusion date/time and drawn date/time falls into.
+                    if (trim(flex_param_out->expiration_unit_type_mean) = "D" ) ;"Days"
+                        set paramDtTm = dateTimeAdd(cnvtdatetime(cnvtdate(drawnDtTm), 235959),
+                                                    flex_param_out->transfusion_flex_params[transFlexParamsIndex].flex_param)
+                    else ; (flex_param_out->expiration_unit_type_mean = "H") ;"Hours"
+                        set paramDtTm = dateTimeAdd(drawnDtTm,
+                                                    flex_param_out->transfusion_flex_params[transFlexParamsIndex].flex_param)
+                    endif
+ 
+                    if (transExpireDtTm > paramDtTm)
+                       set transExpireDtTm = paramDtTm
+                       set nTransParamInd = 1
+                    endif
+ 
+                    ; Exit for loop since found a match
+                    set transFlexParamsIndex = transFlexParamsCount
+                endif
+            endfor
+        endif
+    endfor
+ 
+    if (nTransParamInd = 1)
+        ;Max expire date/time is set based on transfusion. Need to check flex_param_out->extend_trans_ovrd_ind.
+        if (flex_param_out->extend_trans_ovrd_ind = 0)
+            ;User cannot extend specimen expiration due to transfusion. 
+            set flex_max_out->max_expire_dt_tm = cnvtdatetime(transExpireDtTm)
+            set flex_max_out->max_expire_flag = nTRANS_FLAG
+        else
+            ;User can extend specimen expiration due to transfusion.
+            ;Check if patient has antibody id. This is needed when transfusion param
+            ;is shorter than antibody id param. Cannot extend beyond antibody param.
+            set flex_max_out->max_expire_dt_tm = cnvtdatetime(maxParamExpireDtTm)
+            if (nAntiParamInd = 0)
+                ;Patient doesn't have antibody ID. Use max param expiration date/time.                
+                set flex_max_out->max_expire_flag = nMAX_PARAM_FLAG
+            else
+                ;Patient has antibody. Use antibody expiration date/time.
+                set flex_max_out->max_expire_flag = nANTI_FLAG
+            endif        
+        endif        
+    
+    elseif (nAntiParamInd = 1)
+        ;Max expire date/time is set based on antibody id.
+        set flex_max_out->max_expire_dt_tm = cnvtdatetime(maxParamExpireDtTm)
+        set flex_max_out->max_expire_flag = nANTI_FLAG
+        
+    else
+        ;Patient doesn't have transfusion or antibody. Use max param expiration date/time.
+        set flex_max_out->max_expire_dt_tm = cnvtdatetime(maxParamExpireDtTm)
+        set flex_max_out->max_expire_flag = nMAX_PARAM_FLAG
+    endif
+ 
+    return (1)
+end ; GetFlexMaxExpiration sub routine end.
+ 
+subroutine GetFlexExpirationForPerson( personId, encntrId, drawnDtTm, encntrFacilityCd, disregardDefaultInd )
+;*************** FUNCTION DETAILS ***************
+    ; Returns flexible specimen expiration date/time. The disregardDefaultInd value passed in will ignore the
+    ; default value when calculating when indicator is set to 1. If no transfusions or antibodies exist when
+    ; disregardDefaultInd is set to 1 we will return a null value as the date.
+    ; NOTE: any time make change in GetFlexExpirationForPerson function, need to evaluate if the change needs to make
+    ; in GetFlexMaxExpirationForPerson function.
+;*************** LOCAL VARIABLES ****************
+    declare expireDtTm                 = dq8 with protect, noconstant(0.0)
+    declare paramDtTm                  = dq8 with protect, noconstant(0.0)
+    declare transCount                 = i4  with protect, noconstant(0)
+    declare transIndex                 = i4  with protect, noconstant(0)
+    declare transDtTmDrawnDtTmDiff     = i4  with protect, noconstant(0)
+    declare transFlexParamsCount       = i2  with protect, noconstant(0)
+    declare transFlexParamsIndex       = i2  with protect, noconstant(0)
+    declare reCalcCriticalDtTmInd      = i2  with protect, noconstant(0)
+    declare prevTestingFacCdHold       = f8  with protect, noconstant(0.0)
+    declare useCritInd                 = i2  with protect, noconstant(0)
+;***************** INSTRUCTIONS *****************
+    ; Check if cdf meanings need to be loaded, and load if needed.
+    if (flex_codes->codes_loaded_ind != 1)
+        if (GetFlexCodesByCDFMeaning(null) != 1)
+            call log_message("Error calling GetFlexCodesByCDFMeaning.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+    endif
+ 
+    ; Store off the current testing facility cd prior to calling load flex params.
+    set prevTestingFacCdHold = flex_param_out->testing_facility_cd
+ 
+    ; Check if testing facility cd changed to ensure we recalc critical date/times when needed.
+    if (prevTestingFacCdHold != flex_param_out->testing_facility_cd)
+        ; testing facility code changed, set recalc critical date/time indicator accordingly.
+        set reCalcCriticalDtTmInd = 1
+    endif
+ 
+    ; Determine if correct patient info is loaded based on personId and encntrId passed in.
+    if ((flex_patient_out->person_id != personId) or (flex_patient_out->encntr_id != encntrId))
+        ; Must load patient info since personId or encntrId do not match what is currently loaded.
+        if (LoadFlexPatient(personId, encntrId) != 1)
+            ; LoadFlexPatient() returned a bad status, log message, exit sub.
+            call log_message( "Error loading patient info.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+ 
+        set reCalcCriticalDtTmInd = 1
+    endif
+ 
+    ; Determine if must recalculate critical dates/times.
+    if (reCalcCriticalDtTmInd = 1)
+        ; Get critical dates.
+        if (GetCriticalDtsTms(null) != 1)
+            ; GetCriticalDtsTms() returned a bad status, log message and exit sub.
+            call log_message( "Error loading critical dates/times.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+    endif
+ 
+    if (disregardDefaultInd = 1)
+        ; Default value will not be considered in calculation, check if antibodies exist.
+        if (flex_patient_out->anti_exist_ind = 1)
+            ; At least one clinically significant antibody exists, set flex_param value equal to anti_param value.
+            set flex_param_out->flex_param = flex_param_out->anti_param
+        else
+            ; No clinically significant antibodies exist, set flex_param value equal to -1 since disregarding default
+            set flex_param_out->flex_param = -1
+        endif
+    else
+        ;Initialize flex_param to be the allo_param
+        set flex_param_out->flex_param = flex_param_out->allo_param
+ 
+        ; Default value will be considered in calculation, check if antibodies exist.
+        if (flex_patient_out->anti_exist_ind = 1)
+            ; At least one clinically significant antibody exists, determine if the clinically significant antibodies expire
+            ; units preference is shorter than crossmatch allogeneic expire units.
+            if (flex_param_out->anti_param < flex_param_out->flex_param)
+                ; clinically significant antibodies expire units preference is shorter than crossmatch allogeneic expire units,
+                ; set flex_param equal to the shorter.
+                set flex_param_out->flex_param = flex_param_out->anti_param
+            endif
+        endif
+    endif
+ 
+    ; Only set expirDtTm at this point if flex param value is not -1 (flex param value is only -1 when we chose to
+    ; disregard the default value and antibodies do not exist).
+    if (flex_param_out->flex_param != -1)
+        if (trim(flex_param_out->expiration_unit_type_mean) = "D")  ;"Days"
+            set expireDtTm = datetimeadd(cnvtdatetime(cnvtdate(drawnDtTm), 235959), flex_param_out->flex_param)
+ 
+        else ; (flex_param_out->expiration_unit_type_mean = "H") ;"Hours"
+            set expireDtTm = dateTimeAdd(drawnDtTm, flex_param_out->flex_param)
+        endif
+    endif
+ 
+    set transCount           = size(flex_patient_out->transfusion,5)
+    set transFlexParamsCount = size(flex_param_out->transfusion_flex_params, 5)
+ 
+    for (transIndex = 1 to transCount)
+        ; Evaluate this transfusion item.
+        set useCritInd = 0
+    	if (drawnDtTm < flex_patient_out->transfusion[transIndex].transfusion_dt_tm)
+    		set useCritInd = 1
+    	elseif (drawnDtTm < flex_patient_out->transfusion[transIndex].critical_dt_tm)
+    			if (flex_param_out->calc_trans_drawn_dt_ind = 0)
+    				set useCritInd = 1
+    			endif
+    	endif
+ 
+        If (useCritInd = 1)
+        	If((expireDtTm > flex_patient_out->transfusion[transIndex].critical_dt_tm) or (expireDtTm = 0.0))
+                ; Note: expireDtTm will be 0.0 at this point when we are disregarding the default, no clin sig antibodies exist
+                ; and it's the first time we hit a point where we can set expireDtTm.
+        		set expireDtTm = flex_patient_out->transfusion[transIndex].critical_dt_tm
+			endif
+        else
+            ; Find difference between transfusion date/time and drawn date/time
+            set transDtTmDrawnDtTmDiff
+                = ceil(dateTimeDiff(drawnDtTm, flex_patient_out->transfusion[transIndex].transfusion_dt_tm))
+ 
+             ; Find parameter range to match difference
+            for (transFlexParamsIndex = 1 to transFlexParamsCount)
+                if ((transDtTmDrawnDtTmDiff >= flex_param_out->transfusion_flex_params[transFlexParamsIndex].start_Range)
+                and (transDtTmdrawnDtTmDiff <= flex_param_out->transfusion_flex_params[transFlexParamsIndex].end_range))
+                    ; Found parameter range that the difference between transfusion date/time and drawn date/time falls into.
+                    if (trim(flex_param_out->expiration_unit_type_mean) = "D" ) ;"Days"
+                        set paramDtTm = dateTimeAdd(cnvtdatetime(cnvtdate(drawnDtTm), 235959),
+                                                    flex_param_out->transfusion_flex_params[transFlexParamsIndex].flex_param)
+                    else ; (flex_param_out->expiration_unit_type_mean = "H") ;"Hours"
+                        set paramDtTm = dateTimeAdd(drawnDtTm,
+                                                    flex_param_out->transfusion_flex_params[transFlexParamsIndex].flex_param)
+                    endif
+ 
+                    if ((expireDtTm > paramDtTm) or (expireDtTm = 0.0))
+                        ; Note: expireDtTm will be 0.0 at this point when we are disregarding the default, no clin sig
+                        ; antibodies exist and it's the first time we hit a point where we can set expireDtTm.
+                        set expireDtTm = paramDtTm
+                    endif
+ 
+                    ; Exit for loop since found a match
+                    set transFlexParamsIndex = transFlexParamsCount
+                endif
+            endfor
+        endif
+    endfor
+ 
+    return (expireDtTm)
+end ; GetFlexExpirationForPerson sub routine end.
+ 
+subroutine GetFlexMaxExpirationForPerson( personId, encntrId, drawnDtTm, encntrFacilityCd )
+;*************** FUNCTION DETAILS ***************
+    ; Returns flexible specimen max expiration date/time and flag
+    ; NOTE: any time make change in GetFlexExpiration function, need to evaluate if the change needs to make
+    ; in GetFlexMaxExpirationForPerson function.
+;*************** LOCAL VARIABLES ****************
+    declare expireDtTm                 = dq8 with protect, noconstant(0.0)
+    declare paramDtTm                  = dq8 with protect, noconstant(0.0)
+    declare transCount                 = i4  with protect, noconstant(0)
+    declare transIndex                 = i4  with protect, noconstant(0)
+    declare transDtTmDrawnDtTmDiff     = i4  with protect, noconstant(0)
+    declare transFlexParamsCount       = i2  with protect, noconstant(0)
+    declare transFlexParamsIndex       = i2  with protect, noconstant(0)
+    declare reCalcCriticalDtTmInd      = i2  with protect, noconstant(0)
+    declare prevTestingFacCdHold       = f8  with protect, noconstant(0.0)
+    declare useCritInd                 = i2  with protect, noconstant(0)
+    declare maxParamExpireDtTm         = dq8 with protect, noconstant(0.0)
+    declare transExpireDtTm            = dq8 with protect, noconstant(0.0)
+    declare nAntiParamInd              = i2  with protect, noconstant(0)
+    declare nTransParamInd             = i2  with protect, noconstant(0)
+    declare calcFlexParam              = i4  with protect, noconstant(0)
+;***************** INSTRUCTIONS *****************
+    ; Check if cdf meanings need to be loaded, and load if needed.
+    if (flex_codes->codes_loaded_ind != 1)
+        if (GetFlexCodesByCDFMeaning(null) != 1)
+            call log_message("Error calling GetFlexCodesByCDFMeaning.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+    endif
+ 
+    ; Initialize flex_max_out record.
+    set StatBBCalcFlex = initrec(flex_max_out)
+ 
+    ; Store off the current testing facility cd prior to calling load flex params.
+    set prevTestingFacCdHold = flex_param_out->testing_facility_cd
+ 
+    ; Check if testing facility cd changed to ensure we recalc critical date/times when needed.
+    if (prevTestingFacCdHold != flex_param_out->testing_facility_cd)
+        ; testing facility code changed, set recalc critical date/time indicator accordingly.
+        set reCalcCriticalDtTmInd = 1
+    endif
+ 
+    ; Determine if correct patient info is loaded based on personId and encntrId passed in.
+    if ((flex_patient_out->person_id != personId) or (flex_patient_out->encntr_id != encntrId))
+        ; Must load patient info since personId or encntrId do not match what is currently loaded.
+        if (LoadFlexPatient(personId, encntrId) != 1)
+            ; LoadFlexPatient() returned a bad status, log message, exit sub.
+            call log_message( "Error loading patient info.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+ 
+        set reCalcCriticalDtTmInd = 1
+    endif
+ 
+    ; Determine if must recalculate critical dates/times.
+    if (reCalcCriticalDtTmInd = 1)
+        ; Get critical dates.
+        if (GetCriticalDtsTms(null) != 1)
+            ; GetCriticalDtsTms() returned a bad status, log message and exit sub.
+            call log_message( "Error loading critical dates/times.", LOG_LEVEL_ERROR)
+            return (-1)
+        endif
+    endif
+ 
+    ;Initialize calcFlexParam to be the max_param.
+    set calcFlexParam = flex_param_out->max_spec_validity
+ 
+    ; Max expiration value will be considered in calculation, check if antibodies exist.
+    if (flex_patient_out->anti_exist_ind = 1)
+        ; At least one clinically significant antibody exists, determine if the clinically significant antibodies expire
+        ; units preference is shorter than crossmatch max expire units.
+        if (flex_param_out->anti_param < calcFlexParam)
+            ; clinically significant antibodies expire units preference is shorter than max parameter,
+            ; set calcFlexParam equal to the shorter.
+            set calcFlexParam = flex_param_out->anti_param
+            set nAntiParamInd = 1
+        endif
+    endif
+ 
+ 
+    if (trim(flex_param_out->expiration_unit_type_mean) = "D")  ;"Days"
+        set maxParamExpireDtTm = datetimeadd(cnvtdatetime(cnvtdate(drawnDtTm), 235959), calcFlexParam)
+    else ; (flex_param_out->expiration_unit_type_mean = "H") ;"Hours"
+        set maxParamExpireDtTm = dateTimeAdd(drawnDtTm, calcFlexParam)
+    endif
+ 
+    set transCount           = size(flex_patient_out->transfusion,5)
+    set transFlexParamsCount = size(flex_param_out->transfusion_flex_params, 5)
+ 
+    set transExpireDtTm = maxParamExpireDtTm
+ 
+    for (transIndex = 1 to transCount)
+        ; Evaluate this transfusion item.
+        set useCritInd = 0
+    	if (drawnDtTm < flex_patient_out->transfusion[transIndex].transfusion_dt_tm)
+    		set useCritInd = 1
+    	elseif (drawnDtTm < flex_patient_out->transfusion[transIndex].critical_dt_tm)
+            if (flex_param_out->calc_trans_drawn_dt_ind = 0)
+                set useCritInd = 1
+            endif
+    	endif
+ 
+        If (useCritInd = 1)
+            If (transExpireDtTm > flex_patient_out->transfusion[transIndex].critical_dt_tm)
+                set transExpireDtTm = flex_patient_out->transfusion[transIndex].critical_dt_tm
+                set nTransParamInd = 1
+            endif
+        else
+            ; Find difference between transfusion date/time and drawn date/time
+            set transDtTmDrawnDtTmDiff
+                = ceil(dateTimeDiff(drawnDtTm, flex_patient_out->transfusion[transIndex].transfusion_dt_tm))
+ 
+             ; Find parameter range to match difference
+            for (transFlexParamsIndex = 1 to transFlexParamsCount)
+                if ((transDtTmDrawnDtTmDiff >= flex_param_out->transfusion_flex_params[transFlexParamsIndex].start_Range)
+                and (transDtTmdrawnDtTmDiff <= flex_param_out->transfusion_flex_params[transFlexParamsIndex].end_range))
+                    ; Found parameter range that the difference between transfusion date/time and drawn date/time falls into.
+                    if (trim(flex_param_out->expiration_unit_type_mean) = "D" ) ;"Days"
+                        set paramDtTm = dateTimeAdd(cnvtdatetime(cnvtdate(drawnDtTm), 235959),
+                                                    flex_param_out->transfusion_flex_params[transFlexParamsIndex].flex_param)
+                    else ; (flex_param_out->expiration_unit_type_mean = "H") ;"Hours"
+                        set paramDtTm = dateTimeAdd(drawnDtTm,
+                                                    flex_param_out->transfusion_flex_params[transFlexParamsIndex].flex_param)
+                    endif
+ 
+                    if (transExpireDtTm > paramDtTm)
+                       set transExpireDtTm = paramDtTm
+                       set nTransParamInd = 1
+                    endif
+ 
+                    ; Exit for loop since found a match
+                    set transFlexParamsIndex = transFlexParamsCount
+                endif
+            endfor
+        endif
+    endfor
+ 
+    if (nTransParamInd = 1)
+        ;Max expire date/time is set based on transfusion. Need to check flex_param_out->extend_trans_ovrd_ind.
+        if (flex_param_out->extend_trans_ovrd_ind = 0)
+            ;User cannot extend specimen expiration due to transfusion.
+            set flex_max_out->max_expire_dt_tm = cnvtdatetime(transExpireDtTm)
+            set flex_max_out->max_expire_flag = nTRANS_FLAG
+        else
+            ;User can extend specimen expiration due to transfusion.
+            ;Check if patient has antibody id. This is needed when transfusion param
+            ;is shorter than antibody id param. Cannot extend beyond antibody param.
+            set flex_max_out->max_expire_dt_tm = cnvtdatetime(maxParamExpireDtTm)
+            if (nAntiParamInd = 0)
+                ;Patient doesn't have antibody ID. Use max param expiration date/time.
+                set flex_max_out->max_expire_flag = nMAX_PARAM_FLAG
+            else
+                ;Patient has antibody. Use antibody expiration date/time.
+                set flex_max_out->max_expire_flag = nANTI_FLAG
+            endif
+        endif
+ 
+    elseif (nAntiParamInd = 1)
+        ;Max expire date/time is set based on antibody id.
+        set flex_max_out->max_expire_dt_tm = cnvtdatetime(maxParamExpireDtTm)
+        set flex_max_out->max_expire_flag = nANTI_FLAG
+ 
+    else
+        ;Patient doesn't have transfusion or antibody. Use max param expiration date/time.
+        set flex_max_out->max_expire_dt_tm = cnvtdatetime(maxParamExpireDtTm)
+        set flex_max_out->max_expire_flag = nMAX_PARAM_FLAG
+    endif
+ 
+    return (1)
+end ; GetFlexMaxExpirationForPerson sub routine end.
+ 
+subroutine GetFlexSpecimenParams( facilityIndex, enc_facility_cd, AddReadInd, AppKey )
+;*************** FUNCTION DETAILS ***************
+    ; Save all flex parameters set at encounter facilites for a particular patient into FacilityInfo record
+    ; if flex params are not retrieved for a facility, then call LoadFlexParams() and save to FacilityInfo
+    ; if flex params are already saved in FacilityInfo record, get the details and set to flex_param_out record
+    ; which is used for specimen expiration calculation
+;************************************************
+	declare transParamsCount = i4   with protect, noconstant(0)
+  	; if flex params ae not present, get the details using LoadFlexParams() and save in the FacilityInfo structure
+  	set FacilityInfo->Facilities[facilityIndex].load_flex_params  = 1
+	if (AddReadInd = 1)
+  		if(LoadFlexParams(enc_facility_cd) = -1)
+  			; LoadFlexParams() returned a bad status. Log message, exit sub.
+  			set FacilityInfo->Facilities[facilityIndex].load_flex_params  = -1
+        	call log_message( "Error loading flex params.", LOG_LEVEL_ERROR)
+    	endif
+ 
+  		set FacilityInfo->Facilities[facilityIndex].testing_facility_cd       = flex_param_out->testing_facility_cd
+  		set FacilityInfo->Facilities[facilityIndex].flex_on_ind               = flex_param_out->flex_on_ind
+  		set FacilityInfo->Facilities[facilityIndex].flex_param                = flex_param_out->flex_param
+  		set FacilityInfo->Facilities[facilityIndex].allo_param                = flex_param_out->allo_param
+  		set FacilityInfo->Facilities[facilityIndex].auto_param                = flex_param_out->auto_param
+  		set FacilityInfo->Facilities[facilityIndex].anti_flex_ind             = flex_param_out->anti_flex_ind
+  		set FacilityInfo->Facilities[facilityIndex].anti_param                = flex_param_out->anti_param
+  		set FacilityInfo->Facilities[facilityIndex].max_spec_validity         = flex_param_out->max_spec_validity
+  		set FacilityInfo->Facilities[facilityIndex].expiration_unit_type_mean = flex_param_out->expiration_unit_type_mean
+  		set FacilityInfo->Facilities[facilityIndex].max_transfusion_end_range = flex_param_out->max_transfusion_end_range
+  		set FacilityInfo->Facilities[facilityIndex].extend_trans_ovrd_ind     = flex_param_out->extend_trans_ovrd_ind
+  		set FacilityInfo->Facilities[facilityIndex].calc_trans_drawn_dt_ind   = flex_param_out->calc_trans_drawn_dt_ind
+  		set FacilityInfo->Facilities[facilityIndex].neonate_age               = flex_param_out->neonate_age
+ 
+  		set transParamsCount = size(flex_param_out->transfusion_flex_params,5)
+ 	    set stat = alterlist(FacilityInfo->Facilities[facilityIndex].transfusion_flex_params, transParamsCount)
+ 
+        for (x_idx = 1 to transParamsCount)
+            set FacilityInfo->Facilities[facilityIndex].transfusion_flex_params[x_idx].index
+                = flex_param_out->transfusion_flex_params[x_idx].index
+ 
+            set FacilityInfo->Facilities[facilityIndex].transfusion_flex_params[x_idx].start_range
+                = flex_param_out->transfusion_flex_params[x_idx].start_range
+ 
+            set FacilityInfo->Facilities[facilityIndex].transfusion_flex_params[x_idx].end_range
+                = flex_param_out->transfusion_flex_params[x_idx].end_range
+ 
+            set FacilityInfo->Facilities[facilityIndex].transfusion_flex_params[x_idx].flex_param
+                = flex_param_out->transfusion_flex_params[x_idx].flex_param
+ 		endfor
+ 
+ 		; read the value set for extending expired specimens preference
+ 		if (trim(AppKey) = "AVAILSPECS")
+ 			set FacilityInfo->Facilities[facilityIndex].extend_expired_specimen =
+ 		 		BbtGetFlexExpiredSpecimenExpirationOvrd(FacilityInfo->Facilities[facilityIndex].testing_facility_cd)
+ 		 	if (FacilityInfo->Facilities[facilityIndex].extend_expired_specimen = -1)
+ 		 		set FacilityInfo->Facilities[facilityIndex].load_flex_params  = -1
+        		call log_message( "Error getting extending expired specimen pref", LOG_LEVEL_ERROR)
+        	endif
+ 		endif
+ 	; if flex params are already retrieved for a facility, get from FacilityInfo structure and set to flex_param_out
+  	else
+  		set flex_param_out->testing_facility_cd        = FacilityInfo->Facilities[facilityIndex].testing_facility_cd
+  		set flex_param_out->flex_on_ind                = FacilityInfo->Facilities[facilityIndex].flex_on_ind
+  		set flex_param_out->flex_param                 = FacilityInfo->Facilities[facilityIndex].flex_param
+  		set flex_param_out->allo_param                 = FacilityInfo->Facilities[facilityIndex].allo_param
+  		set flex_param_out->auto_param                 = FacilityInfo->Facilities[facilityIndex].auto_param
+  		set flex_param_out->anti_flex_ind              = FacilityInfo->Facilities[facilityIndex].anti_flex_ind
+  		set flex_param_out->anti_param                 = FacilityInfo->Facilities[facilityIndex].anti_param
+  		set flex_param_out->max_spec_validity          = FacilityInfo->Facilities[facilityIndex].max_spec_validity
+  		set flex_param_out->expiration_unit_type_mean  = FacilityInfo->Facilities[facilityIndex].expiration_unit_type_mean
+  		set flex_param_out->max_transfusion_end_range  = FacilityInfo->Facilities[facilityIndex].max_transfusion_end_range
+  		set flex_param_out->extend_trans_ovrd_ind      = FacilityInfo->Facilities[facilityIndex].extend_trans_ovrd_ind
+  		set flex_param_out->calc_trans_drawn_dt_ind    = FacilityInfo->Facilities[facilityIndex].calc_trans_drawn_dt_ind
+  		set flex_param_out->neonate_age				   = FacilityInfo->Facilities[facilityIndex].neonate_age
+ 
+  		set transParamsCount = size(FacilityInfo->Facilities[facilityIndex].transfusion_flex_params,5)
+ 	    set stat = alterlist(flex_param_out->transfusion_flex_params, transParamsCount)
+ 
+        for (x_idx = 1 to transParamsCount)
+            set flex_param_out->transfusion_flex_params[x_idx].index =
+                FacilityInfo->Facilities[facilityIndex].transfusion_flex_params[x_idx].index
+ 
+            set flex_param_out->transfusion_flex_params[x_idx].start_range =
+            	FacilityInfo->Facilities[facilityIndex].transfusion_flex_params[x_idx].start_range
+ 
+            set flex_param_out->transfusion_flex_params[x_idx].end_range =
+            	FacilityInfo->Facilities[facilityIndex].transfusion_flex_params[x_idx].end_range
+ 
+            set flex_param_out->transfusion_flex_params[x_idx].flex_param =
+            	FacilityInfo->Facilities[facilityIndex].transfusion_flex_params[x_idx].flex_param
+ 		endfor
+  	endif
+  	
+end
+ 
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,3002 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBT_ADD_POOLED_PRODUCT/BBT_ADD_POOLED_PRODUCT.PRG Turn on black mode
+
+/*BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Author:                 yck
+        Date Written:           11/15/95
+
+        Source file name:       bbt_add_pooled_product.prg
+        Object name:            bbt_add_pooled_product
+        Request #:              225180
+
+        Product:                Transfusion
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        add pooled product (create pooled product, update pooled/component products)
+                                
+        Tables read:            n/a
+        Tables updated:         product, blood_product, product_event and product_event child tables
+        Executing from:         Dispose
+
+        Special Notes:          ?
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 09/20/96 Jon Weekes           Initial Release                     *
+;     001 07/09/97 Doug Saus            Added carry forward of owner and inv*
+;                                       areas to new product                *
+;     002 09/29/97 David Hall           Added pool_option_id, pooled prod.  *
+;                                       id for correct inventory.           *
+;     003 11/02/97 Jon Weekes           Removed reference to                *
+;       supplier_prefix_cd which was removed from blood_product table       *
+;     004 08/05/99 Doug Saus                Added update of create_dt_tm
+;     005 09/27/00 Jose Suarez          Added flag chars in request
+;     006 12/30/03 jg7520            39495: Expand SELECT with forupdate to *
+;                                      be a series of single table selects. *  
+;     007 06/17/10 Amy Gum              Added fields for ReconRBC mod Option*
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_add_pooled_product:dba go
+create program bbt_add_pooled_product:dba
+
+/*
+record request
+(
+ 1  called_from_script_ind      = i2
+ 1  event_dt_tm                 = dq8
+ 1  event_prsnl_id              = f8
+ 1  product_nbr                 = c20
+ 1  flag_chars                  = c2
+ 1  product_cd                  = f8
+ 1  cur_supplier_id             = f8
+ 1  unit_meas_cd                = f8
+ 1  expire_dt_tm                = dq8
+ 1  volume                      = i4
+ 1  abo_cd                      = f8
+ 1  rh_cd                       = f8
+ 1  autologous_ind              = i2
+ 1  directed_ind                = i2
+ 1  person_id                   = f8
+ 1  encntr_id                   = f8
+ 1  cur_owner_area_cd           = f8
+ 1  cur_inv_area_cd             = f8
+ 1  pool_option_id              = f8
+ 1  pool_eventlist[*]
+     2  event_type_cd           = f8
+     2  reason_cd               = f8
+     2  expire_dt_tm            = f8
+     2  inactivate_ind          = i2
+     2  product_event_id        = f8
+     2  updt_cnt                = i4
+     2  person_id				= f8  ;if executing from bbt_chg_corr_pool
+     2  donated_by_relative_ind = i2  ;if executing from bbt_chg_corr_pool. 
+     2  expected_usage_dt_tm	= dq8 ;if executing from bbt_chg_corr_pool.
+     2  encntr_id				= f8  ;if executing from bbt_chg_corr_pool.
+ 1  cmpntlist[*] 
+     2  product_id              = f8
+     2  p_updt_cnt              = i4
+     2  eventlist[*]            
+         3  product_event_id    = f8
+         3  event_type_cd       = f8
+         3  person_id           = f8
+         3  pe_updt_cnt         = i4
+         3  pe_child_updt_cnt   = i4
+         3  release_reason_cd   = f8
+ 1  pooled_product_id           = f8
+ 1  pooled_product_updt_cnt     = i4 
+)
+*/
+
+/* Determine if script called from another ccl script.  If so do not redefine reply structure */
+if (request->called_from_script_ind = 0) 
+    record reply
+    (
+     1  product_id          = f8
+     1  product_event_id    = f8
+     1  event_type_cd       = f8
+     1  event_type_mean     = c12
+%i cclsource:status_block.inc
+    )
+endif
+/*
+ * Initialize Global Variables
+ */
+    set reply->status_data->status = "F"
+    set count1 = 0
+    set assigned_event_type_cd = 0.0
+    set crossmatched_event_type_cd = 0.0
+    set in_progress_event_type_cd = 0.0
+    set quarantined_event_type_cd = 0.0
+    set autologous_event_type_cd = 0.0
+    set directed_event_type_cd = 0.0
+    set available_event_type_cd = 0.0
+    set unconfirmed_event_type_cd = 0.0
+    set disposed_event_type_cd = 0.0
+    set destroyed_event_type_cd = 0.0
+    set pooled_event_type_cd = 0.0
+    set pooled_product_event_type_cd = 0.0
+    set method_cd_hd = 0.0
+    set method_cdf_meaning = "            "
+    set success_cnt = 0
+    set event_cnt = 0
+    set event = 0
+    set new_pathnet_seq = 0
+    set new_product_event_id = 0.0
+    set disposed_product_event_id = 0.0
+    set process_status_cnt = 0
+    set max_process_status_cnt = 0
+    set derivative_ind = " "
+    set cur_qty = 0
+    set new_cur_qty = 0
+    set new_active_status_cd = 0.0
+    set new_active_ind = 0
+    set new_drv_updt_cnt = 0
+
+    set pooled_destruction_method_cd = 0.0
+    set pooled_dispose_reason_cd = 0.0
+    set pooled_product_id = 0.0
+    set pool_event_cnt = 0
+    set cmpnt_cnt = 0
+    set cmpnt = 0
+    set cmpnt_event_cnt = 0
+    set event = 0
+    set event_cnt = 0
+    set product_cat_cd = 0.0
+    set product_class_cd = 0.0
+    set storage_temp_cd = 0.0
+    set new_blood_bank_seq = 0.0
+    set release_qty = 0
+    set release_prsnl_id = 0.0
+    set release_dt_tm = cnvtdatetime(curdate, curtime3)
+    set release_reason_cd = 0.0
+
+   set tag_product_event_id = 0.0
+   set tag_event_type_cd = 0.0
+
+/*
+ * Initialize Constants
+ */
+    set product_state_code_set = 1610
+    set assigned_cdf_meaning = "1"
+    set crossmatched_cdf_meaning = "3"
+    set in_progress_cdf_meaning = "16"
+    set quarantined_cdf_meaning = "2"
+    set autologous_cdf_meaning = "10"
+    set directed_cdf_meaning = "11"
+    set available_cdf_meaning = "12"
+    set unconfirmed_cdf_meaning = "9"
+    set disposed_cdf_meaning = "5"
+    set destroyed_cdf_meaning = "14"
+    set pooled_cdf_meaning = "17"
+    set pooled_product_cdf_meaning = "18"
+    set pooled_destruction_cdf_meaning = "POOLED"
+    set destruction_method_code_set = 1609
+    set pooled_dispose_cdf_meaning = "POOLED"
+    set dispose_reason_code_set = 1608
+
+/*
+ * Initialize subroutine global variables
+ */
+    set gsub_dummy = ""
+    set gsub_code_value = 0.0
+    set gsub_cdf_meaning = "            "
+    set gsub_product_event_status = "  "
+    set gsub_status = " "
+    set gsub_process = fillstring(200, " ")
+    set gsub_message = fillstring(200, " ")
+    set gsub_active_status_cd = 0.0
+    set gsub_active_ind = 0
+    set gsub_derivative_ind = " "
+    
+    set gsub_person_id = 0.0
+    set gsub_encntr_id = 0.0
+
+#BEGIN_MAIN
+    set reply->status_data->status = "I"            ; Incomplete
+
+    /* Retrieve all event_type_cds */
+    call GET_PROGRAM_CODE_VALUES(gsub_dummy)
+
+    if (reply->status_data->status != "F")
+        /* TEMPORARY pending completion/implementation of user, date, time DLL */
+            set request->event_prsnl_id = reqinfo->updt_id
+        /* END TEMPORARY */
+
+        /* Add product and blood_product rows for new pooled product */
+        if  (request->pooled_product_id = 0)    
+            call ADD_POOLED_PRODUCT(gsub_dummy) 
+            if (reply->status_data->status != "F")
+                /* pooled_product product event row for new pooled product */
+                call ADD_POOLED_PRODUCT_PRODUCT_EVENT(gsub_dummy)
+            endif
+        else
+            set pooled_product_id = request->pooled_product_id
+        endif    ;endif  (request->product_id = 0)
+        if (reply->status_data->status != "F") 
+            /* 
+             * create pooled and available, assign, autologous, directed, quarantine, etc. product_events
+             * (dependant upon active states of components prior to pooling) for pooled product
+             */
+             call PROCESS_POOLED_PRODUCT_EVENTS(gsub_dummy)
+        endif
+        if (reply->status_data->status != "F")
+            /* add pooled and disposed events for components and inactivate all remaining active events */
+            call POOL_COMPONENTS(gsub_dummy)
+            
+            if (reply->status_data->status != "F")
+                call LOAD_PROCESS_STATUS
+                    (
+                     /* sub_status  */ "S",
+                     /* sub_process */ "SUCCESS",
+                     /* sub_message */ "Pooled product added.  All components pooled."
+                    )
+                if (request->pooled_product_id = 0)
+                    set reply->product_id       = pooled_product_id
+                    set reply->product_event_id = tag_product_event_id
+                    set reply->event_type_cd    = tag_event_type_cd
+                endif
+            endif       ; endif POOL_COMPONENTS status != "F"
+        endif   
+    endif       ; endif GET_PRODGRAM_CODE_VALUES status != "F"
+
+    go to EXIT_SCRIPT
+#END_MAIN
+
+subroutine ADD_POOLED_PRODUCT(sub_dummy)
+    /*
+     * Add product, blood_product and available product_event rows for pooled product
+     */
+
+    /* get product_cat_cd and product_class_cd from product_index for new product row */
+    set product_cat_cd = 0.0
+    set product_class_cd = 0.0
+    set storage_temp_cd = 0.0
+
+    select into "nl:"
+        pi.product_cat_cd,
+        pi.product_class_cd,
+        pc.storage_temp_cd
+    from
+        product_index pi,
+        product_category pc
+
+    plan    pi  where   pi.product_cd       = request->product_cd
+                          and pi.active_ind = 1
+    join    pc  where   pc.product_cat_cd   = pi.product_cat_cd
+                          and pc.active_ind = 1                      
+
+    detail
+        product_cat_cd      = pi.product_cat_cd
+        product_class_cd    = pi.product_class_cd
+        storage_temp_cd     = pc.storage_temp_cd
+    with    nocounter
+
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS
+            (
+             /* sub_status  */ "F",
+             /* sub_process */ "get product_index, product_category",
+             /* sub_message */ 
+  "product_cat_cd/product_class_cd/storage_temp_cd not found on product_index/product_category for pooled product product_cd"
+            )
+        RETURN
+    endif
+
+    /* get new blood_bank_seq for product_id in pooled product product row */
+    set new_blood_bank_seq = 0.0
+
+    select into "nl:"
+        seqn = seq(blood_bank_seq, nextval) "###########################;rp0"
+    from
+        dual
+    detail
+         new_blood_bank_seq        = cnvtreal(seqn)
+
+    with    format, nocounter
+
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS
+            (
+             /* sub_status  */ "F",
+             /* sub_process */ "get new blood_bank_seq",
+             /* sub_message */ "could not get new blood_bank_seq"
+            )
+        RETURN
+    endif
+
+    set pooled_product_id = new_blood_bank_seq
+
+    /* Add product row for pooled product */
+    insert into product p
+        set p.product_id                = pooled_product_id,
+            p.product_nbr               = request->product_nbr,
+            p.flag_chars                = request->flag_chars,
+            p.locked_ind                = 0,
+            p.product_cd                = request->product_cd,
+            p.product_cat_cd            = product_cat_cd,
+            p.product_class_cd          = product_class_cd,
+            p.cur_inv_locn_cd           = 0.0,
+            p.orig_inv_locn_cd          = 0.0,
+            p.cur_supplier_id           = request->supplier_id,
+            p.orig_unit_meas_cd         = request->unit_meas_cd,
+            p.storage_temp_cd           = storage_temp_cd,
+            p.cur_unit_meas_cd          = request->unit_meas_cd,
+            p.cur_expire_dt_tm          = cnvtdatetime(request->expire_dt_tm),
+            p.pooled_product_ind        = 1,
+            p.active_ind                = 1,
+            p.active_status_cd          = reqdata->active_status_cd,
+            p.active_status_dt_tm       = cnvtdatetime(curdate, curtime3),
+            p.active_status_prsnl_id    = reqinfo->updt_id,
+            p.updt_cnt                  = 0,
+            p.updt_dt_tm                = cnvtdatetime(curdate, curtime3),
+            p.updt_task                 = reqinfo->updt_task,
+            p.updt_id                   = reqinfo->updt_id,
+            p.updt_applctx              = reqinfo->updt_applctx,
+            p.cur_owner_area_cd         = request->cur_owner_area_cd,
+            p.cur_inv_area_cd           = request->cur_inv_area_cd,
+            p.pool_option_id            = request->pool_option_id,
+                p.create_dt_tm              = cnvtdatetime(request->event_dt_tm) ;004
+    with    nocounter
+
+    if (curqual = 0) 
+        call LOAD_PROCESS_STATUS
+            (
+             /* sub_status  */ "F",
+             /* sub_process */ "add product row",
+             /* sub_message */ "could not add product row for pooled product"
+            )
+        RETURN
+    endif
+	
+    /* add blood_product row for pooled product */
+    insert into blood_product bp
+        set bp.product_id               = pooled_product_id,
+            bp.product_cd               = request->product_cd,
+; 003            bp.supplier_prefix_cd       = 0.0,
+;            bp.cur_expire_dt_tm         = cnvtdatetime(request->expire_dt_tm),
+            bp.cur_volume               = request->volume,
+            bp.orig_label_abo_cd        = request->abo_cd,
+            bp.orig_label_rh_cd         = request->rh_cd,          
+            bp.cur_abo_cd               = request->abo_cd,
+            bp.cur_rh_cd                = request->rh_cd,
+            bp.orig_expire_dt_tm        = cnvtdatetime(request->expire_dt_tm),
+            bp.orig_volume              = request->volume,
+            bp.autologous_ind           = request->autologous_ind, 
+            bp.directed_ind             = request->directed_ind,
+            bp.active_ind               = 1,
+            bp.active_status_cd         = reqdata->active_status_cd,
+            bp.active_status_dt_tm      = cnvtdatetime(curdate, curtime3),
+            bp.active_status_prsnl_id   = reqinfo->updt_id,
+            bp.updt_cnt                 = 0,
+            bp.updt_dt_tm               = cnvtdatetime(curdate, curtime3),
+            bp.updt_task                = reqinfo->updt_task,
+            bp.updt_id                  = reqinfo->updt_id,
+            bp.updt_applctx             = reqinfo->updt_applctx
+
+    with    nocounter
+
+    if (curqual = 0) 
+        call LOAD_PROCESS_STATUS
+            (
+             /* sub_status  */ "F",
+             /* sub_process */ "add blood product row",
+             /* sub_message */ "could not add blood product row for pooled product"
+            )
+        RETURN
+    endif
+END     ; END subroutine ADD_POOLED_PRODUCT
+
+subroutine ADD_POOLED_PRODUCT_PRODUCT_EVENT(sub_dummy2)
+    /* Add pooled_product product_event row for component */
+    call ADD_PRODUCT_EVENT
+        (
+         /* product_id               */ pooled_product_id,
+         /* person_id                */ request->person_id, 
+         /* encntr_id                */ request->encntr_id,
+         /* order_id                 */ 0,
+         /* bb_result_id             */ 0,
+         /* event_type_cd            */ pooled_product_event_type_cd,
+         /* event_dt_tm              */ cnvtdatetime(request->event_dt_tm),
+         /* event_prsnl_id           */ request->event_prsnl_id,
+         /* event_status_flag        */ 0,
+         /* override_ind             */ 0, 
+         /* override_reason_cd       */ 0, 
+         /* related_product_event_id */ 0,
+         /* active_ind               */ 0,
+         /* active_status_cd         */ reqdata->inactive_status_cd,
+         /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id   */ reqinfo->updt_id
+        )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("add", gsub_product_event_status, "pooled_product")
+END             ; END subroutine ADD_POOLED_PRODUCT_PRODUCT_EVENT
+
+subroutine PROCESS_POOLED_PRODUCT_EVENTS(sub_dummy)
+    /* 
+     * create available, assign, autologous, directed, quarantine, etc. product_events
+     * (dependant upon active states of components prior to pooling) for pooled product
+     */
+
+    /* Determine number of product_events/states to be added for pooled product */
+    set pooled_event_cnt = cnvtint(size(request->pool_eventlist, 5))
+    
+    for (event = 1 to pooled_event_cnt)
+    	call GET_EVENT_DETAIL(sub_dummy)
+        if (request->pool_eventlist[event]->event_type_cd = assigned_event_type_cd)
+			if (request->pool_eventlist[event]->inactivate_ind > 0) ;recon only
+				call RELEASE_INACTIVATE_ASSIGN_POOL(gsub_dummy)
+			else
+				call ASSIGNED_POOLED_PRODUCT(gsub_dummy)
+				if (reply->status_data->status != "F")
+					set tag_product_event_id = new_product_event_id
+					set tag_event_type_cd = assigned_event_type_cd
+				endif
+			endif
+        elseif (request->pool_eventlist[event]->event_type_cd = crossmatched_event_type_cd)
+			if (request->pool_eventlist[event]->inactivate_ind > 0) ;recon only
+				call RELEASE_INACTIVATE_CROSSMATCH_POOL(gsub_dummy)				
+			else
+				call CROSSMATCHED_POOLED_PRODUCT(gsub_dummy)
+				if (reply->status_data->status != "F")
+					set tag_product_event_id = new_product_event_id
+					set tag_event_type_cd = crossmatched_event_type_cd
+				endif
+			endif
+        elseif (request->pool_eventlist[event]->event_type_cd = quarantined_event_type_cd)
+            call QUARANTINED_POOLED_PRODUCT(gsub_dummy)
+        elseif (request->pool_eventlist[event]->event_type_cd = available_event_type_cd)
+			if (request->pool_eventlist[event]->inactivate_ind = 1) 
+				call INACTIVATE_AVAILABLE_POOLED_PRODUCT_EVENT(request->pool_eventlist[event]->product_event_id,  
+				request->pool_eventlist[event]->updt_cnt)
+			else
+				call AVAILABLE_POOLED_PRODUCT(gsub_dummy)
+			endif
+        elseif (request->pool_eventlist[event]->event_type_cd = unconfirmed_event_type_cd)
+			if (request->pool_eventlist[event]->inactivate_ind > 0) ;recon only
+				call INACTIVATE_UNCONFIRMED_POOL(request->pool_eventlist[event]->product_event_id, 
+				request->pool_eventlist[event]->updt_cnt)
+			else
+				call UNCONFIRMED_POOLED_PRODUCT(gsub_dummy)
+			endif
+        elseif (request->pool_eventlist[event]->event_type_cd = autologous_event_type_cd
+                or request->pool_eventlist[event]->event_type_cd = directed_event_type_cd)
+			if(request->pool_eventlist[event].inactivate_ind >0) ;recon only
+				call InactivateAutoDirectedEvent( 
+				/*	event id	*/	request->pool_eventlist[event].product_event_id)
+			else
+				call AUTO_DIRECTED_POOLED_PRODUCT(request->pool_eventlist[event]->event_type_cd)
+			endif
+        else
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "add pooled product events",
+                 /* message */ build("invalid event_type_cd for pooled product--event_type_cd = ", 
+                                   request->pool_eventlist[event]->event_type_cd)
+               )
+        endif
+        if (reply->status_data->status = "F")
+            RETURN
+        endif
+    endfor
+END             ; END subroutine PROCESS_POOLED_PRODUCT_EVENTS
+
+subroutine INACTIVATE_AVAILABLE_POOLED_PRODUCT_EVENT
+    (
+     sub2_product_event_id,
+     sub2_updt_cnt
+    )
+
+    /* 
+     * Lock product_event, and, if derivative, derivative rows forupdate
+     */
+        select into "nl:"
+            pe.product_event_id
+        from
+            product_event pe
+        plan    pe      where   pe.product_event_id     = sub2_product_event_id
+                                  and pe.updt_cnt       = sub2_updt_cnt
+        with    nocounter, forupdate(pe)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock pooled product_event/available forupdate",
+                 /* message */ "pooled available product_event row could not be locked forupdate"
+                )
+            RETURN
+        endif
+
+        /*
+         * Inactivate AVAILABLE product_event row
+         */
+            call CHG_PRODUCT_EVENT
+                (
+                 /* product_event_id       */ sub2_product_event_id,
+                 /* event_dt_tm            */ 0, 
+                 /* event_prsnl_id         */ 0, 
+                 /* event_status_flag      */ 0,
+                 /* active_ind             */ 0,
+                 /* active_status_cd       */ reqdata->inactive_status_cd,
+                 /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+                 /* active_status_prsnl_id */ reqinfo->updt_id,
+                 /* updt_cnt               */ sub2_updt_cnt,
+                 /* lock_forupdate_ind     */ 0, ; 0 = do not lock forupdate--locked above
+                 /* update_dt_tm_prsnl_ind */ 0  ; 0 = do not update original event_dt_tm/prsnl_id 
+                )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("inactivate", gsub_product_event_status, "available")
+    
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+END        ; end subroutine INACTIVATE_AVAILABLE_POOLED_PRODUCT_EVENT (<---Pooled Product)
+
+subroutine GET_EVENT_DETAIL(sub_dummy)
+/**
+Get ids from request first if they exist
+If not, grab them from the event
+*/
+    declare req_person_id = f8 with noconstant(0)
+    declare req_encntr_id = f8 with noconstant(0)
+    declare evnt_person_id = f8 with noconstant(0)
+    declare evnt_encntr_id = f8 with noconstant(0)
+    set req_person_id = validate(request->person_id, req_person_id)
+    set req_encntr_id = validate(request->encntr_id, req_encntr_id)
+    set evnt_person_id = validate(request->pool_eventlist[event].person_id, evnt_person_id)
+    set evnt_encntr_id = validate(request->pool_eventlist[event].encntr_id, evnt_encntr_id)
+
+	if(evnt_person_id > 0
+		AND evnt_encntr_id > 0)then
+		set gsub_person_id = evnt_person_id
+		set gsub_encntr_id = evnt_encntr_id
+		RETURN
+	endif
+	
+	if(req_person_id > 0
+    	AND req_encntr_id > 0)then
+    	set gsub_person_id = req_person_id
+    	set gsub_encntr_id = req_encntr_id
+		RETURN
+	endif
+	
+	;to account for person_id without an encntr_id
+	if(evnt_person_id > 0)
+		set gsub_person_id = evnt_person_id		
+	else
+		set gsub_person_id = req_person_id
+	endif 
+end
+
+subroutine ASSIGNED_POOLED_PRODUCT(sub_dummy2)
+    /* Add assigned product_event row for pooled product */
+    call ADD_PRODUCT_EVENT
+        (
+         /* product_id               */ pooled_product_id,
+         /* person_id                */ gsub_person_id, 
+         /* encntr_id                */ gsub_encntr_id,
+         /* order_id                 */ 0,
+         /* bb_result_id             */ 0,
+         /* event_type_cd            */ assigned_event_type_cd,
+         /* event_dt_tm              */ cnvtdatetime(request->event_dt_tm),
+         /* event_prsnl_id           */ request->event_prsnl_id,
+         /* event_status_flag        */ 0,
+         /* override_ind             */ 0, 
+         /* override_reason_cd       */ 0, 
+         /* related_product_event_id */ 0,
+         /* active_ind               */ 1,
+         /* active_status_cd         */ reqdata->active_status_cd,
+         /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id   */ reqinfo->updt_id
+        )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("add", gsub_product_event_status, "assigned")
+
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+    /* NOTE: 'new_product_event_id' set in ADD_PRODUCT_EVENT */
+
+    call ADD_ASSIGN
+        (
+         /* product_event_id       */ new_product_event_id,
+         /* product_id             */ pooled_product_id,
+         /* person_id              */ gsub_person_id,
+         /* assign_reason_cd       */ request->pool_eventlist[event]->reason_cd,
+         /* prov_id                */ 0,
+         /* active_ind             */ 1,
+         /* active_status_cd       */ reqdata->active_status_cd,
+         /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id */ reqinfo->updt_id
+        )
+
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS
+            (
+             /* status  */ "F",
+             /* process */ "add assign row",
+             /* message */ "could not add assign row for pooled product"
+           )
+        RETURN
+    endif
+END         ; END subroutine ASSIGNED_POOLED_PRODUCT
+
+subroutine ADD_ASSIGN
+    (
+     sub_product_event_id,       
+     sub_product_id,             
+     sub_person_id,              
+     sub_assign_reason_cd,       
+     sub_prov_id,                
+     sub_active_ind,            
+     sub_active_status_cd,       
+     sub_active_status_dt_tm,    
+     sub_active_status_prsnl_id
+    )
+
+    insert into assign a
+        set a.product_event_id              = sub_product_event_id,
+            a.product_id                    = sub_product_id,
+            a.person_id                     = sub_person_id,
+            a.assign_reason_cd              = sub_assign_reason_cd,
+            a.prov_id                       = sub_prov_id,
+            a.updt_cnt                      = 0,
+            a.updt_dt_tm                    = cnvtdatetime(curdate, curtime3),
+            a.updt_id                       = reqinfo->updt_id,
+            a.updt_task                     = reqinfo->updt_task,
+            a.updt_applctx                  = reqinfo->updt_applctx,
+            a.active_ind                    = sub_active_ind,
+            a.active_status_cd              = sub_active_status_cd,
+            a.active_status_dt_tm           = cnvtdatetime(sub_active_status_dt_tm),
+            a.active_status_prsnl_id        = sub_active_status_prsnl_id
+
+    with    nocounter
+END         ; END subroutine ADD_ASSIGN
+
+subroutine CROSSMATCHED_POOLED_PRODUCT(sub_dummy2)
+    /* Add crossmatched product_event row for pooled product */
+    call ADD_PRODUCT_EVENT
+        (
+         /* product_id               */ pooled_product_id,
+         /* person_id                */ gsub_person_id, 
+         /* encntr_id                */ gsub_encntr_id,
+         /* order_id                 */ 0,                   ; perhaps forward from component
+         /* bb_result_id             */ 0,                   ; perhaps forward from component
+         /* event_type_cd            */ crossmatched_event_type_cd,
+         /* event_dt_tm              */ cnvtdatetime(request->event_dt_tm),
+         /* event_prsnl_id           */ request->event_prsnl_id,
+         /* event_status_flag        */ 0,
+         /* override_ind             */ 0, 
+         /* override_reason_cd       */ 0, 
+         /* related_product_event_id */ 0,
+         /* active_ind               */ 1,
+         /* active_status_cd         */ reqdata->active_status_cd,
+         /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id   */ reqinfo->updt_id
+        )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("add", gsub_product_event_status, "crossmatched")
+
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+    /* NOTE: 'new_product_event_id' set in ADD_PRODUCT_EVENT */
+
+    call ADD_CROSSMATCH
+        (
+         /* product_event_id       */ new_product_event_id,
+         /* product_id             */ pooled_product_id,
+         /* person_id              */ gsub_person_id,
+         /* crossmatch_exp_dt_tm   */ cnvtdatetime(request->pool_eventlist[event]->expire_dt_tm),
+         /* active_ind             */ 1,
+         /* active_status_cd       */ reqdata->active_status_cd,
+         /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id */ reqinfo->updt_id
+        )
+
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS
+            (
+             /* status  */ "F",
+             /* process */ "add crossmatch row",
+             /* message */ "could not add crossmatch row for pooled product"
+           )
+        RETURN
+    endif
+END         ; END subroutine CROSSMATCHED_POOLED_PRODUCT
+
+subroutine ADD_CROSSMATCH
+    (
+     sub_product_event_id,       
+     sub_product_id,             
+     sub_person_id,              
+     sub_crossmatch_exp_dt_tm,       
+     sub_active_ind,            
+     sub_active_status_cd,       
+     sub_active_status_dt_tm,    
+     sub_active_status_prsnl_id
+    )
+
+    insert into crossmatch xm
+        set xm.product_event_id              = sub_product_event_id,
+            xm.product_id                    = sub_product_id,
+            xm.person_id                     = sub_person_id,
+            xm.crossmatch_exp_dt_tm          = cnvtdatetime(sub_crossmatch_exp_dt_tm),
+            xm.updt_cnt                      = 0,
+            xm.updt_dt_tm                    = cnvtdatetime(curdate, curtime3),
+            xm.updt_id                       = reqinfo->updt_id,
+            xm.updt_task                     = reqinfo->updt_task,
+            xm.updt_applctx                  = reqinfo->updt_applctx,
+            xm.active_ind                    = sub_active_ind,
+            xm.active_status_cd              = sub_active_status_cd,
+            xm.active_status_dt_tm           = cnvtdatetime(sub_active_status_dt_tm),
+            xm.active_status_prsnl_id        = sub_active_status_prsnl_id
+
+    with    nocounter
+END         ; END subroutine ADD_CROSSMATCH
+
+subroutine QUARANTINED_POOLED_PRODUCT(sub_dummy2)
+    /* Add quarantined product_event row for pooled product */
+    call ADD_PRODUCT_EVENT
+        (
+         /* product_id               */ pooled_product_id,
+         /* person_id                */ 0, 
+         /* encntr_id                */ 0,
+         /* order_id                 */ 0,
+         /* bb_result_id             */ 0,
+         /* event_type_cd            */ quarantined_event_type_cd,
+         /* event_dt_tm              */ cnvtdatetime(request->event_dt_tm),
+         /* event_prsnl_id           */ request->event_prsnl_id,
+         /* event_status_flag        */ 0,
+         /* override_ind             */ 0, 
+         /* override_reason_cd       */ 0, 
+         /* related_product_event_id */ 0,
+         /* active_ind               */ 1,
+         /* active_status_cd         */ reqdata->active_status_cd,
+         /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id   */ reqinfo->updt_id
+        )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("add", gsub_product_event_status, "quarantined")
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+    /* NOTE: 'new_product_event_id' set in ADD_PRODUCT_EVENT */
+
+    call ADD_QUARANTINE
+        (
+         /* product_event_id       */ new_product_event_id,
+         /* product_id             */ pooled_product_id,
+         /* quar_reason_cd         */ request->pool_eventlist[event]->reason_cd,
+         /* active_ind             */ 1,
+         /* active_status_cd       */ reqdata->active_status_cd,
+         /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id */ reqinfo->updt_id
+        )
+
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS
+            (
+             /* status  */ "F",
+             /* process */ "add quarantine row",
+             /* message */ "could not add quarantine row for pooled product"
+           )
+        RETURN
+    endif
+END         ; END subroutine QUARANTINED_POOLED_PRODUCT(sub_dummy)
+
+subroutine ADD_QUARANTINE
+    (
+     sub_product_event_id,       
+     sub_product_id,             
+     sub_quar_reason_cd,       
+     sub_active_ind,            
+     sub_active_status_cd,       
+     sub_active_status_dt_tm,    
+     sub_active_status_prsnl_id
+    )
+
+    insert into quarantine qu
+        set qu.product_event_id              = sub_product_event_id,
+            qu.product_id                    = sub_product_id,
+            qu.quar_reason_cd                = sub_quar_reason_cd,
+            qu.updt_cnt                      = 0,
+            qu.updt_dt_tm                    = cnvtdatetime(curdate, curtime3),
+            qu.updt_id                       = reqinfo->updt_id,
+            qu.updt_task                     = reqinfo->updt_task,
+            qu.updt_applctx                  = reqinfo->updt_applctx,
+            qu.active_ind                    = sub_active_ind,
+            qu.active_status_cd              = sub_active_status_cd,
+            qu.active_status_dt_tm           = cnvtdatetime(sub_active_status_dt_tm),
+            qu.active_status_prsnl_id        = sub_active_status_prsnl_id
+
+    with    nocounter
+END         ; END subroutine ADD_QUARANTINE
+
+subroutine AVAILABLE_POOLED_PRODUCT(sub_dummy2)
+    /* Add available product_event row for pooled product */
+    call ADD_PRODUCT_EVENT
+        (
+         /* product_id               */ pooled_product_id,
+         /* person_id                */ 0, 
+         /* encntr_id                */ 0,
+         /* order_id                 */ 0,
+         /* bb_result_id             */ 0,
+         /* event_type_cd            */ available_event_type_cd,
+         /* event_dt_tm              */ cnvtdatetime(request->event_dt_tm),
+         /* event_prsnl_id           */ request->event_prsnl_id,
+         /* event_status_flag        */ 0,
+         /* override_ind             */ 0, 
+         /* override_reason_cd       */ 0, 
+         /* related_product_event_id */ 0,
+         /* active_ind               */ 1,
+         /* active_status_cd         */ reqdata->active_status_cd,
+         /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id   */ reqinfo->updt_id
+        )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("add", gsub_product_event_status, "available")
+END         ; END subroutine AVAILABLE_POOLED_PRODUCT
+
+subroutine UNCONFIRMED_POOLED_PRODUCT(sub_dummy2)
+    /* Add unconfirmed product_event row for pooled product */
+    call ADD_PRODUCT_EVENT
+        (
+         /* product_id               */ pooled_product_id,
+         /* person_id                */ 0, 
+         /* encntr_id                */ 0,
+         /* order_id                 */ 0,
+         /* bb_result_id             */ 0,
+         /* event_type_cd            */ unconfirmed_event_type_cd,
+         /* event_dt_tm              */ cnvtdatetime(request->event_dt_tm),
+         /* event_prsnl_id           */ request->event_prsnl_id,
+         /* event_status_flag        */ 0,
+         /* override_ind             */ 0, 
+         /* override_reason_cd       */ 0, 
+         /* related_product_event_id */ 0,
+         /* active_ind               */ 1,
+         /* active_status_cd         */ reqdata->active_status_cd,
+         /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id   */ reqinfo->updt_id
+        )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("add", gsub_product_event_status, "unconfirmed")
+END         ; END subroutine UNCONFIRMED_POOLED_PRODUCT
+
+subroutine AUTO_DIRECTED_POOLED_PRODUCT(sub_ad_event_type_cd)
+    /* Add autologous product_event row for pooled product */
+    call ADD_PRODUCT_EVENT
+        (
+         /* product_id               */ pooled_product_id,
+         /* person_id                */ gsub_person_id, 
+         /* encntr_id                */ gsub_encntr_id,
+         /* order_id                 */ 0,
+         /* bb_result_id             */ 0,
+         /* event_type_cd            */ sub_ad_event_type_cd,
+         /* event_dt_tm              */ cnvtdatetime(request->event_dt_tm),
+         /* event_prsnl_id           */ request->event_prsnl_id,
+         /* event_status_flag        */ 0,
+         /* override_ind             */ 0, 
+         /* override_reason_cd       */ 0, 
+         /* related_product_event_id */ 0,
+         /* active_ind               */ 1,
+         /* active_status_cd         */ reqdata->active_status_cd,
+         /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id   */ reqinfo->updt_id
+        )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("add", gsub_product_event_status, "auto_directed")
+
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+    /* NOTE: 'new_product_event_id' set in ADD_PRODUCT_EVENT */
+
+    call ADD_AUTO_DIRECTED
+        (
+         /* product_event_id       */ new_product_event_id,
+         /* product_id             */ pooled_product_id,
+         /* person_id              */ gsub_person_id,
+         /* encntr_id              */ gsub_encntr_id,
+         /* associated_dt_tm       */ cnvtdatetime(request->event_dt_tm), 
+         /* active_ind             */ 1,
+         /* active_status_cd       */ reqdata->active_status_cd,
+         /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id */ reqinfo->updt_id,
+         /* donated_by_relative_ind*/ validate(request->pool_eventlist[event]->donated_by_relative_ind, 0),
+         /* expected_usage_dt_tm   */ validate(request->pool_eventlist[event]->expected_usage_dt_tm, 
+         									cnvtdatetime(curdate, curtime3)) 
+        )
+	set request->pool_eventlist[event]->product_event_id = new_product_event_id
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS
+            (
+             /* status  */ "F",
+             /* process */ "add autologous row",
+             /* message */ "could not add auto_directed row for pooled product"
+           )
+        RETURN
+    endif
+
+END         ; END subroutine AUTOLOGOUS_POOLED_PRODUCT
+
+subroutine ADD_AUTO_DIRECTED
+    (
+     sub_product_event_id,       
+     sub_product_id,             
+     sub_person_id,              
+     sub_encntr_id,
+     sub_associated_dt_tm,       
+     sub_active_ind,            
+     sub_active_status_cd,       
+     sub_active_status_dt_tm,    
+     sub_active_status_prsnl_id,
+     sub_donated_by_fam_ind,
+     sub_expected_usage_dt_tm
+    )
+
+    insert into auto_directed ad
+        set ad.product_event_id              = sub_product_event_id,
+            ad.product_id                    = sub_product_id,
+            ad.person_id                     = sub_person_id,
+            ad.encntr_id                     = sub_encntr_id,
+            ad.associated_dt_tm              = cnvtdatetime(sub_associated_dt_tm),
+            ad.updt_cnt                      = 0,
+            ad.updt_dt_tm                    = cnvtdatetime(curdate, curtime3),
+            ad.updt_id                       = reqinfo->updt_id,
+            ad.updt_task                     = reqinfo->updt_task,
+            ad.updt_applctx                  = reqinfo->updt_applctx,
+            ad.active_ind                    = sub_active_ind,
+            ad.active_status_cd              = sub_active_status_cd,
+            ad.active_status_dt_tm           = cnvtdatetime(sub_active_status_dt_tm),
+            ad.active_status_prsnl_id        = sub_active_status_prsnl_id,
+            ad.donated_by_relative_ind		 = sub_donated_by_fam_ind,
+            ad.expected_usage_dt_tm			 = cnvtdatetime(sub_expected_usage_dt_tm)
+    with    nocounter
+END         ; END subroutine ADD_AUTO_DIRECTED
+
+subroutine POOL_COMPONENTS(sub_dummy)
+    /* Determine number of component products to be pooled to create pooled product above */
+    set cmpnt_cnt = cnvtint(size(request->cmpntlist, 5))
+
+    if (cmpnt_cnt > 0)
+        for (cmpnt = 1 to cmpnt_cnt)
+            /* Lock component product forupdate */
+            call LOCK_PRODUCT_FORUPDATE
+                (
+                 /* product_id   */ request->cmpntlist[cmpnt]->product_id,
+                 /* locked_ind   */ 1,
+                 /* p_updt_cnt   */ request->cmpntlist[cmpnt]->p_updt_cnt
+                )
+            
+            if (reply->status_data->status = "F")
+                RETURN
+            else 
+                /* Add pooled product_event row for component */
+                call ADD_POOLED_PRODUCT_EVENT(gsub_dummy)
+
+                if (reply->status_data->status = "F")
+                    RETURN
+                else 
+                    /* Add disposition and destructin product_event and child rows for component */
+                    call PROCESS_DISPOSE_DESTROY(gsub_dummy)
+
+                    if (reply->status_data->status = "F")
+                        RETURN
+                    endif
+
+                    /* Determine number of events to be processed for component */
+                    set cmpnt_event_cnt = cnvtint(size(request->cmpntlist[cmpnt]->eventlist, 5))
+
+                    for (event = 1 to cmpnt_event_cnt)                        
+                        /*
+                         * Inactivate/Release Remaining Active States for component 
+                         */
+                        if (request->cmpntlist[cmpnt]->eventlist[event]->event_type_cd = assigned_event_type_cd)
+                            call RELEASE_INACTIVATE_ASSIGN(gsub_dummy)
+                        elseif (request->cmpntlist[cmpnt]->eventlist[event]->event_type_cd = crossmatched_event_type_cd)
+                            call RELEASE_INACTIVATE_CROSSMATCH(gsub_dummy)
+                        elseif (request->cmpntlist[cmpnt]->eventlist[event]->event_type_cd = quarantined_event_type_cd)
+                            call INACTIVATE_QUARANTINE(gsub_dummy)
+                        elseif (request->cmpntlist[cmpnt]->eventlist[event]->event_type_cd = available_event_type_cd)
+                            call INACTIVATE_AVAILABLE(gsub_dummy)
+                        ;elseif (request->cmpntlist[cmpnt]->eventlist[event]->event_type_cd = unconfirmed_event_type_cd)
+                        ;    call INACTIVATE_UNCONFIRMED(gsub_dummy)
+                        ;elseif (request->cmpntlist[cmpnt]->eventlist[event]->event_type_cd = autologous_event_type_cd
+                        ;        or request->cmpntlist[cmpnt]->eventlist[event]->event_type_cd = directed_event_type_cd)
+                        ;    call INACTIVATE_AUTO_DIRECTED(gsub_dummy)
+                        else
+                            /* Do NOT inactivate Unconfirmed, Autologous or Directed product states */
+                            if (request->cmpntlist[cmpnt]->eventlist[event]->event_type_cd != unconfirmed_event_type_cd
+                            and request->cmpntlist[cmpnt]->eventlist[event]->event_type_cd != autologous_event_type_cd
+                            and request->cmpntlist[cmpnt]->eventlist[event]->event_type_cd != directed_event_type_cd)
+                                
+                                call LOAD_PROCESS_STATUS
+                                    (
+                                     /* status  */ "F",
+                                     /* process */ "inactivate/release component product events",
+                                     /* message */ build("invalid active product state for pool component--event_type_cd = ", 
+                                                       request->cmpntlist[cmpnt]->eventlist[event]->event_type_cd)
+                                   )
+                            endif       ; endif event_type_cd = unconfirmed, autologous, directed
+                        endif   ; endif request->...event_type_cd = ....
+                        if (reply->status_data->status = "F")
+                            RETURN
+                        endif
+                    endfor          ; endfor event = 1 to event_cnt
+                    if (reply->status_data->status != "F")
+                        /* write pooled product_id to component product row pooled_product_id */
+                        call UPDATE_COMPONENT_PRODUCT
+                            (
+                             /* product_id        */ request->cmpntlist[cmpnt]->product_id,
+                             /* pooled_product_id */ pooled_product_id,
+                             /* updt_cnt          */ request->cmpntlist[cmpnt]->p_updt_cnt
+                            )
+                        if (reply->status_data->status = "F")
+                            RETURN
+                        endif
+                    endif               ; endif status != "F"  (update component events)
+                endif           ; endif ADD_POOLED_PRODUCT status != "F"
+            endif           ; endif LOCK_PRODUCT_FORUPDATE status != "F"
+        endfor          ; endfor cmpnt = 1 to cmpnt_cnt
+    else
+        call LOAD_PROCESS_STATUS
+            (
+             /* sub_status  */ "F",
+             /* sub_process */ "pool components",
+             /* sub_message */ "No components selected for pooling.  Pooled product not added."
+            )
+        RETURN
+    endif       ; endif cmpnt_cnt > 0
+END             ; end subroutine POOL_COMPONENTS
+
+subroutine ADD_POOLED_PRODUCT_EVENT(sub_dummy2)
+    /* Add pooled product_event row for component */
+    call ADD_PRODUCT_EVENT
+        (
+         /* product_id               */ request->cmpntlist[cmpnt]->product_id,
+         /* person_id                */ 0, 
+         /* encntr_id                */ 0,
+         /* order_id                 */ 0,
+         /* bb_result_id             */ 0,
+         /* event_type_cd            */ pooled_event_type_cd,
+         /* event_dt_tm              */ cnvtdatetime(request->event_dt_tm),
+         /* event_prsnl_id           */ request->event_prsnl_id,
+         /* event_status_flag        */ 0,
+         /* override_ind             */ 0, 
+         /* override_reason_cd       */ 0, 
+         /* related_product_event_id */ 0,
+         /* active_ind               */ 0,
+         /* active_status_cd         */ reqdata->inactive_status_cd,
+         /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id   */ reqinfo->updt_id
+        )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("add", gsub_product_event_status, "pooled")
+END             ; END subroutine ADD_POOLED_PRODUCT_EVENT
+
+subroutine PROCESS_DISPOSE_DESTROY(sub_dummy2)
+    /* NOTE: the code in PROCESS_DISPOSE_DESTROY is cloned from bbt_add_destruction */
+
+    set disposed_product_event_id = 0.0
+
+    /*
+     * Create DISPOSE product_event row
+     */
+        call ADD_PRODUCT_EVENT
+            (
+             /* product_id               */ request->cmpntlist[cmpnt]->product_id,
+             /* person_id                */ 0, 
+             /* encntr_id                */ 0,
+             /* order_id                 */ 0,
+             /* bb_result_id             */ 0,
+             /* event_type_cd            */ disposed_event_type_cd,
+             /* event_dt_tm              */ cnvtdatetime(request->event_dt_tm),
+             /* event_prsnl_id           */ request->event_prsnl_id,
+             /* event_status_flag        */ 0,
+             /* override_ind             */ 0, 
+             /* override_reason_cd       */ 0, 
+             /* related_product_event_id */ 0,
+             /* active_ind               */ 0,
+             /* active_status_cd         */ reqdata->inactive_status_cd,
+             /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+             /* active_status_prsnl_id   */ reqinfo->updt_id
+            )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("add", gsub_product_event_status, "disposed")
+    
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+    /* NOTE: 'new_product_event_id' set in ADD_PRODUCT_EVENT */
+    set disposed_product_event_id = new_product_event_id
+
+    /*
+     * Add dispose row
+     */
+        call ADD_DISPOSE
+            (
+             /* product_event_id       */ disposed_product_event_id,
+             /* product_id             */ request->cmpntlist[cmpnt]->product_id,
+             /* reason_cd              */ pooled_dispose_reason_cd,
+             /* disposed_qty           */ NULL, ; request->cmpntlist[cmpnt]->eventlist[event]->select_qty,
+             /* active_ind             */ 0,
+             /* active_status_cd       */ reqdata->inactive_status_cd, 
+             /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+             /* active_status_prsnl_id */ reqinfo->updt_id
+            )
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)
+            RETURN
+        endif
+
+    /*
+     * Create DESTROY product_event_row
+     */
+        call ADD_PRODUCT_EVENT
+            (
+             /* product_id               */ request->cmpntlist[cmpnt]->product_id,
+             /* person_id                */ 0, 
+             /* encntr_id                */ 0, 
+             /* order_id                 */ 0,
+             /* bb_result_id             */ 0,
+             /* event_type_cd            */ destroyed_event_type_cd,
+             /* event_dt_tm              */ cnvtdatetime(request->event_dt_tm),
+             /* event_prsnl_id           */ request->event_prsnl_id,
+             /* event_status_flag        */ 0, 
+             /* override_ind             */ 0, 
+             /* override_reason_cd       */ 0, 
+             /* related_product_event_id */ disposed_product_event_id,
+             /* active_ind               */ 1, 
+             /* active_status_cd         */ reqdata->active_status_cd,
+             /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+             /* active_status_prsnl_id   */ reqinfo->updt_id
+            )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("add", gsub_product_event_status, "destroyed")
+    
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+    /*
+     * Add destruction row
+     */
+
+    /* NOTE: 'new_product_event_id' set in ADD_PRODUCT_EVENT */
+
+    /*
+     * Insert row into the destruction table
+     */
+    call ADD_DESTRUCTION
+        (
+         /* product_event_id       */ new_product_event_id,                    
+         /* product_id             */ request->cmpntlist[cmpnt]->product_id,
+         /* method_cd              */ pooled_destruction_method_cd, 
+         /* box_nbr                */ "", 
+         /* manifest_nbr           */ NULL,
+         /* destroyed_qty          */ NULL,  ; request->cmpntlist[cmpnt]->eventlist[event]->select_qty,
+         /* autoclave_ind          */ 0, 
+         /* active_ind             */ 1, 
+         /* active_status_cd       */ reqdata->active_status_cd,
+         /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id */ reqinfo->updt_id
+        )
+
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)
+        RETURN
+    endif
+END         ; END subroutine PROCESS_DISPOSE_DESTROY
+
+subroutine ADD_DISPOSE
+    (
+     sub_product_event_id,
+     sub_product_id,
+     sub_reason_cd,
+     sub_disposed_qty,
+     sub_active_ind,
+     sub_active_status_cd,
+     sub_active_status_dt_tm,
+     sub_active_status_prsnl_id
+    )
+
+    insert into disposition dsp
+        set dsp.product_event_id        = sub_product_event_id,
+            dsp.product_id              = sub_product_id,
+            dsp.reason_cd               = sub_reason_cd,
+            dsp.disposed_qty            = sub_disposed_qty,
+            dsp.active_ind              = sub_active_ind,
+            dsp.active_status_cd        = sub_active_status_cd,
+            dsp.active_status_dt_tm     = cnvtdatetime(sub_active_status_dt_tm),
+            dsp.active_status_prsnl_id  = sub_active_status_prsnl_id,
+            dsp.updt_cnt                = 0,
+            dsp.updt_dt_tm              = cnvtdatetime(curdate, curtime3),
+            dsp.updt_id                 = reqinfo->updt_id,
+            dsp.updt_task               = reqinfo->updt_task,
+            dsp.updt_applctx            = reqinfo->updt_applctx
+    with    nocounter  
+
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "create dispose row"
+        set gsub_message = "dispose row could not be created"
+    endif
+END         ; end subroutine ADD_DISPOSE
+
+subroutine ADD_DESTRUCTION
+    (
+     sub_product_event_id,
+     sub_product_id,
+     sub_method_cd,
+     sub_box_nbr,
+     sub_manifest_nbr,
+     sub_destroyed_qty,
+     sub_autoclave_ind,
+     sub_active_ind,
+     sub_active_status_cd,
+     sub_active_status_dt_tm,
+     sub_active_status_prsnl_id
+    )
+
+    insert into destruction dst
+        set dst.product_event_id          = sub_product_event_id,
+            dst.product_id                = sub_product_id,
+            dst.method_cd                 = sub_method_cd,
+            dst.box_nbr                   = trim(cnvtupper(sub_box_nbr)),
+            dst.manifest_nbr              = sub_manifest_nbr,
+            dst.destroyed_qty             = sub_destroyed_qty,
+            dst.autoclave_ind             = sub_autoclave_ind,
+            dst.destruction_org_id        = 0, ; only valid if meaning = DESTLTR, updated in bbt_chg_destruction
+            dst.active_ind                = sub_active_ind,
+            dst.active_status_cd          = sub_active_status_cd,
+            dst.active_status_dt_tm       = cnvtdatetime(sub_active_status_dt_tm),
+            dst.active_status_prsnl_id    = sub_active_status_prsnl_id,
+            dst.updt_cnt                  = 0,
+            dst.updt_dt_tm                = cnvtdatetime(curdate, curtime3),
+            dst.updt_id                   = reqinfo->updt_id,
+            dst.updt_task                 = reqinfo->updt_task,
+            dst.updt_applctx              = reqinfo->updt_applctx
+    with nocounter
+
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "create destruction row"
+        set gsub_message = "destruction row could not be created"
+    endif
+END     ; end subroutine ADD_DESTRUCTION
+
+subroutine RELEASE_INACTIVATE_ASSIGN(sub_dummy2)
+    /* 
+     * Lock product_event, assign and, if derivative, derivative rows forupdate
+     */
+        ;set derivative_ind = " "
+        ;set cur_qty = 0
+
+        select into "nl:"
+            pe.product_event_id
+        from 
+            product_event pe
+        plan    pe      where   pe.product_event_id     = request->cmpntlist[cmpnt]->eventlist[event]->product_event_id
+                                  and pe.updt_cnt       = request->cmpntlist[cmpnt]->eventlist[event]->pe_updt_cnt
+        
+        with    nocounter, forupdate(pe)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock product_event forupdate",
+                 /* message */ "product_event rows could not be locked forupdate"
+                )
+                RETURN
+        endif
+
+        select into "nl:"
+            a.product_event_id
+        from 
+            assign a
+            
+        plan    a       where   a.product_event_id      = request->cmpntlist[cmpnt]->eventlist[event]->product_event_id
+                                  and a.updt_cnt        = request->cmpntlist[cmpnt]->eventlist[event]->pe_child_updt_cnt
+        
+        with    nocounter,  forupdate(a) 
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock assign forupdate",
+                 /* message */ "assign rows could not be locked forupdate"
+                )
+                RETURN
+        endif
+        ;/* set new_active_ind, new_active_status and, for derivatives, new_cur_qty */
+        ;call SET_NEW_ACTIVE_STATUS (derivative_ind, cur_qty, request->cmpntlist[cmpnt]->eventlist[event]->select_qty)
+        ;if (gsub_status = "F")
+        ;    call LOAD_PROCESS_STATUS
+        ;        (
+        ;         /* status  */ "F",
+        ;         /* process */ "release assign",
+        ;         /* message */ "selected release quantity > assigned quantity--cannot release assign"
+        ;        )
+        ;    RETURN
+        ;else
+        ;    set new_active_status_cd = gsub_active_status_cd
+        ;    set new_active_ind = gsub_active_ind
+        ;endif
+
+        /* TEMPORARY--pending derivative logic (commented out just above) */
+        set new_active_ind = 0
+        set new_active_status_cd = reqdata->inactive_status_cd
+        /* END TEMPORARY */
+
+        /*
+         * Inactivate ASSIGN product_event row
+         */
+            call CHG_PRODUCT_EVENT
+                (
+                 /* product_event_id       */ request->cmpntlist[cmpnt]->eventlist[event]->product_event_id,
+                 /* event_dt_tm            */ 0, 
+                 /* event_prsnl_id         */ 0, 
+                 /* event_status_flag      */ 0,
+                 /* active_ind             */ new_active_ind,
+                 /* active_status_cd       */ new_active_status_cd,
+                 /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+                 /* active_status_prsnl_id */ reqinfo->updt_id,
+                 /* updt_cnt               */ request->cmpntlist[cmpnt]->eventlist[event]->pe_updt_cnt,
+                 /* lock_forupdate_ind     */ 0, ; 0 = do not lock forupdate--locked above
+                 /* update_dt_tm_prsnl_ind */ 0  ; 0 = do not update original event_dt_tm/prsnl_id 
+                )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("inactivate", gsub_product_event_status, "assigned")
+    
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+    /*
+     * Update and inactivate assign row 
+     */
+        call CHG_ASSIGN
+            (
+             /* product_event_id       */ request->cmpntlist[cmpnt]->eventlist[event]->product_event_id,
+             /* cur_assign_qty         */ NULL,  ; new_cur_qty,
+             /* updt_cnt               */ request->cmpntlist[cmpnt]->eventlist[event]->pe_child_updt_cnt,
+             /* active_ind             */ new_active_ind,
+             /* active_status_cd       */ new_active_status_cd,
+             /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+             /* active_status_prsnl_id */ reqinfo->updt_id,
+             /* derivative_ind         */ " "   ; derivative_ind
+            )
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)
+            RETURN
+        endif
+
+    /* Determine if assign is to be released--assign person_id <> pooled product assign person_id */
+    if (request->cmpntlist[cmpnt]->eventlist[event]->person_id != request->person_id
+    or request->person_id <= 0) 
+
+        /* 
+         * Create assign_release row
+         */
+            call ADD_ASSIGN_RELEASE
+                (
+                 /* product_event_id  */ request->cmpntlist[cmpnt]->eventlist[event]->product_event_id,
+                 /* product_id        */ request->cmpntlist[cmpnt]->product_id,
+                 /* release_dt_tm     */ cnvtdatetime(request->event_dt_tm),
+                 /* release_prsnl_id  */ request->event_prsnl_id,
+                 /* release_reason_cd */ request->cmpntlist[cmpnt]->eventlist[event]->release_reason_cd,
+                 /* release_qty       */ NULL,      ; request->cmpntlist[cmpnt]->eventlist[event]->select_qty,
+                 /* derivative_ind    */ " "        ; derivatived_ind
+                )
+
+            if (curqual = 0)
+                call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)
+                RETURN
+            endif       ; endif curqual = 0 ADD_ASSIGN_RELEASE
+    endif       ; endif person_id != person_id
+END         ; end subroutine RELEASE_INACTIVATE_ASSIGN
+
+subroutine CHG_ASSIGN
+    (
+     sub_product_event_id,
+     sub_new_cur_qty,
+     sub_updt_cnt,
+     sub_active_ind,
+     sub_active_status_cd,
+     sub_active_status_dt_tm,
+     sub_active_status_prsnl_id,
+     sub_derivative_ind
+    )
+
+    update into assign a
+        set a.cur_assign_qty            = sub_new_cur_qty,
+            a.active_ind                = sub_active_ind,
+            a.active_status_cd          = sub_active_status_cd,
+            a.active_status_dt_tm       = cnvtdatetime(sub_active_status_dt_tm),
+            a.active_status_prsnl_id    = sub_active_status_prsnl_id,
+            a.updt_cnt                  = a.updt_cnt + 1,
+            a.updt_dt_tm                = cnvtdatetime(curdate, curtime3),
+            a.updt_task                 = reqinfo->updt_task,
+            a.updt_id                   = reqinfo->updt_id,
+            a.updt_applctx              = reqinfo->updt_applctx
+
+    where   a.product_event_id          = sub_product_event_id
+              and a.updt_cnt            = sub_updt_cnt
+
+    with    nocounter
+
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "release/inactivate assign row"
+        set gsub_message = "assign row could not be released/inactivated"
+    endif    
+END     ; end subroutine CHG_ASSIGN
+
+subroutine ADD_ASSIGN_RELEASE
+    (
+     sub_product_event_id,
+     sub_product_id,
+     sub_release_dt_tm,
+     sub_release_prsnl_id,
+     sub_release_reason_cd,
+     sub_release_qty,
+     sub_derivative_ind
+    )
+     
+    /* Retrieve new sequence number for assign_release_id */
+%i cclsource:bbt_get_pathnet_seq.inc
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "add_assign_release"
+        set gsub_message = "get pathnet seq failed for assign_release_id"
+    else
+        /* Create assign_release record */
+        insert into assign_release ar
+            set ar.assign_release_id        = new_pathnet_seq,
+                ar.product_event_id         = sub_product_event_id,
+                ar.product_id               = sub_product_id,
+                ar.release_dt_tm            = cnvtdatetime(sub_release_dt_tm),
+                ar.release_prsnl_id         = sub_release_prsnl_id,
+                ar.release_reason_cd        = sub_release_reason_cd,
+                ar.release_qty              = sub_release_qty,
+                ar.updt_cnt                 = 0,
+                ar.updt_dt_tm               = cnvtdatetime(curdate, curtime3),
+                ar.updt_task                = reqinfo->updt_task,
+                ar.updt_id                  = reqinfo->updt_id,
+                ar.updt_applctx             = reqinfo->updt_applctx,
+                ar.active_ind               = 1,
+                ar.active_status_cd         = reqdata->active_status_cd,
+                ar.active_status_dt_tm      = cnvtdatetime(curdate, curtime3),
+                ar.active_status_prsnl_id   = reqinfo->updt_id
+
+        if (curqual = 0)
+            set gsub_status = "F"
+            set gsub_process = "add_assign_release"
+            set gsub_message = "could not add assign_release row"
+        endif    
+    endif
+END             ; end subroutine ADD_ASSIGN_RELEASE
+
+subroutine RELEASE_INACTIVATE_CROSSMATCH(sub_dummy2)
+    /* 
+     * Lock product_event and crossmatch rows
+     */
+        select into "nl:"
+            pe.product_event_id
+        from 
+            product_event pe
+        plan    pe      where   pe.product_event_id     = request->cmpntlist[cmpnt]->eventlist[event]->product_event_id
+                                  and pe.updt_cnt       = request->cmpntlist[cmpnt]->eventlist[event]->pe_updt_cnt
+        with    nocounter, forupdate(pe)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock product_event forupdate",
+                 /* message */ "product_event rows could not be locked forupdate"
+                )
+                RETURN
+        endif
+
+        select into "nl:"
+            xm.product_event_id
+        from 
+            crossmatch xm
+        plan    xm      where   xm.product_event_id     = request->cmpntlist[cmpnt]->eventlist[event]->product_event_id
+                                  and xm.updt_cnt       = request->cmpntlist[cmpnt]->eventlist[event]->pe_child_updt_cnt
+        with    nocounter, forupdate(xm)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock crossmatch forupdate",
+                 /* message */ "crossmatch rows could not be locked forupdate"
+                )
+                RETURN
+        endif
+        
+        /*
+         * Inactivate CROSSMATCH product_event row
+         */
+           call CHG_PRODUCT_EVENT
+                (
+                 /* product_event_id       */ request->cmpntlist[cmpnt]->eventlist[event]->product_event_id,
+                 /* event_dt_tm            */ 0, 
+                 /* event_prsnl_id         */ 0, 
+                 /* event_status_flag      */ 0,
+                 /* active_ind             */ 0,
+                 /* active_status_cd       */ reqdata->inactive_status_cd,
+                 /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+                 /* active_status_prsnl_id */ reqinfo->updt_id,
+                 /* updt_cnt               */ request->cmpntlist[cmpnt]->eventlist[event]->pe_updt_cnt,
+                 /* lock_forupdate_ind     */ 0, ; 0 = do not lock forupdate--locked above
+                 /* update_dt_tm_prsnl_ind */ 0  ; 0 = do not update original event_dt_tm/prsnl_id 
+                )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("inactivate", gsub_product_event_status, "crossmatched")
+    
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+    /* determine if crossmatch is to be released or inactivated and set release variables */
+    if (request->cmpntlist[cmpnt]->eventlist[event]->person_id != request->person_id
+    or request->person_id <= 0)
+        /* release crossmatch */
+        set release_dt_tm = cnvtdatetime(request->event_dt_tm)
+        set release_prsnl_id = request->event_prsnl_id
+        set release_reason_cd = request->cmpntlist[cmpnt]->eventlist[event]->release_reason_cd
+        set release_qty = NULL
+    else
+        /* do NOT release crossmatch */
+        set release_dt_tm = NULL
+        set release_prsnl_id = 0.0 
+        set release_reason_cd = 0.0
+        set release_qty = NULL
+    endif
+
+    /*  
+     * Update and inactivate crossmatch rows) 
+     */
+        call CHG_CROSSMATCH
+        (
+         /* product_event_id       */ request->cmpntlist[cmpnt]->eventlist[event]->product_event_id,
+         /* updt_cnt               */ request->cmpntlist[cmpnt]->eventlist[event]->pe_child_updt_cnt,
+         /* release_dt_tm          */ cnvtdatetime(release_dt_tm),
+         /* release_prsnl_id       */ release_prsnl_id,
+         /* release_reason_cd      */ release_reason_cd, 
+         /* release_qty            */ release_qty, 
+         /* active_ind             */ 0,
+         /* active_status_cd       */ reqdata->inactive_status_cd,
+         /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id */ reqinfo->updt_id
+        )
+
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)
+        RETURN
+    endif
+END        ; end subroutine RELEASE_CROSSMATCH
+
+subroutine CHG_CROSSMATCH
+    (
+     sub_product_event_id,
+     sub_updt_cnt,
+     sub_release_dt_tm,
+     sub_release_prsnl_id,
+     sub_release_reason_cd,
+     sub_release_qty,
+     sub_active_ind,
+     sub_active_status_cd,
+     sub_active_status_dt_tm,
+     sub_active_status_prsnl_id
+    )
+                      
+    update into crossmatch xm
+        set xm.release_dt_tm            = cnvtdatetime(sub_release_dt_tm),
+            xm.release_prsnl_id         = sub_release_prsnl_id,
+            xm.release_reason_cd        = sub_release_reason_cd,
+            xm.release_qty             = sub_release_qty,
+            xm.active_ind               = sub_active_ind,  
+            xm.active_status_cd         = sub_active_status_cd,
+            xm.active_status_dt_tm      = cnvtdatetime(sub_active_status_dt_tm),
+            xm.active_status_prsnl_id   = sub_active_status_prsnl_id,
+            xm.updt_cnt                 = xm.updt_cnt + 1,
+            xm.updt_dt_tm               = cnvtdatetime(curdate, curtime3),
+            xm.updt_task                = reqinfo->updt_task,
+            xm.updt_id                  = reqinfo->updt_id,
+            xm.updt_applctx             = reqinfo->updt_applctx
+
+    where   xm.product_event_id         = sub_product_event_id
+              and xm.updt_cnt           = sub_updt_cnt
+
+    with    nocounter
+
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "release/inactivate crossmatch row"
+        set gsub_message = "crossmatch row could not be released/inactivated" 
+    endif    
+END     ; end subroutine CHG_CROSSMATCH
+
+subroutine INACTIVATE_QUARANTINE(sub_dummy2)
+    /* 
+     * Lock product_event, quarantine and, if derivative, derivative rows forupdate
+     */
+        ;set derivative_ind = " "
+        ;set cur_qty = 0
+
+        select into "nl:"
+            pe.product_event_id
+        from 
+            product_event pe
+        plan    pe      where   pe.product_event_id     = request->cmpntlist[cmpnt]->eventlist[event]->product_event_id
+                                  and pe.updt_cnt       = request->cmpntlist[cmpnt]->eventlist[event]->pe_updt_cnt
+        with    nocounter, forupdate(pe)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock product_event forupdate",
+                 /* message */ "product_event rows could not be locked forupdate"
+                )
+                RETURN
+        endif
+        
+        select into "nl:"
+            qu.product_event_id
+        from 
+            quarantine qu
+            
+        plan    qu      where   qu.product_event_id      = request->cmpntlist[cmpnt]->eventlist[event]->product_event_id
+                                  and qu.updt_cnt        = request->cmpntlist[cmpnt]->eventlist[event]->pe_child_updt_cnt
+        with    nocounter, forupdate(qu) 
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock quarantine forupdate",
+                 /* message */ "quarantine rows could not be locked forupdate"
+                )
+                RETURN
+        endif
+
+        ;/* set new_active_ind, new_active_status and, for derivatives, new_cur_qty */
+        ;call SET_NEW_ACTIVE_STATUS (derivative_ind, cur_qty, request->cmpntlist[cmpnt]->eventlist[event]->select_qty)
+        ;if (gsub_status = "F")
+        ;    call LOAD_PROCESS_STATUS
+        ;        (
+        ;         /* status  */ "F",
+        ;         /* process */ "release quarantine",
+        ;         /* message */ "selected release quantity > quarantined quantity--cannot release quarantine"
+        ;        )
+        ;    RETURN
+        ;else
+        ;    set new_active_status_cd = gsub_active_status_cd
+        ;    set new_active_ind = gsub_active_ind
+        ;endif
+
+        /* TEMPORARY--pending derivative logic (commented out just above) */
+        set new_active_ind = 0
+        set new_active_status_cd = reqdata->inactive_status_cd
+        /* END TEMPORARY */
+
+        /*
+         * Inactivate QUARANTINE product_event row
+         */
+            call CHG_PRODUCT_EVENT
+                (
+                 /* product_event_id       */ request->cmpntlist[cmpnt]->eventlist[event]->product_event_id,
+                 /* event_dt_tm            */ 0, 
+                 /* event_prsnl_id         */ 0, 
+                 /* event_status_flag      */ 0,
+                 /* active_ind             */ new_active_ind,
+                 /* active_status_cd       */ new_active_status_cd,
+                 /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+                 /* active_status_prsnl_id */ reqinfo->updt_id,
+                 /* updt_cnt               */ request->cmpntlist[cmpnt]->eventlist[event]->pe_updt_cnt,
+                 /* lock_forupdate_ind     */ 0, ; 0 = do not lock forupdate--locked above
+                 /* update_dt_tm_prsnl_ind */ 0  ; 0 = do not update original event_dt_tm/prsnl_id 
+                )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("inactivate", gsub_product_event_status, "quarantined")
+    
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+    /*
+     * Update and inactivate quarantine row 
+     */
+        call CHG_QUARANTINE
+            (
+             /* product_event_id       */ request->cmpntlist[cmpnt]->eventlist[event]->product_event_id,
+             /* cur_quar_qty           */ NULL,     ; new_cur_qty,
+             /* updt_cnt               */ request->cmpntlist[cmpnt]->eventlist[event]->pe_child_updt_cnt,
+             /* active_ind             */ new_active_ind,
+             /* active_status_cd       */ new_active_status_cd,
+             /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+             /* active_status_prsnl_id */ reqinfo->updt_id,
+             /* derivative_ind         */ " "       ; derivative_ind
+            )
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)
+            RETURN
+        endif    ; endif curqual = 0 CHG_QUARANTINE
+END         ; end subroutine INACTIVATE_QUARANTINED_EVENT
+
+subroutine CHG_QUARANTINE
+    (
+     sub_product_event_id,
+     sub_cur_quar_qty,
+     sub_updt_cnt,
+     sub_active_ind,
+     sub_active_status_cd,
+     sub_active_status_dt_tm,
+     sub_active_status_prsnl_id,
+     sub_derivative_ind
+    )
+
+    update into quarantine qu
+        set qu.cur_quar_qty             = sub_cur_quar_qty,
+            qu.updt_cnt                 = qu.updt_cnt + 1,
+            qu.updt_dt_tm               = cnvtdatetime(curdate, curtime3),
+            qu.updt_task                = reqinfo->updt_task,
+            qu.updt_id                  = reqinfo->updt_id,
+            qu.updt_applctx             = reqinfo->updt_applctx,
+            qu.active_ind               = sub_active_ind,
+            qu.active_status_cd         = sub_active_status_cd,
+            qu.active_status_dt_tm      = cnvtdatetime(sub_active_status_dt_tm),
+            qu.active_status_prsnl_id   = sub_active_status_prsnl_id
+
+    where  qu.product_event_id          = sub_product_event_id
+             and qu.updt_cnt            = sub_updt_cnt
+
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "inactivate quarantine row"
+        set gsub_message = "quarantine row could not be inactivated"
+    endif    
+END         ; end subroutine CHG_QUARANTINE
+
+subroutine INACTIVATE_AVAILABLE(sub_dummy2)
+    /* 
+     * NOTE:  When AVAILABLE product_event/state is inactivated, if the product is a derivative, the quantity disposed
+     * is subtracted from the current available quantity (cur_avail_qty) on the derivative table.
+     * NOTE: Derivatives not currently processed in this script
+     */
+
+    /* 
+     * Lock product_event, and, if derivative, derivative rows forupdate
+     */
+        ;set derivative_ind = " "
+        ;set cur_qty = 0
+
+        select into "nl:"
+            pe.product_event_id
+            ;drv.seq,
+            ;drv.cur_avail_qty,
+            ;drv.product_id,
+            ;bp.product_id
+        from
+            product_event pe
+            ;(dummyt d_drv_bp with seq = 1),
+            ;derivative drv,
+            ;blood_product bp
+        plan    pe      where   pe.product_event_id     = request->cmpntlist[cmpnt]->eventlist[event]->product_event_id
+                                  and pe.updt_cnt       = request->cmpntlist[cmpnt]->eventlist[event]->pe_updt_cnt
+        ;/*
+        ; *  NOTE:  the orjoin to bp is to ensure proper joining for derivatives re: drv.updt_cnt.  No data is
+        ; *  needed from bp; however, if no match on derivative need to be able to verify that blood product
+        ; */               
+        ;join    (d_drv_bp where d_drv_bp.seq            = 1
+        ;join    (drv    where   drv.product_id          = pe.product_id
+        ;                          and drv.updt_cnt      = new_drv_updt_cnt)
+        ;orjoin  (bp     where   bp.product_id           = pe.product_id))
+        ;detail
+        ;    if (drv.seq > 0)
+        ;        derivative_ind  = "Y"
+        ;        cur_qty         = drv.cur_avail_qty
+        ;    endif
+        with    nocounter, forupdate(pe) ; , forupdate(drv)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock product_event forupdate",
+                 /* message */ "product_event row could not be locked forupdate"
+                )
+            RETURN
+        endif
+
+        ;/* set new_active_ind, new_active_status and, for derivatives, new_cur_qty */
+        ;call SET_NEW_ACTIVE_STATUS (derivative_ind, cur_qty, request->cmpntlist[cmpnt]->eventlist[event]->select_qty)
+        ;if (gsub_status = "F")
+        ;    call LOAD_PROCESS_STATUS
+        ;        (
+        ;         /* status  */ "F",
+        ;         /* process */ "inactivate available product_event",
+        ;         /* message */ "selected quantity > available quantity--cannot inactivate available product_event"
+        ;        )
+        ;    RETURN
+        ;else
+        ;    set new_active_status_cd = gsub_active_status_cd
+        ;    set new_active_ind = gsub_active_ind
+        ;endif
+
+        /* TEMPORARY--pending derivative logic (commented out just above) */
+        set new_active_ind = 0
+        set new_active_status_cd = reqdata->inactive_status_cd
+        /* END TEMPORARY */
+
+        /*
+         * Inactivate AVAILABLE product_event row
+         */
+            call CHG_PRODUCT_EVENT
+                (
+                 /* product_event_id       */ request->cmpntlist[cmpnt]->eventlist[event]->product_event_id,
+                 /* event_dt_tm            */ 0, 
+                 /* event_prsnl_id         */ 0, 
+                 /* event_status_flag      */ 0,
+                 /* active_ind             */ new_active_ind,
+                 /* active_status_cd       */ new_active_status_cd,
+                 /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+                 /* active_status_prsnl_id */ reqinfo->updt_id,
+                 /* updt_cnt               */ request->cmpntlist[cmpnt]->eventlist[event]->pe_updt_cnt,
+                 /* lock_forupdate_ind     */ 0, ; 0 = do not lock forupdate--locked above
+                 /* update_dt_tm_prsnl_ind */ 0  ; 0 = do not update original event_dt_tm/prsnl_id 
+                )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("inactivate", gsub_product_event_status, "available")
+    
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+; Following commented out pending implementation of derivative logic for pooled products
+;   if (derivative_ind = "Y")
+    ;    /*
+    ;     * Update and inactivate derivative row 
+    ;     */
+    ;   call CHG_DERIVATIVE
+    ;       (
+    ;        /* product_id             */ request->cmpntlist[cmpnt]->product_id,
+    ;        /* cur_avail_qty          */ new_cur_qty,
+    ;        /* updt_cnt               */ new_drv_updt_cnt,
+    ;        /* active_ind             */ new_active_ind,
+    ;        /* active_status_cd       */ new_active_status_cd,
+    ;        /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+    ;        /* active_status_prsnl_id */ reqinfo->updt_id
+    ;       )
+    ;
+    ;   if (curqual = 0)
+    ;   call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)
+    ;   RETURN
+    ;    endif    ; endif curqual = 0 CHG_DERIVATIVE
+    ;endif   ; endif derivative_ind = "Y"
+END        ; end subroutine INACTIVATE_AVAILABLE
+
+;subroutine CHG_DERIVATIVE
+;    (
+;     sub_product_id,
+;     sub_cur_avail_qty,
+;     sub_updt_cnt,
+;     sub_active_ind,
+;     sub_active_status_cd,
+;     sub_active_status_dt_tm,
+;     sub_active_status_prsnl_id
+;    )
+;
+;    update into derivative drv
+;        set drv.cur_avail_qty            =  sub_cur_avail_qty,
+;            drv.updt_cnt                 = drv.updt_cnt + 1,
+;            drv.updt_dt_tm               = cnvtdatetime(curdate, curtime3),
+;            drv.updt_task                = reqinfo->updt_task,
+;            drv.updt_id                  = reqinfo->updt_id,
+;            drv.updt_applctx             = reqinfo->updt_applctx,
+;            drv.active_ind               = sub_active_ind,
+;            drv.active_status_cd         = sub_active_status_cd,
+;            drv.active_status_dt_tm      = cnvtdatetime(sub_active_status_dt_tm),
+;            drv.active_status_prsnl_id   = sub_active_status_prsnl_id
+;
+;    where  drv.product_id          = sub_product_id
+;             and drv.updt_cnt            = sub_updt_cnt
+;
+;    if (curqual = 0)
+;        set gsub_status = "F"
+;        set gsub_process = "update derivative row"
+;        set gsub_message = "derivative current available quantity could not be updated"
+;    else
+;        /* Increment new_drv_updt_cnt for any remaining events which update the derivative table */
+;        set new_drv_updt_cnt = new_drv_updt_cnt + 1
+;    endif    
+;
+;END         ; end subroutine CHG_DERIVATIVE
+
+subroutine INACTIVATE_UNCONFIRMED(sub_dummy2)
+    /* 
+     * Lock product_event row
+     */
+        select into "nl:"
+            pe.product_event_id
+        from 
+            product_event pe
+        plan    pe      where   pe.product_event_id     = request->cmpntlist[cmpnt]->eventlist[event]->product_event_id
+                                  and pe.updt_cnt       = request->cmpntlist[cmpnt]->eventlist[event]->pe_updt_cnt
+        with    nocounter, forupdate(pe)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock unconfirmed product_event forupdate",
+                 /* message */ "unconfirmed product_event row could not be locked forupdate"
+                )
+                RETURN
+        endif
+
+        /*
+         * Inactivate UNCONFIRMED product_event row
+         */
+           call CHG_PRODUCT_EVENT
+                (
+                 /* product_event_id       */ request->cmpntlist[cmpnt]->eventlist[event]->product_event_id,
+                 /* event_dt_tm            */ 0, 
+                 /* event_prsnl_id         */ 0, 
+                 /* event_status_flag      */ 0,
+                 /* active_ind             */ 0,
+                 /* active_status_cd       */ reqdata->inactive_status_cd,
+                 /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+                 /* active_status_prsnl_id */ reqinfo->updt_id,
+                 /* updt_cnt               */ request->cmpntlist[cmpnt]->eventlist[event]->pe_updt_cnt,
+                 /* lock_forupdate_ind     */ 0, ; 0 = do not lock forupdate--locked above
+                 /* update_dt_tm_prsnl_ind */ 0  ; 0 = do not update original event_dt_tm/prsnl_id 
+                )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("inactivate", gsub_product_event_status, "unconfirmed")
+    
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+END        ; end subroutine INACTIVATE_UNCONFIRMED
+
+subroutine INACTIVATE_AUTO_DIRECTED(sub_dummy2)
+    /* 
+     * Lock product_event and auto_directed rows
+     */
+        select into "nl:"
+            pe.product_event_id
+        from 
+            product_event pe
+        plan    pe      where   pe.product_event_id     = request->cmpntlist[cmpnt]->eventlist[event]->product_event_id
+                                  and pe.updt_cnt       = request->cmpntlist[cmpnt]->eventlist[event]->pe_updt_cnt
+        with    nocounter, forupdate(pe)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock product_event forupdate",
+                 /* message */ "product_event rows could not be locked forupdate"
+                )
+                RETURN
+        endif
+        
+        select into "nl:"
+            ad.product_event_id
+        from 
+            auto_directed ad
+        plan    ad      where   ad.product_event_id     = request->cmpntlist[cmpnt]->eventlist[event]->product_event_id
+                                  and ad.updt_cnt       = request->cmpntlist[cmpnt]->eventlist[event]->pe_child_updt_cnt
+        with    nocounter, forupdate(ad)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock auto_directed forupdate",
+                 /* message */ "auto_directed rows could not be locked forupdate"
+                )
+                RETURN
+        endif
+
+        /*
+         * Inactivate AUTO_DIRECTED product_event row
+         */
+           call CHG_PRODUCT_EVENT
+                (
+                 /* product_event_id       */ request->cmpntlist[cmpnt]->eventlist[event]->product_event_id,
+                 /* event_dt_tm            */ 0, 
+                 /* event_prsnl_id         */ 0, 
+                 /* event_status_flag      */ 0,
+                 /* active_ind             */ 0,
+                 /* active_status_cd       */ reqdata->inactive_status_cd,
+                 /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+                 /* active_status_prsnl_id */ reqinfo->updt_id,
+                 /* updt_cnt               */ request->cmpntlist[cmpnt]->eventlist[event]->pe_updt_cnt,
+                 /* lock_forupdate_ind     */ 0, ; 0 = do not lock forupdate--locked above
+                 /* update_dt_tm_prsnl_ind */ 0  ; 0 = do not update original event_dt_tm/prsnl_id 
+                )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("inactivate", gsub_product_event_status, "auto_directed")
+    
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+    /*  
+     * Update and inactivate auto_directed rows) 
+     */
+        call CHG_AUTO_DIRECTED
+        (
+         /* product_event_id       */ request->cmpntlist[cmpnt]->eventlist[event]->product_event_id,
+         /* updt_cnt               */ request->cmpntlist[cmpnt]->eventlist[event]->pe_child_updt_cnt,
+         /* active_ind             */ 0,
+         /* active_status_cd       */ reqdata->inactive_status_cd,
+         /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id */ reqinfo->updt_id
+        )
+
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)
+        RETURN
+    endif    ; endif curqual = 0 CHG_AUTO_DIRECTED
+END        ; end subroutine INACTIVATE_AUTO_DIRECTED
+
+subroutine CHG_AUTO_DIRECTED
+    (
+     sub_product_event_id,
+     sub_updt_cnt,
+     sub_active_ind,
+     sub_active_status_cd,
+     sub_active_status_dt_tm,
+     sub_active_status_prsnl_id
+    )
+                      
+    update into auto_directed ad
+        set ad.active_ind               = sub_active_ind,  
+            ad.active_status_cd         = sub_active_status_cd,
+            ad.active_status_dt_tm      = cnvtdatetime(sub_active_status_dt_tm),
+            ad.active_status_prsnl_id   = sub_active_status_prsnl_id,
+            ad.updt_cnt                 = ad.updt_cnt + 1,
+            ad.updt_dt_tm               = cnvtdatetime(curdate, curtime3),
+            ad.updt_task                = reqinfo->updt_task,
+            ad.updt_id                  = reqinfo->updt_id,
+            ad.updt_applctx             = reqinfo->updt_applctx
+
+    where   ad.product_event_id         = sub_product_event_id
+              and ad.updt_cnt           = sub_updt_cnt
+
+    with    nocounter
+
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "inactivate auto_directed row"
+        set gsub_message = "auto_directed row could not be inactivated" 
+    endif    
+END     ; end subroutine CHG_AUTO_DIRECTED
+
+subroutine PROCESS_PRODUCT_EVENT_STATUS(sub_pe_type, sub_pe_status, sub_event_type_disp)
+
+    set sub_pe_process =  concat(sub_pe_type, " ", sub_event_type_disp, " product_event")
+
+    if (sub_pe_status = "FS")            ;  get_product_event_id (seq) failed
+        call LOAD_PROCESS_STATUS
+            (
+             /* status  */ "F",
+             /* process */ sub_pe_process,
+             /* message */ "get new product_event_id failed (seq)"
+            )
+
+    elseif (sub_pe_status = "FA")       ; add product_event failed 
+        call LOAD_PROCESS_STATUS
+            (
+             /* status  */ "F",
+             /* process */ sub_pe_process,
+             /* message */ concat("could not ", sub_pe_type, " ", event_type_disp,  " product_event row")
+            )
+
+
+    elseif (gsub_product_event_status = "FU")           ; product_event update failed
+        call LOAD_PROCESS_STATUS
+            (
+             /* status  */ "F",
+             /* process */ concat(sub_pe_type, " active ", sub_event_type_disp, " product_event row"),
+             /* message */
+                concat(sub_event_type_disp, " product_event row could not be released--product_event_id:  ",
+                    request->cmpntlist[cmpnt]->eventlist[event]->product_event_id)
+            )
+
+    elseif (sub_pe_status != "OK")               ; invalid add_product_event status
+        call LOAD_PROCESS_STATUS
+            (
+             /* status  */ "F",
+             /* process */ sub_pe_process,
+             /* message */ concat("Script error!  Invalid product_event_status:  ", gsub_product_event_status)
+            )
+
+    endif
+END         ; END subroutine PROCESS_ADD_PRODUCT_EVENT_STATUS
+
+subroutine UPDATE_COMPONENT_PRODUCT
+    (
+     sub_product_id,
+     sub_pooled_product_id,
+     sub_updt_cnt
+    )
+
+    update into product p
+        set ;p.related_product_id        = sub_pooled_product_id,
+            p.pooled_product_id         = sub_pooled_product_id,
+            p.locked_ind                = 0,
+            p.updt_cnt                  = p.updt_cnt + 1,
+            p.updt_dt_tm                = cnvtdatetime(curdate, curtime3),
+            p.updt_id                   = reqinfo->updt_id,
+            p.updt_task                 = reqinfo->updt_task,
+            p.updt_applctx              = reqinfo->updt_applctx
+
+    where   p.product_id                = sub_product_id
+              and p.updt_cnt            = sub_updt_cnt
+
+    with    nocounter
+
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS
+            (
+             /* status  */ "F",
+             /* process */ "update component product row",
+             /* message */ build("could not update component product row.  product_id = ", sub_product_id)
+            )
+    endif
+END         ; END subroutine UPDATE_COMPONENT_PRODUCT
+
+subroutine LOCK_PRODUCT_FORUPDATE
+    (
+     sub_product_id,
+     sub_locked_ind,                        
+     sub_updt_cnt
+    )
+
+    ;set gsub_derivative_ind = " "
+
+    select into "nl:"
+        p.product_id
+;        drv.product_id,
+;        bp.product_id
+    from    
+        product p
+;        (dummyt d_drv_bp with seq = 1),
+;        derivative drv,
+;        blood_product bp
+    plan    p       where   p.product_id                = sub_product_id
+;                              and p.locked_ind          = sub_locked_ind
+                              and p.updt_cnt            = sub_updt_cnt
+;    join    (d_drv_bp   where   d_drv_bp.seq = 1
+;    join    (drv        where   drv.product_id          = p.product_id
+;                                  and drv.updt_cnt      = request->productlist[prod]->drv_updt_cnt)
+;    orjoin  (bp         where   bp.product_id           = p.product_id))
+;    
+;    detail
+;        if (drv.seq > 0)
+;            gsub_derivative_ind = "Y"
+;        endif
+    with    nocounter, forupdate(p)
+
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "lock product row forupdate"
+        set gsub_message = build("product row could not be locked for update.  product_id = ", sub_product_id)
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)
+    endif
+END     ; end subroutine LOCK_PRODUCT_FORUPDATE
+
+subroutine UNLOCK_PRODUCT
+    (
+     sub_product_id,
+     sub_updt_cnt
+    )
+
+    update into product p
+        set p.locked_ind                = 0,
+            p.updt_cnt                  = p.updt_cnt + 1,
+            p.updt_dt_tm                = cnvtdatetime(curdate, curtime3),
+            p.updt_id                   = reqinfo->updt_id,
+            p.updt_task                 = reqinfo->updt_task,
+            p.updt_applctx              = reqinfo->updt_applctx
+    where   p.product_id                = sub_product_id
+              and p.updt_cnt            = sub_updt_cnt
+    with    nocounter
+
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "unlock product row"
+        set gsub_message = "product row could not be unlocked"
+    endif
+END         ; exit subroutine UNLOCK_PRODUCT
+
+subroutine GET_PROGRAM_CODE_VALUES(sub_dummy)
+
+    set gsub_status = " "
+    
+     /* Get pooled_destruction_method_cd */
+    call GET_CODE_VALUE(destruction_method_code_set, pooled_destruction_cdf_meaning)
+
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get pooled destruction method _cd"
+        set gsub_message = "could not retrieve pooled destruction method _cd--code_set = 1609, cdf_meaning = POOLED"  
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set pooled_destruction_method_cd = gsub_code_value
+    endif
+
+     /* Get pooled_dispose_reason_cd */
+    call GET_CODE_VALUE(dispose_reason_code_set, pooled_dispose_cdf_meaning)
+
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get pooled dispose reason _cd"
+        set gsub_message = "could not retrieve pooled dispose reason _cd--code_set = 1608, cdf_meaning = POOLED"  
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set pooled_dispose_reason_cd = gsub_code_value
+    endif
+
+    /*
+     * Get product_event/state event_type_cds
+     */
+
+    /*
+     * Get dispose event_type_cd
+     */
+    call GET_CODE_VALUE(product_state_code_set, disposed_cdf_meaning)
+
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get disposed event_type_cd"
+        set gsub_message = "could not retrieve disosed event_type_cd--code_set = 1610, cdf_meaning = 5"
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set disposed_event_type_cd = gsub_code_value
+    endif
+
+    /*
+     * Get destroy event_type_cd
+     */
+    call GET_CODE_VALUE(product_state_code_set, destroyed_cdf_meaning)
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get destroyed event_type_cd"
+        set gsub_message = "could not retrieve destroyed event_type_cd--code_set = 1610, cdf_meaning = 14"
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set destroyed_event_type_cd = gsub_code_value
+    endif
+
+    /*
+     * Get assign event_type_cd
+     */
+    call GET_CODE_VALUE(product_state_code_set, assigned_cdf_meaning)
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get assigned event_type_cd"
+        set gsub_message = "could not retrieve assigned event_type_cd--code_set = 1610, cdf_meaning = 1"
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set assigned_event_type_cd = gsub_code_value
+    endif
+
+    /*
+     * Get crossmatch event_type_cd
+     */
+    call GET_CODE_VALUE(product_state_code_set, crossmatched_cdf_meaning)
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get crossmatched event_type_cd"
+        set gsub_message = "could not retrieve crossmatched event_type_cd--code_set = 1610, cdf_meaning = 3"
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set crossmatched_event_type_cd = gsub_code_value
+    endif
+
+    /*
+     * Get in_progress event_type_cd
+     */
+    call GET_CODE_VALUE(product_state_code_set, in_progress_cdf_meaning)
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get in_progress event_type_cd"
+        set gsub_message = "could not retrieve in_progress event_type_cd--code_set = 1610, cdf_meaning = 16"
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set in_progress_event_type_cd = gsub_code_value
+    endif
+
+    /*
+     * Get quarantine event_type_cd
+     */
+    call GET_CODE_VALUE(product_state_code_set, quarantined_cdf_meaning)
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get quarantine event_type_cd"
+        set gsub_message 
+            = "could not retrieve quarantined event_type_cd--code_set = 1610, cdf_meaning = 2"
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set quarantined_event_type_cd = gsub_code_value
+    endif
+
+    /*
+     * Get directed event_type_cd
+     */
+    call GET_CODE_VALUE(product_state_code_set, directed_cdf_meaning)
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get directed event_type_cd"
+        set gsub_message 
+            = "could not retrieve directed event_type_cd--code_set = 1610, cdf_meaning = 11"
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set directed_event_type_cd = gsub_code_value
+    endif
+
+    /*
+     * Get autologous event_type_cd
+     */
+    call GET_CODE_VALUE(product_state_code_set, autologous_cdf_meaning)
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get autologous event_type_cd"
+        set gsub_message 
+            = "could not retrieve autologous event_type_cd--code_set = 1610, cdf_meaning = 10"
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set autologous_event_type_cd = gsub_code_value
+    endif
+              
+    /*
+     * Get unconfirmed event_type_cd
+     */
+    call GET_CODE_VALUE(product_state_code_set, unconfirmed_cdf_meaning)
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get unconfirmed event_type_cd"
+        set gsub_message 
+         = "could not retrieve unconfirmed event_type_cd--code_set = 1610, cdf_meaning = 9"
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN                      
+    else
+        set unconfirmed_event_type_cd = gsub_code_value
+    endif
+
+    /*
+     * Get available event_type_cd
+     */
+    call GET_CODE_VALUE(product_state_code_set, available_cdf_meaning)
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get available event_type_cd"
+        set gsub_message 
+            = "could not retrieve available event_type_cd--code_set = 1610, cdf_meaning = 12"
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set available_event_type_cd = gsub_code_value
+    endif
+
+    /*
+     * Get pooled event_type_cd
+     */
+    call GET_CODE_VALUE(product_state_code_set, pooled_cdf_meaning)
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get pooled event_type_cd"
+        set gsub_message 
+            = "could not retrieve pooled event_type_cd--code_set = 1610, cdf_meaning = 17"
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set pooled_event_type_cd = gsub_code_value
+    endif
+
+    /*
+     * Get pooled_product event_type_cd
+     */
+    call GET_CODE_VALUE(product_state_code_set, pooled_product_cdf_meaning)
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "get pooled_product event_type_cd"
+        set gsub_message 
+            = "could not retrieve pooled_product event_type_cd--code_set = 1610, cdf_meaning = 18"
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)            
+        RETURN
+    else
+        set pooled_product_event_type_cd = gsub_code_value
+    endif
+END ; end subroutine GET_PROGRAM_CODE_VALUES
+
+subroutine GET_CODE_VALUE(sub_code_set, sub_cdf_meaning)
+    /*
+     * Retrieve code_value using passed code_set and meaning
+     */
+    select into "nl:"
+        cv.code_value
+    from    code_value cv
+    where   cv.code_set             = sub_code_set                
+              and cv.cdf_meaning    = sub_cdf_meaning             
+             and cv.active_ind     = 1
+             and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+             and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+    detail
+         gsub_code_value       = cv.code_value
+    with    nocounter
+END     ; end subroutine GET_CODE_VALUE
+
+subroutine InactivateAutoDirectedEvent( InactivateEventId )
+;Description: Inactivate an autologous or directed event on this product
+
+   if (InactivateEventId > 0.0)
+      select into "nl:"
+          pe.product_event_id
+      from 
+          product_event pe
+      plan pe 
+          where pe.product_event_id = InactivateEventId
+            and pe.active_ind = 1
+      with nocounter, forupdate(pe)
+      
+      if (curqual != 0)
+         select into "nl:"
+               ad.product_event_id
+            from 
+               auto_directed ad
+            plan ad 
+                 where ad.product_event_id = InactivateEventId 
+                   and ad.active_ind = 1            
+             with nocounter, forupdate(ad)
+      endif
+
+      if (curqual = 0)
+          set failed = "T",
+          set count1 = count1 + 1,,
+          set stat = alter(reply->status_data->subeventstatus, count1)
+          set reply->status_data->subeventstatus[count1]->OperationName
+          = "Lock",
+          set reply->status_data->subeventstatus[count1]->OperationStatus
+          = "F",
+          set reply->status_data->subeventstatus[count1]->TargetObjectName
+          = "Product_Event, Auto_Directed",
+          set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+          = build(InactivateEventId),
+          go to exit_script
+      endif
+      update into product_event p  set
+             p.active_ind = 0,
+             p.active_status_cd = reqdata->inactive_status_cd,
+             p.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+             p.active_status_prsnl_id = reqinfo->updt_id,
+             p.updt_id               = reqinfo->updt_id,
+             p.updt_cnt              = p.updt_cnt + 1,
+             p.updt_task             = reqinfo->updt_task,
+             p.updt_applctx          = reqinfo->updt_applctx,
+             p.updt_dt_tm            = cnvtdatetime(curdate,curtime3)
+       where p.product_event_id = InactivateEventId
+       with nocounter
+       if (curqual = 0)
+           set failed = "T",
+           set count1 = count1 + 1,
+           set stat = alter(reply->status_data->subeventstatus, count1)
+           set reply->status_data->subeventstatus[count1]->OperationName
+           = "Update",
+           set reply->status_data->subeventstatus[count1]->OperationStatus
+           = "F",
+           set reply->status_data->subeventstatus[count1]->TargetObjectName
+           = "Product_Event",
+           set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+           = build(InactivateEventId),
+           go to exit_script       
+       else
+           update into auto_directed ad  set
+                 ad.active_ind = 0,
+                 ad.active_status_cd = reqdata->inactive_status_cd,
+                 ad.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+                 ad.active_status_prsnl_id = reqinfo->updt_id,
+                 ad.updt_id               = reqinfo->updt_id,
+                 ad.updt_cnt              = ad.updt_cnt + 1,
+                 ad.updt_task             = reqinfo->updt_task,
+                 ad.updt_applctx          = reqinfo->updt_applctx,
+                 ad.updt_dt_tm            = cnvtdatetime(curdate,curtime3)
+           where ad.product_event_id       = InactivateEventId
+           with nocounter
+           if (curqual = 0)
+               set failed = "T",
+               set count1 = count1 + 1,
+               set stat = alter(reply->status_data->subeventstatus, count1)
+               set reply->status_data->subeventstatus[count1]->OperationName
+               = "Update",
+               set reply->status_data->subeventstatus[count1]->OperationStatus
+               = "F",
+               set reply->status_data->subeventstatus[count1]->TargetObjectName
+               = "auto_directed",
+               set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+               = build(InactivateEventId),
+              go to exit_script       
+           endif
+       endif
+   endif
+
+END ; end of InactivateAutoDirectedEvent
+
+subroutine RELEASE_INACTIVATE_CROSSMATCH_POOL(sub_dummy)
+ declare child_updt_cnt = i4 with noconstant(0)
+
+    /* 
+     * Lock product_event and crossmatch rows
+     */
+        select into "nl:"
+            pe.product_event_id
+        from 
+            product_event pe
+        plan    pe      where   pe.product_event_id     = request->pool_eventlist[event]->product_event_id
+                                  and pe.updt_cnt       = request->pool_eventlist[event]->updt_cnt
+        with    nocounter, forupdate(pe)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock product_event forupdate",
+                 /* message */ "product_event rows could not be locked forupdate"
+                )
+                RETURN
+        endif
+
+        select into "nl:"
+            xm.product_event_id
+        from 
+            crossmatch xm
+        plan    xm      where   xm.product_event_id     = request->pool_eventlist[event]->product_event_id
+		detail
+			child_updt_cnt = xm.updt_cnt
+        with    nocounter, forupdate(xm)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock crossmatch forupdate",
+                 /* message */ "crossmatch rows could not be locked forupdate"
+                )
+                RETURN
+        endif
+        
+        /*
+         * Inactivate CROSSMATCH product_event row
+         */
+           call CHG_PRODUCT_EVENT
+                (
+                 /* product_event_id       */ request->pool_eventlist[event]->product_event_id,
+                 /* event_dt_tm            */ 0, 
+                 /* event_prsnl_id         */ 0, 
+                 /* event_status_flag      */ 0,
+                 /* active_ind             */ 0,
+                 /* active_status_cd       */ reqdata->inactive_status_cd,
+                 /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+                 /* active_status_prsnl_id */ reqinfo->updt_id,
+                 /* updt_cnt               */ request->pool_eventlist[event]->updt_cnt,
+                 /* lock_forupdate_ind     */ 0, ; 0 = do not lock forupdate--locked above
+                 /* update_dt_tm_prsnl_ind */ 0  ; 0 = do not update original event_dt_tm/prsnl_id 
+                )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("inactivate", gsub_product_event_status, "crossmatched")
+    
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+        /* release crossmatch */
+        set release_dt_tm = cnvtdatetime(request->event_dt_tm)
+        set release_prsnl_id = request->event_prsnl_id
+        set release_reason_cd = 0.0
+        set release_qty = NULL
+
+
+    /*  
+     * Update and inactivate crossmatch rows) 
+     */
+        call CHG_CROSSMATCH
+        (
+         /* product_event_id       */ request->pool_eventlist[event]->product_event_id,
+         /* updt_cnt               */ child_updt_cnt,
+         /* release_dt_tm          */ cnvtdatetime(release_dt_tm),
+         /* release_prsnl_id       */ release_prsnl_id,
+         /* release_reason_cd      */ release_reason_cd, 
+         /* release_qty            */ release_qty, 
+         /* active_ind             */ 0,
+         /* active_status_cd       */ reqdata->inactive_status_cd,
+         /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+         /* active_status_prsnl_id */ reqinfo->updt_id
+        )
+
+    if (curqual = 0)
+        call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)
+        RETURN
+    endif
+
+END        ; end subroutine RELEASE_CROSSMATCH_POOL
+
+subroutine RELEASE_INACTIVATE_ASSIGN_POOL(sub_dummy)
+declare child_updt_cnt = i4 with noconstant(0)
+
+	;Lock Applicable Tables
+	select into "nl:"
+		pe.product_event_id
+	from 
+		product_event pe
+	plan    pe      where   pe.product_event_id     = request->pool_eventlist[event]->product_event_id
+					and pe.updt_cnt   	    = request->pool_eventlist[event]->updt_cnt
+	with    nocounter, forupdate(pe)
+	
+	if (curqual = 0)
+		call LOAD_PROCESS_STATUS
+		(
+			/* status  */ "F",
+			/* process */ "lock product_event forupdate",
+			/* message */ "product_event rows could not be locked forupdate"
+		)
+		RETURN
+	endif
+	
+	select into "nl:"
+		a.product_event_id
+	from 
+		assign a           
+	plan    a       where   a.product_event_id      = request->pool_eventlist[event]->product_event_id
+	detail
+		child_updt_cnt = a.updt_cnt
+	with    nocounter,  forupdate(a) 
+	
+	if (curqual = 0)
+		call LOAD_PROCESS_STATUS
+		(
+		/* status  */ "F",
+		/* process */ "lock assign forupdate",
+		/* message */ "assign rows could not be locked forupdate"
+		)
+		RETURN
+	endif
+
+	;Inactivate ASSIGN product_event row
+	call CHG_PRODUCT_EVENT
+	(
+		/* product_event_id       */ request->pool_eventlist[event]->product_event_id,
+		/* event_dt_tm            */ 0, 
+		/* event_prsnl_id         */ 0, 
+		/* event_status_flag      */ 0,
+		/* active_ind             */ 0,
+		/* active_status_cd       */ reqdata->inactive_status_cd,
+		/* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+		/* active_status_prsnl_id */ reqinfo->updt_id,
+		/* updt_cnt               */ request->pool_eventlist[event]->updt_cnt,
+		/* lock_forupdate_ind     */ 0, ; 0 = do not lock forupdate--locked above
+		/* update_dt_tm_prsnl_ind */ 0  ; 0 = do not update original event_dt_tm/prsnl_id 
+	)
+
+    call PROCESS_PRODUCT_EVENT_STATUS("inactivate", gsub_product_event_status, "assigned")
+    
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+
+	;Update and inactivate assign row 
+
+        call CHG_ASSIGN
+            (
+             /* product_event_id       */ request->pool_eventlist[event]->product_event_id,
+             /* cur_assign_qty         */ NULL,  ; new_cur_qty,
+             /* updt_cnt               */ child_updt_cnt,
+             /* active_ind             */ 0,
+             /* active_status_cd       */ reqdata->inactive_status_cd,
+             /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+             /* active_status_prsnl_id */ reqinfo->updt_id,
+             /* derivative_ind         */ " "   ; derivative_ind
+            )
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)
+            RETURN
+        endif
+
+
+        /* 
+         * Create assign_release row
+         */
+            call ADD_ASSIGN_RELEASE
+                (
+                 /* product_event_id  */ request->pool_eventlist[event]->product_event_id,
+                 /* product_id        */ pooled_product_id,
+                 /* release_dt_tm     */ cnvtdatetime(request->event_dt_tm),
+                 /* release_prsnl_id  */ request->event_prsnl_id,
+                 /* release_reason_cd */ request->pool_eventlist[event]->reason_cd,
+                 /* release_qty       */ NULL,      ; request->cmpntlist[cmpnt]->eventlist[event]->select_qty,
+                 /* derivative_ind    */ " "        ; derivatived_ind
+                )
+
+            if (curqual = 0)
+                call LOAD_PROCESS_STATUS(gsub_status, gsub_process, gsub_message)
+                RETURN
+            endif       ; endif curqual = 0 ADD_ASSIGN_RELEASE
+
+END         ; end subroutine RELEASE_INACTIVATE_ASSIGN_POOL
+
+subroutine INACTIVATE_UNCONFIRMED_POOL(product_event_id, pe_updt_cnt)
+    /* 
+     * Lock product_event row
+     */
+        select into "nl:"
+            pe.product_event_id
+        from 
+            product_event pe
+        plan    pe      where   pe.product_event_id     = product_event_id
+        with    nocounter, forupdate(pe)
+
+        if (curqual = 0)
+            call LOAD_PROCESS_STATUS
+                (
+                 /* status  */ "F",
+                 /* process */ "lock unconfirmed product_event forupdate",
+                 /* message */ "unconfirmed product_event row could not be locked forupdate"
+                )
+                RETURN
+        endif
+
+        /*
+         * Inactivate UNCONFIRMED product_event row
+         */
+           call CHG_PRODUCT_EVENT
+                (
+                 /* product_event_id       */ product_event_id,
+                 /* event_dt_tm            */ 0, 
+                 /* event_prsnl_id         */ 0, 
+                 /* event_status_flag      */ 0,
+                 /* active_ind             */ 0,
+                 /* active_status_cd       */ reqdata->inactive_status_cd,
+                 /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+                 /* active_status_prsnl_id */ reqinfo->updt_id,
+                 /* updt_cnt               */ pe_updt_cnt,
+                 /* lock_forupdate_ind     */ 0, ; 0 = do not lock forupdate--locked above
+                 /* update_dt_tm_prsnl_ind */ 0  ; 0 = do not update original event_dt_tm/prsnl_id 
+                )
+
+    call PROCESS_PRODUCT_EVENT_STATUS("inactivate", gsub_product_event_status, "unconfirmed")
+    
+    if (reply->status_data->status = "F")
+        RETURN
+    endif
+END        ; end subroutine INACTIVATE_UNCONFIRMED_POOL
+
+
+subroutine GET_CDF_MEANING(sub_code_set, sub_code_value)
+    /*
+     * Retrieve cdf_meaning using passed code_set and code_value
+     */
+    set gsub_cdf_meaning = "            "
+    select into "nl:"
+        cv.cdf_meaning
+    from    code_value cv
+    where   cv.code_set             = sub_code_set
+              and cv.code_value     = sub_code_value
+              and cv.active_ind     = 1
+              and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+    detail
+        gsub_cdf_meaning            = cv.cdf_meaning
+    with    nocounter
+END     ; end subroutine GET_CDF_MEANING
+
+%i cclsource:bbt_add_product_event.inc
+set new_product_event_id = product_event_id
+END     ; end subroutine ADD_PRODUCT_EVENT
+
+%i cclsource:bbt_chg_product_event.inc
+END     ; end subroutine CHG_PRODUCT_EVENT
+
+subroutine ADD_POOLED_PRODUCT
+    (
+     sub_product_event_id,
+     sub_product_id,
+     sub_method_cd,
+     sub_method_cdf_meaning,
+     sub_box_nbr,
+     sub_manifest_nbr,
+     sub_destroyed_qty,
+     sub_autoclave_ind,
+     sub_active_ind,
+     sub_active_status_cd,
+     sub_active_status_dt_tm,
+     sub_active_status_prsnl_id
+    )
+
+    insert into destruction dst
+        set dst.product_event_id          = sub_product_event_id,
+            dst.product_id                = sub_product_id,
+            dst.method_cd                 = sub_method_cd,
+            dst.box_nbr                   = trim(cnvtupper(sub_box_nbr)),
+            dst.manifest_nbr              = sub_manifest_nbr,
+            dst.destroyed_qty             = sub_destroyed_qty,
+            dst.autoclave_ind
+                =   if (sub_method_cdf_meaning = "DESTNOW")
+                        sub_autoclave_ind
+                    else
+                        NULL
+                    endif,
+            dst.destruction_org_id        = NULL, ; only valid if meaning = DESTLTR, updated in bbt_chg_destruction
+            dst.active_ind                = sub_active_ind,
+            dst.active_status_cd          = sub_active_status_cd,
+            dst.active_status_dt_tm       = cnvtdatetime(sub_active_status_dt_tm),
+            dst.active_status_prsnl_id    = sub_active_status_prsnl_id,
+            dst.updt_cnt                  = 0,
+            dst.updt_dt_tm                = cnvtdatetime(curdate, curtime3),
+            dst.updt_id                   = reqinfo->updt_id,
+            dst.updt_task                 = reqinfo->updt_task,
+            dst.updt_applctx              = reqinfo->updt_applctx
+    with nocounter
+
+    if (curqual = 0)
+        set gsub_status = "F"
+        set gsub_process = "create destruction row"
+        set gsub_message = "destruction row could not be created"
+    endif
+END     ; end subroutine ADD_POOLED_PRODUCT
+
+subroutine LOAD_PROCESS_STATUS
+    (
+     sub_status,
+     sub_process,
+     sub_message
+    )
+
+    set reply->status_data->status = sub_status
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alter(reply->status_data->subeventstatus, count1)
+    endif
+    set reply->status_data->subeventstatus[count1]->OperationName = sub_process
+    set reply->status_data->subeventstatus[count1]->OperationStatus = sub_status
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_add_pooled_product"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = sub_message
+END         ; end subroutine LOAD_PROCESS_STATUS
+
+subroutine SET_NEW_ACTIVE_STATUS
+    (sub_derivative_ind,
+     sub_cur_qty,
+     sub_select_qty
+    )
+
+    set gsub_status = "F"
+    set new_cur_qty = 0
+    set gsub_active_status_cd = reqdata->inactive_status_cd
+    set gsub_active_ind = 0
+
+    if (sub_derivative_ind = "Y")
+        if (sub_select_qty > sub_cur_qty)
+            set gsub_status = "F"
+        else
+            set gsub_status = "S"
+            set new_cur_qty = sub_cur_qty - sub_select_qty
+            if (new_cur_qty > 0)
+                set gsub_active_status_cd = reqdata->active_status_cd
+                set gsub_active_ind = 1
+            endif
+        endif
+    else
+        set gsub_status = "S"
+    endif
+END             ; end subroutine SET_NEW_ACTIVE_STATUS
+
+
+
+
+#EXIT_SCRIPT
+if (reply->status_data->status = "S")
+    set reqinfo->commit_ind = 1
+else
+    set reqinfo->commit_ind = 0
+endif
+
+;call echo(build("assigned      :", assigned_event_type_cd))
+;call echo(build("crossmatched  :", crossmatched_event_type_cd)) 
+;call echo(build("in_progress   :", in_progress_event_type_cd)) 
+;call echo(build("quarantined   :", quarantined_event_type_cd)) 
+;call echo(build("autologous    :", autologous_event_type_cd)) 
+;call echo(build("directed      :", directed_event_type_cd)) 
+;call echo(build("available     :", available_event_type_cd)) 
+;call echo(build("unconfirmed   :", unconfirmed_event_type_cd))
+;call echo(build("disposed      :", disposed_event_type_cd)) 
+;call echo(build("destroyed     :", destroyed_event_type_cd))
+;call echo(build("pooled        :", pooled_event_type_cd))
+;call echo(build("pooled_product:", pooled_product_event_type_cd))
+;call echo("     ")
+;call echo (build("pooled_destruction_method_cd:", pooled_destruction_method_cd))
+;call echo (build("pooled_dispose_reason_cd    :", pooled_dispose_reason_cd))
+;
+
+
+;call echo(build("pooled_product_id =", pooled_product_id))
+;call echo("    ")
+;call echo(build("pool_event_cnt  =", pool_event_cnt))
+;call echo(build("cmpnt_cnt       =", cmpnt_cnt))
+;call echo(build("cmpnt           =", cmpnt))
+;call echo(build("cmpnt_event_cnt =", cmpnt_event_cnt))
+;call echo(build("event_cnt       =", event_cnt))
+;call echo(build("event           =", event))
+;call echo("     ")
+;call echo(reply->status_data->status)
+;for (x = 1 to count1)
+;    call echo(reply->status_data->subeventstatus[x]->OperationName)
+;    call echo(reply->status_data->subeventstatus[x]->OperationStatus)
+;    call echo(reply->status_data->subeventstatus[x]->TargetObjectName)
+;    call echo(reply->status_data->subeventstatus[x]->TargetObjectValue)
+;endfor
+
+end go
+
+;Generated by GNU enscript 1.6.4.

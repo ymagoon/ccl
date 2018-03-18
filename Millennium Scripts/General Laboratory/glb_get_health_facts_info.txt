@@ -1,0 +1,666 @@
+ ;;Solution_Test/script/HealthFacts/glb_get_health_facts_info/glb_get_health_facts_info.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2003 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Author:                 Chuck Figas
+        Date Written:           04/07/03
+        Source file name:       glb_get_health_facts_info.prg
+        Object name:            glb_get_health_facts_info
+        Request #:              none
+ 
+        Product:                PathNet
+        Product Team:           General Lab
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        This script allows General Lab order and result data
+                                to be extracted for use by the Health Facts product.
+ 
+        Tables read:            accession_order_r
+                                encounter
+                                encntr_loc_hist
+                                orders
+                                order_action
+                                order_laboratory
+                                perform_result
+                                result
+                                result_event
+ 
+        Tables updated:         none
+ 
+        Executing from:         pcs_get_health_facts_info.prg
+ 
+        Special Notes:          none
+ 
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer or CAPE ID  Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 04/07/03 Chuck Figas          Initial Release                     *
+;     002 07/29/03 Chuck Figas          Replaced moverec() function         *
+;                                       Added some more outerjoins          *
+;     003 10/17/03 Chuck Figas          Return result_value_numeric         *
+;     004 12/03/03 Chuck Figas          Use value() function with dummy     *
+;                                       tables for older versions of CCL.   *
+;     005 09/08/04 YC3429               Added perform loc and source code   *
+;     006 01/12/05 MG010594				Added reference_lab and             *
+;										interface_flg                       *
+;										changed perform_loc to              *
+;										perform_loc_inst and                *
+;										service_resource_cd to perform_loc  *
+;	  007 02/16/05 MG010594				Added logic to handle Instituion    *
+;										Lists								*
+;	  008 08/19/05 MG010594				Populate the result_dt_tm only if   *
+;										the result has been verified		*
+;     009 09/06/05 YC3429               Modified to pull the long_text from *
+;                                       the proper field when long_text_id  *
+;                                       is greater than 0.                  *
+;     010 10/29/08 JW014069             Split long_text query into seperate *
+;                                       queries                             *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+ 
+drop program glb_get_health_facts_info:dba go
+create program glb_get_health_facts_info:dba
+ 
+%i cclsource:glb_script_logging.inc
+call log_message("Starting script: GLB_GET_HEALTH_FACTS_INFO", LOG_LEVEL_DEBUG)
+;/*005*.../ added in the include program for the hierarchy
+%i cclsource:mic_get_serv_res_hierarchy.inc
+ 
+;*** Check for errors in pcs_get_health_facts_info.prg
+if (g_nUarErrorInd = 1 or g_nSelectErrorInd = 1)
+  go to EXIT_SCRIPT
+endif
+ 
+ 
+/*****************************************************************************
+*                             Record Structures                              *
+******************************************************************************/
+;*** see cclsource:pcs_get_health_facts_info.inc
+ 
+record glb_orders
+(
+  1 qual[*]
+    2 order_id = f8
+)
+ 
+ 
+/*****************************************************************************
+*                               Variables                                    *
+******************************************************************************/
+set reply->status_data->status = "F"
+ 
+declare lGlbOrderCnt = i4 with protect, noconstant(0)
+;/*005...*/ adding logic for perform location
+declare perform_loc = f8 with protect, noconstant(0.0)
+declare source_code = f8 with protect, noconstant(0.0)
+declare lHierCnt   = i4 with protect, noconstant(0)
+declare x          = i4 with protect, noconstant(0)
+declare y          = i4 with protect, noconstant(0)
+declare pos        = i4 with protect, noconstant(0)
+declare nSubDummy  = i2 with protect, noconstant(0)
+declare num		   = i4 with protect, noconstant(0)	;/*007...*/
+;BEG MOD 009
+declare InBuffer = vc
+declare InBufLen = i4
+declare OutBuffer = c1000 with NoConstant("")
+declare OutBufLen = i4 with NoConstant(1000)
+declare RetBufLen = i4 with NoConstant(0)
+declare bFlag = i4 with NoConstant(0)
+;END MOD 009
+/*****************************************************************************
+*                                Code Values                                 *
+******************************************************************************/
+if (not validate(CDF_MEANING, 0))
+  declare CDF_MEANING = vc with protect, constant("MEANING")
+endif
+ 
+if (not validate(ORDER_ACTION_TYPE_CS, 0))
+  declare ORDER_ACTION_TYPE_CS = i4 with protect, constant(6003)
+ 
+  declare ORDER_ACTION = vc with protect, constant("ORDER")
+  declare CANCEL_ACTION = vc with protect, constant("CANCEL")
+  declare COMPLETE_ACTION = vc with protect, constant("COMPLETE")
+ 
+  declare ORDER_ACTION_CD = f8 with protect, noconstant(0.0)
+  set ORDER_ACTION_CD = uar_get_code_by(nullterm(CDF_MEANING), ORDER_ACTION_TYPE_CS, nullterm(ORDER_ACTION))
+ 
+  declare CANCEL_ACTION_CD = f8 with protect, noconstant(0.0)
+  set CANCEL_ACTION_CD = uar_get_code_by(nullterm(CDF_MEANING), ORDER_ACTION_TYPE_CS, nullterm(CANCEL_ACTION))
+ 
+  declare COMPLETE_ACTION_CD = f8 with protect, noconstant(0.0)
+  set COMPLETE_ACTION_CD = uar_get_code_by(nullterm(CDF_MEANING), ORDER_ACTION_TYPE_CS, nullterm(COMPLETE_ACTION))
+endif
+ 
+if (not validate(RESULT_STATUS_CS, 0))
+  declare RESULT_STATUS_CS = i4 with protect, constant(1901)
+ 
+  declare VERIFIED_STATUS = vc with protect, constant("VERIFIED")
+  declare CORRECTED_STATUS = vc with protect, constant("CORRECTED")
+  declare AUTOVERIFIED_STATUS = vc with protect, constant("AUTOVERIFIED")
+ 
+  declare VERIFIED_STATUS_CD = f8 with protect, noconstant(0.0)
+  set VERIFIED_STATUS_CD = uar_get_code_by(nullterm(CDF_MEANING), RESULT_STATUS_CS, nullterm(VERIFIED_STATUS))
+ 
+  declare CORRECTED_STATUS_CD = f8 with protect, noconstant(0.0)
+  set CORRECTED_STATUS_CD = uar_get_code_by(nullterm(CDF_MEANING), RESULT_STATUS_CS, nullterm(CORRECTED_STATUS))
+ 
+  declare AUTOVERIFIED_STATUS_CD = f8 with protect, noconstant(0.0)
+  set AUTOVERIFIED_STATUS_CD = uar_get_code_by(nullterm(CDF_MEANING), RESULT_STATUS_CS, nullterm(AUTOVERIFIED_STATUS))
+endif
+ 
+ 
+;*** Gen Lab Activity Types
+declare GetGenLabActivityTypes(none = i2) = vc with private
+subroutine GetGenLabActivityTypes(none)
+  declare nTotal = i4 with private, noconstant(0)
+  declare nCurrent = i4 with private, noconstant(1)
+  declare nLoopCount = i4 with private, noconstant(1)
+  declare dCodeValue = f8 with private, noconstant(0.0)
+  declare sCodeValues = vc with private, noconstant
+ 
+  while (nTotal = 0 or nCurrent <= nTotal)
+    set stat = uar_get_meaning_by_codeset(106, "GLB", nCurrent, dCodeValue)
+    if (stat != 0 or dCodeValue = 0.0)
+      set g_nUarErrorInd = 1
+      go to EXIT_SCRIPT
+    endif
+ 
+    set sCodeValues = build(sCodeValues, ",", dCodeValue)
+ 
+    if (nTotal = 0)
+      set nTotal = nCurrent
+    endif
+ 
+    set nLoopCount = nLoopCount + 1
+    set nCurrent = nLoopCount
+  endwhile
+ 
+  ;Strip leading comma
+  set sCodeValues = substring(2, size(sCodeValues) - 1, sCodeValues)
+ 
+  return (sCodeValues)
+end ;subroutine
+ 
+ 
+/*****************************************************************************
+*                              Main Program                                  *
+******************************************************************************/
+if (currev >= 8)
+  set stat = moverec(orders, glb_orders)
+  set lGlbOrderCnt = size(glb_orders->qual, 5)
+else
+  set lGlbOrderCnt = size(orders->qual, 5)
+  set stat = alterlist(glb_orders->qual, lGlbOrderCnt)
+  for (g = 1 to lGlbOrderCnt)
+    set glb_orders->qual[g]->order_id = orders->qual[g]->order_id
+  endfor
+endif
+ 
+ 
+;*** Get Order Ids With Results
+select into "nl:"
+from
+  result_event re
+  ,result r
+ 
+plan re
+  where re.event_dt_tm >= cnvtdatetime(date_range->beg_dt_tm)
+    and re.event_dt_tm <= cnvtdatetime(date_range->end_dt_tm)
+join r
+  where r.result_id = re.result_id
+ 
+order
+  r.order_id
+ 
+head report
+  order_cnt = lGlbOrderCnt
+ 
+head r.order_id
+  order_cnt = order_cnt + 1
+  if (size(glb_orders->qual, 5) < order_cnt)
+    stat = alterlist(glb_orders->qual, order_cnt + 10)
+  endif
+  glb_orders->qual[order_cnt].order_id = r.order_id
+ 
+detail
+  stat = 0
+ 
+foot report
+  stat = alterlist(glb_orders->qual, order_cnt)
+  lGlbOrderCnt = order_cnt
+ 
+with
+  nocounter
+ 
+if (error_message(1) > 0)
+  set g_nSelectErrorInd = 1
+  go to EXIT_SCRIPT
+endif
+ 
+if (lGlbOrderCnt = 0)
+  go to EXIT_SCRIPT
+endif
+ 
+ 
+;*** Select Gen Lab Orders, Sort, Eliminate Duplicates
+select distinct into "nl:"
+from
+  (dummyt d1 with seq = value(lGlbOrderCnt))
+  ,orders o
+ 
+plan d1
+join o
+  where o.order_id = glb_orders->qual[d1.seq].order_id
+    and parser(build("o.activity_type_cd in (", GetGenLabActivityTypes(0), ")"))
+ 
+order
+  o.order_id
+  ,0
+ 
+head report
+  order_cnt = 0
+ 
+detail
+  order_cnt = order_cnt + 1
+  ;no need to alterlist since it already has max possible
+  glb_orders->qual[order_cnt].order_id = o.order_id
+ 
+foot report
+  stat = alterlist(glb_orders->qual, order_cnt)
+  lGlbOrderCnt = order_cnt
+ 
+with
+  nocounter
+  ,nullreport
+ 
+if (error_message(1) > 0)
+  set g_nSelectErrorInd = 1
+  go to EXIT_SCRIPT
+endif
+ 
+if (lGlbOrderCnt = 0)
+  go to EXIT_SCRIPT
+endif
+ 
+ 
+;*** Get Order Info
+;BEGIN MOD 007
+;Join to the Encounter table and filter on the institution list
+; only if an institution list was entered by the user
+select
+IF( SIZE(inst_list->qual, 5) > 0)
+	plan d1
+	join o
+	  where o.order_id = glb_orders->qual[d1.seq].order_id
+	join oa1
+	  where oa1.order_id = o.order_id
+	    and oa1.action_type_cd = ORDER_ACTION_CD
+	join e
+	  where e.encntr_id = o.encntr_id
+	  	and expand(num, 1, SIZE(inst_list->qual, 5), e.loc_facility_cd, inst_list->qual[num].loc_cd)
+	join d2
+	join aor
+	  where aor.order_id = o.order_id
+	    and aor.primary_flag = 0
+	join d3
+	join ol
+	  where ol.order_id = o.order_id
+	join d4
+	join elh
+	  where elh.encntr_id = o.encntr_id
+	    and elh.beg_effective_dt_tm <= o.orig_order_dt_tm
+	    and elh.end_effective_dt_tm >= o.orig_order_dt_tm
+	join d5
+	join oa2
+	  where oa2.order_id = o.order_id
+	    and oa2.action_type_cd = CANCEL_ACTION_CD
+	join d6
+	join oa3
+	  where oa3.order_id = o.order_id
+	    and oa3.action_type_cd = COMPLETE_ACTION_CD
+ 
+ELSE
+	plan d1
+	join o
+	  where o.order_id = glb_orders->qual[d1.seq].order_id
+	join oa1
+	  where oa1.order_id = o.order_id
+	    and oa1.action_type_cd = ORDER_ACTION_CD
+	join e
+	  where e.encntr_id = o.encntr_id
+	join d2
+	join aor
+	  where aor.order_id = o.order_id
+	    and aor.primary_flag = 0
+	join d3
+	join ol
+	  where ol.order_id = o.order_id
+	join d4
+	join elh
+	  where elh.encntr_id = o.encntr_id
+	    and elh.beg_effective_dt_tm <= o.orig_order_dt_tm
+	    and elh.end_effective_dt_tm >= o.orig_order_dt_tm
+	join d5
+	join oa2
+	  where oa2.order_id = o.order_id
+	    and oa2.action_type_cd = CANCEL_ACTION_CD
+	join d6
+	join oa3
+	  where oa3.order_id = o.order_id
+	    and oa3.action_type_cd = COMPLETE_ACTION_CD
+ENDIF
+ 
+into "nl:"
+	aor_ind = decode(aor.seq, 1, 0)
+	,ol_ind = decode(ol.seq, 1, 0)
+	,elh_ind = decode(elh.seq, 1, 0)
+	,oa2_ind = decode(oa2.seq, 1, 0)
+	,oa3_ind = decode(oa3.seq, 1, 0)
+from
+	(dummyt d1 with seq = value(lGlbOrderCnt))
+	,orders o
+	,order_action oa1
+	,encounter e
+	,dummyt d2
+	,accession_order_r aor
+	,dummyt d3
+	,order_laboratory ol
+	,dummyt d4
+	,encntr_loc_hist elh
+	,dummyt d5
+	,order_action oa2
+	,dummyt d6
+	,order_action oa3
+;END MOD 007
+ 
+order
+	o.order_id
+ 
+head report
+	order_cnt = 0
+ 
+detail
+	order_cnt = order_cnt + 1
+	if (order_cnt > size(reply->orders, 5))
+	  stat = alterlist(reply->orders, order_cnt + 10)
+	endif
+ 
+	if (aor_ind = 1)
+	  reply->orders[order_cnt].accession = aor.accession
+	endif
+ 
+	if (elh_ind = 1)
+	  reply->orders[order_cnt].loc_bed_cd = elh.loc_bed_cd
+	  reply->orders[order_cnt].loc_building_cd = elh.loc_building_cd
+	  reply->orders[order_cnt].loc_facility_cd = elh.loc_facility_cd
+	  reply->orders[order_cnt].loc_nurse_unit_cd = elh.loc_nurse_unit_cd
+	  reply->orders[order_cnt].loc_room_cd = elh.loc_room_cd
+	endif
+ 
+	reply->orders[order_cnt].current_start_dt_tm = o.current_start_dt_tm
+	reply->orders[order_cnt].organization_id = e.organization_id
+	reply->orders[order_cnt].disch_dt_tm = e.disch_dt_tm
+ 
+	if (oa3_ind = 1)
+	  reply->orders[order_cnt].completed_dt_tm = oa3.action_dt_tm
+	endif
+ 
+	if (oa2_ind = 1)
+	  reply->orders[order_cnt].cancel_dt_tm = oa2.action_dt_tm
+	endif
+ 
+	reply->orders[order_cnt].order_provider_id = oa1.order_provider_id
+	reply->orders[order_cnt].order_id = o.order_id
+	reply->orders[order_cnt].encntr_id = o.encntr_id
+	reply->orders[order_cnt].orig_order_dt_tm = o.orig_order_dt_tm
+	reply->orders[order_cnt].catalog_cd = o.catalog_cd
+	reply->orders[order_cnt].activity_type_cd = o.activity_type_cd
+ 
+	if (ol_ind = 1)
+	  reply->orders[order_cnt].report_priority_cd = ol.report_priority_cd
+	endif
+ 
+foot report
+	stat = alterlist(reply->orders, order_cnt)
+	lGlbOrderCnt = order_cnt
+ 
+with
+	nocounter
+	,nullreport
+	,maxqual(elh,1)
+	,outerjoin = d2
+	,outerjoin = d3
+	,outerjoin = d4
+	,outerjoin = d5
+	,outerjoin = d6
+	,dontcare = aor
+	,dontcare = ol
+	,dontcare = elh
+	,dontcare = oa2
+ 
+if (error_message(1) > 0)
+  set g_nSelectErrorInd = 1
+  go to EXIT_SCRIPT
+endif
+ 
+if (lGlbOrderCnt = 0)
+  go to EXIT_SCRIPT
+endif
+ 
+ 
+;*** Get Container Info
+select distinct into "nl:"
+from
+  (dummyt d1 with seq = value(lGlbOrderCnt))
+  ,order_container_r ocr
+  ,container c
+ 
+plan d1
+join ocr
+  where ocr.order_id = reply->orders[d1.seq].order_id
+join c
+  where c.container_id = ocr.container_id
+ 
+order
+  ocr.order_id
+  ,0
+ 
+detail
+  reply->orders[d1.seq].drawn_dt_tm = c.drawn_dt_tm
+  reply->orders[d1.seq].received_dt_tm = c.received_dt_tm
+;/*005...*/ adding logic for the source_code to print on the po01_1
+  reply->orders[d1.seq].source_code = c.specimen_type_cd
+with
+  nocounter
+ 
+if (error_message(1) > 0)
+  set g_nSelectErrorInd = 1
+  go to EXIT_SCRIPT
+endif
+ 
+;begin mod010
+;*** Get Result Info
+select into "nl:"
+from
+  (dummyt d1 with seq = value(lGlbOrderCnt))
+  ,result r
+  ,perform_result pr
+  ,result_event re
+  ,service_resource sr	;/*006...*/ used to get the location_cd
+plan d1
+join r
+  where r.order_id = reply->orders[d1.seq].order_id
+join pr
+  where pr.result_id = r.result_id
+    and pr.result_status_cd = r.result_status_cd
+join sr
+  where sr.service_resource_cd = pr.service_resource_cd	;/*006...*/ used to get the location_cd
+join re
+  where re.result_id = pr.result_id
+    and re.perform_result_id = pr.perform_result_id
+    and re.event_type_cd = pr.result_status_cd
+    and re.event_dt_tm >= cnvtdatetime(date_range->beg_dt_tm)
+    and re.event_dt_tm <= cnvtdatetime(date_range->end_dt_tm)
+order
+  r.order_id
+  ,pr.result_id
+  ,pr.perform_dt_tm desc
+ 
+head r.order_id
+  result_cnt = 0
+ 
+head pr.result_id
+  result_cnt = result_cnt + 1
+  if (result_cnt > size(reply->orders[d1.seq]->results, 5))
+    stat = alterlist(reply->orders[d1.seq]->results, result_cnt + 10)
+  endif
+  
+  if (pr.long_text_id = 0)
+    reply->orders[d1.seq]->results[result_cnt].ascii_text = pr.ascii_text
+  endif
+ 
+ 
+  reply->orders[d1.seq]->results[result_cnt].task_assay_cd = r.task_assay_cd
+  reply->orders[d1.seq]->results[result_cnt].nomenclature_id = pr.nomenclature_id
+  reply->orders[d1.seq]->results[result_cnt].result_value_dt_tm = pr.result_value_dt_tm
+  reply->orders[d1.seq]->results[result_cnt].normal_low = pr.normal_low
+  reply->orders[d1.seq]->results[result_cnt].normal_high = pr.normal_high
+  reply->orders[d1.seq]->results[result_cnt].units_cd = pr.units_cd
+  reply->orders[d1.seq]->results[result_cnt].perform_dt_tm = pr.perform_dt_tm
+  reply->orders[d1.seq]->results[result_cnt].result_type_cd = pr.result_type_cd
+  reply->orders[d1.seq]->results[result_cnt].result_value_numeric = pr.result_value_numeric
+  reply->orders[d1.seq]->results[result_cnt].critical_cd = pr.critical_cd
+  reply->orders[d1.seq]->results[result_cnt].delta_cd = pr.delta_cd
+  reply->orders[d1.seq]->results[result_cnt].feasible_cd = pr.feasible_cd
+  reply->orders[d1.seq]->results[result_cnt].linear_cd = pr.linear_cd
+  reply->orders[d1.seq]->results[result_cnt].normal_cd = pr.normal_cd
+  reply->orders[d1.seq]->results[result_cnt].review_cd = pr.review_cd
+  if(r.result_status_cd IN(VERIFIED_STATUS_CD, CORRECTED_STATUS_CD, AUTOVERIFIED_STATUS_CD))	;/*008...*/
+  	reply->orders[d1.seq]->results[result_cnt].event_dt_tm = re.event_dt_tm						;/*008...*/
+  endif																							;/*008...*/
+  reply->orders[d1.seq]->results[result_cnt].event_type_cd = re.event_type_cd
+  reply->orders[d1.seq]->results[result_cnt].performed_loc = pr.service_resource_cd	;/*006...*/
+;/*006..*/ populating the two new elements in the record structure
+  reply->orders[d1.seq]->results[result_cnt].reference_lab = sr.location_cd
+  reply->orders[d1.seq]->results[result_cnt].interface_flg = pr.interface_flag
+  reply->orders[d1.seq]->results[result_cnt].long_text_id = pr.long_text_id
+ 
+detail
+  stat = 0
+ 
+foot r.order_id
+  stat = alterlist(reply->orders[d1.seq]->results, result_cnt)
+ 
+with
+  nocounter
+  
+if (error_message(1) > 0)
+  set g_nSelectErrorInd = 1
+  go to EXIT_SCRIPT
+endif
+
+;get long text
+select into "nl:"
+from
+  (dummyt d1 with seq = value(lGlbOrderCnt)),
+  (dummyt d2 with seq = 1),
+  long_text lt
+plan d1 where maxrec(d2, size(reply->orders[d1.seq].results, 5))
+join d2
+join lt where lt.long_text_id = reply->orders[d1.seq].results[d2.seq]->long_text_id
+             and reply->orders[d1.seq].results[d2.seq]->long_text_id > 0
+detail
+   OutBuffer = ""
+   if (substring(1,5,lt.long_text) = asis("{\rtf"))
+       InBuffer = lt.long_text
+       InBufLen = size(InBuffer)
+       call uar_rtf(InBuffer,InBufLen,OutBuffer,OutBufLen,RetBufLen,bFlag)
+     reply->orders[d1.seq]->results[d2.seq].ascii_text = OutBuffer
+   else
+     reply->orders[d1.seq]->results[d2.seq].ascii_text = lt.long_text
+   endif
+with
+  nocounter
+
+;end mod010
+ 
+if (error_message(1) > 0)
+  set g_nSelectErrorInd = 1
+  go to EXIT_SCRIPT
+endif
+ 
+ 
+;/*005...*/*** CAPTURING THE PERFORM LOCATION BASED OFF THE HIERARCHY
+set x  = 0
+set y  = 0
+set pos  = 0
+    for (x = 1 to lGlbOrderCnt)
+        set result_cnt = size(reply->orders[x]->results, 5)
+          for (y = 1 to result_cnt)
+             set pos = GetServiceResourceHierarchy(reply->orders[x]->results[y].performed_loc)	;/*006...*/
+                if (pos > 0)
+                    set lHierCnt = size(ServiceResource->qual[pos]->serv_qual, 5)
+                    set lHierCnt = lHierCnt - 1
+                     set loc_meaning =
+                      uar_get_code_meaning(serviceresource->qual[pos]->serv_qual[lHierCnt].service_resource_cd)
+                       if (loc_meaning = "INSTITUTION")
+                         set reply->orders[x]->results[y].performed_loc_inst =	;/*006...*/
+                           serviceresource->qual[pos]->serv_qual[lHierCnt].service_resource_cd
+                       endif
+                endif
+          endfor
+    endfor
+/******************************************************************************
+*                               Exit Script                                   *
+*******************************************************************************/
+#EXIT_SCRIPT
+if (g_nUarErrorInd = 1)
+  call log_message("UAR error retrieving code values.", LOG_LEVEL_DEBUG)
+  call populate_subeventstatus("UAR_ERROR", "F", "UAR", "UAR")
+elseif (lGlbOrderCnt = 0)
+  call log_message("No data found.", LOG_LEVEL_DEBUG)
+  set reply->status_data->status = "Z"
+elseif (g_nSelectErrorInd =  0)
+  call log_message("Select was successful.", LOG_LEVEL_DEBUG)
+  set reply->status_data->status = "S"
+endif
+ 
+free record glb_orders
+call FreeRecordServiceResource(0)
+ 
+call log_message("End of script: GLB_GET_HEALTH_FACTS_INFO", LOG_LEVEL_DEBUG)
+ 
+;Call required by glb_script_logging.inc
+call uar_SysDestroyHandle(hSys)
+ 
+Set script_version = "009 09/02/05 YC3429"
+end go
+ 
+ 
+
+;Generated by GNU enscript 1.6.4.

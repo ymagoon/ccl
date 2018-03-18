@@ -1,0 +1,842 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Receiveproducts/BBT_RPT_PROD_RECVD.PRG Turn on black mode
+
+  /***********************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_rpt_prod_recvd.prg
+        Object name:            bbt_rpt_prod_recvd
+        Request #:              225081
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Report products received by date, supplier, product
+                                type and ABO/Rh
+
+        Tables read:            code_value, product, blood_product
+
+        Tables updated:         none
+
+        Executing from:         VB
+
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 09/30/96 Brian Franke         Initial Release                     *
+;     002 03/24/98 Matt Benson          Modified to retrieve Institution    *
+;                                       name from preferences               *
+;     003 11/09/98 Emily Zhou           Modified to order the report by     *
+;                                       user preference                     *
+;     004 01/04/99 Jose Suarez          Added logic to print the location name                                *
+;                                       and address.  Added the address_location_cd to request.               *
+;                                       Added bbt_get_location_info.inc                                       *
+;                                       Added bbt_print_location_info.inc                                     *
+;     005 05/21/99 Jose Suarez          change cer_temp to cer_print        *
+;     006 08/09/00 Lawrence Dsouza      internationalized date and time     *
+;     007 02/26/01 Chris Noe            Internationalize text			          *
+;     008 01/10/02 Sasi Gandham         Add order by for the Head Field     *
+;     009 07/26/02 Jason Osborn			Unique RPT filename project			*
+;     010 07/07/04 David Fifer          Rearranged the report to handle a 25*
+;                                       character eurocode product number.  *
+;     011 05/26/05 Jason Osborn         Ensure that the currently recvd qyt *
+;                                       prints for derivatives instead of   *
+;                                       the total quantity available.       *
+;     012 10/14/05 Tom Brecht			Corrected sorting algorithm			*
+;     013 04/10/07 Ronda Zheng          Fixed CR 1-606941125. Don't print   *
+;                                       duplicate sub number.               *
+;     014 04/29/10 Archita S	        Added code to print the pooled 	    *
+;					ABO\RH to report without truncation *	
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_rpt_prod_recvd:dba go
+create program bbt_rpt_prod_recvd:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+        /*
+        record request
+        (
+          1  prr_product_id[*]
+             2  prod_id          = f8
+; 003
+          1  sort_key1           = c20
+          1  sort_key2           = c20
+          1  sort_key3           = c20
+          1  sort_AscDes1        = i2
+          1  sort_AscDes2        = i2
+          1  sort_AscDec3        = i2
+;003
+          1  address_location_cd = f8
+        )
+        */
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+        record reply
+        (
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+        )
+
+;Begin 007
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+ 
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+record captions
+(
+  1  products_received	 = vc
+  1  time					 = vc
+  1  sorted_by		       = vc
+  1  aborh					 = vc
+  1  product_number		 = vc
+  1  product_type			 = vc
+  1  supplier				 = vc
+  1  as_of_date		 	 = vc
+  1  prod_no				 = vc
+  1  prod_type				 = vc
+  1  expires				 = vc
+  1  quantity				 = vc
+  1  space_supplier		 = vc
+  1  received				 = vc
+  1  no_supplier			 = vc
+  1  total				    = vc
+  1  report_id				 = vc
+  1  page_no				 = vc
+  1  printed				 = vc
+  1  end_of_report		 = vc
+)
+ 
+set captions->products_received = uar_i18ngetmessage(i18nHandle,
+  "products_received",
+  "P R O D U C T S   R E C E I V E D   R E P O R T")
+set captions->time = uar_i18ngetmessage(i18nHandle,
+  "time", "Time:")
+set captions->sorted_by = uar_i18ngetmessage(i18nHandle,
+  "sorted_by", "Sorted by: ")
+set captions->aborh = uar_i18ngetmessage(i18nHandle,
+  "aborh", "ABO/Rh")
+set captions->product_number = uar_i18ngetmessage(i18nHandle,
+  "product_number", "Product Number")
+set captions->product_type = uar_i18ngetmessage(i18nHandle,
+  "product_type", "Product Type")
+set captions->supplier = uar_i18ngetmessage(i18nHandle,
+  "supplier", "Supplier")
+set captions->as_of_date = uar_i18ngetmessage(i18nHandle,
+  "as_of_date", "As of Date:")
+set captions->prod_no = uar_i18ngetmessage(i18nHandle,
+  "prod_no", "   Product Number    ")
+set captions->prod_type = uar_i18ngetmessage(i18nHandle,
+  "prod_type", "      Product Type       ")
+set captions->expires = uar_i18ngetmessage(i18nHandle,
+  "expires", "Expires")
+set captions->quantity = uar_i18ngetmessage(i18nHandle,
+  "quantity", "Quantity")
+set captions->space_supplier = uar_i18ngetmessage(i18nHandle,
+  "space_supplier", "         Supplier        ")
+set captions->received = uar_i18ngetmessage(i18nHandle,
+  "received", "Received")
+set captions->no_supplier = uar_i18ngetmessage(i18nHandle,
+  "no_supplier", "Supplier not on File")
+set captions->total = uar_i18ngetmessage(i18nHandle,
+  "total", "Total")
+set captions->report_id = uar_i18ngetmessage(i18nHandle,
+  "report_id", "Report ID: BBT_RPT_PROD_RECVD")
+set captions->page_no = uar_i18ngetmessage(i18nHandle,
+  "page_no", "Page:")
+set captions->printed = uar_i18ngetmessage(i18nHandle,
+  "printed", "Printed:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+;End 007
+
+; 003
+record product_rec
+(
+ 1  products[*]
+     2  product_id          = f8
+     2  cur_abo_disp     = c10
+     2  cur_rh_disp      = c10
+)
+
+;%i cclsource:bbt_get_inst_name.inc      ;002 ;004
+%i cclsource:bbt_get_location_info.inc
+ 
+set nbr_prod_id = size(request->prr_product_id,5)
+
+record prod_tbl
+(
+ 1  prod_list[*]
+    2  prod_display     = c25
+    2  prod_cnt         = f8
+)
+
+set stat = alterlist(prod_tbl->prod_list,10)
+
+; 003 Retrieve ABO and Rh Display values for Blood Products, Set to " " for derivatives
+set stat = alterlist(product_rec->products, nbr_prod_id)
+
+select into "nl:"
+    bp_ind = decode(bp.seq, "bp", "xx"),
+    cur_abo_disp = decode(bp.cur_abo_cd, uar_get_code_display(bp.cur_abo_cd), " "),
+    cur_rh_disp = decode(bp.cur_rh_cd, uar_get_code_display(bp.cur_rh_cd), " ")
+ 
+from
+    (dummyt d1 with seq = value(nbr_prod_id)),
+    blood_product bp
+
+plan    d1
+join    bp      where bp.product_id = request->prr_product_id[d1.seq]->prod_id
+
+detail
+    product_rec->products[d1.seq].product_id = request->prr_product_id[d1.seq]->prod_id
+    if (bp_ind = "bp")
+        product_rec->products[d1.seq].cur_abo_disp = cur_abo_disp
+        product_rec->products[d1.seq].cur_rh_disp = cur_rh_disp
+    else
+        product_rec->products[d1.seq].cur_abo_disp = " "
+        product_rec->products[d1.seq].cur_rh_disp = " "
+    endif
+
+with    nocounter, outerjoin(d1)
+
+set reply->status_data->status = "F"
+set select_ok_ind = 0
+ 
+set rpt_cnt = 0
+
+execute cpm_create_file_name_logical "bbt_prod_recvd", "txt", "x"
+
+select
+if(request->sort_AscDes1 = 0 AND request->sort_AscDes2 = 0 AND request->sort_AscDes3 = 0)
+	order by
+   		sort1 DESC,
+   		sort2 DESC,
+   		sort3 DESC,
+   		pr.product_cd
+elseif(request->sort_AscDes1 = 0 AND request->sort_AscDes2 = 0 AND request->sort_AscDes3 = -1)
+   	order by
+   		sort1 DESC,
+   		sort2 DESC,
+   		sort3,
+   		pr.product_cd
+elseif(request->sort_AscDes1 = 0 AND request->sort_AscDes2 = -1 AND request->sort_AscDes3 = 0)
+	order by
+    	sort1 DESC,
+    	sort2,
+    	sort3 DESC,
+    	pr.product_cd
+elseif(request->sort_AscDes1 = 0 AND request->sort_AscDes2 = -1 AND request->sort_AscDes3 = -1)
+    order by
+    	sort1 DESC,
+    	sort2,
+    	sort3,
+    	pr.product_cd
+elseif(request->sort_AscDes1 = -1 AND request->sort_AscDes2 = 0 AND request->sort_AscDes3 = 0)
+	order by
+     	sort1,
+     	sort2 DESC,
+     	sort3 DESC,
+     	pr.product_cd
+elseif(request->sort_AscDes1 = -1 AND request->sort_AscDes2 = 0 AND request->sort_AscDes3 = -1)
+    order by
+    	sort1,
+    	sort2 DESC,
+    	sort3,
+    	pr.product_cd
+elseif(request->sort_AscDes1 = -1 AND request->sort_AscDes2 = -1 AND request->sort_AscDes3 = 0)
+	order by
+    	sort1,
+    	sort2,
+    	sort3 DESC,
+    	pr.product_cd
+else
+    order by
+    	sort1,
+    	sort2,
+    	sort3,
+    	pr.product_cd
+endif
+ 
+into cpm_cfn_info->file_name_logical
+      bp_seq = bp.seq,
+      de_seq = de.seq,
+      d_flg = decode(bp.seq, "BP", de.seq, "DE", "XX"),
+      og.org_name,
+      org_name = substring(1,25,og.org_name),
+      og.organization_id,
+      pr.product_nbr,
+      pr.product_sub_nbr,
+      pr.product_id,
+      product_type = substring(1,25,uar_get_code_display(pr.product_cd)),
+      pr.cur_supplier_id,
+      bp.cur_abo_cd,
+      bp.cur_rh_cd,
+      pr.recv_dt_tm,
+      pr.cur_expire_dt_tm,
+      pe.event_dt_tm,
+;-------------------------------------------------------------------------------003
+      ABO_Rh = concat(trim(substring(1,10,uar_get_code_display(bp.cur_abo_cd)))," ",
+      trim(substring(1, 10, uar_get_code_display(bp.cur_rh_cd)))),
+      sort1 = if (trim(request->sort_key1) = "ABO/Rh")
+            concat(product_rec->products[d1.seq].cur_abo_disp, product_rec->products[d1.seq].cur_rh_disp)
+              elseif (trim(request->sort_key1) = "Product Number")
+                 substring(1,25,pr.product_nbr)
+              elseif (trim(request->sort_key1) = "Product Type")
+                 substring(1,25,uar_get_code_display(pr.product_cd))
+              elseif (trim(request->sort_key1) = "Supplier")
+                 concat(substring(1,25,og.org_name), cnvtstring(og.organization_id,32,2))
+              endif,
+      sort2 = if(request->sort_key2 = "ABO/Rh")
+               concat(product_rec->products[d1.seq].cur_abo_disp, product_rec->products[d1.seq].cur_rh_disp)
+                elseif(request->sort_key2 = "Product Number") substring(1,25,pr.product_nbr)
+                elseif(request->sort_key2 = "Product Type") substring(1,25,uar_get_code_display(pr.product_cd))
+                elseif(request->sort_key2 = "Supplier") concat(substring(1,25,og.org_name), cnvtstring(og.organization_id,32,2))
+                else ""
+              endif,
+      sort3 = if(request->sort_key3 = "ABO/Rh")
+               concat(product_rec->products[d1.seq].cur_abo_disp, product_rec->products[d1.seq].cur_rh_disp)
+                elseif(request->sort_key3 = "Product Number") substring(1,25,pr.product_nbr)
+                elseif(request->sort_key3 = "Product Type") substring(1,25,uar_get_code_display(pr.product_cd))
+                elseif(request->sort_key3 = "Supplier") concat(substring(1,25,og.org_name), cnvtstring(og.organization_id,32,2))
+                else ""
+              endif
+;-----------------------------------------------------------------------------003
+from
+      (dummyt d1 with seq = value(nbr_prod_id)),
+      product pr,
+      (dummyt d3 with seq = 1),
+      (dummyt d4 with seq = 1),
+      blood_product bp,
+      (dummyt d2 with seq = 1),
+      organization og,
+      derivative de,
+      receipt r,
+      product_event pe
+plan  d1
+join  pr where pr.active_ind = 1 and
+               pr.product_id = request->prr_product_id[d1.seq]->prod_id and
+               pr.product_id > 0
+join  r  where r.product_id = pr.product_id
+           and r.updt_applctx = reqinfo->updt_applctx
+join  pe where pe.product_event_id = r.product_event_id
+join  og where pr.cur_supplier_id = og.organization_id
+join (d3 where d3.seq = 1
+join (d4 where d4.seq = 1
+join  bp where pr.product_id = bp.product_id)
+orjoin (d2 where d2.seq = 1
+join  de where pr.product_id = de.product_id))
+
+head report
+      idx         = 0
+      prod_cnt    = 0
+      line        = fillstring(125,"_")
+      first_time = "Y"
+      detail_summary_flg = "D"
+      print_page_head_ind = "Y"
+      select_ok_ind = 0
+
+;------------------------------------------------------------------------------003
+head page
+      if (print_page_head_ind = "Y")
+           if (detail_summary_flg = "D")
+              ;col   1, Institution_name   ;"Integris Health Systems",           ;002 ;004
+              call center(captions->products_received,1,125)						;007
+              col 104, captions->time,														;007
+              col 118, curtime "@TIMENOSECONDS;;M",
+ 
+%i cclsource:bbt_print_location_info.inc
+              SAVE_ROW = ROW
+              ROW 1
+              ;row + 1
+              col 45, captions->sorted_by													;007
+              if (request->sort_key1 = "ABO/Rh")
+                col 57, captions->aborh													;007
+              elseif(request->sort_key1 = "Product Number")
+                col 57, captions->product_number										;007
+              elseif(request->sort_key1 = "Product Type")
+                col 57, captions->product_type											;007
+              elseif(request->sort_key1 = "Supplier")
+                col 57, captions->supplier												;007
+              endif
+              col 104, captions->as_of_date,												;007
+              col 118, curdate "@DATECONDENSED;;d",
+              row + 1
+              if (request->sort_key2 = "ABO/Rh")
+                col 57, captions->aborh													;007
+              elseif(request->sort_key2 = "Product Number")
+                col 57, captions->product_number										;007
+              elseif(request->sort_key2 = "Product Type")
+                col 57, captions->product_type 											;007
+              elseif(request->sort_key2 = "Supplier")
+                col 57, captions->supplier 												;007
+              endif
+              row + 1
+              if (request->sort_key3 = "ABO/Rh")
+                col 57, captions->aborh													;007
+              elseif(request->sort_key3 = "Product Number")
+                col 57, captions->product_number										;007
+              elseif(request->sort_key3 = "Product Type")
+                col 57, captions->product_type 											;007
+              elseif(request->sort_key3 = "Supplier")
+                col 57, captions->supplier 												;007
+              endif
+ 
+              if (SAVE_ROW >= row)
+                ROW SAVE_ROW
+                ROW + 1
+              else
+                ROW + 1
+              endif
+
+              ;row + 1
+              if (request->sort_key1 = "ABO/Rh")
+                col   3, captions->aborh,":"													;007
+                if (d_flg = "BP")
+                   col 11, ABO_Rh
+                   finish_flag = "Y"
+                else
+                   col 11, "      "
+                endif
+                row + 3
+                col   5, captions->prod_no			    ;010								;007
+                col  32, captions->prod_type			;010								;007
+                col  59, captions->expires				;010								;007
+                col  74, captions->quantity				;010								;007
+                col  83, captions->space_supplier		;010								;007
+                col 110, captions->received				;010								;007
+                row + 1
+                col   5, "---------------------"		;010
+                col  32, "-------------------------"	;010
+                col  59, "-------------"				;010
+                col  74, "--------"						;010
+                col  83, "-------------------------"	;010
+                col 110, "-------------"				;010
+                row + 1
+              elseif (request->sort_key1 = "Product Number")
+                row + 2
+                col   0, captions->prod_no												;007
+                col  23, captions->prod_type			;010							;007
+                col  44, captions->aborh				;010							;007
+                col  65, captions->expires				;010							;007
+                col  79, captions->quantity												;007
+                col  88, captions->space_supplier										;007
+                col 114,captions->received												;007
+                row + 1
+                col   0, "---------------------"		;010
+                col  23, "--------------------"		;010
+                col  44, "-------------------"							;010
+                col  65, "-------------"					;010
+                col  79, "--------"
+                col  88, "-------------------------"
+                col 114, "-------------"
+                row + 1
+              elseif(request->sort_key1 = "Product Type")
+                col   3, captions->product_type,":"						   		;007
+                col  17, product_type
+                row + 3
+                col   4, captions->prod_no												;007
+                col  31, captions->aborh													;007
+                col  53, captions->expires												;007
+                col  68, captions->quantity												;007
+                col  81, captions->space_supplier										;007
+                col 113, captions->received												;007
+                row + 1
+                col   4, "-------------------------"		;010
+                col  31, "--------------------"
+                col  53, "-------------"
+                col  68, "--------"
+                col  81, "-------------------------"
+                col 113, "-------------"
+                row + 1
+              elseif(request->sort_key1 = "Supplier")
+                col   3, captions->supplier,":"											;007
+                if (og.org_name > " ")
+                   col  13, og.org_name
+                else
+                   col  13, captions->no_supplier										;007
+                endif
+                row + 3
+                col   3, captions->prod_no												;007
+                col  28, captions->prod_type												;007
+                col  59, captions->aborh													;007
+                col  81, captions->expires												;007
+                col  97, captions->quantity												;007
+                col 114, captions->received												;007
+                row + 1
+                col   3, "------------------------"		;010
+                col  28, "-------------------------"
+                col  59, "------------------"
+                col  81, "------------"
+                col  97, "--------"
+                col 114, "-------------"
+                row + 1
+              endif
+           endif
+      endif
+head sort1
+     if (request->sort_key1 = "ABO/Rh")
+      idx = 0
+      stat = alterlist(prod_tbl->prod_list, 10)
+      if (first_time = "Y")
+        first_time = "N"
+      else
+        break
+      endif
+     elseif(request->sort_key1 = "Product Number")
+      idx = 0
+      stat = alterlist(prod_tbl->prod_list, 10)
+     elseif(request->sort_key1 = "Product Type")
+      idx = 0
+      stat = alterlist(prod_tbl->prod_list, 10)
+      if (first_time = "Y")
+        first_time = "N"
+      else
+        break
+      endif
+     elseif(request->sort_key1 = "Supplier")
+      idx = 0
+      stat = alterlist(prod_tbl->prod_list, 10)
+      if (first_time = "Y")
+        first_time = "N"
+      else
+        break
+      endif
+     endif
+head pr.product_cd
+      if ( request->sort_key2 = "Product Type")
+        idx = idx + 1
+        if (mod(idx, 10) = 1 and idx != 1)
+           stat = alterlist(prod_tbl->prod_list, idx + 9)
+        endif
+      endif
+detail
+  recv_dt_tm = cnvtdatetime(pe.event_dt_tm)
+  expire_dt_tm = cnvtdatetime(pr.cur_expire_dt_tm)
+  supplier = substring(1,25, og.org_name)
+  product_nbr_formatted = concat(trim(bp.supplier_prefix), trim(pr.product_nbr), " ", trim(pr.product_sub_nbr))		;010
+  if (request->sort_key1 = "ABO/Rh")
+      col 5, product_nbr_formatted			;010
+      col 32, product_type							;010
+      col 59, expire_dt_tm "@DATETIMECONDENSED;;d" 	;010
+      if (d_flg = "DE")
+        col 79, r.orig_rcvd_qty "####;p "	;010
+      else
+        col 74, "    "						;010
+      endif
+      col  83, org_name								;010
+      col 110, recv_dt_tm "@DATETIMECONDENSED;;d"	;010
+      row + 2
+      if (d_flg = "BP")
+        prod_cnt = prod_cnt + 1
+      elseif (d_flg = "DE")
+        prod_cnt = prod_cnt + r.orig_rcvd_qty
+      endif
+      if (row > 56)
+        break
+      endif
+  elseif(request->sort_key1 = "Product Number")
+      col   0, product_nbr_formatted
+      col 23, product_type					;010
+      if (d_flg = "BP")
+            col 44, ABO_Rh					;010
+            finish_flag = "Y"
+      else
+        col 44, "                "								;010
+      endif
+      col 65, expire_dt_tm "@DATETIMECONDENSED;;d"  	;010
+      if (d_flg = "DE")
+        col 79, r.orig_rcvd_qty "####;p "
+      else
+        col 79, "    "
+      endif
+      col  88, org_name
+      col 113, recv_dt_tm "@DATETIMECONDENSED;;d"
+      row + 2
+      if (d_flg = "BP")
+        prod_cnt = prod_cnt + 1
+      elseif (d_flg = "DE")
+        prod_cnt = prod_cnt + r.orig_rcvd_qty
+      endif
+      detail_summary_flg = "D"
+      if (row > 56)
+        break
+      endif
+  elseif(request->sort_key1 = "Product Type")
+      col   4, product_nbr_formatted
+      if (d_flg = "BP")
+            col 31, ABO_Rh
+            finish_flag = "Y"
+      else
+        col 31, "               "
+      endif
+      col  53, expire_dt_tm "@DATETIMECONDENSED;;d"
+      if (d_flg = "DE")
+        col 68, r.orig_rcvd_qty "####;p "
+      else
+        col 68, "    "
+      endif
+      col  81, org_name
+      col 113, recv_dt_tm "@DATETIMECONDENSED;;d"
+      row + 2
+      if (d_flg = "BP")
+        prod_cnt = prod_cnt + 1
+      elseif (d_flg = "DE")
+        prod_cnt = prod_cnt + r.orig_rcvd_qty
+      endif
+      detail_summary_flg = "D"
+      if (row > 56)
+        break
+      endif
+  elseif(request->sort_key1 = "Supplier")
+      col   3, product_nbr_formatted
+      col  28, product_type
+      if (d_flg = "BP")
+            col 59, ABO_Rh
+            finish_flag = "Y"
+      else
+        col 59, "      "
+      endif
+      col  81, expire_dt_tm "@DATETIMECONDENSED;;d"
+      col 114, recv_dt_tm "@DATETIMECONDENSED;;d"
+ 
+      if (d_flg = "DE")
+        col 97, r.orig_rcvd_qty "####;p "
+      else
+        col 97, "    "
+      endif
+      row + 2
+      if (d_flg = "BP")
+        prod_cnt = prod_cnt + 1
+      elseif (d_flg = "DE")
+        prod_cnt = prod_cnt + r.orig_rcvd_qty
+      endif
+      detail_summary_flg = "D"
+      if (row > 56)
+        break
+      endif
+  endif
+
+;-------------------------------------------------------------003
+foot  pr.product_cd
+      if (request->sort_key2 = "Product Type")
+        prod_tbl->prod_list[idx]->prod_display = product_type
+        prod_tbl->prod_list[idx]->prod_cnt     = prod_cnt
+        prod_cnt = 0
+      endif
+ 
+foot sort1
+     if(request->sort_key1 = "Supplier" and request->sort_key2 = "Product Type")
+      detail_summary_flg = "S"
+      break
+
+              ;col   1, Institution_name   ;"Integris Health Systems",           ;002 ;004
+              call center(captions->products_received,1,125)						;007
+              col 104, captions->time,														;007
+              col 118, curtime "@TIMENOSECONDS;;M",
+ 
+%i cclsource:bbt_print_location_info.inc
+ 
+              SAVE_ROW = ROW
+              ROW 1
+              ;row + 1
+              col 45, captions->sorted_by													;007
+              if (request->sort_key1 = "ABO/Rh")
+                col 57, captions->aborh													;007
+              elseif(request->sort_key1 = "Product Number")
+                col 57, captions->product_number										;007
+              elseif(request->sort_key1 = "Product Type")
+                col 57, captions->product_type 											;007
+              elseif(request->sort_key1 = "Supplier")
+                col 57, captions->supplier												;007
+              endif
+              col 104, captions->as_of_date,												;007
+              col 118, curdate "@DATECONDENSED;;d",
+              row + 1
+              if (request->sort_key2 = "ABO/Rh")
+                col 57, captions->aborh													;007
+              elseif(request->sort_key2 = "Product Number")
+                col 57, captions->product_number										;007
+              elseif(request->sort_key2 = "Product Type")
+                col 57, captions->product_type 											;007
+              elseif(request->sort_key2 = "Supplier")
+                col 57, captions->supplier												;007
+              endif
+              row + 1
+              if (request->sort_key3 = "ABO/Rh")
+                col 57, captions->aborh													;007
+              elseif(request->sort_key3 = "Product Number")
+                col 57, captions->product_number										;007
+              elseif(request->sort_key3 = "Product Type")
+                col 57, captions->product_type 											;007
+              elseif(request->sort_key3 = "Supplier")
+                col 57, captions->supplier												;007
+              endif
+ 
+              if (SAVE_ROW >= row)
+                ROW SAVE_ROW
+                ROW + 1
+              else
+                ROW + 1
+              endif
+ 
+              ;row + 1
+              col   3, captions->supplier,":"												;007
+              if (og.org_name > " ")
+                 col  13, og.org_name
+              else
+                 col  13, captions->no_supplier											;007
+              endif
+              row + 3
+              col   9, captions->product_type 											;007
+              col  33, captions->total														;007
+              row + 1
+              col   3, "-------------------------"
+              col  33, "-----"
+              row + 1
+              idx1 = 1
+              stat = alterlist(prod_tbl->prod_list, idx)
+              while (idx1 <= idx)
+                col   3, prod_tbl->prod_list[idx1]->prod_display
+                col  33, prod_tbl->prod_list[idx1]->prod_cnt "#####;p "
+                row + 2
+                if (row > 56)
+                break
+
+              ;col   1, Institution_name   ;"Integris Health Systems",           ;002 ;004
+              call center(captions->products_received,1,125)						;007
+              col 104, captions->time,														;007
+              col 118, curtime "@TIMENOSECONDS;;M" ,
+ 
+%i cclsource:bbt_print_location_info.inc
+ 
+              SAVE_ROW = ROW
+              ROW 1
+              ;row + 1
+              col 45, captions->sorted_by													;007
+              if (request->sort_key1 = "ABO/Rh")
+                col 57, captions->aborh													;007
+              elseif(request->sort_key1 = "Product Number")
+                col 57, captions->product_number										;007
+              elseif(request->sort_key1 = "Product Type")
+                col 57, captions->product_type 											;007
+              elseif(request->sort_key1 = "Supplier")
+                col 57, captions->supplier												;007
+              endif
+              col 104, captions->as_of_date,												;007
+              col 118, curdate "@DATECONDENSED;;d",
+              row + 1
+              if (request->sort_key2 = "ABO/Rh")
+                col 57, captions->aborh													;007
+              elseif(request->sort_key2 = "Product Number")
+                col 57, captions->product_number										;007
+              elseif(request->sort_key2 = "Product Type")
+                col 57, captions->product_type 											;007
+              elseif(request->sort_key2 = "Supplier")
+                col 57, captions->supplier												;007
+              endif
+              row + 1
+              if (request->sort_key3 = "ABO/Rh")
+                col 57, captions->aborh													;007
+              elseif(request->sort_key3 = "Product Number")
+                col 57, captions->product_number										;007
+              elseif(request->sort_key3 = "Product Type")
+                col 57, captions->product_type 											;007
+              elseif(request->sort_key3 = "Supplier")
+                col 57, captions->supplier												;007
+              endif
+ 
+              if (SAVE_ROW >= row)
+                ROW SAVE_ROW
+                ROW + 1
+              else
+                ROW + 1
+              endif
+
+              ;row + 1
+              col   3, captions->supplier,":"												;007
+              if (og.org_name > " ")
+                 col  13, og.org_name
+              else
+                 col  13, captions->no_supplier											;007
+              endif
+              row + 3
+              col   9, captions->product_type 											;007
+              col  33, captions->total			 											;007
+              row + 1
+              col   3, "-------------------------"
+              col  33, "-----"
+              row + 1
+        endif
+        idx1 = idx1 + 1
+      endwhile
+      detail_summary_flg = "D"
+      endif
+ 
+foot page
+      row  57
+      col   1, line,
+      row + 1
+      col   1, captions->report_id,															;007
+      col  58, captions->page_no,															;007
+      col  64, curpage "###",
+      col 100, captions->printed,															;007
+      col 110, curdate "@DATECONDENSED;;d"
+      col 120, curtime "@TIMENOSECONDS;;M"
+
+foot report
+      row  60
+      col  51, captions->end_of_report														;007
+      print_page_head_ind = "N"
+      break
+      select_ok_ind = 1
+
+with
+      nullreport,
+      maxrow = 61,
+      nocounter,
+      compress,
+      nolandscape
+
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+if (select_ok_ind = 1)
+    set reply->status_data->status = "S"
+endif
+end
+go
+
+;Generated by GNU enscript 1.6.4.

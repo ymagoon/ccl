@@ -1,0 +1,442 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_disp_not_destryd.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_rpt_disp_not_destryd.prg
+        Object name:            bbt_rpt_disp_not_destryd
+        Request #:              225185
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Report blood products and derivatives that have
+                                been disposed but not destroyed
+
+        Tables read:            code_value, product_event, prsnl, product,
+                                disposition, blood_product, derivative
+
+        Tables updated:         none
+
+        Executing from:         VB
+
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 09/30/96 Brian Franke         Initial Release                     *
+;     002 06/16/97 Doug Saus            Added select of owner and inv areas *
+;     003 03/23/98 Matt Benson          Modified to retrieve institution    *
+;       name from preferences                                               *
+;     004 12/21/98 Jose Suarez          Added logic to print the location name                                *
+;                                       and address.  Added the address_location_cd to request.               *
+;                                       Added bbt_get_location_info.inc                                       *
+;                                       Added bbt_print_location_info.inc                                     *
+;     005 05/21/99 Jose Suarez          change cer_temp to cer_print          *
+;     006 09/01/99 Badari Kopparapu     Modified to use bbt_ops_owninvloc.inc
+;                                       for processing owner area, inventory*
+;                                       area & location address from batch  *
+;                                       selection field in Ops Job Templates*
+;                                       Modified to use ops_date for computing
+;                                       the report date range.              *
+;     007 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       removed bbt_ops_owninvloc.inc and   *
+;                                       added bbt_ops_parm_passed.inc       *
+;     008 02/21/01 Chris Noe            Internationalize date/time and text *
+;     009 07/24/02 Jason Osborn         Unique RPT filename project         *
+;     010 04/12/04 Jim Jensen           Remove "Select" for own/inv info and*
+;                                       use UAR, instead.  Increase size of *
+;                                       ABORh display                       *
+;     011 06/28/04 David Fifer          Rearranged the report to handle a 25*
+;                                       character eurocode product number.  *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_rpt_disp_not_destryd:dba go
+create program bbt_rpt_disp_not_destryd:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+        /*
+        record request
+        (
+          1  beg_dt_tm         = di8
+          1  end_dt_tm         = di8
+          1  ops_date          = dq8
+          1  batch_selection   = vc100
+          1  output_dist       = vc100
+          1  cur_owner_area_cd  = f8
+          1  cur_inv_area_cd    = f8
+          1  address_location_cd = f8
+        )
+        */
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+        record reply
+        (
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+        )
+
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+ 
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+record captions
+(
+  1  products_disposed   = vc
+  1  time                = vc
+  1  as_of_date          = vc
+  1  by_prod_type        = vc
+  1  bb_owner            = vc
+  1  inventory_area      = vc
+  1  beg_date            = vc
+  1  end_date            = vc
+  1  product_type        = vc
+  1  aborh               = vc
+  1  product_number      = vc
+  1  qty                 = vc
+  1  dt_tm               = vc
+  1  tech_id             = vc
+  1  total               = vc
+  1  report_id           = vc
+  1  page_no             = vc
+  1  printed             = vc
+  1  end_of_report       = vc
+  1  all                 = vc
+)
+ 
+set captions->products_disposed = uar_i18ngetmessage(i18nHandle,
+  "products_disposed",
+  "P R O D U C T S   D I S P O S E D   N O T   D E S T R O Y E D")
+set captions->time = uar_i18ngetmessage(i18nHandle,
+  "time", "Time:")
+set captions->as_of_date = uar_i18ngetmessage(i18nHandle,
+  "as_of_date", "As of Date:")
+set captions->by_prod_type = uar_i18ngetmessage(i18nHandle,
+  "by_prod_type", "(by Product Type)")
+set captions->bb_owner = uar_i18ngetmessage(i18nHandle,
+  "bb_owner", "Blood Bank Owner: ")
+set captions->inventory_area = uar_i18ngetmessage(i18nHandle,
+  "inventory_area", "Inventory Area: ")
+set captions->beg_date = uar_i18ngetmessage(i18nHandle,
+  "beg_date", "Beginning Date:")
+set captions->end_date = uar_i18ngetmessage(i18nHandle,
+  "end_date", "Ending Date:")
+set captions->product_type = uar_i18ngetmessage(i18nHandle,
+  "product_type", "Product Type:")
+set captions->aborh = uar_i18ngetmessage(i18nHandle,
+  "aborh", "ABO/Rh")
+set captions->product_number = uar_i18ngetmessage(i18nHandle,
+  "product_number", "Product Number")
+set captions->qty = uar_i18ngetmessage(i18nHandle,
+  "qty", "Qty")
+set captions->dt_tm = uar_i18ngetmessage(i18nHandle,
+  "dt_tm", "Date/Time")
+set captions->tech_id = uar_i18ngetmessage(i18nHandle,
+  "tech_id", "Tech ID")
+set captions->total = uar_i18ngetmessage(i18nHandle,
+  "total", "Total for Product Type:")
+set captions->report_id = uar_i18ngetmessage(i18nHandle,
+  "report_id", "Report ID: BBT_RPT_DISP_NOT_DESTRYD")
+set captions->page_no = uar_i18ngetmessage(i18nHandle,
+  "page_no", "Page:")
+set captions->printed = uar_i18ngetmessage(i18nHandle,
+  "printed", "Printed:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+set captions->all = uar_i18ngetmessage(i18nHandle,
+  "all", "(All)")
+ 
+/*****************************************************************************
+* Script                                                                     *
+*****************************************************************************/
+if (trim(request->batch_selection) > " ")
+  set begday = request->ops_date
+  set endday = request->ops_date
+  set temp_string = cnvtupper(trim(request->batch_selection))
+  CALL CHECK_OPT_DATE_PASSED("bbt_rpt_disp_not_destryd")
+  if (reply->status_data->status != "F")
+        set request->beg_dt_tm = begday
+        set request->end_dt_tm = endday
+  endif
+
+  call CHECK_OWNER_CD ("bbt_rpt_disp_not_destryd")
+  call CHECK_INVENTORY_CD ("bbt_rpt_disp_not_destryd")
+  call CHECK_LOCATION_CD ("bbt_rpt_disp_not_destryd")
+endif
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+
+;006 has to be after the batch_selection processing.
+%i cclsource:bbt_get_location_info.inc
+%i cclsource:bbt_get_code_value.inc
+
+/* Retrieve display values for requested Owner Area and Inventory Area */
+set cur_owner_area_disp = fillstring(40," ")
+set cur_inv_area_disp = fillstring(40, " ")
+if (request->cur_owner_area_cd = 0.0)
+   set cur_owner_area_disp = captions->all
+else
+   set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+endif
+if (request->cur_inv_area_cd = 0.0)
+   set cur_inv_area_disp = captions->all
+else
+   set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+endif
+
+set cdf_meaning = fillstring(12, " ")
+set event_code = 0.0
+set cdf_meaning = "5"
+set event_code = GET_CODE_VALUE(1610, cdf_meaning)
+set event_display = uar_get_code_display(event_code)
+
+set reply->status_data->status = "F"
+set select_ok_ind = 0
+ 
+set rpt_cnt = 0
+
+execute cpm_create_file_name_logical "bbt_not_dest", "txt", "x"
+
+select into cpm_cfn_info->file_name_logical
+      d_flg = decode(bp.seq, "BP", de.seq, "DE", "XX"),
+      pe.product_id,
+      bp.supplier_prefix,
+      pr.product_nbr "###############",
+      pr.product_sub_nbr "#####",
+      product_display = decode(pr.seq, uar_get_code_display(pr.product_cd), " "),
+      sub_nbr = pr.product_sub_nbr "#####",
+      product_disp = decode(pr.seq, uar_get_code_display(pr.product_cd), " "),
+      abo = decode(bp.seq, uar_get_code_display(bp.cur_abo_cd), " "),
+      rh = decode(bp.seq, uar_get_code_display(bp.cur_rh_cd), " "),
+      qty = dp.disposed_qty "####",
+      dt_tm = pe.event_dt_tm,
+      tech = prs.username
+
+from  product_event pe,
+      prsnl prs,
+      product pr,
+      disposition dp,
+      (dummyt d1 with seq = 1),
+      (dummyt d5 with seq = 1),
+      blood_product bp,
+      (dummyt d2 with seq = 1),
+      derivative de
+ 
+plan  pe where (pe.event_dt_tm between cnvtdatetime(request->beg_dt_tm)  and
+                                       cnvtdatetime(request->end_dt_tm)) and
+                event_code = pe.event_type_cd and
+                pe.active_ind = 1
+
+join   prs where pe.event_prsnl_id = prs.person_id
+ 
+join  pr where pe.product_id = pr.product_id and
+               pr.product_id > 0 and
+               pr.active_ind = 1
+                  and ((request->cur_owner_area_cd > 0.0
+                  and request->cur_owner_area_cd = pr.cur_owner_area_cd)
+                  or (request->cur_owner_area_cd = 0.0))
+                  and ((request->cur_inv_area_cd > 0.0
+                  and request->cur_inv_area_cd = pr.cur_inv_area_cd)
+                  or (request->cur_inv_area_cd = 0.0))
+
+join  dp where pe.product_id = dp.product_id and
+               pe.product_event_id = dp.product_event_id and
+               dp.active_ind = 1
+
+join  (d1 where d1.seq = 1
+
+join  (d5 where d5.seq = 1
+join  bp where pr.product_id = bp.product_id)
+
+orjoin (d2 where d2.seq = 1
+join  de where pr.product_id = de.product_id))
+
+order by
+      product_display,
+      abo,
+      rh,
+      pr.product_nbr,
+      pr.product_sub_nbr
+
+head report
+      line          = fillstring(125,"_")
+      first_time    = "Y"
+      cnt           = 0
+      select_ok_ind = 0
+      aborh_display = fillstring(15, " ")
+
+head page
+      beg_dt_tm    = cnvtdatetime(request->beg_dt_tm)
+      end_dt_tm    = cnvtdatetime(request->end_dt_tm)
+      call center(captions->products_disposed,1,125)
+      col 107, captions->time,
+      col 121, curtime "@TIMENOSECONDS;;m",
+ 
+      row + 1
+      col 107, captions->as_of_date,
+      col 119, curdate "@DATECONDENSED;;d",
+
+%i cclsource:bbt_print_location_info.inc
+      SAVE_ROW = ROW
+      ROW 1
+      call center(captions->by_prod_type,1,125)
+      ROW SAVE_ROW
+      ROW + 1
+      col 1, captions->bb_owner,
+      col 19, cur_owner_area_disp,
+ 
+      row + 1
+      col 1, captions->inventory_area,
+      col 17, cur_inv_area_disp
+ 
+      row + 2
+      col  34, captions->beg_date
+      col  50, beg_dt_tm "@DATECONDENSED;;d"
+      col  58, beg_dt_tm "@TIMENOSECONDS;;m"
+      col  73, captions->end_date
+      col  86, end_dt_tm "@DATECONDENSED;;d"
+      col  94, end_dt_tm "@TIMENOSECONDS;;m"
+ 
+      row + 2
+      col  25, captions->product_type
+      col  39, product_display "#########################"
+      row + 2
+      col  25, captions->aborh
+      call center(captions->product_number,44,68)			;011
+      col  73, captions->qty								;011
+      col  82, captions->dt_tm
+      col 101, captions->tech_id
+      row + 1
+      col  25, "---------------"
+      col  44, "-------------------------"		;011
+      col  73, "----"							;011
+      col  80, "-------------"
+      col 101, "-------"
+      row + 1
+
+head product_display
+      if (first_time = "Y")
+        first_time = "N"
+      else
+        break
+      endif
+
+detail
+      event_dt_tm  = cnvtdatetime(pe.event_dt_tm)
+      if (d_flg = "BP")
+        aborh_display = concat(trim(abo), " ", trim(rh))
+        col 25, aborh_display "###############"
+      elseif (d_flg = "DE")
+        col  25, "               "
+      endif
+      prod_nbr_display = concat(TRIM(bp.supplier_prefix), TRIM(pr.product_nbr))
+      col  44, prod_nbr_display
+      if (pr.product_sub_nbr > "     ")
+        col  64, pr.product_sub_nbr			;011
+      else
+        col  64, "     "					;011
+      endif
+      if (d_flg = "DE")
+        col 73, dp.disposed_qty "####;p "	;011
+      else
+        col 73, "    "						;011
+      endif
+      col   80, event_dt_tm "@DATECONDENSED;;d"
+      col   88, event_dt_tm "@TIMENOSECONDS;;m"
+      col  101, prs.username "######"
+      row + 2
+      if (row > 56)
+        break
+      endif
+      if (d_flg = "BP")
+        cnt = cnt + 1
+      else
+        cnt = cnt + dp.disposed_qty
+      endif
+
+foot product_display
+      row + 1
+      if (row > 54)
+        break
+        row + 3
+      endif
+      col  25, captions->total
+      col  49, product_display "#########################"
+      row + 2
+      col  28, event_display "###############"
+      col  45, cnt "####;p "
+      cnt = 0
+
+foot page
+      row  57
+      col   1, line,
+      row + 1
+      col   1, captions->report_id,
+      col  58, captions->page_no,
+      col  64, curpage "###",
+      col 109, captions->printed,
+      col 119, curdate "@DATECONDENSED;;d"
+
+foot report
+      row  60
+      call center(captions->end_of_report, 1, 125)
+      select_ok_ind = 1
+
+with  counter,
+      nullreport,
+      maxrow = 61,
+      outerjoin (d1),
+      compress, nolandscape
+
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+
+if (trim(request->batch_selection) > "")
+    SET spool value(reply->rpt_list[rpt_cnt].rpt_filename) value(request->output_dist)
+endif
+ 
+if (select_ok_ind = 1)
+    set reply->status_data->status = "S"
+endif
+
+#EXIT_SCRIPT
+ 
+end
+go
+
+;Generated by GNU enscript 1.6.4.

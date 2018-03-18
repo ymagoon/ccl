@@ -1,0 +1,1389 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_interp_result/glb_get_interp_result.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2000 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       glb_get_interp_result.prg
+        Object name:            glb_get_interp_result
+        Request #:              250112
+ 
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:
+        Tables read:            accession_order_r,
+                                code_value,
+                                container,
+                                interp_range,
+                                interp_result,
+                                long_text_reference,
+                                order_container_r,
+                                orders,
+                                perform_result,
+                                profile_task_r,
+                                result,
+                                result_hash
+ 
+        Tables updated:         None
+        Executing from:
+ 
+        Special Notes:
+ 
+******************************************************************************/
+ 
+;~DB~*************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG               *
+;    *************************************************************************
+;    *                                                                       *
+;    *Mod Date     Engineer             Comment                              *
+;    *--- -------- -------------------- ------------------------------------ *
+;    *000 09/04/96 Hal Patchen          Initial Release                      *
+;    *001 09/19/97 Hal Patchen          Add Autoverification logic           *
+;    *002 11/21/97 Hal Patchen          Add check for accession primary_flag *
+;    *003 03/23/98 Hal Patchen          Return additional donor fields and   *
+;    *                                  support for result type code set     *
+;    *004 05/18/98 Hal Patchen          Allow for any result value in hash   *
+;    *                                  pattern.                             *
+;    *005 12/16/98 Chris Heil           Add support for unknown age ranges.  *
+;    *006 11/25/98 Hal Patchen          Move textual interp from long_text   *
+;    *                                  to long_text_reference table.        *
+;    *007 11/01/00 Hal Patchen          Fix cross drawn date script error    *
+;    *008 07/16/03 Ekta Agarwal         Remove ORAHINT                       *
+;    *009 05/22/06 Tim Sady (TS010410)  Support for inserting results into   *
+;    *                                  textual interps.                     *
+;    *009 03/22/06 Joe Troy             Added order_id to reply for pass back*
+;    *                                  on MDI interp results.               *
+;    *010 03/30/07 Roli Srivastava      CR1- 810290221 Fix to address        *
+;    *                                  decimal precision of F8 variable     *
+;    *                                  compared to an F8 column value of a  *
+;    *                                  table.                               *
+;    *011 08/03/09 Babak Aghili         Added pattern [:ORD;C;Spec Type:]    *
+;    *                                  for Helix Orders.                    *
+;    *012 01/27/11 Craig Gaskill        Added support for a format specifier *
+;    *                                  for Numeric & Calculated result types*
+;    *013 11/11/11 Scott Haven          Fix CR 1-5354014291 (linearity > <)  *
+;    *014 04/18/12 Priya Nayak          Fix CR 1-5830499981 Modified format  *
+;    *                                  specifier for assay names having ";" *
+;    *015 03/04/13 Dilip Raju		    CR 1-6786168561.Added pattern for    *
+;    *					                [:ORD;C;Workup Comment:]             *
+;    *016 03/14/13 Priya Nayak          Fix for CR 1-6806040024 Added logic  *
+;    *                                  handle order from MDI                *
+;    *017 08/28/14 Kapil Sen            Fix for CR# 1-7580818124 : Inserting *
+;    *                                  a workup comment into an interp does *
+;    *                                  not preserve formatting              *
+;~DE~*************************************************************************
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+             drop program GLB_GET_INTERP_RESULT:dba go
+             create program GLB_GET_INTERP_RESULT:dba
+ 
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  interp[*]
+            2  order_id                  = f8
+            2  task_assay_cd             = f8
+            2  service_resource_cd       = f8
+            2  interp_id                 = f8
+            2  interp_type_cd            = f8
+            2  species_cd                = f8
+            2  race_cd                   = f8
+            2  gender_cd                 = f8
+            2  age_in_minutes            = i4
+            2  unknown_age_ind           = i2    ;005
+            2  component_cnt             = i4
+            2  component[*]
+               3  interp_detail_id       = f8
+               3  sequence               = i4
+               3  included_assay_cd      = f8
+               3  cross_drawn_dt_tm_ind  = i2
+               3  time_window_minutes    = i4
+               3  time_window_units_cd   = f8
+               3  order_id               = f8 ;fill out if
+                                              ;cross_drawn_dt_tm_ind = 1
+               3  result_req_flag        = i4
+               3  verified_flag          = i4
+               3  result_ind             = i2 ;1 = result passed in request
+               3  result_type_cd         = f8 ;required field
+               3  result_numeric         = f8
+               3  nomenclature_id        = f8
+               3  result_code_set_cd     = f8                          ;003
+               3  formatted_result_value = vc
+         1 check_insert_result_ind = i2
+      )
+      */
+ 
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      (
+         1  interp[*]
+            2  task_assay_cd             = f8
+            2  service_resource_cd       = f8
+            2  interp_id                 = f8
+            2  interp_type_cd            = f8
+            2  interp_result_id          = f8
+            2  hash_pattern              = vc
+            2  result_nomenclature_id    = f8
+            2  result_cd                 = f8
+            2  long_text_id              = f8
+            2  result_text               = vc
+            2  donor_eligibility_cd      = f8                          ;003
+            2  donor_eligibility_disp    = vc                          ;003
+            2  donor_eligibility_mean    = vc                          ;003
+            2  days_ineligible           = i4                          ;003
+            2  component_cnt             = i4
+            2  component[*]
+               3  interp_detail_id       = f8
+               3  sequence               = i4
+               3  included_assay_cd      = f8
+               3  interp_range_id        = f8
+               3  result_hash_id         = f8
+               3  from_result_range      = f8
+               3  to_result_range        = f8
+               3  nomenclature_id        = f8
+               3  result_code_set_cd     = f8                          ;003
+               3  result_hash            = vc
+               3  formatted_result_value = vc
+               3  result_type_cd         = f8                          ;012
+            2  tags_not_found[*]
+               3  dta_name_in_tag        = vc
+            2  order_id                  = f8
+%i cclsource:status_block.inc
+      )
+      
+%i cclsource:i18n_uar.inc
+declare i18nHandle = i4  with protect, noconstant(0)
+call uar_i18nlocalizationinit(i18nHandle,curprog,"",curcclrev)
+
+      /***********************************************************************
+      * Drawn date/time range record                                         *
+      ***********************************************************************/
+      record drawn
+      (
+         1  curr_dt_tm                   = dq8
+         1  dt_tm_from                   = dq8
+         1  dt_tm_to                     = dq8
+      )
+ 
+      /***********************************************************************
+      * Hash pattern comparison record                                       *
+      ***********************************************************************/
+      record hash                                                      ;004
+      (                                                                ;004
+         1  pattern1                     = vc                          ;004
+         1  pattern2                     = vc                          ;004
+      )
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+;001         set CV_REQUIRED_RECS            = 6
+;003         set CV_REQUIRED_RECS            = 7                           ;001
+         set CV_REQUIRED_RECS            = 10                           ;003
+         declare cv_cnt                  = i4
+         set RESULT_TYPE_CODESET         = 289
+         set RESULT_TYPE_ALPHA_CDF       = "2"
+         set RESULT_TYPE_NUMERIC_CDF     = "3"
+         set RESULT_TYPE_CALC_CDF        = "8"
+         set RESULT_TYPE_CODE_SET_CDF    = "9"                         ;003
+         set RESULT_STATUS_CODESET       = 1901
+         set RESULT_STATUS_PERFORMED_CDF = "PERFORMED"
+         set RESULT_STATUS_VERIFIED_CDF  = "VERIFIED"
+         set RESULT_STATUS_AUTOVERIFIED_CDF  = "AUTOVERIFIED"          ;001
+         set RESULT_STATUS_CORRECTED_CDF = "CORRECTED"
+         set RESULT_STATUS_INREVIEW_CDF = "INREVIEW"
+         set RESULT_STATUS_CORRINREV_CDF = "CORRINREV"
+         declare result_type_alpha_cd    = f8
+         declare result_type_numeric_cd  = f8
+         declare result_type_calc_cd     = f8
+         declare result_type_code_set_cd = f8                          ;003
+         declare result_status_performed_cd = f8
+         declare result_status_inreview_cd = f8
+         declare result_status_corrinrev_cd = f8
+         declare result_status_verified_cd  = f8
+         declare result_status_autoverified_cd  = f8                   ;001
+         declare result_status_corrected_cd = f8
+         declare stat                    = i4
+         declare i_cnt                   = i4
+         declare c_cnt                   = i4
+         declare nbr_interps             = i4
+         declare nbr_components          = i4
+         declare max_nbr_components      = i4
+         declare usable_result_ind       = i2
+         declare curr_person_id          = f8
+         declare nbr_mins                = i4
+         declare interp_result_failure   = i2
+
+         declare CheckInsertResults() = i2 with protect
+
+         set reply->status_data.status = "F"
+ 
+      /***********************************************************************
+      * Load result type and result status code sets                         *
+      ***********************************************************************/
+         set cv_cnt = 0
+ 
+         select into "nl:"
+            cv.code_set,
+            cv.code_value
+         from
+            code_value cv
+         where cv.code_set in ( RESULT_TYPE_CODESET, RESULT_STATUS_CODESET )
+           and cv.active_ind = 1
+           and (cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+             and  cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+         detail
+            if (cv.code_set = RESULT_TYPE_CODESET)
+               case (cv.cdf_meaning)
+                 of RESULT_TYPE_ALPHA_CDF:
+                    result_type_alpha_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_TYPE_NUMERIC_CDF:
+                    result_type_numeric_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_TYPE_CALC_CDF:
+                    result_type_calc_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_TYPE_CODE_SET_CDF:                          ;003
+                    result_type_code_set_cd = cv.code_value            ;003
+                    cv_cnt = cv_cnt + 1                                ;003
+               endcase
+            endif
+            if (cv.code_set = RESULT_STATUS_CODESET)
+               case (cv.cdf_meaning)
+                 of RESULT_STATUS_PERFORMED_CDF:
+                    result_status_performed_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_STATUS_INREVIEW_CDF:
+                    result_status_inreview_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_STATUS_VERIFIED_CDF:
+                    result_status_verified_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_STATUS_CORRINREV_CDF:
+                    result_status_corrinrev_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_STATUS_AUTOVERIFIED_CDF:                    ;001
+                    result_status_autoverified_cd = cv.code_value      ;001
+                    cv_cnt = cv_cnt + 1                                ;001
+                 of RESULT_STATUS_CORRECTED_CDF:
+                    result_status_corrected_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+         with nocounter
+ 
+         ;* Verify that all required code value records were read.
+         if (cv_cnt != CV_REQUIRED_RECS)
+            go to Exit_Script
+         endif
+ 
+      /***********************************************************************
+      * If a component result was not passed in and the cross_drawn_dt_tm_ind*
+      * is checked, then look across orders for results within the given time*
+      * window.                                                              *
+      ***********************************************************************/
+         set max_nbr_components = 0
+         set nbr_interps = size(request->interp,5)
+         set stat = alterlist(reply->interp, nbr_interps)
+         for (i_cnt = 1 to nbr_interps)
+            set nbr_components = request->interp[i_cnt].component_cnt
+            if (nbr_components > max_nbr_components)
+               set max_nbr_components = nbr_components
+            endif
+            set stat = alterlist(reply->interp[i_cnt].component, nbr_components)
+            set reply->interp[i_cnt].task_assay_cd =
+              request->interp[i_cnt].task_assay_cd
+            set reply->interp[i_cnt].service_resource_cd =
+              request->interp[i_cnt].service_resource_cd
+            set reply->interp[i_cnt].interp_id =
+              request->interp[i_cnt].interp_id
+            set reply->interp[i_cnt].interp_type_cd =
+              request->interp[i_cnt].interp_type_cd
+            set reply->interp[i_cnt].component_cnt = nbr_components
+            set reply->interp[i_cnt].order_id = request->interp[i_cnt].order_id
+
+            for (c_cnt = 1 to nbr_components)
+               set reply->interp[i_cnt].component[c_cnt].interp_detail_id =
+                 request->interp[i_cnt].component[c_cnt].interp_detail_id
+               set reply->interp[i_cnt].component[c_cnt].sequence =
+                 request->interp[i_cnt].component[c_cnt].sequence
+               set reply->interp[i_cnt].component[c_cnt].included_assay_cd =
+                 request->interp[i_cnt].component[c_cnt].included_assay_cd
+               
+               /* NOTE - This has to be given to us to perform any 'result inserting' logic.
+                  It was going to be impossible to know for sure how to format a numeric result
+                  based purely on what we are given 
+                  NOTE - At this point, we will NOT try to format any results that
+                  are looked up from the data base (ie, cross order, cross accession, etc ...
+                  so those results will NOT fall into the result inserting logic.
+               */
+               set reply->interp[i_cnt].component[c_cnt].formatted_result_value =  
+                 request->interp[i_cnt].component[c_cnt].formatted_result_value
+                 
+               set reply->interp[i_cnt].component[c_cnt].result_type_cd =
+                 request->interp[i_cnt].component[c_cnt].result_type_cd
+
+               ;* If no result was passed in the request, attempt to find
+               ;* a result when the cross drawn date/time is activated.
+               if (request->interp[i_cnt].component[c_cnt]
+                 .result_ind = 0
+               and request->interp[i_cnt].component[c_cnt]
+                 .cross_drawn_dt_tm_ind = 1)
+ 
+                  ;* Check current order for component results
+                  select into "nl:"
+                     r.seq,
+                     pr.seq
+                     /* Selection fields:
+                     r.result_id,
+                     r.order_id,
+                     r.task_assay_cd,
+                     r.result_status_cd,
+                     pr.perform_result_id,
+                     pr.result_id,
+                     pr.result_type_cd,
+                     pr.result_value_numeric,
+                     pr.nomenclature_id
+                     */
+                  from
+                     result r,
+                     perform_result pr
+                  plan r  where r.order_id =
+                              request->interp[i_cnt].component[c_cnt].order_id
+                            and r.task_assay_cd = request->interp[i_cnt]
+                              .component[c_cnt].included_assay_cd
+                            and r.result_status_cd
+                              in (result_status_performed_cd,
+                                  result_status_inreview_cd,
+                                  result_status_corrinrev_cd,
+                                  result_status_verified_cd,
+                                  result_status_autoverified_cd,       ;001
+                                  result_status_corrected_cd)
+                  join pr where pr.result_id = r.result_id
+                            and pr.result_status_cd = r.result_status_cd
+                  detail
+                     ;* Make sure result is in the proper status before using
+                     if ((request->interp[i_cnt].component[c_cnt]
+                         .verified_flag = 0
+                       and r.result_status_cd
+                         in (result_status_performed_cd,
+                             result_status_inreview_cd,
+                             result_status_verified_cd,
+                             result_status_corrinrev_cd,
+                             result_status_autoverified_cd,            ;001
+                             result_status_corrected_cd))
+                     or (request->interp[i_cnt].component[c_cnt]
+                         .verified_flag = 1
+                       and r.result_status_cd
+                         in (result_status_verified_cd,
+                             result_status_corrinrev_cd,
+                             result_status_autoverified_cd,            ;001
+                             result_status_corrected_cd)))
+                        usable_result_ind = 1
+                     else
+                        usable_result_ind = 0
+                     endif
+                     if (usable_result_ind = 1
+                     and pr.result_type_cd in (result_type_numeric_cd,
+                                               result_type_calc_cd))
+                        request->interp[i_cnt].component[c_cnt]
+                          .result_ind = 1
+                        request->interp[i_cnt].component[c_cnt]        ;007
+                          .result_type_cd = pr.result_type_cd          ;007
+                        request->interp[i_cnt].component[c_cnt]
+                          .result_numeric = pr.result_value_numeric
+                     endif
+                     if (usable_result_ind = 1
+                     and pr.result_type_cd in (result_type_alpha_cd))
+                        request->interp[i_cnt].component[c_cnt]
+                          .result_ind = 1
+                        request->interp[i_cnt].component[c_cnt]        ;007
+                          .result_type_cd = pr.result_type_cd          ;007
+                        request->interp[i_cnt].component[c_cnt]
+                          .nomenclature_id = pr.nomenclature_id
+                     endif
+                     if (usable_result_ind = 1                         ;003
+                     and pr.result_type_cd = result_type_code_set_cd)  ;003
+                        request->interp[i_cnt].component[c_cnt]        ;003
+                          .result_ind = 1                              ;003
+                        request->interp[i_cnt].component[c_cnt]        ;007
+                          .result_type_cd = pr.result_type_cd          ;007
+                        request->interp[i_cnt].component[c_cnt]        ;003
+                          .result_code_set_cd = pr.result_code_set_cd  ;003
+                     endif                                             ;003
+                  with nocounter
+ 
+                  ;* If component wasn't found on current order_id, check
+                  ;* across the accession to see if it exists under a
+                  ;* different order_id.
+                  if (request->interp[i_cnt].component[c_cnt].result_ind = 0)
+                     select into "nl:"
+                        a1.seq,
+                        a2.seq,
+                        r.seq,
+                        pr.seq
+                        /* Selection fields:
+                        a1.order_id,
+                        a1.accession,
+                        a2.order_id,
+                        r.result_id,
+                        r.order_id,
+                        r.task_assay_cd,
+                        r.result_status_cd,
+                        pr.perform_result_id,
+                        pr.result_id,
+                        pr.result_type_cd,
+                        pr.result_value_numeric,
+                        pr.nomenclature_id
+                        */
+                     from
+                        accession_order_r a1,
+                        accession_order_r a2,
+                        result r,
+                        perform_result pr
+                     plan a1 where a1.order_id = request->interp[i_cnt]
+                                 .component[c_cnt].order_id
+                               and a1.primary_ind = 0                  ;002
+                     join a2 where a2.accession = a1.accession
+                               and a2.order_id != request->interp[i_cnt]
+                                 .component[c_cnt].order_id
+                     join r  where r.order_id = a2.order_id
+                               and r.task_assay_cd = request->interp[i_cnt]
+                                 .component[c_cnt].included_assay_cd
+                               and r.result_status_cd
+                                 in (result_status_performed_cd,
+                                     result_status_inreview_cd,
+                                     result_status_corrinrev_cd,
+                                     result_status_verified_cd,
+                                     result_status_autoverified_cd,    ;001
+                                     result_status_corrected_cd)
+                     join pr where pr.result_id = r.result_id
+                               and pr.result_status_cd = r.result_status_cd
+                     detail
+                        ;* Make sure result is in the proper status before using
+                        if ((request->interp[i_cnt].component[c_cnt]
+                            .verified_flag = 0
+                          and r.result_status_cd
+                            in (result_status_performed_cd,
+                                result_status_inreview_cd,
+                                result_status_corrinrev_cd,
+                                result_status_verified_cd,
+                                result_status_autoverified_cd,         ;001
+                                result_status_corrected_cd))
+                        or (request->interp[i_cnt].component[c_cnt]
+                            .verified_flag = 1
+                          and r.result_status_cd
+                            in (result_status_verified_cd,
+                                result_status_corrinrev_cd,
+                                result_status_autoverified_cd,         ;001
+                                result_status_corrected_cd)))
+                           usable_result_ind = 1
+                        else
+                           usable_result_ind = 0
+                        endif
+                        if (usable_result_ind = 1
+                        and pr.result_type_cd in (result_type_numeric_cd,
+                                                  result_type_calc_cd))
+                           request->interp[i_cnt].component[c_cnt]
+                             .result_ind = 1
+                           request->interp[i_cnt].component[c_cnt]     ;007
+                             .result_type_cd = pr.result_type_cd       ;007
+                           request->interp[i_cnt].component[c_cnt]
+                             .result_numeric = pr.result_value_numeric
+                        endif
+                        if (usable_result_ind = 1
+                        and pr.result_type_cd in (result_type_alpha_cd))
+                           request->interp[i_cnt].component[c_cnt]
+                             .result_ind = 1
+                           request->interp[i_cnt].component[c_cnt]     ;007
+                             .result_type_cd = pr.result_type_cd       ;007
+                           request->interp[i_cnt].component[c_cnt]
+                             .nomenclature_id = pr.nomenclature_id
+                        endif
+                        if (usable_result_ind = 1                      ;003
+                        and pr.result_type_cd = result_type_code_set_cd) ;003
+                           request->interp[i_cnt].component[c_cnt]     ;003
+                             .result_ind = 1                           ;003
+                           request->interp[i_cnt].component[c_cnt]     ;007
+                             .result_type_cd = pr.result_type_cd       ;007
+                           request->interp[i_cnt].component[c_cnt]     ;003
+                             .result_code_set_cd = pr.result_code_set_cd ;003
+                        endif                                          ;003
+                     with nocounter
+                  endif
+ 
+                  ;* If component wasn't found on current order_id
+                  ;* or across the current accession, check across
+                  ;* accessions.
+                  if (request->interp[i_cnt].component[c_cnt].result_ind = 0)
+                     select into "nl:"
+                        o.order_id,
+                        ocr.order_id,
+                        ocr.catalog_cd,
+                        c.container_id,
+                        c.drawn_dt_tm
+                     from
+                        orders o,
+                        order_container_r ocr,
+                        container c
+                     plan o   where o.order_id = request->interp[i_cnt]
+                                  .component[c_cnt].order_id
+                     join ocr where ocr.order_id = o.order_id
+                                and ocr.catalog_cd = o.catalog_cd
+                     join c   where c.container_id = ocr.container_id
+                     head report
+                        nbr_mins = 0
+                     detail
+                        curr_person_id = o.person_id
+                        drawn->curr_dt_tm = c.drawn_dt_tm
+                        nbr_mins = request->interp[i_cnt].component[c_cnt]
+                          .time_window_minutes
+                        drawn->dt_tm_from =
+                          datetimeadd(c.drawn_dt_tm,(-1 * (nbr_mins/1440.0)))
+                        nbr_mins = request->interp[i_cnt].component[c_cnt]
+                          .time_window_minutes
+                        drawn->dt_tm_to =
+                          datetimeadd(c.drawn_dt_tm,(nbr_mins/1440.0))
+                     with nocounter,
+                        maxread(ocr, 1)
+ 
+                     select into "nl:"
+                        ptr.seq,
+                        o.seq,
+                        ocr.seq,
+                        c.seq,
+                        r.seq,
+                        pr.seq
+                        /* Selection fields:
+                        ptr.task_assay_cd,
+                        ptr.catalog_cd,
+                        o.order_id,
+                        o.person_id,
+                        o.catalog_cd,
+                        ocr.order_id,
+                        ocr.container_id,
+                        c.container_id,
+                        c.drawn_dt_tm,
+                        r.result_id,
+                        r.order_id,
+                        r.task_assay_cd,
+                        r.result_status_cd,
+                        pr.perform_result_id,
+                        pr.result_id,
+                        pr.result_type_cd,
+                        pr.result_value_numeric,
+                        pr.nomenclature_id
+                        */
+                     from
+                        profile_task_r ptr,
+                        orders o,
+                        order_container_r ocr,
+                        container c,
+                        result r,
+                        perform_result pr
+                     plan ptr where ptr.task_assay_cd = request->interp[i_cnt]
+                                  .component[c_cnt].included_assay_cd
+                                and ptr.active_ind = 1
+                     join o   where o.person_id = curr_person_id
+                                and o.catalog_cd = ptr.catalog_cd
+                                and o.order_id != request->interp[i_cnt]
+                                  .component[c_cnt].order_id
+                     join ocr where ocr.order_id = o.order_id
+                     join c   where c.container_id = ocr.container_id
+                                and c.drawn_dt_tm
+                                    between cnvtdatetime(drawn->dt_tm_from)
+                                        and cnvtdatetime(drawn->dt_tm_to)
+                     join r   where r.order_id = o.order_id
+                                and r.task_assay_cd = request->interp[i_cnt]
+                                  .component[c_cnt].included_assay_cd
+                                and r.result_status_cd
+                                  in (result_status_performed_cd,
+                                      result_status_inreview_cd,
+                                      result_status_corrinrev_cd,
+                                      result_status_verified_cd,
+                                      result_status_autoverified_cd,   ;001
+                                      result_status_corrected_cd)
+                     join pr where pr.result_id = r.result_id
+                               and pr.result_status_cd = r.result_status_cd
+                     head report
+                        dt_tm_diff = 0.0
+                        closest_dt_tm_diff = 0.0
+                        closest_drawn_result_type_cd = 0.0             ;007
+                        closest_drawn_result_numeric = 0.0
+                        closest_drawn_result_nomenclature_id = 0.0
+                        closest_drawn_result_code_set_cd = 0.0         ;003
+                        closest_dt_tm_diff = 9999999.0
+                     detail
+                        ;* Make sure result is in the proper status before using
+                        if ((request->interp[i_cnt].component[c_cnt]
+                            .verified_flag = 0
+                          and r.result_status_cd
+                            in (result_status_performed_cd,
+                                result_status_inreview_cd,
+                                result_status_corrinrev_cd,
+                                result_status_verified_cd,
+                                result_status_autoverified_cd,         ;001
+                                result_status_corrected_cd))
+                        or (request->interp[i_cnt].component[c_cnt]
+                            .verified_flag = 1
+                          and r.result_status_cd
+                            in (result_status_verified_cd,
+                                result_status_corrinrev_cd,
+                                result_status_autoverified_cd,         ;001
+                                result_status_corrected_cd)))
+                           usable_result_ind = 1
+                        else
+                           usable_result_ind = 0
+                        endif
+                        ;* If result is usable, find the result with the
+                        ;* closest drawn date/time for use.
+                        if (usable_result_ind = 1)
+                           dt_tm_diff =
+                             datetimediff(c.drawn_dt_tm, drawn->curr_dt_tm)
+                           if (abs(dt_tm_diff) < closest_dt_tm_diff)
+                              closest_dt_tm_diff = abs(dt_tm_diff)
+                              if (pr.result_type_cd in (result_type_numeric_cd,
+                                                        result_type_calc_cd))
+                                 closest_drawn_result_type_cd =        ;007
+                                   pr.result_type_cd                   ;007
+                                 closest_drawn_result_numeric =
+                                   pr.result_value_numeric
+                              endif
+                              if (pr.result_type_cd = result_type_alpha_cd)
+                                 closest_drawn_result_type_cd =        ;007
+                                   pr.result_type_cd                   ;007
+                                 closest_drawn_nomenclature_id =
+                                   pr.nomenclature_id
+                              endif
+                              if (pr.result_type_cd = result_type_code_set_cd) ;003
+                                 closest_drawn_result_type_cd =        ;007
+                                   pr.result_type_cd                   ;007
+                                 closest_drawn_result_code_set_cd =    ;003
+                                   pr.result_code_set_cd               ;003
+                              endif                                    ;003
+                           endif
+                        endif
+                     foot report
+                        if (closest_dt_tm_diff < 9999999.0)
+                           request->interp[i_cnt].component[c_cnt]
+                             .result_ind = 1
+                           request->interp[i_cnt].component[c_cnt]     ;007
+                             .result_type_cd =                         ;007
+                             closest_drawn_result_type_cd              ;007
+                           request->interp[i_cnt].component[c_cnt]
+                             .result_numeric = closest_drawn_result_numeric
+                           request->interp[i_cnt].component[c_cnt]
+                             .nomenclature_id = closest_drawn_nomenclature_id
+                           request->interp[i_cnt].component[c_cnt]     ;003
+                             .result_code_set_cd =                     ;003
+;007                             closest_result_code_set_cd                ;003
+                             closest_drawn_result_code_set_cd          ;007
+                        endif
+                     with nocounter
+                  endif
+               endif
+               ;* Verify that result was found if it is required.
+               if (request->interp[i_cnt].component[c_cnt].result_req_flag = 1
+               and request->interp[i_cnt].component[c_cnt].result_ind = 0)
+                  set reply->status_data.status = "F"
+                  go to Exit_Script
+               endif
+               ;* If a result was not found and it is not required, set
+               ;* the no result hash value.
+               if (request->interp[i_cnt].component[c_cnt].result_req_flag = 0
+               and request->interp[i_cnt].component[c_cnt].result_ind = 0)
+                  set reply->interp[i_cnt].component[c_cnt].result_hash = "$"
+               endif
+            endfor
+         endfor
+ 
+      /***********************************************************************
+      * Find result hash for each interp component.                          *
+      ***********************************************************************/
+         select into "nl:"
+            d1.seq,
+            d2.seq,
+            d3.seq,
+            ir_exists = decode(ir.seq, "Y", "N"),
+            ir.sequence,
+            rh.sequence
+            /* Selection fields:
+            d1.seq,
+            d2.seq,
+            d3.seq,
+            ir_exists = decode(ir.seq, "Y", "N"),
+            ir.interp_id,
+            ir.interp_detail_id,
+            ir.interp_range_id,
+            ir.sequence,
+            ir.included_assay_cd,
+            ir.age_from_units_cd,
+            ir.age_from_minutes,
+            ir.age_to_units_cd,
+            ir.age_to_minutes,
+            ir.species_cd,
+            ir.gender_cd,
+            ir.race_cd,
+            rh.result_hash_id,
+            rh.sequence,
+            rh.from_result_range,
+            rh.to_result_range,
+            rh.result_hash,
+            rh.result_cd,                                              ;003
+            rh.nomenclature_id
+            */
+ 
+         from
+            (dummyt d1 with seq = value(nbr_interps)),
+            (dummyt d2 with seq = value(max_nbr_components)),
+            dummyt d3,
+            interp_range ir,
+            result_hash rh
+ 
+         plan d1
+         join d2  where d2.seq <= request->interp[d1.seq].component_cnt
+         join d3  where d3.seq = 1
+         join ir  where ir.interp_id =
+                          request->interp[d1.seq].interp_id
+                    and ir.interp_detail_id =
+                          request->interp[d1.seq].component[d2.seq].interp_detail_id
+                    and ir.active_ind = 1
+         join rh  where rh.interp_id = ir.interp_id
+                    and rh.interp_detail_id = ir.interp_detail_id
+                    and rh.interp_range_id = ir.interp_range_id
+                    and rh.active_ind = 1
+ 
+         order by
+            d1.seq,
+            d2.seq,
+            ir.sequence,
+            rh.sequence
+ 
+         head report
+            hash_found_ind = 0
+            i_cnt = 0
+            c_cnt = 0
+ 
+         head d1.seq
+            i_cnt = d1.seq
+            reply->interp[i_cnt].hash_pattern = ""
+ 
+         head d2.seq
+            c_cnt = d2.seq
+            hash_found_ind = 0
+ 
+         detail
+            ;* Check to see if a hash has been determined yet for the assay.
+            if (hash_found_ind = 0)
+               ;* If no result was found and the result is not required,
+               ;* use the default no result hash.
+               if (reply->interp[i_cnt].component[c_cnt].result_hash = "$")
+                  hash_found_ind = 1
+                  if (reply->interp[i_cnt].hash_pattern = "")
+                     reply->interp[i_cnt].hash_pattern =
+                       reply->interp[i_cnt].component[c_cnt].result_hash
+                  else
+                     reply->interp[i_cnt].hash_pattern =
+                       concat(reply->interp[i_cnt].hash_pattern, ",",
+                         reply->interp[i_cnt].component[c_cnt].result_hash)
+                  endif
+               endif
+               ;* Find qualifying interpretation range
+               if (hash_found_ind = 0
+               and ir_exists = "Y"
+               and (ir.species_cd = request->interp[i_cnt].species_cd
+                 or ir.species_cd = 0.0)
+               and (ir.race_cd = request->interp[i_cnt].race_cd
+                 or ir.race_cd = 0.0)
+               and (ir.gender_cd = request->interp[i_cnt].gender_cd
+                 or ir.gender_cd = 0.0)
+;005               and ir.age_from_minutes <= request->interp[i_cnt].age_in_minutes
+;005               and ir.age_to_minutes >= request->interp[i_cnt].age_in_minutes)
+               and ((ir.unknown_age_ind = 1 and                     ;005
+                     request->interp[i_cnt].unknown_age_ind = 1)    ;005
+                or  (ir.age_from_minutes <=                         ;005
+                        request->interp[i_cnt].age_in_minutes and   ;005
+                     ir.age_to_minutes >=                           ;005
+                        request->interp[i_cnt].age_in_minutes)))    ;005
+                  ;* Find hash if result is numeric
+                  if (request->interp[i_cnt].component[c_cnt].result_ind = 1
+                  and request->interp[i_cnt].component[c_cnt].result_type_cd
+                        in (result_type_numeric_cd, result_type_calc_cd)
+                  ;Fix to address decimal precision of F8 variable compared to an F8 column value of a table
+                  and round(request->interp[i_cnt].component[c_cnt].result_numeric,10)
+                        between round(rh.from_result_range,10) and round(rh.to_result_range,10))
+                     reply->interp[i_cnt].component[c_cnt].interp_range_id =
+                       ir.interp_range_id
+                     reply->interp[i_cnt].component[c_cnt].result_hash_id =
+                       rh.result_hash_id
+                     reply->interp[i_cnt].component[c_cnt].from_result_range =
+                       rh.from_result_range
+                     reply->interp[i_cnt].component[c_cnt].to_result_range =
+                       rh.to_result_range
+                     reply->interp[i_cnt].component[c_cnt].result_hash =
+                       rh.result_hash
+                     hash_found_ind = 1
+                  endif
+                  ;* Find hash if result is alpha
+                  if (request->interp[i_cnt].component[c_cnt].result_ind = 1
+                  and request->interp[i_cnt].component[c_cnt].result_type_cd
+                        in (result_type_alpha_cd)
+                  and request->interp[i_cnt].component[c_cnt].nomenclature_id =
+                        rh.nomenclature_id)
+                     reply->interp[i_cnt].component[c_cnt].interp_range_id =
+                       ir.interp_range_id
+                     reply->interp[i_cnt].component[c_cnt].result_hash_id =
+                       rh.result_hash_id
+                     reply->interp[i_cnt].component[c_cnt].nomenclature_id =
+                       rh.nomenclature_id
+                     reply->interp[i_cnt].component[c_cnt].result_hash =
+                       rh.result_hash
+                     hash_found_ind = 1
+                  endif
+                  ;* Find hash if result is online code set            ;003
+                  if (request->interp[i_cnt].component[c_cnt]          ;003
+                      .result_ind = 1                                  ;003
+                  and request->interp[i_cnt].component[c_cnt]          ;003
+                      .result_type_cd = result_type_code_set_cd        ;003
+                  and request->interp[i_cnt].component[c_cnt]          ;003
+                      .result_code_set_cd = rh.result_cd)              ;003
+                     reply->interp[i_cnt].component[c_cnt]             ;003
+                       .interp_range_id = ir.interp_range_id           ;003
+                     reply->interp[i_cnt].component[c_cnt]             ;003
+                       .result_hash_id = rh.result_hash_id             ;003
+                     reply->interp[i_cnt].component[c_cnt]             ;003
+                       .result_code_set_cd = rh.result_cd              ;003
+                     reply->interp[i_cnt].component[c_cnt]             ;003
+                       .result_hash = rh.result_hash                   ;003
+                     hash_found_ind = 1                                ;003
+                  endif                                                ;003
+                  ;* If a valid hash was found, build hash pattern
+                  if (hash_found_ind = 1)
+                     if (reply->interp[i_cnt].hash_pattern = "")
+                        reply->interp[i_cnt].hash_pattern = trim(rh.result_hash)
+                     else
+                        reply->interp[i_cnt].hash_pattern =
+                          concat(reply->interp[i_cnt].hash_pattern, ",",
+                                 trim(rh.result_hash))
+                     endif
+                  endif
+               endif
+            endif
+ 
+         foot d2.seq
+            row+0
+ 
+         foot d1.seq
+            row+0
+ 
+         with
+            nocounter,
+            outerjoin = d3
+ 
+      /***********************************************************************
+      * Find interp result based on hash pattern.                            *
+      ***********************************************************************/
+         select into "nl:"
+            d1.seq,
+            d2.seq,
+            r_exists = decode(r.seq, "Y", "N"),
+            r.seq,
+            lt.seq
+ 
+            /* Selection fields:
+            d1.seq,
+            d2.seq,
+            r_exists = decode(r.seq, "Y", "N"),
+            r.interp_result_id,
+            r.interp_id,
+            r.hash_pattern,
+            r.result_nomenclature_id,
+            r.result_cd,
+            r.long_text_id,
+            r.donor_eligibility_cd,                                    ;003
+            r.days_ineligible,                                         ;003
+            lt.long_text_id,
+            lt.long_text
+            */
+ 
+         from
+            (dummyt d1 with seq = value(nbr_interps)),
+            dummyt d2,
+            interp_result r,
+;006            long_text lt
+            long_text_reference lt                                     ;006
+ 
+         plan d1
+         join d2 where d2.seq = 1
+         join r  where r.interp_id = reply->interp[d1.seq].interp_id
+                   and r.active_ind = 1
+         join lt where lt.long_text_id = r.long_text_id
+ 
+         head report
+            interp_result_failure = 0
+            pattern_match_ind = 0                                      ;004
+ 
+            macro(check_for_pattern_match)                             ;004
+               hash->pattern1 = ""                                     ;004
+               hash->pattern2 = ""                                     ;004
+               max_pattern1_len = 0                                    ;004
+               max_pattern2_len = 0                                    ;004
+               ptr1 = 0                                                ;004
+               ptr2 = 0                                                ;004
+               start_pos1 = 0                                          ;004
+               start_pos2 = 0                                          ;004
+               hash1_len = 0                                           ;004
+               hash2_len = 0                                           ;004
+               hash1 = fillstring(25, " ")                             ;004
+               hash2 = fillstring(25, " ")                             ;004
+               hash->pattern1 =                                        ;004
+                 concat(trim(reply->interp[i_cnt].hash_pattern), ",")  ;004
+               max_pattern1_len = (size(trim(hash->pattern1),3))       ;004
+               hash->pattern2 =                                        ;004
+                 concat(trim(r.hash_pattern), ",")                     ;004
+               max_pattern2_len = (size(trim(hash->pattern2),3))       ;004
+               pattern_match_ind = 1                                   ;004
+               while (ptr1 < max_pattern1_len                          ;004
+                 and  ptr2 < max_pattern2_len)                         ;004
+                  hash1 = fillstring(25, " ")                          ;004
+                  hash2 = fillstring(25, " ")                          ;004
+                  if (ptr1 < max_pattern1_len)                         ;004
+                     start_pos1 = ptr1 + 1                             ;004
+                     ptr1 = findstring(",", hash->pattern1, start_pos1) ;004
+                     hash1_len = ptr1 - start_pos1                     ;004
+                     if (hash1_len > 0)                                ;004
+                        hash1 = substring(start_pos1, hash1_len,       ;004
+                          hash->pattern1)                              ;004
+                     endif                                             ;004
+                  endif                                                ;004
+                  if (ptr2 < max_pattern2_len)                         ;004
+                     start_pos2 = ptr2 + 1                             ;004
+                     ptr2 = findstring(",", hash->pattern2, start_pos2) ;004
+                     hash2_len = ptr2 - start_pos2                     ;004
+                     if (hash2_len > 0)                                ;004
+                        hash2 = substring(start_pos2, hash2_len,       ;004
+                          hash->pattern2)                              ;004
+                     endif                                             ;004
+                  endif                                                ;004
+                  if ((trim(hash2) = "@" and trim(hash1) != "")        ;004
+                  or  trim(hash2) = trim(hash1))                       ;004
+                     ;* Hash pattern matches, continue matching        ;004
+                     pattern_match_ind = 1                             ;004
+                  else                                                 ;004
+                     ;* Hash does not match, terminate matching        ;004
+                     pattern_match_ind = 0                             ;004
+                     ptr1 = max_pattern1_len                           ;004
+                     ptr2 = max_pattern2_len                           ;004
+                  endif                                                ;004
+               endwhile                                                ;004
+            endmacro                                                   ;004
+ 
+         head d1.seq
+            i_cnt = d1.seq
+            reply->interp[i_cnt].interp_result_id = 0.0
+            pattern_match_ind = 0                                      ;004
+ 
+         detail
+            i_cnt = d1.seq
+            ;* Search for a pattern match
+;004            if (r_exists = "Y")
+            if (r_exists = "Y"                                         ;004
+            and pattern_match_ind = 0)                                 ;004
+               pattern_match_ind = 0                                   ;004
+               ;* Check for any result character (@) and parse hash
+               ;* pattern if found.
+               if (findstring("@", r.hash_pattern) = 0)                ;004
+                  ;* Any result character not found, compare patterns
+                  if (trim(r.hash_pattern) =
+                              trim(reply->interp[i_cnt].hash_pattern))
+                     pattern_match_ind = 1                             ;004
+                  endif
+               else                                                    ;004
+                  ;* Any result character found, parse hash pattern
+                  check_for_pattern_match                              ;004
+               endif
+               ;* Determine if match was found
+               if (pattern_match_ind = 1)                              ;004
+                  reply->interp[i_cnt].interp_result_id =
+                    r.interp_result_id
+                  reply->interp[i_cnt].hash_pattern =
+                    r.hash_pattern
+                  reply->interp[i_cnt].result_nomenclature_id =
+                    r.result_nomenclature_id
+                  reply->interp[i_cnt].result_cd =
+                    r.result_cd
+                  if (r.long_text_id > 0.0)
+                     reply->interp[i_cnt].long_text_id =
+                       r.long_text_id
+                     reply->interp[i_cnt].result_text =
+                       lt.long_text
+                  endif
+                  reply->interp[i_cnt].donor_eligibility_cd =          ;003
+                    r.donor_eligibility_cd                             ;003
+                  reply->interp[i_cnt].days_ineligible =               ;003
+                    r.days_ineligible                                  ;003
+               endif                                                   ;004
+            endif
+ 
+         foot d1.seq
+            ;* Determine if interp result was found
+            if (reply->interp[i_cnt].interp_result_id = 0.0)
+               interp_result_failure = 1
+            endif
+ 
+         with
+            nocounter,
+            outerjoin = d2
+
+         /* see if we have any results to replace */
+         if (CheckInsertResults(NULL) = 0)
+           set interp_result_failure = 1
+         endif
+
+      /***********************************************************************
+      * Script succeeds if all interp results were found.                    *
+      ***********************************************************************/
+         if (interp_result_failure = 1)
+            set reply->status_data.status = "F"
+         else
+            set reply->status_data.status = "S"
+         endif
+
+      /***********************************************************************
+      * Determine the formatted value for any results given or loaded.       *
+      ***********************************************************************/
+         subroutine CheckInsertResults(NULL)
+
+           declare sDTA_COMP_TAG = vc with constant("[:DTA;C;"), protect
+           declare sSPEC_TAG = vc with constant("[:ORD;C;Spec Type:]"), protect
+           declare sSAMPLE = vc with constant("SAMPLE"), protect
+           declare sNUMERIC_FORMAT_TAG = c1 with constant("N"), protect
+           declare fSpecTypeCD = F8 with noconstant(0.0), protect
+           declare sSpecName = vc with noconstant(""), protect           
+           declare sWORKUP_COMMENT_TAG = vc with constant("[:ORD;C;Workup Comment:]"), protect
+           declare sCommentResult = vc with noconstant(""),protect
+           declare l = i4 with noconstant(0),protect
+	   declare fCommentTypeCD = f8 with constant(uar_get_code_by("MEANING",14,"ORD COMMENT")), protect
+           declare lDtaCompTagLen = i4 with noconstant(size(sDTA_COMP_TAG)), protect
+           declare i = i4 with noconstant(0), protect
+           declare j = i4 with noconstant(0), protect
+           declare k = i4 with noconstant(0), protect
+           declare sDTAName = vc with noconstant(""), protect
+           declare sCurrentDTA = vc with noconstant(""), protect
+           declare lFormatSpecifierPos = i4 with noconstant(0), protect
+           declare sFormatSpecifier = vc with noconstant(""), protect
+           declare dResult = f8 with noconstant(0.0), protect
+           declare sRTFText = vc with noconstant(""), protect
+           declare bDTAFound = i2 with noconstant(FALSE), protect
+           declare bDTAResultExists = i2 with noconstant(FALSE), protect
+           declare bNormalProcessingInd = i2 with noconstant(FALSE), protect
+           declare lCurrentNotFoundSize = i4 with noconstant(0), protect
+           declare sNoResult = vc with noconstant(""), protect
+           declare sUnknownResult = vc with noconstant(""), protect
+           declare sToSplice = vc with noconstant(""), protect
+           declare sGREATER_THAN = vc with constant(uar_i18ngetmessage(i18nHandle, "GREATER_THAN", ">")), protect
+           declare sLESS_THAN = vc with constant(uar_i18ngetmessage(i18nHandle, "LESS_THAN", "<")), protect
+           declare sFormattedResultValue = vc with noconstant(""), protect
+           declare bGreaterThanInd = i2 with noconstant(FALSE), protect
+           declare bLessThanInd = i2 with noconstant(FALSE), protect
+	   declare isUCMStepInd = i2 with noconstant(FALSE), protect
+           set sNoResult = uar_i18ngetmessage(i18nHandle, "NORESULT", "no result")
+           set sUnknownResult = uar_i18ngetmessage(i18nHandle, "UNKNOWNRESULT", "unknown result")
+           
+           /* only do the check if we need to */
+           if (request->check_insert_result_ind != 1)
+           /* To check if order is a valid ucm_case_step*/
+          
+             if(request->interp[1].order_id >0.0)
+                select into "nl:"
+		        ucs.ucm_case_step_id
+                from 
+                  ucm_case_step ucs
+	        where 
+	          ucs.order_id = request->interp[1].order_id
+	        detail
+	          isUCMStepInd = TRUE
+	        with nocounter
+              endif
+           
+              if(isUCMStepInd = FALSE)
+                return (1)
+              endif
+           endif 
+
+           /* loop through and insert results as needed. */         
+           set i_cnt = 1
+           while (i_cnt <= nbr_interps)
+
+              /* only do this evaluation if we found a textual interp */
+              if (reply->interp[i_cnt].long_text_id > 0)
+
+                set sRTFText = reply->interp[i_cnt].result_text
+                set i = findstring(sDTA_COMP_TAG, sRTFText)
+                set k = findstring (sSPEC_TAG, sRTFText)                
+                set sSpecName = ""
+             
+                if(k > 0)  ; Find the container name of the current order         	 
+                  select into "nl:"
+                    from order_container_r ocr, container c
+                  plan ocr
+                     /*  "We are making the assumption here that all interpretations are firing from
+                     *    dta results for the SAME order since Helix does not currently support cross order interpretations" */
+                    where ocr.order_id = request->interp[i_cnt].component[1].order_id
+                  join c 
+                    where c.container_id = ocr.container_id
+                      and c.container_id+0 > 0.0
+                    detail
+                    /*  If we don't have ANY specimen type yet then take what we can find. However, if we have MULTIPLE
+                     * specimen types for the same order, ensure we get the NON-SAMPLE */
+                      if(fSpecTypeCd = 0.0 OR uar_get_code_meaning(fSpecTypeCd) != sSAMPLE)
+                        fSpecTypeCD = c.specimen_type_cd
+                      endif 					           
+                  with nocounter               
+					          
+                  set sSpecName = uar_get_code_display(fSpecTypeCD)  
+          				          				
+                endif
+
+                set l = findstring(sWORKUP_COMMENT_TAG,sRTFText)
+                set sCommentResult = ""
+ 
+                if(l>0)
+			select 
+				into "n1:"
+				textRTF = replace(lt.long_text, char(10), "\par ")					
+			from
+				ucm_case_step ucs,
+				order_comment oc,
+				long_text lt
+			plan ucs
+			where 
+				ucs.order_id = request->interp[i_cnt].component[1].order_id
+			join oc
+			where 
+				oc.order_id =ucs.specimen_order_id
+				and oc.comment_type_cd = fCommentTypeCD
+			join lt
+			where 
+				lt.long_text_id = oc.long_text_id
+			order by 
+				oc.action_sequence
+			detail
+				sCommentResult = textRTF
+			with nocounter	
+		endif
+                /* now, loop while we find the beginning string */
+                while (i > 0)
+                  set j = findstring(":]", sRTFText, i+1)
+  
+                  /* ensure we found the matching end brace */
+                  if (j > i)
+                    /* check to see if there is a format specifier */
+                    set sCurrentDTA = substring(i+lDtaCompTagLen, j-i-lDtaCompTagLen, sRTFText);
+                    set lFormatSpecifierPos = findstring("N;", sCurrentDTA, 1)
+                    if (lFormatSpecifierPos > 0 and i=lDtaCompTagLen)
+                      /* get the format specifier */
+                      set sFormatSpecifier = substring(1, lFormatSpecifierPos - 1, sCurrentDTA)
+                      
+                      /* get the DTA name from the tag */
+                      set sDTAName = substring(lFormatSpecifierPos + 1, j - lFormatSpecifierPos - 1, sCurrentDTA)
+                    else
+                      /* clear the format specifier */
+                      set sFormatSpecifier = ""
+                      
+                      /* get the DTA name from the tag */
+                      set sDTAName = substring(i + lDtaCompTagLen, j - i - lDtaCompTagLen, sRTFText)
+                    endif
+
+                    /* now search through the components to see if we find a matching dta
+                       Here, we will continue to search throught the components list even once we
+                       find the included assay just in case they can be duplicated in the
+                       component list. */
+                    set bDTAFound = FALSE
+                    set bDTAResultExists = FALSE
+                    set sToSplice = ""
+                    set nbr_components = reply->interp[i_cnt].component_cnt
+                    set c_cnt = 1
+                    while ((c_cnt <= nbr_components) and (bDTAResultExists = FALSE))
+                      /* Use the to get the display.  The display is the same as the mnemonic.*/
+                      if (cnvtupper(sDTAName) =
+                          cnvtupper(uar_get_code_display(reply->interp[i_cnt].component[c_cnt].included_assay_cd)))
+
+                        ; if there is a format specifier and
+                        ; the result type is numeric or calculated
+                        set bNormalProcessingInd = FALSE
+                        if ((size(trim(sFormatSpecifier,3), 1) > 0) and
+                            (reply->interp[i_cnt].component[c_cnt].result_type_cd = result_type_numeric_cd or
+                             reply->interp[i_cnt].component[c_cnt].result_type_cd = result_type_calc_cd))
+                             
+                          /* Are we being asked to format as numeric (i.e. 1,230,000 instead of 1.23E+6) */
+                          if (sNUMERIC_FORMAT_TAG = cnvtupper(substring(1, 1, sFormatSpecifier)))
+                            set sFormattedResultValue = trim(reply->interp[i_cnt].component[c_cnt].formatted_result_value)
+                            set bGreaterThanInd = FALSE
+                            set bLessThanInd = FALSE
+                            
+                            ; Temporarily strip Greater Than and Less Than symbols so we can do cnvtreal.
+                            if (findstring(sGREATER_THAN, sFormattedResultValue) > 0)
+                              set bGreaterThanInd = TRUE ;replace first occurrence
+                              set sFormattedResultValue = replace(sFormattedResultValue, sGREATER_THAN, "", 1)
+                            elseif (findstring(sLESS_THAN, sFormattedResultValue) > 0)
+                              set bLessThanInd = TRUE ;replace first occurrence
+                              set sFormattedResultValue = replace(sFormattedResultValue, sLESS_THAN, "", 1)
+                            endif
+                          
+                            set dResult = cnvtreal(sFormattedResultValue)
+                            
+                            if (dResult != 0.0)
+                              ; We need to build a format string to properly display the comma placement
+                              ; The format string needs to know the number of characters to properly format the number
+                              ; The number of characters in front of the decimal are not relavant
+                              ; as long as it is large enough to contain all the digits and the commas.
+                              ; However, we do need to calculate the number of character we will need after the decimal point.
+                              declare sFormat = vc with noconstant("")
+                              declare lPos    = i4 with noconstant(0)
+                                
+                              set sFormat = trim(build(dResult), 3)
+                              set lPos = findstring(".", sFormat)
+                              if (lPos > 0)
+                                ; get the characters after the decimal point
+                                set sFormat = substring(lPos + 1, textlen(sFormat) - lPos, sFormat)
+                                  
+                                ; trim out any 0 to the right of the decimal that are not significant
+                                ; meaning "123.0456000" should be trimed to "123.0456"
+                                set lPos = textlen(sFormat)
+                                  
+                                ; while we haven't work our way back to the start of the string
+                                ; and the character we are looking at is 0
+                                while (lPos > 0 and substring(lpos, 1, sFormat) = "0")
+                                  set sFormat = substring(1, lPos - 1, sFormat);  chop off the last character
+                                  set lPos = textlen(sFormat)
+                                endwhile
+                                  
+                                if (textlen(sFormat) > 0)
+                                  ; Minor hack here.  Tried to use fillstring(textlen(sFormat, "#")) to generate
+                                  ; the number of # we need after the decimal and it blows up (doesn't work)
+                                  ; The hack is to swap out all of our numbers for #.
+                                  set sFormat = replace(sFormat, "0", "#")
+                                  set sFormat = replace(sFormat, "1", "#")
+                                  set sFormat = replace(sFormat, "2", "#")
+                                  set sFormat = replace(sFormat, "3", "#")
+                                  set sFormat = replace(sFormat, "4", "#")
+                                  set sFormat = replace(sFormat, "5", "#")
+                                  set sFormat = replace(sFormat, "6", "#")
+                                  set sFormat = replace(sFormat, "7", "#")
+                                  set sFormat = replace(sFormat, "8", "#")
+                                  set sFormat = replace(sFormat, "9", "#")
+                                    
+                                  set sFormat = build("####################.", sFormat, ";,I;F")
+                                else
+                                  set sFormat = "####################;,I;F"
+                                endif
+                              else
+                                set sFormat = "####################;,I;F"
+                              endif
+                                
+                              set sToSplice = trim(format(dResult, sFormat), 3)
+                              ; Add the Greater Than or Less Than symbol back if needed.
+                              if (bGreaterThanInd)
+                                set sToSplice = uar_i18nbuildmessage(i18nHandle, "RESULT_GREATER_THAN", "%1%2", "ss",
+                                 nullterm(sGREATER_THAN), nullterm(sToSplice))
+                              elseif (bLessThanInd)
+                                set sToSplice = uar_i18nbuildmessage(i18nHandle, "RESULT_LESS_THAN", "%1%2", "ss",
+                                 nullterm(sLESS_THAN), nullterm(sToSplice))
+                              endif
+                            else
+                              ; If cnvtreal fails or returns 0, continue with normal processing
+                              set bNormalProcessingInd = TRUE
+                            endif
+                          endif
+                        ; otherwise, continue with normal processing
+                        else
+                          set bNormalProcessingInd = TRUE
+                        endif
+                        
+                        if (bNormalProcessingInd = TRUE)
+                          /* only look for results where we were given the formatted value ... */
+                          if (size(trim(reply->interp[i_cnt].component[c_cnt].formatted_result_value)) > 0)
+  
+                            /* we found a matching DTA name, so splice in the result */
+                            set sToSplice = reply->interp[i_cnt].component[c_cnt].formatted_result_value
+                          endif
+                        endif
+                        
+                        if (size(trim(sToSplice,3), 1) > 0)
+                          set bDTAResultExists = TRUE
+                        endif
+                        
+                        set bDTAFound = TRUE
+                      endif
+                      set c_cnt = c_cnt + 1
+                    endwhile
+                    if (bDTAResultExists = FALSE)
+                      if (bDTAFound = FALSE)
+                        /* splice in error msg */
+                        set sToSplice = concat(sUnknownResult, " (", sDTAName, ")")
+                        set lCurrentNotFoundSize = size(reply->interp[i_cnt]->tags_not_found,5) + 1
+                        set stat= alterlist(reply->interp[i_cnt]->tags_not_found, lCurrentNotFoundSize)
+                        set reply->interp[i_cnt]->tags_not_found[lCurrentNotFoundSize]->dta_name_in_tag = sDTAName
+                      else
+                        set sToSplice = concat(sNoResult, " (", sDTAName, ")")
+                      endif
+                    endif
+                    set sRTFText = concat(substring(1, i - 1, sRTFText),
+                                          sToSplice,
+                                          substring(j+2, size(sRTFText)-j, sRTFText))
+                  endif
+                  set i = findstring(sDTA_COMP_TAG, sRTFText, i + 1)
+                endwhile    ;W2
+
+                if(size(trim(sSpecName)) > 0 ) 
+                  set sRTFText = replace(sRTFText,sSPEC_TAG,sSpecName,0) 
+                endif
+
+                set sRTFText = replace(sRTFText,sWORKUP_COMMENT_TAG,sCommentResult,0)
+		
+                set reply->interp[i_cnt].result_text = sRTFText                 
+                           
+              endif
+              set i_cnt = i_cnt + 1
+           endwhile
+
+           return (1) ;* no errors
+         end ;subroutine CheckInsertResults
+
+      /***********************************************************************
+      * Exit script                                                          *
+      ***********************************************************************/
+      #Exit_Script
+ 
+         end
+         go
+
+;Generated by GNU enscript 1.6.4.

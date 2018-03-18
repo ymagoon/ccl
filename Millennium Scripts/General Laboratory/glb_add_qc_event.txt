@@ -1,0 +1,368 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_add_qc_event/glb_add_qc_event.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_ADD_QC_EVENT.PRG
+        Object name:            GLB_ADD_QC_EVENT
+        Request #:              257531
+
+        Product:                General Lab - Quality Control           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Add QC events and comments
+                                into the database
+
+        Tables read:            person
+
+        Tables updated:         qc_comment
+                                qc_result_event
+
+        Executing from:         General Lab QC Inquiry
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *### 09/06/96 Kevin Brunner        Initial Release                     *
+;    *001 10/10/97 Kevin Brunner        Change event sequence processing    *
+;    *002 08/07/03 Craig Sumrall    Updated Select Table (person-prsnl) *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_ADD_QC_EVENT:dba go    
+      create program GLB_ADD_QC_EVENT:dba
+     
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request                                      
+      (                                       
+         1 event_dt_tm                  = dq8
+         1 event_personnel_id           = f8
+         1 event_reason                 = vc
+         1 event_type_cd                = f8
+         1 qc_results[x]
+           2 qc_result_id               = f8
+           2 comments[x]
+             3 comment_type_cd            = f8
+             3 perform_prsnl_id           = f8
+             3 comment_dt_tm              = dq8
+             3 comment_text               = vc
+      ) 
+*/
+;record reqinfo
+;( 1 commit_ind  = i2
+;  1 updt_id     = f8
+;  1 position_cd = f8
+;  1 updt_app    = i4
+;  1 updt_task   = i4
+;  1 updt_req    = i4
+;  1 updt_applctx= i4
+;)
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      ( 
+         1 personnel_name          = vc
+   1 review_dt_tm      = dq8
+         1 status_data
+           2 status                = c1
+           2 subeventstatus[1]
+             3 OperationName       = c15
+             3 OperationStatus     = c1
+             3 TargetObjectName    = c15
+             3 TargetObjectValue   = vc
+      )
+
+      /***********************************************************************
+      * Insert result event subroutine                                       *
+      ***********************************************************************/
+        declare insert_result_event( arg_qc_result_id, arg_event_seq, arg_curr_status_cd ) = i4
+        subroutine insert_result_event( arg_qc_result_id, arg_event_seq, arg_curr_status_cd )
+          insert into 
+            qc_result_event qre
+          set
+           qre.qc_result_id          = arg_qc_result_id,
+           qre.event_sequence        = arg_event_seq,
+;           qre.event_personnel_id    = request->event_personnel_id,
+           qre.event_personnel_id  = reqinfo->updt_id,
+           qre.event_reason          = request->event_reason,
+           qre.event_dt_tm           = cnvtdatetime(request->event_dt_tm),
+           qre.event_type_cd         = arg_curr_status_cd,
+           qre.updt_dt_tm            = cnvtdatetime(curdate,curtime3),
+           qre.updt_cnt              = 0,
+           qre.updt_task             = reqinfo->updt_task,
+           qre.updt_id               = reqinfo->updt_id,
+           qre.updt_applctx          = reqinfo->updt_applctx
+
+          plan qre
+  
+          with 
+           nocounter
+
+    ;set temp_cur_dt_tm = cnvtdatetime(curdate,curtime3)
+          return(curqual)
+        end
+
+      /***********************************************************************
+      * Find last event sequence                                             *
+      ***********************************************************************/
+        declare check_event_sequence = i4
+        declare find_sequence ( arg_qc_result_id ) = i4
+        subroutine find_sequence( arg_qc_result_id )
+          set check_event_sequence = 0
+          select into "nl:"
+            qre1.qc_result_id,
+            qre1.event_sequence
+          from qc_result_event qre1
+          plan qre1
+            where qre1.qc_result_id = arg_qc_result_id
+          order
+            qre1.event_sequence ;001... desc
+          
+          detail
+            check_event_sequence = qre1.event_sequence + 1
+
+          with 
+            nocounter ;001... ,
+;001...             maxqual(qre1,1)
+          return (check_event_sequence)
+        end
+
+      /***********************************************************************
+      * Find last action sequence for comment                                *
+      ***********************************************************************/
+        declare check_action_sequence = i4
+        declare find_cmt_sequence ( arg_qc_result_id, arg_comment_type_cd ) = i4
+        subroutine find_cmt_sequence( arg_qc_result_id, arg_comment_type_cd )
+          set check_action_sequence = 0
+          select into "nl:"
+            qcc1.qc_result_id,
+            qcc1.comment_type_cd,
+            qcc1.action_sequence
+          from qc_comment qcc1
+          plan qcc1
+            where qcc1.qc_result_id = arg_qc_result_id
+              and qcc1.comment_type_cd = arg_comment_type_cd
+          order
+            qcc1.action_sequence ;001... desc
+          
+          detail
+            check_action_sequence = qcc1.action_sequence + 1
+
+          with 
+            nocounter ;001... ,
+;001...             maxqual(qcc1,1)
+
+          return (check_action_sequence)
+        end
+
+      /***********************************************************************
+      * Insert result comment                                                *
+      ***********************************************************************/
+        declare insert_result_comment( arg_qc_result_id, arg_comment_type_cd, arg_comment_sequence ) = i4
+        subroutine insert_result_comment( arg_qc_result_id, arg_comment_type_cd, arg_comment_sequence )
+
+;001... * add long text correctly
+          set long_text_seq = 0.0                                   
+          select into "nl:"
+             y = seq(long_data_seq,nextval)
+          from dual
+          detail
+             long_text_seq = y
+          with nocounter, format
+
+          if (curqual = 0)
+             go to seq_failed
+          endif
+   
+          insert 
+             into long_text l
+          set
+             l.long_text_id           = long_text_seq,
+             l.long_text              = request->qc_results[ridx].comments[cidx].comment_text,
+             l.active_ind             = 1,
+             l.active_status_cd       = 0,
+             l.active_status_dt_tm    = cnvtdatetime(curdate,curtime3),
+             l.active_status_prsnl_id = reqinfo->updt_id,
+             l.parent_entity_name     = "QC_COMMENT",
+             l.parent_entity_id       = arg_qc_result_id,
+             l.updt_dt_tm             = cnvtdatetime(curdate,curtime3),
+             l.updt_cnt               = 0,
+             l.updt_task              = reqinfo->updt_task,
+             l.updt_id                = reqinfo->updt_id,
+             l.updt_applctx           = reqinfo->updt_applctx
+          with
+            nocounter
+;001... * add long text correctly
+             
+          insert
+             into qc_comment qcc
+          set
+             qcc.qc_result_id     = arg_qc_result_id,
+             qcc.comment_type_cd  = arg_comment_type_cd,
+             qcc.action_sequence  = arg_comment_sequence,
+             qcc.long_text_id      = long_text_seq,        ;001... 
+;001...             qcc.comment_text     = request->qc_results[ridx].comments[cidx].comment_text,
+;             qcc.perform_prsnl_id = request->qc_results[ridx].comments[cidx].perform_prsnl_id,
+             qcc.perform_prsnl_id  = reqinfo->updt_id,
+             qcc.comment_dt_tm    = if (request->qc_results[ridx].comments[cidx].comment_dt_tm > 0)
+                                     cnvtdatetime(request->qc_results[ridx].comments[cidx].comment_dt_tm)
+                                   else
+                                     cnvtdatetime(curdate,curtime3)
+                                   endif,
+             qcc.updt_dt_tm       = cnvtdatetime(curdate,curtime3),
+             qcc.updt_cnt         = 0,
+             qcc.updt_task        = reqinfo->updt_task,
+             qcc.updt_id          = reqinfo->updt_id,
+             qcc.updt_applctx     = reqinfo->updt_applctx
+
+          plan qcc
+
+          with
+            nocounter
+
+          return(curqual)
+        end
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+     #Script
+      set failed = "F"
+      set reply->status_data->status = "F"
+
+      declare results_to_add           = i4
+      declare comments_to_add          = i4
+      declare prev_qc_result_id        = f8
+      declare pass_sequence            = i4
+      declare temp_type_cd             = f8
+      declare temp_sequence            = i4
+;      declare temp_cur_dt_tm        = dq8
+
+      set results_to_add = size(request->qc_results, 5)
+              
+      for (ridx = 1 to results_to_add)
+        set prev_qc_result_id = request->qc_results[ridx].qc_result_id
+        if (request->event_type_cd > 0.0)
+          set temp_type_cd = request->event_type_cd
+          set pass_sequence = find_sequence( prev_qc_result_id)
+          if (insert_result_event( prev_qc_result_id, pass_sequence, temp_type_cd ) = 0)
+            go to q_insert_event_failed
+          endif
+        endif
+
+        set comments_to_add = size(request->qc_results[ridx].comments, 5)
+        for (cidx = 1 to comments_to_add)
+          set temp_type_cd = request->qc_results[ridx].comments[cidx].comment_type_cd
+          set temp_sequence = find_cmt_sequence( prev_qc_result_id, temp_type_cd )
+          if (insert_result_comment( prev_qc_result_id, temp_type_cd, temp_sequence ) = 0)
+            go to q_comment_insert_failed
+          endif
+        endfor
+
+      endfor
+
+/* Return the name of the person reviewing/editing the result */
+      select into "nl:"
+        p.name_full_formatted
+      from prsnl p
+      plan p
+        where reqinfo->updt_id = p.person_id
+;        where request->event_personnel_id = p.person_id
+      detail
+        reply->personnel_name = p.name_full_formatted
+        reply->review_dt_tm = request->event_dt_tm
+      with
+        nocounter
+
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if long_text table sequence is unsuccessful.            */
+/********************************************************************/
+     #seq_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "sequence"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "long_text table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if qc_comment table insert is unsuccessful.             */
+/********************************************************************/
+     #q_comment_insert_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "qc_comment table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if qc_result_event table insert is unsuccessful.        */
+/********************************************************************/
+     #q_insert_event_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "qc_result_event table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+      if (failed = "F")
+         set reply->status_data->status = "S"
+         commit
+      else
+         rollback
+      endif
+
+END
+GO     
+      
+
+;Generated by GNU enscript 1.6.4.

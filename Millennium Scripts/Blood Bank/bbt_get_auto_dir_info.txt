@@ -1,0 +1,290 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/SCRIPTCORRECTINVENTORY/BBT_GET_AUTO_DIR_INFO.PRG Turn on black mode
+
+     /************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Author:                 Doug Saus, Jon Weekes
+        Date Written:           08/07/97
+        Last Modified:          08/07/97
+        Request #:              225386
+
+        Source file name:       BBT_GET_AUTO_DIR_INFO.PRG
+        Object name:            bbt_get_auto_dir_info
+
+        Product:                Blood Bank Transfusion           
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Get demographic info for auto directed products
+
+        Tables read:            code_value, person, person_alias, auto_directed,
+                                person_aborh
+
+        Executing from:         Correct Inventory, Modify Products.
+
+******************************************************************************/
+ 
+;~DB~**********************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG                         *
+;    ********************************************************************************* *
+;    *                                                                                 *
+;    *MOD#  BY            PIM#   DATE   RELEASE MODIFICATION TECHNIQUE/UTILITY         *
+;    *---- ---           ----- -------- ------- -------------------------------------  *
+;     000  DMS            0000 08/07/97 000     Initial Release                        *
+;     001  BNK            0001 12/12/97 000     Modified to return expected_usage_dt_tm*
+;     002  BNK            0001 12/23/97 000     Modified to return associated_dt_tm    *
+;     003  BNK            0001 11/13/98 000     Modified to return person abo & rh Cds *
+;     004  Matt Cummings       05/18/07         Process a list of aut/dir product      *
+;                                               events                                 *
+;~DE~***********************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+        drop program bbt_get_auto_dir_info:dba go
+        create program bbt_get_auto_dir_info:dba
+
+/*
+record request
+(
+  ; The productEventList is now used in preference over this field, but it is
+  ; retained for passivity.
+  1  product_event_id        = f8
+  1  productEventList[*]
+     2  product_event_id     = f8
+)
+*/
+
+record reply
+(
+    1 name_full_formatted    = vc 
+    1 person_id              = f8
+    1 encounter_id           = f8
+    1 alias                  = vc
+    1 expected_usage_dt_tm   = dq8
+    1 associated_dt_tm       = dq8      ;BNK - 12/23/97
+    1 abo_cd                 = f8       ;BNK - 11/13/98
+    1 rh_cd                  = f8       ;BNK - 11/13/98
+    1  productEventList[*]
+       2 product_event_id        = f8
+       2 name_full_formatted     = vc 
+       2 person_id               = f8
+       2 birth_dt_tm             = dq8
+       2 age                     = vc
+       2 gender_cd               = f8
+       2 gender_disp             = c40
+       2 encounter_id            = f8
+       2 mrn                     = vc
+       2 fin                     = vc
+       2 ssn                     = vc
+       2 expected_usage_dt_tm    = dq8
+       2 associated_dt_tm        = dq8
+       2 abo_cd                  = f8
+       2 abo_disp                = c40
+       2 rh_cd                   = f8
+       2 rh_disp                 = c40
+       2 donated_by_relative_ind = i2
+%i cclsource:status_block.inc
+)
+
+; Store the product events that will be used in the main query below
+record queryProductEvents
+(
+    1 productEventList[*]
+        2 product_event_id   = f8
+)
+
+;**************** declare variables ****************
+
+;financial number alias code value
+declare finAliasTypeCd         = f8 with protected,noconstant(0.0)
+;used to iterate through a product event record
+declare idxProductEvent        = i4 with protected,noconstant(0)
+;medical record number alias code value
+declare mrnAliasTypeCd         = f8 with protected,noconstant(0.0)
+;number of product events that have been stored in the reply
+declare productEventCnt        = i4 with protected,noconstant(0)
+;store the number of event passed through request
+declare requestProductEventCnt = i4 with protected,noconstant(0)
+;SSN alias code value
+declare ssnAliasTypeCd         = f8 with protected,noconstant(0.0)
+declare stat                   = i4 with protected,noconstant(0)
+;when true, pull product_event_id's from the productEventList for querying
+;when false,use the product_event_id at the first level of the request
+declare useListInQuery         = i2 with protected,noconstant(0)
+
+;**************** retrieve code values ****************
+
+set mrnAliasTypeCd = uar_get_code_by("MEANING",319,"MRN")
+call echo(build(mrnAliasTypeCd))
+if( mrnAliasTypeCd < 1.0 )
+  go to FAIL_SCRIPT
+endif
+
+set finAliasTypeCd = uar_get_code_by("MEANING",319,"FIN NBR")
+call echo(build(finAliasTypeCd))
+if( finAliasTypeCd < 1.0 )
+  go to FAIL_SCRIPT
+endif
+
+set ssnAliasTypeCd = uar_get_code_by("MEANING",4,"SSN")
+call echo(build(ssnAliasTypeCd))
+if( ssnAliasTypeCd < 1.0 )
+  go to FAIL_SCRIPT
+endif
+
+set requestProductEventCnt = size( request->productEventList, 5)
+
+;If both the productEventList and the base level pe was filled, then fail
+;the script since only one or the other should be used.
+if( requestProductEventCnt > 0 and request->product_event_id > 0.0 )
+  go to FAIL_SCRIPT
+endif
+
+;If neither the productEventList and the base level pe are filled, then fail
+;the script since the request was not filled in properly
+if( requestProductEventCnt = 0 and request->product_event_Id = 0.0 )
+  go to FAIL_SCRIPT
+endif
+
+;if the product event list was not filled in
+if( requestProductEventCnt = 0)
+    ;store the product_event_id from the base level into the query record
+    set requestProductEventCnt = 1
+    set stat = alterlist( queryProductEvents->productEventList, 1 )
+    set queryProductEvents->productEventList[1].product_event_id = 
+        request->product_event_id
+    set useListInQuery = 0
+else
+    ;store all product_event_id's from the request into the query record
+    set stat = alterlist( queryProductEvents->productEventList, requestProductEventCnt )
+    for( idxProductEvent = 1 to requestProductEventCnt )
+        set queryProductEvents->productEventList[ idxProductEvent ].product_event_id = 
+            request->productEventList[ idxProductEvent ].product_event_id
+    endfor
+    set useListInQuery = 1
+endif
+
+select into "nl:"
+      ad.expected_usage_dt_tm
+    , ad.donated_by_relative_ind
+    , per.birth_dt_tm
+    , age = cnvtage( per.birth_dt_tm )
+    , per.name_full_formatted
+    , per.person_id
+    , gender = per.sex_cd
+    , ad.encntr_id
+    , mrn = cnvtalias( ea_mrn.alias, ea_mrn.alias_pool_cd )
+    , fin = cnvtalias( ea_fin.alias, ea_fin.alias_pool_cd )
+    , ssn = cnvtalias( palias.alias, palias.alias_pool_cd )
+    , pa.abo_cd
+    , pa.rh_cd
+from
+      auto_directed ad
+    , product p
+    , person per  
+    , encntr_alias ea_mrn
+    , encntr_alias ea_fin
+    , person_alias palias
+    , person_aborh pa
+
+plan    ad      where   expand( idxProductEvent, 1, requestProductEventCnt,
+                                ad.product_event_id, 
+                                queryProductEvents->productEventList[ idxProductEvent ].product_event_id)
+                  and   ad.active_ind = 1
+                  and   ad.person_id != NULL
+                  and   ad.person_id > 0.0
+join    p       where   p.product_id                =  ad.product_id
+join    per     where   per.person_id               =  ad.person_id
+                  and   per.active_ind              =  1
+join    ea_mrn  where   ea_mrn.encntr_id            =  outerjoin(ad.encntr_id)
+                  and   ea_mrn.encntr_alias_type_cd =  outerjoin(mrnAliasTypeCd)
+                  and   ea_mrn.active_ind           =  outerjoin(1)
+join    ea_fin  where   ea_fin.encntr_id            =  outerjoin(ad.encntr_id)
+                  and   ea_fin.encntr_alias_type_cd =  outerjoin(finAliasTypeCd)
+                  and   ea_fin.active_ind           =  outerjoin(1)
+join    palias  where   palias.person_id            =  outerjoin(per.person_id)
+                  and   palias.person_alias_type_cd =  outerjoin(ssnAliasTypeCd)
+                  and   palias.active_ind           =  outerjoin(1)
+join    pa      where   pa.person_id                =  outerjoin(per.person_id)
+                  and   pa.active_ind               =  outerjoin(1)
+detail
+
+    
+    if( useListInQuery = 0 )
+    
+        reply->name_full_formatted  = per.name_full_formatted
+        reply->person_id = per.person_id
+        reply->encounter_id = ad.encntr_id
+        if( ea_mrn.encntr_id > 0.0 and
+            ea_mrn.encntr_id != NULL )
+          reply->alias = mrn
+        endif
+        reply->abo_cd = pa.abo_cd       ;003
+        reply->rh_cd = pa.rh_cd         ;003
+        reply->expected_usage_dt_tm = cnvtdatetime(ad.expected_usage_dt_tm)     ;BNK - 12/12/97
+        reply->associated_dt_tm = cnvtdatetime(ad.associated_dt_tm)             ;BNK - 12/23/97
+        
+    else
+    
+        productEventCnt = productEventCnt + 1
+        if( productEventCnt > size( reply->productEventList, 5 ) )
+          stat = alterlist( reply->productEventList, productEventCnt + 4)
+        endif
+
+        reply->productEventList[productEventCnt].product_event_id = ad.product_event_id
+        reply->productEventList[productEventCnt].donated_by_relative_ind = ad.donated_by_relative_ind
+        reply->productEventList[productEventCnt].name_full_formatted = per.name_full_formatted
+        reply->productEventList[productEventCnt].person_id = per.person_id
+        reply->productEventList[productEventCnt].birth_dt_tm = per.birth_dt_tm
+        reply->productEventList[productEventCnt].age = age
+        reply->productEventList[productEventCnt].gender_cd = gender
+        reply->productEventList[productEventCnt].encounter_id = ad.encntr_id
+        if( ea_mrn.encntr_id > 0.0 and
+            ea_mrn.encntr_id != NULL )
+          reply->productEventList[productEventCnt].mrn = mrn
+        endif
+        if( ea_fin.encntr_id > 0.0 and
+            ea_fin.encntr_id != NULL )
+          reply->productEventList[productEventCnt].fin = fin
+        endif
+        reply->productEventList[productEventCnt].ssn = ssn
+        reply->productEventList[productEventCnt].abo_cd = pa.abo_cd
+        reply->productEventList[productEventCnt].rh_cd = pa.rh_cd
+        reply->productEventList[productEventCnt].expected_usage_dt_tm = cnvtdatetime( ad.expected_usage_dt_tm )
+        reply->productEventList[productEventCnt].associated_dt_tm = cnvtdatetime( ad.associated_dt_tm )
+    
+    endif
+    
+with nocounter
+
+set stat = alterlist( reply->productEventList, productEventCnt )
+
+if (curqual = 0) 
+#FAIL_SCRIPT
+    set reply->status_data->status = "F"
+else
+    set reply->status_data->status = "S"
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

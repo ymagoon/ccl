@@ -1,0 +1,1018 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_build_signature_line/glb_build_signature_line.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1997 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       glb_build_signature_line.prg
+        Object name:            glb_build_signature_line
+        Request #:              250215
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        To populate the ce_event_note table
+                                with GL signature lines.
+
+        Tables read:            person_name
+                                code_value
+                                sign_line_dta_r
+                                sign_line_ep_r
+                                sign_line_layout_field_r
+                                sign_line_format
+                                sign_line_format_detail
+       							prsnl
+        Tables updated:         
+
+        Executing from:         
+
+        Special Notes:          Written using aps_build_signature_line as
+                                a template.
+
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 01/04/99 Chris Heil           Initial Release                     *
+;    *001 08/07/03 Craig Sumrall        Updated "current" value to "prsnl"  *
+;    *002 09/01/04 Craig Sumrall        Added logic for hla signatures      *
+;    *003 04/21/06 Tim Sady (ts010410)  Added logic for Helix signatures.   *
+;    *004 12/12/06 Tim Sady (ts010410)  Added logic for CI signatures.      *
+;    *005 07/02/07 Matt Cummings        Added logic for BB signatures.      * 
+;    *006 08/29/07 Elliott Hoffman      Added logic for CI:UCR signatures   * 
+;    *007 09/24/07 Vibhor Mathur		Changes to store date/time value in *
+;										temp_hold_date of pcs_get_time_zone * 
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+DROP   PROGRAM GLB_BUILD_SIGNATURE_LINE:DBA GO
+CREATE PROGRAM GLB_BUILD_SIGNATURE_LINE:DBA 
+
+/***********************************************************************
+ *   Request Record                                                    *
+ ***********************************************************************/
+/*
+  record request
+  (
+      1  verified_prsnl_id     = f8
+      1  verified_dt_tm        = dq8
+      1  task_assay_cd         = f8
+      1  row_qual[*]
+         2  line_num           = i4
+         2  col_qual[*]
+            3  position        = i4
+            3  value           = c200
+            3  max_size        = i4
+            3  literal_display = c100
+            3  literal_size    = i4
+         2  suppress_line_ind  = i2
+      1  max_cols              = i4
+      1  called_ind            = c1
+      1  perform_prsnl_id      = f8
+      1  perform_dt_tm         = dq8
+      1  perform_tz            = i4
+      1  verified_tz           = i4
+      1  cki_source            = c12
+      1  cki_identifier        = vc
+      1  ucmr_layout_field_id  = f8
+  )
+*/
+%i cclsource:pcs_get_time_zone.inc
+/***********************************************************************
+ * Record to Pass Back Signature Line                                  *
+ ***********************************************************************/
+ if (request->called_ind != "Y")
+   record reply
+   (
+     1 signature_line  = vc
+%i cclsource:status_block.inc
+   )
+ endif
+
+/***********************************************************************
+ * Declare Variables                                                   *
+ ***********************************************************************/
+declare cnt_qualified       = i2
+declare cur_col_pos         = i2
+declare cur_row             = i2
+declare cur_row_pos         = i2
+declare iBSLDR              = i2
+declare max_cols            = i2
+declare return_string       = vc
+declare return_val          = i2
+declare status_flag         = i2
+declare prsnl_cnt           = i4 with protect, noconstant (0)
+declare nPrsnlItem          = i4 with protect, noconstant (0)
+
+/***************************************************************/
+/*  Records                                                    */
+/***************************************************************/
+record prsnl_info 
+ (
+   1 qual[*]
+     2 prsnl_id     = f8
+     2 initials     = c3
+     2 name_full    = vc
+     2 name_first   = vc
+     2 name_middle  = vc
+     2 name_last    = vc
+     2 name_title   = vc
+ )
+
+
+record temp
+ (
+   1 qual[*]
+     2 line_nbr           = i4
+     2 column_pos         = i4
+     2 meaning            = c12
+     2 literal_display    = vc
+     2 max_size           = i4
+     2 literal_size       = i4
+     2 format_desc        = c60
+     2 suppress_line_ind  = i2
+ )
+ 
+record tempdate
+  (
+    1 date_now        = dq8
+    1 date_tz         = i4
+  )
+
+set cnt_qualified = 0
+set cur_row = 0
+set cur_row_pos = 0
+set cur_col_pos = 0
+set iBSLDR   = 0
+set max_cols = 0
+set return_string = ""
+set return_val = 0
+set status_flag = 0
+
+
+/***************************************************************************
+ *  Main                                                                   *
+ ***************************************************************************/
+  set status_flag = 2  ;verified
+  set stat = alterlist(request->row_qual, 0)
+  set request->max_cols = 0
+  set request->called_ind = "Y"
+
+  set return_val = GetFormatForSection(0)
+  if (return_val > 0)
+    call RetrievePrsnlInfo(0)  
+    call BuildSLDataRequest(return_val)
+  
+    
+    execute aps_get_signature_line
+  
+  endif
+
+  if (request->task_assay_cd > 0)
+    set reply->status_data->status = "S"
+  else
+    if (textlen(reply->signature_line) = 0)
+      set reply->status_data->status = "Z"
+    else
+      set reply->status_data->status = "S"
+    endif
+  endif
+
+/***************************************************************************
+ *  Subroutines                                                            *
+ ***************************************************************************/
+declare GetFormatForSection(sign_none1) = i2
+subroutine GetFormatForSection(sign_none1)
+   ;**********************************************
+   ;*  Get signature line format without values. *
+   ;**********************************************
+   set cnt_qualified = 0
+   set stat = alterlist(temp->qual, 0)
+   set nStatusFlag = -1   ;controls layout_field_retieval 
+
+   if (request->task_assay_cd > 0)
+      select into "nl:"
+         sldr.task_assay_cd,
+         sldr.status_flag,
+         slf.format_id,
+         slfd.format_id,
+         slfd.sequence,
+         format_desc = uar_get_code_description(slfd.data_element_format_cd),
+         sCodeMeaning = uar_get_code_meaning(slfd.data_element_cd)
+      from
+         sign_line_dta_r sldr,
+         sign_line_format slf,
+         sign_line_format_detail slfd
+
+      plan sldr where
+         sldr.task_assay_cd = request->task_assay_cd
+         and sldr.status_flag = 2             ; verified or corrected
+
+      join slf where
+         sldr.format_id = slf.format_id
+         and slf.active_ind = 1
+
+      join slfd where
+         sldr.format_id = slfd.format_id 
+   
+      order by
+         slfd.format_id desc,
+         sldr.task_assay_cd desc, 
+         sldr.status_flag desc,
+         slfd.sequence
+
+      head report
+         cnt = 0
+         cnt_qualified = 0
+         temp_status_flag = 0
+         temp_task_assay_cd = 0.0
+
+      detail
+         cnt = cnt + 1
+         if (cnt = 1)
+            temp_task_assay_cd = sldr.task_assay_cd
+            temp_status_flag = sldr.status_flag
+         endif   
+         if ((sldr.task_assay_cd = temp_task_assay_cd)
+         and (sldr.status_flag = temp_status_flag))
+            cnt_qualified = cnt_qualified + 1
+         if (mod(cnt_qualified, 10) = 1)
+            stat = alterlist(temp->qual, cnt_qualified + 9)
+         endif
+         temp->qual[cnt_qualified]->line_nbr = slfd.line_nbr
+         temp->qual[cnt_qualified]->column_pos = slfd.column_pos
+         if (slfd.data_element_cd != 0.0)
+            temp->qual[cnt_qualified]->meaning = sCodeMeaning
+         else
+            temp->qual[cnt_qualified]->meaning = ""
+         endif
+         temp->qual[cnt_qualified]->literal_display = slfd.literal_display
+         temp->qual[cnt_qualified]->max_size = slfd.max_size
+         temp->qual[cnt_qualified]->literal_size = slfd.literal_size
+         temp->qual[cnt_qualified]->format_desc = format_desc
+         temp->qual[cnt_qualified]->suppress_line_ind = slfd.suppress_line_ind
+      endif
+      
+      foot report
+         stat  = alterlist(temp->qual, cnt_qualified)
+
+      with nocounter
+   elseif (request->ucmr_layout_field_id > 0)
+   ;logic for layout fields
+      
+      ;set flag to control layout fields that qualify
+      if(request->verified_prsnl_id > 0)
+         set nStatusFlag = 2
+      elseif(request->perform_prsnl_id > 0)
+         set nStatusFlag = 1
+      endif
+      
+      ;retrieve layout fields
+      if(nStatusFlag != -1)
+         select into "nl:"
+            slf.format_id,
+            slfd.format_id,
+            slfd.sequence,
+            format_desc = uar_get_code_description(slfd.data_element_format_cd),
+            sCodeMeaning = uar_get_code_meaning(slfd.data_element_cd)
+         from
+            sign_line_layout_field_r sllfr,
+            sign_line_format slf,
+            sign_line_format_detail slfd
+      
+         plan sllfr where
+            sllfr.format_id > 0.0 ;suppress table scan warning
+            and sllfr.ucmr_layout_field_id = request->ucmr_layout_field_id
+            and sllfr.status_flag = nStatusFlag ;switch flag based on permissions
+         join slf where
+            sllfr.format_id = slf.format_id
+            and slf.active_ind = 1 
+         join slfd where
+            sllfr.format_id = slfd.format_id    
+         order by
+            slfd.format_id desc,
+            sllfr.ucmr_layout_field_id,
+            sllfr.status_flag desc,
+            slfd.sequence
+         head report
+            cnt_qualified = 0
+         detail
+            cnt_qualified = cnt_qualified + 1
+            if (mod(cnt_qualified, 10) = 1)
+               stat = alterlist(temp->qual, cnt_qualified + 9)
+            endif
+            temp->qual[cnt_qualified]->line_nbr = slfd.line_nbr
+            temp->qual[cnt_qualified]->column_pos = slfd.column_pos
+            if (slfd.data_element_cd != 0.0)
+               temp->qual[cnt_qualified]->meaning = sCodeMeaning
+            else
+               temp->qual[cnt_qualified]->meaning = ""
+            endif
+            temp->qual[cnt_qualified]->literal_display = slfd.literal_display
+            temp->qual[cnt_qualified]->max_size = slfd.max_size
+            temp->qual[cnt_qualified]->literal_size = slfd.literal_size
+            temp->qual[cnt_qualified]->format_desc = format_desc
+            temp->qual[cnt_qualified]->suppress_line_ind = slfd.suppress_line_ind   
+         foot report
+            stat  = alterlist(temp->qual, cnt_qualified)
+         with nocounter 
+      endif ;nStatusFlag <> -1
+      ;end layout_field logic
+   else
+    select into "nl:"
+      slf.format_id,
+      slfd.format_id,
+      slfd.sequence,
+      format_desc = uar_get_code_description(slfd.data_element_format_cd),
+      sCodeMeaning = uar_get_code_meaning(slfd.data_element_cd)
+
+    from
+      sign_line_ep_r sler,
+      sign_line_format slf,
+      sign_line_format_detail slfd
+
+    plan sler where
+      sler.cki_source = request->cki_source
+        and sler.cki_identifier = request->cki_identifier
+        and sler.status_flag = 2             ; verified or corrected
+
+    join slf where
+      sler.format_id = slf.format_id
+        and slf.active_ind = 1
+
+    join slfd where
+      sler.format_id = slfd.format_id 
+
+    order by
+      slfd.format_id desc,
+      sler.cki_source desc,
+      sler.cki_identifier desc,
+      sler.status_flag desc,
+      slfd.sequence
+
+    head report
+      cnt_qualified = 0
+
+    detail
+      cnt_qualified = cnt_qualified + 1
+      if (mod(cnt_qualified, 10) = 1)
+        stat = alterlist(temp->qual, cnt_qualified + 9)
+      endif
+      temp->qual[cnt_qualified]->line_nbr = slfd.line_nbr
+      temp->qual[cnt_qualified]->column_pos = slfd.column_pos
+      if (slfd.data_element_cd != 0.0)
+        temp->qual[cnt_qualified]->meaning = sCodeMeaning
+      else
+        temp->qual[cnt_qualified]->meaning = ""
+      endif
+      temp->qual[cnt_qualified]->literal_display = slfd.literal_display
+      temp->qual[cnt_qualified]->max_size = slfd.max_size
+      temp->qual[cnt_qualified]->literal_size = slfd.literal_size
+      temp->qual[cnt_qualified]->format_desc = format_desc
+      temp->qual[cnt_qualified]->suppress_line_ind = slfd.suppress_line_ind
+
+    foot report
+      stat  = alterlist(temp->qual, cnt_qualified)
+
+    with nocounter
+
+  endif
+  return (cnt_qualified)
+
+end
+
+
+subroutine RetrievePrsnlInfo(RPIDummy)
+  ;*************************************************
+  ;*  Retrieve person info for verified personnel. *
+  ;*************************************************
+
+  call AddPrsnlInfoItem(request->verified_prsnl_id)
+  call AddPrsnlInfoItem(request->perform_prsnl_id)
+
+
+  if(prsnl_cnt > 0)
+    set dNameCd = uar_get_code_by("MEANING", 213, "PRSNL")
+
+    select into "nl:"
+      d.seq,
+      pn.person_id
+
+      from 
+           person_name pn,
+           (dummyt d with seq = value(prsnl_cnt))
+
+      plan d
+      join pn where pn.person_id = prsnl_info->qual[d.seq].prsnl_id 
+                and pn.name_type_cd = dNameCd
+                and pn.active_ind = 1
+                and (pn.beg_effective_dt_tm < cnvtdatetime(curdate,curtime3) 
+                and (pn.end_effective_dt_tm > cnvtdatetime(curdate,curtime3) 
+                 or  pn.end_effective_dt_tm = NULL))  
+
+      detail
+    
+        prsnl_info->qual[d.seq].initials = substring(1,3,pn.name_initials)
+        prsnl_info->qual[d.seq].name_full = trim(pn.name_full)
+        prsnl_info->qual[d.seq].name_first = trim(pn.name_first)
+        prsnl_info->qual[d.seq].name_middle = trim(pn.name_middle)
+        prsnl_info->qual[d.seq].name_last = trim(pn.name_last) 
+        prsnl_info->qual[d.seq].name_title = trim(pn.name_title)
+
+    with nocounter
+  endif
+end
+
+
+subroutine BuildSLDataRequest(BSLDRcnt)
+  ;**************************************
+  ;*  Fill in values in signature line. *
+  ;**************************************
+   set cur_row_pos = 0
+   set cur_row = 0
+   set max_cols = 0
+
+   for (iBSLDR = 1 to BSLDRcnt)
+     set return_string = ""
+     if (temp->qual[iBSLDR].line_nbr != cur_row)
+       set cur_row_pos = cur_row_pos + 1
+       set cur_row = temp->qual[iBSLDR].line_nbr
+       set cur_col_pos = 1
+       set stat = alterlist(request->row_qual, cur_row_pos)
+       set stat = alterlist(request->row_qual[cur_row_pos].col_qual, cur_col_pos)
+       set request->row_qual[cur_row_pos]->line_num = temp->qual[iBSLDR].line_nbr
+       set request->row_qual[cur_row_pos]->suppress_line_ind = temp->qual[iBSLDR].suppress_line_ind
+       set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].position = temp->qual[iBSLDR].column_pos
+       set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].max_size = temp->qual[iBSLDR].max_size
+       set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].literal_size = temp->qual[iBSLDR].literal_size
+       set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].literal_display = temp->qual[iBSLDR].literal_display
+       if (trim(temp->qual[iBSLDR].meaning) != "")
+         call GetValueData(trim(temp->qual[iBSLDR].meaning),temp->qual[iBSLDR].format_desc )
+         set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].value =
+                          trim(return_string)
+         if (textlen(trim(return_string)) = 0)
+           set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].
+                   literal_display = ""
+         else
+           set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].
+                   literal_display = temp->qual[iBSLDR].literal_display
+         endif
+       endif
+     else
+       set cur_col_pos = cur_col_pos + 1
+       set stat = alterlist(request->row_qual[cur_row_pos].col_qual, 
+                          cur_col_pos)
+       set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].position =
+                          temp->qual[iBSLDR].column_pos
+       set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].max_size =
+                          temp->qual[iBSLDR].max_size
+       set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].
+                          literal_size = temp->qual[iBSLDR].literal_size
+       set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].
+                          literal_display = temp->qual[iBSLDR].literal_display
+       if (trim(temp->qual[iBSLDR].meaning) != "")
+         call GetValueData(trim(temp->qual[iBSLDR].meaning),temp->qual[iBSLDR].format_desc)
+         set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].value =
+                          trim(return_string)
+         if (textlen(trim(return_string)) = 0)
+           set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].
+                   literal_display = ""
+         else
+           set request->row_qual[cur_row_pos]->col_qual[cur_col_pos].
+                   literal_display = temp->qual[iBSLDR].literal_display
+         endif
+       endif
+     endif
+     if (cur_col_pos > max_cols)
+       set max_cols = cur_col_pos
+     endif     
+   endfor
+   set request->max_cols = max_cols
+end
+
+
+subroutine GetValueData(GVDmeaning,FormatDesc)
+  ;**************************************
+  ;*  Fill in values in signature line. *
+  ;**************************************
+  set return_string = ""
+  CASE (trim(GVDmeaning))
+    OF "GLBVERFFNAME":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_first
+      endif
+    OF "GLBVERFINIT":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].initials
+      endif
+    OF "GLBVERFLNAME":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_last
+      endif
+    OF "GLBVERFMNAME":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_middle
+      endif
+    OF "GLBVERFTITLE":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_title
+      endif
+    OF "GLBVERIFYDT":
+      if (size(trim(FormatDesc)) = 0)
+        set return_string = format(cnvtdatetime(request->verified_dt_tm),"mm/dd/yy;;d")
+      else
+        set tempdate->date_now = request->verified_dt_tm
+        set tempdate->date_tz = request->verified_tz
+        call FormatDateByMask(FormatDesc)
+      endif
+    OF "GLBVERIFYTM":
+      set return_string = format(cnvtdatetime(request->verified_dt_tm),"hh:mm;;d")
+    OF "HLAVERIFYDT":
+      if(size(trim(FormatDesc)) = 0)
+        set return_string = format(cnvtdatetime(request->verified_dt_tm),"mm/dd/yy;;d")
+      else
+        set tempdate->date_now = request->verified_dt_tm
+        set tempdate->date_tz = request->verified_tz
+        call FormatDateByMask(FormatDesc)
+      endif    
+    OF "HLAVERFNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)    
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_first
+      endif    
+    OF "HLAVERLNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_last
+      endif    
+    OF "HLAVERMNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_middle
+      endif    
+    OF "HLAVERFLNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_full
+      endif    
+    OF "HLAVERINIT":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].initials
+      endif    
+    OF "HLAVERTITLE":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_title
+      endif    
+    OF "HLAPERFDT":
+      if(size(trim(FormatDesc)) = 0)
+        set return_string = format(cnvtdatetime(request->perform_dt_tm),"mm/dd/yy;;d")
+      else
+        set tempdate->date_now = request->perform_dt_tm
+        set tempdate->date_tz = request->perform_tz
+        call FormatDateByMask(FormatDesc)
+      endif
+    OF "HLAPERFNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_first
+      endif    
+    OF "HLAPERLNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_last
+      endif    
+    OF "HLAPERMNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_middle
+      endif
+    OF "HLAPERFLNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_full        
+      endif
+    OF "HLAPERINIT":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].initials
+      endif
+    OF "HLAPERTITLE":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_title
+      endif
+    OF "HXVERIFYDT":
+      if(size(trim(FormatDesc)) = 0)
+        set return_string = format(cnvtdatetime(request->verified_dt_tm),"mm/dd/yy;;d")
+      else
+        set tempdate->date_now = request->verified_dt_tm
+        set tempdate->date_tz = request->verified_tz
+        call FormatDateByMask(FormatDesc)
+      endif    
+    OF "HXVERFNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)    
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_first
+      endif    
+    OF "HXVERLNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_last
+      endif    
+    OF "HXVERMNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_middle
+      endif    
+    OF "HXVERFLNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_full
+      endif    
+    OF "HXVERINIT":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].initials
+      endif    
+    OF "HXVERTITLE":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_title
+      endif    
+    OF "HXPERFDT":
+      if(size(trim(FormatDesc)) = 0)
+        set return_string = format(cnvtdatetime(request->perform_dt_tm),"mm/dd/yy;;d")
+      else
+        set tempdate->date_now = request->perform_dt_tm
+        set tempdate->date_tz = request->perform_tz
+        call FormatDateByMask(FormatDesc)
+      endif
+    OF "HXPERFNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_first
+      endif    
+    OF "HXPERLNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_last
+      endif    
+    OF "HXPERMNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_middle
+      endif
+    OF "HXPERFLNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_full
+      endif
+    OF "HXPERINIT":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].initials
+      endif
+    OF "HXPERTITLE":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_title
+      endif
+    OF "CIVERIFYDT":
+      if(size(trim(FormatDesc)) = 0)
+        set return_string = format(cnvtdatetime(request->verified_dt_tm),"mm/dd/yy;;d")
+      else
+        set tempdate->date_now = request->verified_dt_tm
+        set tempdate->date_tz = request->verified_tz
+        call FormatDateByMask(FormatDesc)
+      endif
+    OF "CIVERFNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_first
+      endif
+    OF "CIVERLNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_last
+      endif
+    OF "CIVERMNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_middle
+      endif
+    OF "CIVERFLNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_full
+      endif
+    OF "CIVERINIT":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].initials
+      endif
+    OF "CIVERTITLE":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_title
+      endif
+      
+    
+    ;UCR fields VERIFY
+    OF "UCVERIFYDT":
+      if(size(trim(FormatDesc)) = 0)
+        set return_string = format(cnvtdatetime(request->verified_dt_tm),"mm/dd/yy;;d")
+      else
+        set tempdate->date_now = request->verified_dt_tm
+        set tempdate->date_tz = request->verified_tz
+        call FormatDateByMask(FormatDesc)
+      endif
+    OF "UCVERFNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_first
+      endif
+    OF "UCVERLNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_last
+      endif
+    OF "UCVERMNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_middle
+      endif
+    OF "UCVERFLNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_full
+      endif
+    OF "UCVERINIT":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].initials
+      endif
+    OF "UCVERTITLE":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_title
+      endif
+       
+    ;UCR fields PEFORM
+    OF "UCPERFDT":
+      if(size(trim(FormatDesc)) = 0)
+        set return_string = format(cnvtdatetime(request->perform_dt_tm),"mm/dd/yy;;d")
+      else
+        set tempdate->date_now = request->perform_dt_tm
+        set tempdate->date_tz = request->perform_tz
+        call FormatDateByMask(FormatDesc)
+      endif
+    OF "UCPERFNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_first
+      endif
+    OF "UCPERLNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_last
+      endif
+    OF "UCPERMNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_middle
+      endif
+    OF "UCPERFLNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_full
+      endif
+    OF "UCPERINIT":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].initials
+      endif
+    OF "UCPERTITLE":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_title
+      endif
+     
+    ;BB Verify fields
+    OF "BBVERFNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_first
+      endif
+    OF "BBVERLNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_last
+      endif
+    OF "BBVERMNAM":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_middle
+      endif
+    OF "BBVERINIT":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].initials
+      endif
+    OF "BBVERTITLE":
+      call GetPrsnlInfoById(request->verified_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_title
+      endif
+    OF "BBVERIFYDT":
+      if(size(trim(FormatDesc)) = 0)
+        set return_string = format(cnvtdatetime(request->verified_dt_tm),"mm/dd/yy;;d")
+      else
+        set tempdate->date_now = request->verified_dt_tm
+        set tempdate->date_tz = request->verified_tz
+        call FormatDateByMask(FormatDesc)
+      endif
+      
+    ;BB Perform fields
+    OF "BBPERFNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_first
+      endif
+    OF "BBPERLNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_last
+      endif
+    OF "BBPERMNAM":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_middle
+      endif
+    OF "BBPERINIT":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].initials
+      endif
+    OF "BBPERTITLE":
+      call GetPrsnlInfoById(request->perform_prsnl_id)
+      if (nPrsnlItem != 0)
+          set return_string = prsnl_info->qual[nPrsnlItem].name_title
+      endif
+    OF "BBPERFDT":
+      if(size(trim(FormatDesc)) = 0)
+        set return_string = format(cnvtdatetime(request->perform_dt_tm),"mm/dd/yy;;d")
+      else
+        set tempdate->date_now = request->perform_dt_tm
+        set tempdate->date_tz = request->perform_tz
+        call FormatDateByMask(FormatDesc)
+      endif
+  ENDCASE
+end
+;***************************************************************
+;***************************************************************
+subroutine FormatDateByMask(FormatDesc)
+  set deflength = 0
+  set findptf = 0
+  set findptl = 0  
+  set findptc = 0  
+  set return_string = ""
+  
+  if (size(trim(FormatDesc)) = 0)
+    set FormatDesc = "@SHORTDATE;;D" 
+  endif
+  
+  set findptf = findstring("|",FormatDesc)
+  if (findptf = 0)
+    if(curutc = 1)
+      ;Remove date display qualifier if it exists
+      set findptc = findstring(";;D",FormatDesc)
+      if (findptc != 0)
+        set FormatDesc = substring(1,findptc-1,FormatDesc)
+      endif
+      set return_string = datetimezoneformat(cnvtdatetime(tempdate->date_now), tempdate->date_tz, trim(FormatDesc))      
+    else
+      set return_string = format(tempdate->date_now, FormatDesc)      
+    endif
+  else
+    set findptl = findstring("|", FormatDesc, 1, 1)
+    set deflength = textlen(trim(FormatDesc))
+    set date_mask = substring(1,findptf-1,FormatDesc)      
+    if(findptl != findptf)
+      set time_mask = substring(findptf+1, (findptl - 1 - findptf), formatdesc)
+      set zone_mask = substring(findptl+1, deflength, formatdesc)
+      set temp_hold_date->date_value = tempdate->date_now 
+      set zone_now = GetTimeZoneShortName(tempdate->date_tz)
+    else
+      set time_mask = substring(findptf+1,deflength,FormatDesc)
+    endif        
+    if(curutc = 1)
+      ;Convert to standard time format if display qualifier exists
+      set findptc = findstring(";3;S",time_mask)
+      if (findptc != 0)
+        set time_mask = build(cnvtlower(substring(2,findptc-2,time_mask))," tt")
+      endif
+      ;Convert to maritime format if display qualifier exists
+      set findptc = findstring(";3;M",time_mask)
+      if (findptc != 0)
+        set time_mask = build(cnvtupper(substring(1,2,time_mask)), substring(3,findptc-3,time_mask))
+      endif
+      set time_now = datetimezoneformat(cnvtdatetime(tempdate->date_now), tempdate->date_tz, trim(time_mask))      
+    else
+      set time_now = format(tempdate->date_now,time_mask)
+      if (substring(textlen(trim(time_mask)),textlen(trim(time_mask)),FormatDesc) = "S")
+        if (substring(1,1,time_now) = "0")
+          set time_now = substring(2,textlen(time_now),time_now)
+        endif
+      endif
+    endif
+    if(curutc = 1)
+      ;Remove date display qualifier if it exists
+      set findptc = findstring(";;D",date_mask)
+      if (findptc != 0)
+        set date_mask = substring(1,findptc-1,date_mask)
+      endif
+      set date_now = datetimezoneformat(cnvtdatetime(tempdate->date_now), tempdate->date_tz, trim(date_mask))      
+    else
+      set date_now = format(tempdate->date_now,date_mask)
+    endif
+    if(findptl != findptf)
+      set return_string = concat(trim(date_now),' ',trim(time_now),' ',trim(zone_now))
+    else
+      set return_string = concat(trim(date_now),' ',trim(time_now))
+    endif
+  endif
+end
+;***************************************************************
+;***************************************************************
+subroutine AddPrsnlInfoItem(APIIPrsnlId)
+
+declare iAPIIP = i4 with protect, noconstant(0)
+  if (APIIPrsnlId != 0)
+    set nPrsnlItem = 0
+    set iAPIIP = 1
+
+    while (iAPIIP <= prsnl_cnt and nPrsnlItem = 0)
+      if (APIIPrsnlId = prsnl_info->qual[iAPIIP].prsnl_id)
+        set nPrsnlItem = iAPIIP
+      endif
+      set iAPIIP = iAPIIP + 1
+    endwhile
+
+    if (nPrsnlItem = 0)
+      set prsnl_cnt = prsnl_cnt + 1
+      set stat = alterlist(prsnl_info->qual, prsnl_cnt)
+      set prsnl_info->qual[prsnl_cnt].prsnl_id = APIIPrsnlId
+    endif
+  endif
+end
+
+;***************************************************************
+;***************************************************************
+subroutine GetPrsnlInfoById(GPIPrsnlId)
+declare iGPIP = i4 with protect, noconstant(0)
+  
+  set nPrsnlItem = 0
+
+  if (GPIPrsnlId != 0)
+    set iGPIP = 1
+
+    while (iGPIP <= prsnl_cnt and nPrsnlItem = 0)
+      if (GPIPrsnlId = prsnl_info->qual[iGPIP].prsnl_id)
+        set nPrsnlItem = iGPIP
+      endif
+      set iGPIP = iGPIP + 1
+    endwhile
+  endif
+end
+
+end go
+
+;Generated by GNU enscript 1.6.4.

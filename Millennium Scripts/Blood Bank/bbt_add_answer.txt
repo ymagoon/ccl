@@ -1,0 +1,325 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Dbpreferencewizard/bbt_add_answer.prg Turn on black mode
+
+ 
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       BBT_ADD_ANSWER
+        Object name:            BBT_ADD_ANSWER
+        Request #:              225036
+ 
+        Product:                PATHNET
+        Product Team:           BLOOD BANK
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        First, sets the previous answer (if available) to
+                                inactive.  Then, inserts a row into the answer table.
+ 
+        Tables read:            NA
+        Tables updated:         ANSWER
+        Executing from:         ##
+ 
+        Special Notes:          NA
+ 
+******************************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 03/22/96 Yvonne Klipfel       Initial Release                     *
+;     001 07/05/05 Jeff Wain            Added declare of new_answer_id and  *
+;                                       removed cnvtint formatting on nextseqnum
+;~DE~************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program bbt_add_answer:dba go
+create program bbt_add_answer:dba
+ 
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+/*
+record request
+(
+ 1 module_cd           = f8
+ 1 qual[x]
+   2 process_cd        = f8
+   2 answer_qual[x]
+     3 question_cd     = f8
+     3 answer_id       = f8
+     3 answer          = vc
+     3 active_ind      = i2
+     3 updt_cnt        = i4
+)
+*/
+ 
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+record reply
+(
+1 qual[1]
+  2 process_cd     = f8
+  2 answer_qual[1]
+    3 question_cd  = f8
+    3 answer_id    = f8
+%I CCLSOURCE:STATUS_BLOCK.INC
+)
+ 
+/****************************************************************************
+*       Initialize Variables                                                *
+*****************************************************************************/
+declare new_answer_id = f8 with protect, noconstant(0.0)
+ 
+set reply->status_data->status = "F"
+set status_count = 0
+set cur_updt_cnt = 0
+set number_of_process = cnvtint(size(request->qual,5))
+set number_of_answers = cnvtint(size(request->qual->answer_qual,5))
+set sequence_cntr = 0
+set failed = "F"
+set partial_update = "F"
+set count1 = 0
+set count2 = 0
+/****************************************************************************
+*   Inactivate the old answer if available.  Insert the new answer          *
+*****************************************************************************/
+for (x = 1 to number_of_process)
+   set count2 = 0
+   set count1 = count1 + 1
+   for (y = 1 to number_of_answers)
+     /* determine if a previous answer exists */
+     if (request->qual[x]->answer_qual[y]->answer_id > 0)
+         /* lock the previous answer for update */
+         select into "nl:"
+            a.*
+         from answer a
+         where a.module_cd = request->module_cd
+           and a.process_cd = request->qual[x]->process_cd
+           and a.question_cd = request->qual[x]->answer_qual[y]->question_cd
+           and a.answer_id = request->qual[x]->answer_qual[y]->answer_id
+           and a.active_ind = 1
+         detail
+             cur_updt_cnt = a.updt_cnt
+             sequence_cntr = a.sequence
+         with nocounter, forupdate(a)
+         /* determine if the answer record previously existed */
+         if (curqual > 0)
+            /* determine if the answer record has already been updated by another */
+            if (request->qual[x]->answer_qual[y]->updt_cnt != cur_updt_cnt)
+               set failed = "T"
+               set reply->status_data->status = "C"
+               set status_count = status_count + 1
+               /* create an occurrence of the reply record if the original occurrence previously used */
+               if (status_count > 1)
+                  set stat = alter(reply->status_data->subeventstatus, status_count+1)
+               endif
+               set reply->status_data->subeventstatus[status_count]->OperationName = "ADD"
+               set reply->status_data->subeventstatus[status_count]->OperationStatus = "F"
+               set reply->status_data->subeventstatus[status_count]->TargetObjectName = "Answer"
+               set reply->status_data->subeventstatus[status_count]->TargetObjectValue =
+                                                     "Unable to update to answer table due to updt_cnt"
+            else
+               /* create an audit trail of answers */
+               update into answer a set
+                   a.active_ind            = 0,
+                   a.inactive_dt_tm        = cnvtdatetime(curdate,curtime3),
+                   a.updt_dt_tm            = cnvtdatetime(curdate, curtime3),
+                   a.updt_id               = reqinfo->updt_id,
+                   a.updt_task             = reqinfo->updt_task,
+                   a.updt_applctx          = reqinfo->updt_applctx,
+                   a.updt_cnt              = a.updt_cnt + 1
+               where a.module_cd = request->module_cd
+                 and a.process_cd = request->qual[x]->process_cd
+                 and a.question_cd = request->qual[x]->answer_qual[y]->question_cd
+                 and a.answer_id = request->qual[x]->answer_qual[y]->answer_id
+                 and a.active_ind = 1
+               with nocounter
+               /* determine if update was successful */
+               if (curqual = 0)
+                  set failed = "T"
+                  set status_count = status_count + 1
+                  /* create an occurrence of the reply record if the original occurrence previously used */
+                  if (status_count > 1)
+                     set stat = alter(reply->status_data->subeventstatus, status_count+1)
+                  endif
+                  set reply->status_data->subeventstatus[status_count]->OperationName = "ADD"
+                  set reply->status_data->subeventstatus[status_count]->OperationStatus = "F"
+                  set reply->status_data->subeventstatus[status_count]->TargetObjectName = "Answer"
+                  set reply->status_data->subeventstatus[status_count]->TargetObjectValue =
+                                                                       "Unable to update previous answer"
+ 
+               else
+                  /* set indicator to indicate part of the add/update was done */
+                  set partial_update = "T"
+                  /* add new answer row with same answer id but increase seq to keep unique */
+                  insert into answer a set
+                     a.module_cd             = request->module_cd,
+                     a.process_cd            = request->qual[x]->process_cd,
+                     a.question_cd           = request->qual[x]->answer_qual[y]->question_cd,
+                     a.answer_id             = request->qual[x]->answer_qual[y]->answer_id,
+                     a.sequence              = sequence_cntr + 1,
+                     a.answer                = request->qual[x]->answer_qual[y]->answer,
+                     a.active_ind            = request->qual[x]->answer_qual[y]->active_ind,
+                     a.active_dt_tm          = cnvtdatetime(curdate, curtime3),
+                     a.inactive_dt_tm        = NULL,
+                     a.updt_dt_tm            = cnvtdatetime(curdate, curtime3),
+                     a.updt_id               = reqinfo->updt_id,
+                     a.updt_task             = reqinfo->updt_task,
+                     a.updt_applctx          = reqinfo->updt_applctx,
+                     a.updt_cnt              = 0
+                 with nocounter
+                 if (curqual = 0)
+                    set failed = "T"
+                    set status_count = status_count + 1
+                    /* create an occurrence of the reply record if the original occurrence previously used */
+                    if (status_count > 1)
+                       set stat = alter(reply->status_data->subeventstatus, status_count+1)
+                    endif
+                    set reply->status_data->subeventstatus[status_count]->OperationName = "ADD"
+                    set reply->status_data->subeventstatus[status_count]->OperationStatus = "F"
+                    set reply->status_data->subeventstatus[status_count]->TargetObjectName = "Answer"
+                    set reply->status_data->subeventstatus[status_count]->TargetObjectValue =
+                                                                     "Unable to add changed answer to answer table"
+                 else
+                    if (count1 > 1)
+                       set stat = alter(reply->qual, count1 + 1)
+                    endif
+                    set count2 = count2 + 1
+                    if (count2 > 1)
+                       set stat = alter(reply->qual->answer_qual, count2 + 1)
+                    endif
+                    set reply->qual[count1]->process_cd = request->qual[x]->process_cd
+                    set reply->qual[count1]->answer_qual[count2]->question_cd
+                                                           = request->qual[x]->answer_qual[y]->question_cd
+                    set reply->qual[count1]->answer_qual[count2]->answer_id
+                                                           = request->qual[x]->answer_qual[y]->answer_id
+                 endif
+               endif
+            endif
+         else
+             set failed = "T"
+             set status_count = status_count + 1
+             /* create an occurrence of the reply record if the original occurrence previously used */
+             if (status_count > 1)
+                 set stat = alter(reply->status_data->subeventstatus, status_count+1)
+             endif
+             set reply->status_data->subeventstatus[status_count]->OperationName = "ADD"
+             set reply->status_data->subeventstatus[status_count]->OperationStatus = "F"
+             set reply->status_data->subeventstatus[status_count]->TargetObjectName = "Answer"
+             set reply->status_data->subeventstatus[status_count]->TargetObjectValue = "Previous answer does not exist"
+         endif
+     else
+        if (request->qual[x]->answer_qual[y]->question_cd > 0)
+           /* insert a new answer row for a question that has never been answered before */
+           select into "nl:"
+              nextseqnum = seq(pathnet_seq,nextval)
+           from dual
+           detail
+               new_answer_id = nextseqnum
+           with format, nocounter
+ 
+           if (curqual = 0)
+               set failed = "T"
+               set status_count = status_count + 1
+               /* create an occurrence of the reply record if the original occurrence previously used */
+               if (status_count > 1)
+                 set stat = alter(reply->status_data->subeventstatus, status_count + 1)
+               endif
+               set reply->status_data->subeventstatus[status_count]->OperationName = "ADD"
+               set reply->status_data->subeventstatus[status_count]->OperationStatus = "F"
+               set reply->status_data->subeventstatus[status_count]->TargetObjectName = "Answer"
+               set reply->status_data->subeventstatus[status_count]->TargetObjectValue = "Unable to get seq number"
+           else
+              insert into answer a set
+                   a.module_cd             = request->module_cd,
+                   a.process_cd            = request->qual[x]->process_cd,
+                   a.question_cd           = request->qual[x]->answer_qual[y]->question_cd,
+                   a.answer_id             = new_answer_id,
+                   a.sequence              = 1,
+                   a.answer                = request->qual[x]->answer_qual[y]->answer,
+                   a.active_ind            = request->qual[x]->answer_qual[y]->active_ind,
+                   a.active_dt_tm          = cnvtdatetime(curdate, curtime3),
+                   a.inactive_dt_tm        = NULL,
+                   a.updt_dt_tm            = cnvtdatetime(curdate, curtime3),
+                   a.updt_id               = reqinfo->updt_id,
+                   a.updt_task             = reqinfo->updt_task,
+                   a.updt_applctx          = reqinfo->updt_applctx,
+                   a.updt_cnt              = 0
+              with nocounter
+              /* determine if insert failed */
+              if (curqual = 0)
+                  set failed = "T"
+                  set status_count = status_count + 1
+                  /* create an occurrence of the reply record if the original occurrence previously used */
+                  if (status_count > 1)
+                    set stat = alter(reply->status_data->subeventstatus, status_count+1)
+                  endif
+                  set reply->status_data->subeventstatus[status_count]->OperationName = "ADD"
+                  set reply->status_data->subeventstatus[status_count]->OperationStatus = "F"
+                  set reply->status_data->subeventstatus[status_count]->TargetObjectName = "Answer"
+                  set reply->status_data->subeventstatus[status_count]->TargetObjectValue =
+                                                                 "Unable to add new record to answer table"
+              else
+                  /* set indicator to show that at least one record was inserted */
+                  set partial_update = "T"
+                  if (count1 > 1)
+                    set stat = alter(reply->qual, count1 + 1)
+                  endif
+                  set count2 = count2 + 1
+                  if (count2 > 1)
+                    set stat = alter(reply->qual->answer_qual, count2 + 1)
+                  endif
+                  set reply->qual[count1]->process_cd = request->qual[x]->process_cd
+                  set reply->qual[count1]->answer_qual[count2]->question_cd
+                                                             = request->qual[x]->answer_qual[y]->question_cd
+                  set reply->qual[count1]->answer_qual[count2]->answer_id = new_answer_id
+              endif
+           endif
+        endif
+     endif
+   endfor
+endfor
+ 
+/****************************************************************************
+*       exit_script                                                         *
+* Determine if total failure, partial success or total success occurred     *
+*****************************************************************************/
+#exit_script
+if (failed = "T" and partial_update = "F")
+   set reqinfo->commit_ind = 0
+elseif (failed = "T" and partial_update = "T")
+   set reqinfo->commit_ind = 1
+   set reply->status_data->status = "P"
+else
+   set reqinfo->commit_ind = 1
+   set reply->status_data->status = "S"
+endif
+ 
+end go
+
+;Generated by GNU enscript 1.6.4.

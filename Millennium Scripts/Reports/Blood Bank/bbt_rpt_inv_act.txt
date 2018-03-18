@@ -1,0 +1,919 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_inv_act.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2005 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_rpt_inv_act.prg
+        Object name:            bbt_rpt_inv_act
+        Request #:              225289
+
+        Product:                PathNet Transfusion
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Print [simple] inventory activity for specified date range,
+                                based upon product_event rows
+
+        Tables read:            product_index, product_category, product, product_event
+                                bbhist_product, bbhist_product_event
+        Tables updated:         none
+        Executing from:         variety
+
+        Special Notes:
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 01/30/97 Jon Weekes           Initial Release                     *
+;     001 06/13/97 Doug Saus            Added select of owner and inventory *
+;                                       areas                               *
+;     002 03/23/98 Jon Weekes           Modified to retrieve Institutuion   *
+;                                       Name from preferences               *
+;     003 12/16/98 Doug Saus            Added parsing of batch_selection    *
+;                                       string to get owner and inv areas   *
+;     004 01/04/99 John Rieck           Added logic to print location name  *
+;                                       and address. Added the address_     *
+;                                       location_cd to request.  Added bbt_ *
+;                                       get_location_info.inc and bbt_print_*
+;                                       location_info.inc.                  *
+;     005 05/21/99 Jose Suarez          change cer_temp to cer_print        *
+;     006 09/08/99 Badari Kopparapu     Modified to use bbt_ops_owninvloc.inc
+;                                       for processing owner area, inventory*
+;                                       area & location address from batch  *
+;                                       selection field in Ops Job Templates*
+;                                       Modified to use ops_date for computing
+;                                       the report date range.              *
+;     007 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       removed bbt_ops_owninvloc.inc and   *
+;                                       added bbt_ops_parm_passed.inc       *
+;     008 08/18/00 Lawrence Dsouza      internationalized dates and time    *
+;     009 02/22/01 Chris Noe            Internationalize text               *
+;     010 01/03/02 Christi Ditmars      Add Historical products             *
+;     011 07/26/02 Jason Osborn 		Unique RPT filename project			*
+;     012 11/24/03 Chris Noe            Performance enhancement for defect  *
+;                                       CAPEP00038930.  Join first to the   *
+;                                       product_event table by event_dt_tm  *
+;                                       and event_type_cd for both live and *
+;                                       historical products.                *
+;     013 09/24/04 Jason Osborn         Modified to only grab only 1        *
+;                                       crossmatch event per product per    *
+;                                       order_id.(CAPEP00119339) *
+;                                       Active_ind is now checked on the    *
+;                                       transfused, disposed, or destroyed  *
+;                                       product_events.(CAPEP00135174)      *
+;     014 10/11/05 Jason Coy            Updated report to display the       *
+;                                       front end username.                 *
+;~DE~************************************************************************
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_rpt_inv_act:dba go
+create program bbt_rpt_inv_act:dba
+
+/*
+record request
+(
+ 1  beg_dt_tm           = dq8
+ 1  end_dt_tm           = dq8
+ 1  ops_date            = dq8
+ 1  batch_selection     = c100
+ 1  output_dist         = c100
+ 1  cur_owner_area_cd   = f8
+ 1  cur_inv_area_cd     = f8
+ 1  address_location_cd = f8
+)
+*/
+
+record reply
+(
+   1 rpt_list[*]
+      2 rpt_filename  = vc
+%i cclsource:status_block.inc
+)
+
+;Begin 009
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+
+record captions
+(
+  1  inventory_activity  = vc
+  1  time                = vc
+  1  as_of_date          = vc
+  1  bb_owner            = vc
+  1  inventory_area      = vc
+  1  beg_date            = vc
+  1  end_date            = vc
+  1  ct                  = vc
+  1  per_of              = vc
+  1  patients            = vc
+  1  per_patients        = vc
+  1  product             = vc
+  1  receivd             = vc
+  1  assignd             = vc
+  1  xmatchd             = vc
+  1  dispensd            = vc
+  1  transfsd            = vc
+  1  disposd             = vc
+  1  destryd             = vc
+  1  rc_ratio            = vc
+  1  transfsns           = vc
+  1  rpt_total           = vc
+  1  report_id           = vc
+  1  page_no             = vc
+  1  printed             = vc
+  1  rpt_by              = vc
+  1  end_of_report       = vc
+  1  all                 = vc
+)
+
+set captions->inventory_activity = uar_i18ngetmessage(i18nHandle,
+  "inventory_activity",
+  "I N V E N T O R Y   A C T I V I T Y   R E P O R T")
+set captions->time = uar_i18ngetmessage(i18nHandle,
+  "time", "Time:")
+set captions->as_of_date = uar_i18ngetmessage(i18nHandle,
+  "as_of_date", "As of Date:")
+set captions->bb_owner = uar_i18ngetmessage(i18nHandle,
+  "bb_owner", "Blood Bank Owner: ")
+set captions->inventory_area = uar_i18ngetmessage(i18nHandle,
+  "inventory_area", "Inventory Area: ")
+set captions->beg_date = uar_i18ngetmessage(i18nHandle,
+  "beg_date", "Beginning Date:")
+set captions->end_date = uar_i18ngetmessage(i18nHandle,
+  "end_date", "Ending Date:")
+set captions->ct = uar_i18ngetmessage(i18nHandle,
+  "ct", "     C/T  ")
+set captions->per_of = uar_i18ngetmessage(i18nHandle,
+  "per_of", "  % OF   ")
+set captions->patients = uar_i18ngetmessage(i18nHandle,
+  "patients", "PATIENTS")
+set captions->per_patients = uar_i18ngetmessage(i18nHandle,
+  "per_patients", "% PATIENTS")
+set captions->product = uar_i18ngetmessage(i18nHandle,
+  "product", "PRODUCT             ")
+set captions->receivd = uar_i18ngetmessage(i18nHandle,
+  "receivd", "RECEIVD")
+set captions->assignd = uar_i18ngetmessage(i18nHandle,
+  "assignd", "ASSIGND")
+set captions->xmatchd = uar_i18ngetmessage(i18nHandle,
+  "xmatchd", "XMATCHD")
+set captions->dispensd = uar_i18ngetmessage(i18nHandle,
+  "dispensd", "DISPENSD")
+set captions->transfsd = uar_i18ngetmessage(i18nHandle,
+  "transfsd", "TRANSFSD")
+set captions->disposd = uar_i18ngetmessage(i18nHandle,
+  "disposd", "DISPOSD")
+set captions->destryd = uar_i18ngetmessage(i18nHandle,
+  "destryd", "DESTRYD")
+set captions->rc_ratio = uar_i18ngetmessage(i18nHandle,
+  "rc_ratio", "RC  RATIO ")
+set captions->transfsns = uar_i18ngetmessage(i18nHandle,
+  "transfsns", "TRANSFSNS")
+set captions->rpt_total = uar_i18ngetmessage(i18nHandle,
+  "rpt_total", "TOTAL")
+set captions->report_id = uar_i18ngetmessage(i18nHandle,
+  "report_id", "Report ID: BBT_RPT_INV_ACT.PRG")
+set captions->page_no = uar_i18ngetmessage(i18nHandle,
+  "page_no", "Page:")
+set captions->printed = uar_i18ngetmessage(i18nHandle,
+  "printed", "Printed:")
+set captions->rpt_by = uar_i18ngetmessage(i18nHandle,
+  "rpt_by", "By:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+set captions->all = uar_i18ngetmessage(i18nHandle,
+  "all", "(All)")
+;End 009
+
+declare DERIVATIVE_CLASS_CD = F8
+declare stat = i4
+declare new_order_product_ind = i2 with protected, noconstant(0)
+declare reportByUsername = vc with protect, noconstant("")
+
+set stat = uar_get_meaning_by_codeset( 1606, "DERIVATIVE", 1, DERIVATIVE_CLASS_CD)
+
+;006 beg
+/* If printing from OPS, set-up beg/end_dt_tm */
+if (trim(request->batch_selection) > " ")
+  set begday = request->ops_date
+  set endday = request->ops_date
+  set temp_string = cnvtupper(trim(request->batch_selection))
+  CALL CHECK_OPT_DATE_PASSED("bbt_rpt_inv_act")
+  if (reply->status_data->status != "F")
+        set request->beg_dt_tm = begday
+        set request->end_dt_tm = endday
+  endif
+
+  call CHECK_OWNER_CD ("bbt_rpt_inv_act")
+  call CHECK_INVENTORY_CD ("bbt_rpt_inv_act")
+  call CHECK_LOCATION_CD ("bbt_rpt_inv_act")
+
+endif
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+
+%i cclsource:bbt_get_location_info.inc
+;006 end
+
+record inv_act
+(
+ 1  product[*]
+     2  product_cd              = f8
+     2  product_disp            = c20
+     2  red_cell_product_ind    = i2
+     2  active_ind              = i2
+     2  patient_cnt             = f8
+     2  received_cnt            = f8
+     2  assigned_cnt            = f8
+     2  xmatched_cnt            = f8
+     2  issued_cnt              = f8
+     2  transfused_cnt          = f8
+     2  disposed_cnt            = f8
+     2  destroyed_cnt           = f8
+     2  derivative_ind          = i2
+ 1  person[*]
+     2  person_id               = f8
+)
+
+/*
+ * Set Global Variables
+ */
+
+declare GET_EVENT_TYPE_CDS (" ") = c1
+
+    SET reply->status_data->status = "F"
+    SET count1 = 0
+    SET get_event_type_cds_status = ""
+    SET report_complete_ind = "N"
+    SET prod_cnt = 0
+    SET prod = 0
+    SET person_cnt                  = 0
+    SET tot_patient_cnt             = 0.0
+    SET tot_received_cnt            = 0.0
+    SET tot_assigned_cnt            = 0.0
+    SET tot_xmatched_cnt            = 0.0
+    SET tot_issued_cnt              = 0.0
+    SET tot_transfused_cnt          = 0.0
+    SET tot_disposed_cnt            = 0.0
+    SET tot_destroyed_cnt           = 0.0
+
+    SET totals_d_seq                = 0
+    SET active_cnt                  = 0
+
+%i cclsource:bbt_get_event_type_cds_init.inc
+
+set cur_owner_area_disp = fillstring(40," ")
+set cur_inv_area_disp = fillstring(40, " ")
+
+/* Retrieve display values for requested Owner Area and Inventory Area */
+if (request->cur_owner_area_cd = 0.0)
+    set cur_owner_area_disp = captions->all                              
+else
+    set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+endif
+
+if (request->cur_inv_area_cd = 0.0)
+    set cur_inv_area_disp = captions->all                                
+else
+    set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+endif
+
+/* Get event_type code_values */
+set get_event_type_cds_status = GET_EVENT_TYPE_CDS (" ")
+
+IF ((get_event_type_cds_status = " ")
+OR 0.0 in (received_event_type_cd, assigned_event_type_cd, crossmatched_event_type_cd,
+            issued_event_type_cd, transfused_event_type_cd, disposed_event_type_cd,
+            destroyed_event_type_cd))
+    SET reply->status_data->status = "F"
+    SET count1 = count1 + 1
+    IF (count1 > 1)
+        SET stat = alter(reply->status_data->subeventstatus, count1+1)
+    ENDIF
+    SET reply->status_data->subeventstatus[count1]->OperationName = "get event_type code_values"
+    SET reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    SET reply->status_data->subeventstatus[count1]->TargetObjectName = "code_value"
+    IF (get_event_type_cds_status = "F")
+        SET reply->status_data->subeventstatus[count1]->TargetObjectValue
+            = "could not et event_type code_values, select failed"
+    ELSEIF (received_event_type_cd = 0.0)
+        SET reply->status_data->subeventstatus[count1]->TargetObjectValue
+            = "could not get received event_type_cd"
+    ELSEIF (assigned_event_type_cd = 0.0)
+        SET reply->status_data->subeventstatus[count1]->TargetObjectValue
+            = "could not get assigned event_type_cd"
+    ELSEIF (crossmatched_event_type_cd = 0.0)
+        SET reply->status_data->subeventstatus[count1]->TargetObjectValue
+            = "could not get crossmatched event_type_cd"
+    ELSEIF (issued_event_type_cd = 0.0)
+        SET reply->status_data->subeventstatus[count1]->TargetObjectValue
+            = "could not get issued event_type_cd"
+    ELSEIF (transfused_event_type_cd = 0.0)
+        SET reply->status_data->subeventstatus[count1]->TargetObjectValue
+            = "could not get transfused event_type_cd"
+    ELSEIF (disposed_event_type_cd = 0.0)
+        SET reply->status_data->subeventstatus[count1]->TargetObjectValue
+            = "could not get disposed event_type_cd"
+    ELSEIF (destroyed_event_type_cd = 0.0)
+        SET reply->status_data->subeventstatus[count1]->TargetObjectValue
+            = "could not get destroyed event_type_cd"
+    ENDIF
+    go to EXIT_SCRIPT
+ENDIF
+
+/* Retrieve username of user printing report */
+SET reportByUsername = GET_USERNAME(reqinfo->updt_id)
+    
+;Get list of products
+
+SELECT INTO "nl:"
+    pi.product_cd
+    , pi.active_ind
+    , product_disp = uar_get_code_display(pi.product_cd)
+    , pc.product_cat_cd
+    , pc.red_cell_product_ind
+
+FROM
+    product_index pi
+    , product_category pc
+
+PLAN    pi      WHERE   pi.product_cd               > 0.0
+JOIN    pc      WHERE   pc.product_cat_cd           = pi.product_cat_cd
+                          AND pc.product_class_cd   = pi.product_class_cd
+
+ORDER BY    product_disp, pi.product_cd
+
+HEAD REPORT
+    prod_cnt = 0
+
+HEAD pi.product_cd
+    prod_cnt = prod_cnt + 1
+    IF (MOD(prod_cnt, 20) = 1)
+        stat = ALTERLIST(inv_act->product, prod_cnt + 19)
+    ENDIF
+    inv_act->product[prod_cnt]->product_cd              = pi.product_cd
+    inv_act->product[prod_cnt]->active_ind              = pi.active_ind
+    if (pi.active_ind = 1)
+      active_cnt = active_cnt + 1
+    endif
+    inv_act->product[prod_cnt]->product_disp            = product_disp
+    inv_act->product[prod_cnt]->red_cell_product_ind    = pc.red_cell_product_ind
+    if (pi.product_class_cd = DERIVATIVE_CLASS_CD)
+        inv_act->product[prod_cnt]->derivative_ind = 1
+    else
+        inv_act->product[prod_cnt]->derivative_ind = 0
+    endif
+    inv_act->product[prod_cnt]->patient_cnt             = 0
+    inv_act->product[prod_cnt]->received_cnt            = 0
+    inv_act->product[prod_cnt]->assigned_cnt            = 0
+    inv_act->product[prod_cnt]->xmatched_cnt            = 0
+    inv_act->product[prod_cnt]->issued_cnt              = 0
+    inv_act->product[prod_cnt]->transfused_cnt          = 0
+    inv_act->product[prod_cnt]->disposed_cnt            = 0
+    inv_act->product[prod_cnt]->destroyed_cnt           = 0
+
+foot report
+    stat = ALTERLIST(inv_act->product, prod_cnt)
+WITH    nocounter
+
+
+;Get live products
+SELECT INTO "nl:"
+    p.product_id
+    , derivative_ind = inv_act->product[d1.seq]->derivative_ind
+    , pe.event_dt_tm
+    , pe.event_type_cd
+    , pe.event_status_flag
+    , pe.person_id
+    , re.product_event_id
+    , disp.product_event_id
+    , dest.product_event_id
+    , ass.product_event_id
+    , pd.product_event_id
+    , tran.product_event_id
+    , pe.order_id
+
+FROM
+    (dummyt d1 with seq =value(prod_cnt))
+    , product p
+    , product_event pe
+    , (dummyt d_re with seq = 1)
+    , (dummyt d_derivatives with seq = 1)
+    , receipt re
+    , disposition disp
+    , destruction dest
+    , assign ass
+    , patient_dispense pd
+    , transfusion tran
+
+PLAN    pe     WHERE pe.event_dt_tm    between cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm)
+                     AND ((pe.event_type_cd in (received_event_type_cd
+                                              , assigned_event_type_cd
+                                              , crossmatched_event_type_cd
+                                              , issued_event_type_cd))
+                      OR (pe.event_type_cd in (transfused_event_type_cd
+                                              , disposed_event_type_cd
+                                              , destroyed_event_type_cd)
+                                           AND pe.active_ind = 1))
+JOIN    p    WHERE  p.product_id = pe.product_id 
+                     and ((request->cur_owner_area_cd > 0.0
+                           and p.cur_owner_area_cd = request->cur_owner_area_cd)
+                         or (request->cur_owner_area_cd = 0.0))
+                     and ((request->cur_inv_area_cd > 0.0
+                           and p.cur_inv_area_cd = request->cur_inv_area_cd)
+                         or (request->cur_inv_area_cd = 0.0))
+JOIN    d1 where inv_act->product[d1.seq]->product_cd = p.product_cd
+JOIN    d_re
+        ;Need this extra dummy to skip the orjoins below for blood_products because they are slow
+        ;can't put this check on d_re because then it wouldn't go to the detail for blood products
+        join    d_derivatives WHERE  inv_act->product[d1.seq]->derivative_ind = 1
+        JOIN    ( re   WHERE  re.product_event_id  = pe.product_event_id
+        orjoin (disp  where disp.product_event_id     = pe.product_event_id)
+        orjoin (dest  where dest.product_event_id     = pe.product_event_id)
+        orjoin (ass   where ass.product_event_id      = pe.product_event_id)
+        orjoin (pd    where pd.product_event_id       = pe.product_event_id)
+        orjoin (tran  where tran.product_event_id     = pe.product_event_id))
+ORDER BY    p.product_cd, pe.event_type_cd, pe.person_id, pe.order_id, pe.product_id, pe.product_event_id
+
+HEAD p.product_cd
+    event_cnt = 0
+
+HEAD pe.event_type_cd
+    person_id_hd = 0.0
+    
+head pe.person_id
+    row + 0
+    
+head pe.order_id
+    row + 0
+
+HEAD pe.product_id
+    new_order_product_ind = 1
+    
+head pe.product_event_id
+    row + 0
+
+DETAIL
+        event_cnt = event_cnt + 1
+        IF (pe.event_type_cd = received_event_type_cd)
+            IF (derivative_ind = 1)
+                tot_received_cnt = tot_received_cnt + re.orig_rcvd_qty
+                inv_act->product[d1.seq]->received_cnt
+                   = inv_act->product[d1.seq]->received_cnt + re.orig_rcvd_qty
+            ELSE
+                tot_received_cnt = tot_received_cnt + 1
+                inv_act->product[d1.seq]->received_cnt
+                   = inv_act->product[d1.seq]->received_cnt + 1
+            ENDIF
+        ELSEIF (pe.event_type_cd = assigned_event_type_cd)
+            IF (derivative_ind = 1)
+                tot_assigned_cnt = tot_assigned_cnt + ass.orig_assign_qty
+                inv_act->product[d1.seq]->assigned_cnt
+                        = inv_act->product[d1.seq]->assigned_cnt + ass.orig_assign_qty
+            ELSE
+                tot_assigned_cnt = tot_assigned_cnt + 1
+                inv_act->product[d1.seq]->assigned_cnt
+                        = inv_act->product[d1.seq]->assigned_cnt + 1
+            ENDIF
+        ELSEIF (pe.event_type_cd = crossmatched_event_type_cd)
+            if (new_order_product_ind = 1)
+               tot_xmatched_cnt = tot_xmatched_cnt + 1
+               inv_act->product[d1.seq]->xmatched_cnt
+                   = inv_act->product[d1.seq]->xmatched_cnt + 1
+               new_order_product_ind = 0
+            endif
+        ELSEIF (pe.event_type_cd = issued_event_type_cd)
+            IF (derivative_ind = 1)
+                tot_issued_cnt = tot_issued_cnt + pd.orig_dispense_qty
+                inv_act->product[d1.seq]->issued_cnt
+                        = inv_act->product[d1.seq]->issued_cnt + pd.orig_dispense_qty
+            ELSE
+                tot_issued_cnt = tot_issued_cnt + 1
+                inv_act->product[d1.seq]->issued_cnt
+                        = inv_act->product[d1.seq]->issued_cnt + 1
+            ENDIF
+        ELSEIF (pe.event_type_cd = transfused_event_type_cd)
+            IF (derivative_ind = 1)
+                tot_transfused_cnt = tot_transfused_cnt + tran.orig_transfused_qty
+                inv_act->product[d1.seq]->transfused_cnt
+                        = inv_act->product[d1.seq]->transfused_cnt + tran.orig_transfused_qty
+            ELSE
+                tot_transfused_cnt = tot_transfused_cnt + 1
+                inv_act->product[d1.seq]->transfused_cnt
+                        = inv_act->product[d1.seq]->transfused_cnt + 1
+            ENDIF
+            IF (pe.person_id != NULL AND pe.person_id > 0)
+                IF (pe.person_id != person_id_hd)
+                    person_id_hd = pe.person_id
+                    inv_act->product[d1.seq]->patient_cnt = inv_act->product[d1.seq]->patient_cnt + 1
+
+                    person_cnt = person_cnt + 1
+                    IF (MOD(person_cnt, 20) = 1)
+                        stat = ALTERLIST(inv_act->person, person_cnt + 19)
+                    ENDIF
+                    inv_act->person[person_cnt]->person_id = pe.person_id
+                ENDIF
+            ENDIF
+        ELSEIF (pe.event_type_cd = disposed_event_type_cd)
+            IF (derivative_ind = 1)
+                tot_disposed_cnt = tot_disposed_cnt + disp.disposed_qty
+                inv_act->product[d1.seq]->disposed_cnt = inv_act->product[d1.seq]->disposed_cnt + disp.disposed_qty
+            ELSE
+                tot_disposed_cnt = tot_disposed_cnt + 1
+                inv_act->product[d1.seq]->disposed_cnt = inv_act->product[d1.seq]->disposed_cnt + 1
+            ENDIF
+        ELSEIF (pe.event_type_cd = destroyed_event_type_cd
+          AND pe.event_status_flag = 0)
+            IF (derivative_ind = 1)
+               tot_destroyed_cnt = tot_destroyed_cnt + dest.destroyed_qty
+               inv_act->product[d1.seq]->destroyed_cnt = inv_act->product[d1.seq]->destroyed_cnt + dest.destroyed_qty
+            ELSE
+                tot_destroyed_cnt = tot_destroyed_cnt + 1
+                inv_act->product[d1.seq]->destroyed_cnt = inv_act->product[d1.seq]->destroyed_cnt + 1
+            ENDIF
+        ENDIF
+
+FOOT p.product_cd
+
+     ; Only include include product_cds that are active or that have
+     ; product_event activity
+
+    IF (event_cnt >  0 and inv_act->product[d1.seq]->active_ind = 0)
+        active_cnt = active_cnt + 1
+        inv_act->product[d1.seq]->active_ind = 1
+    ENDIF
+
+WITH    nocounter, OUTERJOIN(d_re)
+
+;Get Historical Products
+SELECT INTO "nl:"
+    product_cd = inv_act->product[d1.seq]->product_cd
+    , derivative_ind = inv_act->product[d1.seq]->derivative_ind
+    , p.product_id
+    , pe.event_dt_tm
+    , pe.event_type_cd
+    , pe.event_status_flag
+    , pe.person_id
+FROM
+    (dummyt d1 with seq = prod_cnt)
+    , bbhist_product p
+    , bbhist_product_event pe
+
+PLAN    pe
+    WHERE pe.event_dt_tm between cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm)  
+      AND pe.event_type_cd in (transfused_event_type_cd
+                               , destroyed_event_type_cd) ; These will be the only event types on the bbhist_product_event table
+        
+JOIN    p
+    WHERE   p.product_id = pe.product_id
+        and ((p.owner_area_cd = request->cur_owner_area_cd
+              and  request->cur_owner_area_cd > 0.0)
+              or (request->cur_owner_area_cd = 0.0))
+        and ((request->cur_inv_area_cd = p.inv_area_cd
+              and request->cur_inv_area_cd > 0.0)
+              or (request->cur_inv_area_cd = 0.0))
+
+JOIN    d1 where inv_act->product[d1.seq]->product_cd = p.product_cd
+              
+ORDER BY    product_cd, pe.event_type_cd, pe.person_id, pe.product_event_id
+
+HEAD product_cd
+    event_cnt = 0
+
+HEAD pe.event_type_cd
+    person_id_hd = 0.0
+    i = 0
+
+DETAIL
+    event_cnt = event_cnt + 1
+    IF (pe.event_type_cd = transfused_event_type_cd)
+        IF (derivative_ind = 1)
+            tot_transfused_cnt = tot_transfused_cnt + pe.qty
+            inv_act->product[d1.seq]->transfused_cnt
+                = inv_act->product[d1.seq]->transfused_cnt + pe.qty
+        ELSE
+            tot_transfused_cnt = tot_transfused_cnt + 1
+            inv_act->product[d1.seq]->transfused_cnt
+                = inv_act->product[d1.seq]->transfused_cnt + 1
+        ENDIF
+        IF (pe.person_id > 0.0)
+            IF (pe.person_id != person_id_hd)
+                person_id_hd = pe.person_id
+                ;Add to person_cnt for this product event if we find the person in the struct already
+                inv_act->product[d1.seq]->patient_cnt = inv_act->product[d1.seq]->patient_cnt + 1
+
+                 person_cnt = person_cnt + 1
+                 IF (MOD(person_cnt, 20) = 1)
+                    stat = ALTERLIST(inv_act->person, person_cnt + 19)
+                 ENDIF
+                 
+                 inv_act->person[person_cnt]->person_id = pe.person_id
+            ENDIF
+        ENDIF
+    ELSEIF (pe.event_type_cd = destroyed_event_type_cd)
+        IF (derivative_ind = 1)
+           tot_destroyed_cnt = tot_destroyed_cnt + pe.qty
+           inv_act->product[d1.seq]->destroyed_cnt = inv_act->product[d1.seq]->destroyed_cnt + pe.qty
+        ELSE
+            tot_destroyed_cnt = tot_destroyed_cnt + 1
+            inv_act->product[d1.seq]->destroyed_cnt = inv_act->product[d1.seq]->destroyed_cnt + 1
+        ENDIF
+    ENDIF
+
+FOOT product_cd
+     ; Only activate products that were inactive after last select and have events from this select
+    IF (inv_act->product[d1.seq]->active_ind = 0 AND event_cnt >  0)
+        active_cnt = active_cnt + 1
+        inv_act->product[d1.seq]->active_ind = 1
+    ENDIF
+
+WITH    nocounter
+
+set stat = ALTERLIST(inv_act->person, person_cnt)
+set totals_d_seq = prod_cnt + 1
+
+/*
+ * Determine number of DIFFERENT patients
+ */
+
+set tot_patient_cnt = 0
+
+SELECT INTO "nl:"
+    d.seq
+    , person_id = inv_act->person[d.seq]->person_id
+
+FROM
+    (dummyt d with seq = value(person_cnt))
+
+ORDER BY    person_id
+
+HEAD person_id
+    IF (person_id > 0
+    AND d.seq > 0)
+        tot_patient_cnt = tot_patient_cnt + 1
+    ENDIF
+
+WITH    nocounter
+
+
+/*
+ * Print Report
+ */
+
+set select_ok_ind = 0
+set rpt_cnt = 0
+
+execute cpm_create_file_name_logical "bbt_inv_act", "txt", "x"
+
+select into cpm_cfn_info->file_name_logical	
+
+    d.seq
+
+FROM
+    (dummyt d with seq = value(totals_d_seq))
+
+HEAD REPORT
+    line        = fillstring(130, "-")
+    beg_dt_tm   = cnvtdatetime(request->beg_dt_tm)
+    end_dt_tm   = cnvtdatetime(request->end_dt_tm)
+
+    tot_trans_pcnt = 0.0
+    first_page = "Y"
+    select_ok_ind = 0
+
+HEAD PAGE
+    new_page = "Y"
+    ROW + 1
+    row 0
+    CALL CENTER(captions->inventory_activity, 1, 132)                                        
+    col 107, captions->time,                                                                  
+    col 121, CURTIME "@TIMENOSECONDS;;M",     ;"HH:MM;;M",
+    row + 1
+    col 107, captions->as_of_date,                                                                 
+    col 121, CURDATE "@DATECONDENSED;;d",     ;"DDMMMYY;;DATE",
+%i cclsource:bbt_print_location_info.inc
+    row + 1
+      col 1, captions->bb_owner,                                                                    
+      col 19, cur_owner_area_disp,
+      row + 1
+      col 1, captions->inventory_area,                                                                        
+      col 17, cur_inv_area_disp
+    ROW + 2
+        COL 034,    captions->beg_date                                                         
+        COL 050,    beg_dt_tm "@DATETIMECONDENSED;;d"   ;"mm/dd/yy;;d"
+        COL 073,    captions->end_date                                                               
+        COL 086,    end_dt_tm "@DATETIMECONDENSED;;d"   ;"mm/dd/yy;;d"
+
+    ROW + 2
+        COL 088,    captions->ct                                                                   
+        COL 100,    captions->per_of                                                               
+        COL 111,    captions->patients                                                            
+        COL 121,    captions->per_patients                                                       
+
+    ROW + 1
+        COL 001,    captions->product                                                             
+        COL 023,    captions->receivd                                                            
+        COL 032,    captions->assignd                                                                
+        COL 041,    captions->xmatchd                                                               
+        COL 050,    captions->dispensd                                                             
+        COL 060,    captions->transfsd                                                               
+        COL 070,    captions->disposd                                                              
+        COL 079,    captions->destryd                                                                                        
+        COL 088,    captions->rc_ratio                                                                                    
+        COL 100,    captions->transfsns                                                                              
+        COL 111,    captions->transfsd                                                                                          
+        COL 121,    captions->transfsd                                                                                          
+
+    ROW + 1
+        COL 001,    "--------------------"
+        COL 023,    "-------"
+        COL 032,    "-------"
+        COL 041,    "-------"
+        COL 050,    "--------"
+        COL 060,    "--------"
+        COL 070,    "-------"
+        COL 079,    "-------"
+        COL 088,    "----------"
+        COL 100,    "---------"
+        COL 111,    "--------"
+        COL 121,    "----------"
+
+DETAIL
+    IF (d.seq != totals_d_seq)
+        IF (inv_act->product[d.seq]->active_ind = 1)
+            IF (first_page = "Y")
+                first_page = "N"
+            ELSE
+                ROW + 1
+                IF (ROW > 56)
+                    BREAK
+                ENDIF
+            ENDIF
+
+            ROW + 1
+                COL 001,    inv_act->product[d.seq]->product_disp
+                COL 024,    inv_act->product[d.seq]->received_cnt "######"
+                COL 033,    inv_act->product[d.seq]->assigned_cnt "######"
+                COL 042,    inv_act->product[d.seq]->xmatched_cnt "######"
+                COL 052,    inv_act->product[d.seq]->issued_cnt "######"
+                COL 062,    inv_act->product[d.seq]->transfused_cnt "######"
+                COL 071,    inv_act->product[d.seq]->disposed_cnt "######"
+                COL 080,    inv_act->product[d.seq]->destroyed_cnt "######"
+
+                IF (inv_act->product[d.seq]->red_cell_product_ind = 1)
+                    COL 088,    "*"
+                    ct_ratio = 0.0
+                    IF (inv_act->product[d.seq]->transfused_cnt > 0)
+                        ct_ratio = (inv_act->product[d.seq]->xmatched_cnt
+                                / inv_act->product[d.seq]->transfused_cnt)
+                    else
+                        ct_ratio = inv_act->product[d.seq]->xmatched_cnt
+                    ENDIF
+                    COL 090,    ct_ratio "###.####"
+                ENDIF
+
+                trans_pcnt = 0.0
+                trans_pcnt = (inv_act->product[d.seq]->transfused_cnt / tot_transfused_cnt) * 100
+                tot_trans_pcnt = tot_trans_pcnt + trans_pcnt
+                COL 101,    trans_pcnt "###.##"
+                COL 108,    "%"
+
+                COL 113,    inv_act->product[d.seq]->patient_cnt "######"
+
+                pat_trans_pcnt = 0.0
+                pat_trans_pcnt = (inv_act->product[d.seq]->patient_cnt / tot_patient_cnt) * 100
+                COL 123,    pat_trans_pcnt "###.##"
+                COL 130,    "%"
+        ENDIF
+    ELSE
+        ROW + 1
+        IF (ROW > 55)
+            BREAK
+        ELSE
+            COL 001,    "--------------------"
+            COL 023,    "-------"
+            COL 032,    "-------"
+            COL 041,    "-------"
+            COL 050,    "--------"
+            COL 060,    "--------"
+            COL 070,    "-------"
+            COL 079,    "-------"
+            COL 088,    "----------"
+            COL 100,    "---------"
+            COL 111,    "--------"
+            COL 121,    "----------"
+        ENDIF
+
+        ROW + 1
+            COL 001,    captions->rpt_total                                                                                     
+            COL 007,    "("
+            COL 008,    active_cnt "####"
+            COL 012,    ")"
+            COL 024,    tot_received_cnt "######"
+            COL 033,    tot_assigned_cnt "######"
+            COL 042,    tot_xmatched_cnt "######"
+            COL 052,    tot_issued_cnt "######"
+            COL 062,    tot_transfused_cnt "######"
+            COL 071,    tot_disposed_cnt "######"
+            COL 080,    tot_destroyed_cnt "######"
+
+            COL 111,    tot_patient_cnt "######"
+
+            ct_ratio = 0.0
+            IF (tot_transfused_cnt > 0)
+                ct_ratio = (tot_xmatched_cnt / tot_transfused_cnt)
+            else
+                ct_ratio = tot_xmatched_cnt
+            ENDIF
+            COL 088,    "*"
+            COL 090,    ct_ratio "###.####"
+
+            COL 101,    tot_trans_pcnt "###.##"
+            COL 108,    "%"
+
+            COL 113,    tot_patient_cnt "######"
+            pat_trans_pcnt = 0.0
+            pat_trans_pcnt = (tot_patient_cnt / tot_patient_cnt) * 100
+            COL 123,    pat_trans_pcnt "###.##"
+            COL 130,    "%"
+    ENDIF
+
+FOOT PAGE
+    ROW 058,
+        COL 001,    line
+
+    ROW + 1
+        COL 001,    captions->report_id                                                                                         
+        COL 060,    captions->page_no                                                                                        
+        COL 067,    curpage "###"
+        COL 103,    captions->printed                                                                                        
+        COL 113,    curdate  "@DATECONDENSED;;d" ;"mm/dd/yy;;d"
+        COL 123,    curtime "@TIMENOSECONDS;;M"  ;"hh:mm;;m"
+
+    ROW + 1
+        COL 113,    captions->rpt_by                                                                                        
+        COL 117,    reportByUsername "##############" 
+
+FOOT REPORT
+    ROW 061
+        call center(captions->end_of_report, 1, 125)                                                            
+    report_complete_ind = "Y"
+    select_ok_ind = 1
+
+WITH    nocounter, OUTERJOIN(d_pe), MAXROW = 63, NULLREPORT, COMPRESS,NOLANDSCAPE
+
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path	
+
+if (select_ok_ind = 1)
+    set reply->status_data->status = "S"
+endif
+
+IF (trim(request->batch_selection) > " " and reply->status_data->status = "S")
+    SET spool value(reply->rpt_list[rpt_cnt].rpt_filename) value(request->output_dist)
+ENDIF
+
+go to EXIT_SCRIPT
+
+%i cclsource:bbt_get_username.inc
+
+%i cclsource:bbt_get_event_type_cds_sub.inc
+
+#EXIT_SCRIPT
+
+end go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,1002 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/RESULTENTRYFORBLOODBANK/BBT_GET_ORDERS_BY_ACCN.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2006 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_orders_by_accn.prg
+        Object name:            bbt_get_orders_by_accn
+        Request #:              225068
+
+        Product:                Blood Bank
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load order, task assay, result information
+                                and product for a given accession for result entry.
+
+        Tables read:            assay_processing_list
+                                container
+                                container_accession
+                                code_value
+                                order_comment
+                                order_serv_res_container
+                                orders
+                                profile_task_r
+                                prsnl
+
+        Tables updated:         None
+        Executing from:         
+
+        Special Notes:          
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 06/05/96 Yvonne Klipfel       Initial Release                     *
+;    *001 11/14/97 Jon Weekes           Modified to return o.updt_cnt       *
+;    *002 07/31/98 Doug Saus            Added specimen_id to reply          *
+;    *003 11/14/98 Jon Weekes           Modified to only retrieve logged-in *
+;    *        orders if they have a Dept_Status_Cd of LabInLab.  Other      *
+;    *        orders will be retrieved as before.                           *
+;    *004 12/3/99  Jose Suarez          Added inprocess order_status and    *
+;    *       labinprocess dept_status                                       *
+;    *005 01/10/00 Jon Weekes           Major structural modifications to   *
+;    *       improve retrieval of container information.  Also, changed to  *
+;    *       only return one container per service resource.  Also          *
+;    *       modified to use UAR's to retrieve necessary Code Values.       *
+;    *006 01/14/02 Sasi Gandham         Replaced osrc.order_id with         *
+;    *                                  o.order_id to comply with Head Order*
+;    *                                  Standard                            *
+;    *007 07/29/02 Ronda Zheng          Retrieve drawn_username from container*
+;                                       and prsnl tables                    *
+;    *008 08/20/02 Chris Heil           Account for drawn_id of 0           *
+;    *009 08/30/02 John Rieck           Updated to return orders based on   *
+;    *                                  service resource security (HIPAA).  *
+;    *010 05/21/03 Ronda Zheng          Retrive "Blood Bank Donor" orders   *
+;    *011 02/17/05 Jason Osborn         Filter out Discontinued and Deleted *
+;    *                                  orders.                             *
+;    *012 08/01/06 Ryan Manuel          Added last_update_provider_id to    *
+;                                       the reply.                          *
+;    *013 08/09/06 Jim Jensen           Do not return orders with a row on  *
+;    *                                  the BB_EXCEPTION table with:        *
+;    *                                  exception_type     = "MSBOS"        *
+;    *                                  override_reason_cd = 0.0.           *
+;    *014 09/29/06 Jason Coy            Update with flexible specimen logic.*
+;    *015 11/10/06 Gary Runde           Updated to support PCS Imaging      *
+;    *016 01/12/09 Ronda zheng          Removed donor code.                 *
+;    *017 18/11/10 Archita S            Modified to return correct container*
+;                                       details as per the CR 1-4329792021  * 
+;    *018 07/16/13 Gayatri Samala       Fix for CR 1-7027895211,to populate *
+;										reply structure by qualifying on    *
+;										primary accession for the order     *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program BBT_GET_ORDERS_BY_ACCN:dba go    
+create program BBT_GET_ORDERS_BY_ACCN:dba
+
+/*
+record request
+(
+ 1  accession                    = c20
+ 1  cat_cnt                      = i4
+ 1  catlist[*]
+     2  catalog_cd               = f8
+     2  sequence                 = i4
+ 1  resource_security_ind        = i2
+)
+*/
+
+
+record reply
+( 
+ 1  person_id                    = f8
+ 1  encntr_id                    = f8
+ 1  qual[*]
+     2  order_id                  = f8
+     2  order_mnemonic            = vc
+     2  status_flag               = i2
+     2  catalog_cd                = f8
+     2  catalog_type_cd           = f8
+     2  order_status_cd           = f8
+     2  order_status_disp         = vc
+     2  order_status_mean         = c12
+     2  order_comment_ind         = i2
+     2  activity_type             = c12 
+     2  updt_cnt                  = i4          ; 001
+     2  bb_processing_cd          = f8
+     2  bb_processing_disp        = vc
+     2  bb_processing_mean        = c12
+     2  bb_default_phases_cd      = f8          ;lqs
+     2  total_xm_cnt              = i4
+     2  drawn_dt_tm               = dq8
+     2  drawn_username            = c25
+     2  phase_grp_cd            = f8            ;lqs
+     2  phase_grp_disp          = vc            ;lqs
+     2  container_serv_res_cnt    = i4
+     2  container_serv_res[*]
+         3  specimen_id           = f8          ; 002
+         3  container_id           = f8
+         3  order_serv_res_upd_cnt = i4
+         3  service_resource_cd    = f8
+         3  service_resource_disp  = vc
+         3  cell_cnt               = i4    
+         3  cells[*]                      
+             4  order_id            = f8     
+             4  order_cell_id       = f8    
+             4  cell_cd             = f8    
+             4  cell_disp           = vc    
+             4  cell_mean           = c12   
+             4  product_id          = f8    
+             4  bb_result_id        = f8    
+             4  order_cell_updt_cnt = i4    
+         3  products_cnt           = i4
+         3  products[*]
+             4  product_id          = f8
+             4  bb_result_id        = f8
+             4  product_event_id    = f8
+             4  updt_cnt            = i4
+         3  assays_cnt             = i4
+         3  assays[*]
+             4  task_assay_cd       = f8
+             4  sequence            = i4
+             4  pending_ind         = i2
+             4  order_phase_id      = f8        ;lqs  later will need to handle multiple phases  yck moved
+         3  expiration_dt_tm        = dq8
+     2  last_update_provider_id     = f8
+     2  spec_flex_ind               = i2
+     2  order_encntr_facility_cd    = f8
+     2  testing_facility_cd         = f8
+     2  activity_type_cd            = f8
+%i cclsource:status_block.inc
+)
+
+; Include the following file for performing service resource security checking
+%i cclsource:pcs_resource_security.inc
+
+%i cclsource:bbt_get_code_value_by_cdf.inc
+
+; Include the following file for flexible specimen implementation.
+%i cclsource:BBT_GetBBPreference.inc
+%i cclsource:bbt_calc_flex_expiration.inc
+
+#SCRIPT
+;**
+;* Declare/Initialize CCL error handling variables
+;**
+
+declare sErrorMsg               = c255
+set nErrorStatus                = ERROR(sErrorMsg,1)
+
+declare TargetObjectName        = c25
+declare TargetObjectValue       = c255
+
+set count1                      = 0
+
+;**
+;* Declare/Initialize Variables
+;**
+
+set ACTIVITY_TYPE_CODESET           = 106
+set ACTIVITY_TYPE_BB_CDF            = "BB"
+set ORDER_STATUS_CODESET            = 6004
+set DEPT_STATUS_CODESET             = 14281             ; 003
+set DEPT_STATUS_LABINLAB_CDF        = "LABINLAB"        ; 003
+set DEPT_STATUS_LABINPROCESS_CDF    = "LABINPROCESS"    ; 004
+set ORDER_STATUS_CANCELED_CDF       = "CANCELED"
+set ORDER_STATUS_DELETED_CDF        = "DELETED"              
+set ORDER_STATUS_DISCONTINUED_CDF   = "DISCONTINUED"     
+set ORDER_STATUS_ORDERED_CDF        = "ORDERED"         ; 003
+set ORDER_STATUS_INPROCESS_CDF      = "INPROCESS"       ; 004
+set PRODUCT_STATES_CODESET          = 1610
+set IN_PROGRESS_CDF                 = "16"
+set CROSSMATCH_CDF                  = "3"
+
+declare order_status_canceled_cd    = f8
+declare order_status_deleted_cd     = f8   
+declare order_status_discontinued_cd = f8 
+declare order_status_ordered_cd     = f8                ; 003
+declare order_status_inprocess_cd   = f8                ; 004
+declare dept_status_labinlab_cd     = f8                ; 003
+declare dept_status_labinprocess_cd = f8                ; 004
+declare in_progress_cd              = f8
+declare crossmatch_cd               = f8
+declare bb_activity_cd              = f8
+
+declare qual_cnt                    = i4                ; Orders
+declare max_cntr_cnt                = i4
+declare qual_idx                    = i4     with protect, noconstant(0)
+declare container_serv_res_cnt      = i4     with protect, noconstant(0)
+declare container_serv_res_idx      = i4     with protect, noconstant(0)
+
+; Stores the value of the operation name
+declare operation_name              = c25 with noconstant(fillstring(25," ")) 
+; Set to TRUE if service resource security has been granted to the user
+declare srs_granted                 = i2 with noconstant(FALSE)
+; Set to TRUE if order was found
+declare order_found                 = i2 with noconstant(FALSE)
+; Set to the value from the table and then sent into the IsResourceViewable function
+declare service_resource_cd         = f8 with noconstant(0.0)
+
+
+; Set MSBOS exception_type variables
+declare lEXCEPTION_TYPE_CS          = i4 with protect,   constant(14072)
+declare sMSBOS_CDF                  = c5 with protect,   constant("MSBOS") 
+declare exception_msbos_cd          = f8 with protect, noconstant(0.0)
+
+; Initialize resource security
+call InitResourceSecurity(validate(request->resource_security_ind, 0))
+
+set reply->status_data.status       = "F"
+
+
+;**
+;* Retrieve Processing Code Values
+;**
+
+set sErrorMsg = ""
+set nErrorStatus = ERROR(sErrorMsg,1)
+
+
+if (GET_PROCESSING_CODE_VALUES(0) = 0)
+    go to EXIT_SCRIPT
+endif
+
+
+set nErrorStatus = ERROR(sErrorMsg,0)
+if (nErrorStatus > 0)
+    call ADD_REPLY_STATUS_EVENT
+        (
+         /* ScriptStatus        */ "F"
+         /* OperationName       */ , "Get processing Code Values"
+         /* OperationStatus     */ , "F"
+         /* TargetObjectName    */ , "_cd fields"    
+         /* TargetObjectValue   */ , "CCL Error retrieving processing code values"
+        )
+
+    go to EXIT_SCRIPT
+endif
+
+
+;**
+;* Retrieve orders and associated data based on request->accession
+;*
+;*  - Retrieve associated orders (Order_Id) from ACCESSION_ORDER_R
+;*  - Retrieve order information from ORDERS
+;*  - Retrieve order bb processing type from SERVICE_DIRECTORY
+;*  - Retrieve associated service resources (Service_Resource_Cd) and containers (Container_Id)
+;*      from ORDER_SERV_RES_CONTAINER
+;*
+;**
+
+set sErrorMsg = ""
+set nErrorStatus = ERROR(sErrorMsg,1)
+
+select into "nl:"
+    aor.seq
+    , aor.accession 
+    , aor.order_id
+    , cat_seq 
+        = if (request->cat_cnt > 0)
+            request->catlist[d_cat.seq]->sequence
+          else
+              0
+          endif
+    , o.order_status_cd
+    , o.dept_status_cd
+    , o.catalog_cd
+    , o.order_mnemonic "####################"    
+    , sd.bb_processing_cd
+    , osrc.service_resource_cd
+    , osrc.container_id
+    , c.drawn_dt_tm ";;f"
+    , c.specimen_id
+    , pnl.username
+
+from
+    accession_order_r aor
+    , (dummyt d_cat with seq = value(request->cat_cnt))
+    , orders o
+    , service_directory sd
+    , encounter e
+    , order_serv_res_container osrc
+    , container c
+    , prsnl pnl
+    , bb_exception be
+
+plan    aor     where   aor.accession = request->accession and aor.primary_flag = 0
+join    d_cat
+join    o       where   o.order_id = aor.order_id
+                        and o.order_status_cd not in (order_status_canceled_cd,
+                                                      order_status_discontinued_cd,
+                                                      order_status_deleted_cd)
+                          and (o.activity_type_cd = bb_activity_cd)
+                          and ((request->cat_cnt = 0)
+                            or (request->cat_cnt > 0
+                                and o.catalog_cd = request->catlist[d_cat.seq]->catalog_cd))
+join    sd      where   sd.catalog_cd = o.catalog_cd 
+                          and sd.active_ind = 1
+join    e       where   e.encntr_id = o.encntr_id
+join    osrc    where   osrc.order_id = o.order_id
+join    be      where   be.order_id           = outerjoin(o.order_id)
+                  and   be.exception_type_cd  = outerjoin(exception_msbos_cd)
+                  and   be.override_reason_cd = outerjoin(0.0)
+                  and   be.active_ind         = outerjoin(1)
+join    c       where   c.container_id = osrc.container_id
+join    pnl     where   pnl.person_id  = c.drawn_id
+
+order by
+    cat_seq,
+    o.orig_order_dt_tm,
+    o.order_id,
+    osrc.service_resource_cd,
+    osrc.container_id           ; 005 (Moved from above osrc.service_resource_cd)    
+
+head report
+    stat = alterlist(reply->qual, 3)
+
+    reply->person_id                            = o.person_id
+    reply->encntr_id                            = o.encntr_id
+
+    qual_cnt = 0
+    cntr_cnt = 0
+ 
+head o.orig_order_dt_tm
+	row + 0
+ 
+head o.order_id
+    ; Determine if the user has security to view the specified orderable.  If
+    ; not, then set a granted variable to FALSE and do not load the orderable.
+    srs_granted = FALSE ; reinitialize
+    service_resource_cd = osrc.service_resource_cd
+    
+    ; Call the function to determine if the user has security
+    srs_granted = IsResourceViewable(service_resource_cd)
+    
+    ; Set the order_found boolean to TRUE so the script will know which error
+    ; message to return if the user has no security to view any orderables.
+    order_found = TRUE
+    
+    if (srs_granted = TRUE and be.order_id = 0.00)
+       qual_cnt = qual_cnt + 1
+   
+       ;** determine if array resize is necessary
+       if (mod(qual_cnt,3) = 1 and qual_cnt != 1)
+           stat = alterlist(reply->qual, qual_cnt + 2)
+       endif
+   
+       reply->qual[qual_cnt].order_id                 = o.order_id
+   
+   
+       reply->qual[qual_cnt].order_mnemonic           = o.order_mnemonic
+       reply->qual[qual_cnt].catalog_cd               = o.catalog_cd
+       reply->qual[qual_cnt].catalog_type_cd          = o.catalog_type_cd
+       reply->qual[qual_cnt].order_status_cd          = o.order_status_cd
+       reply->qual[qual_cnt].activity_type            = ACTIVITY_TYPE_BB_CDF
+       reply->qual[qual_cnt].activity_type_cd         = o.activity_type_cd
+       reply->qual[qual_cnt].updt_cnt                 = o.updt_cnt                            ; 001
+       reply->qual[qual_cnt].order_comment_ind        = o.order_comment_ind
+       reply->qual[qual_cnt].bb_processing_cd         = sd.bb_processing_cd
+       reply->qual[qual_cnt].bb_default_phases_cd     = sd.bb_default_phases_cd
+       reply->qual[qual_cnt].last_update_provider_id  = o.last_update_provider_id 
+       
+       reply->qual[qual_cnt].order_encntr_facility_cd = e.loc_facility_cd
+   
+       cntr_cnt = 0
+    else
+       if (be.order_id > 0.00)
+           order_found = FALSE
+       endif
+    endif
+    
+head osrc.service_resource_cd
+    if (srs_granted = TRUE and order_found = TRUE)
+       cntr_cnt = cntr_cnt + 1
+   
+       stat = alterlist(reply->qual[qual_cnt].container_serv_res, cntr_cnt)
+       reply->qual[qual_cnt].container_serv_res_cnt = cntr_cnt
+   
+       ;** Initialize .status_flag to -1 to indicate that container information not yet added for service_resource_cd
+   
+       reply->qual[qual_cnt].status_flag = -1
+    endif
+
+head osrc.container_id      ; 005 Moved from above head osrc.service_resource_cd
+    ;**
+    ;* Add container associated with the service resource.  Only return 1 container per service resource based upon following
+    ;* processing
+    ;**
+
+    ;** Following are the standard combinations of Order_Status, Dept_Status and Status_Flag valid for retrieval in Result Entry
+    ;*  and Result Entry Corrections
+    ;*
+    ;*      Order_Status        Dept_Status         Status_Flag         Valid for Application
+    ;*      ------------        -----------         -----------         ---------------------
+    ;*      ORDERED             LABINLAB            1                   Result Entry, Result Entry Corrections
+    ;*      INPROCESS           LABINPROCESS        1                   Result Entry, Resutl Entry Corrections
+    ;*      COMPLETED           COMPLETED           2                   Result Entry Corrections
+    ;*
+    ;*  Result Entry and Result Entry Corrections evalutate the Status_Flag to determine if the order is valid for retrieval
+    ;*  (For Result Entry Status_Flag must = 1, for Result Entry Corrections Status_Flag = 1 or 2).
+    ;*  
+    ;*  If Order_Status = ORDERED and Dept_Status NOT = LABINLAB or if Order_Status = INPROCESS and Dept_Status != LABINPROCESS
+    ;*  the Status_Flag returned in the reply will be set to 0 regardless of the actual value of osrc.status_flag so that 
+    ;*  Result Entry will treat the container as NOT logged in and prohibit the retrieval of the order.  Discrepancy in these 
+    ;*  status indicates that routing after ordering or logging in has not yet completed.  The user must wait for these statuses 
+    ;*  to be in synch before Result Entry will allow the user to retrieve the order.
+    ;*
+    ;*  NOTE:  Below, allowing Dept_Status_Cd = LABINLAB or LABINPROCESS if Order_Status_Cd = INPROCESS.  Really only LABINPROCESS
+    ;*      should be valid for Dept_Status_Cd when Order_Status_Cd = INPROCESS; however, order server is currently (01/20/00)
+    ;*      setting Dept_Status_Cd back to LABINLAB when a second container is logged in after Dept_Status_Cd changed to 
+    ;*      LABINPROCESS.  Do not know if order server will be corrected to not move the Dept_Status_Cd backward for Rev 7.9, 
+    ;*      so allowing LABINLAB as well.  This should not cause any problems.
+    ;*
+    
+    if (srs_granted = TRUE and order_found = TRUE)    
+       chk_osrc_status_flag = 0
+   
+       if (osrc.status_flag = 1                                                                                    ; 003
+               and ((o.order_status_cd = order_status_ordered_cd                                                   ; 003
+                       and o.dept_status_cd != dept_status_labinlab_cd)                                            ; 003
+                   or (o.order_status_cd = order_status_inprocess_cd                                               ; 004
+                       and o.dept_status_cd != dept_status_labinlab_cd                                             ; 004
+                       and o.dept_status_cd != dept_status_labinprocess_cd)))                                      ; 004
+           chk_osrc_status_flag = 0                                                                                ; 003
+       else                                                                                                        ; 003
+           chk_osrc_status_flag = osrc.status_flag                                                                 ; 003
+       endif                                                                                                       ; 003
+   
+       ;** Determine if container previously added.  Automatically add container if no containers added.  If container already
+       ;*  added, replace/update only with current container if current container higher in the following priority than the 
+       ;*  previously added 
+       ;*  container:
+       ;*      1 = In Lab
+       ;*      2 = Completed
+       ;*      0 = Not in lab
+       ;*  If current container status same as previously added container do NOT replace.
+       ;*
+       if (((reply->qual[qual_cnt].status_flag = -1)                  ; No container previously added                    - ADD
+       or (reply->qual[qual_cnt].status_flag != 1                     ; Previously added container Not In Lab or Complted
+               and chk_osrc_status_flag = 1)                          ; and Current container is In Lab                  - REPLACE
+       or (reply->qual[qual_cnt].status_flag = 0                      ; Previously added container Not In Lab
+               and chk_osrc_status_flag = 2))and osrc.in_lab_dt_tm >0); and Current container Completed                  - REPLACE
+           ;** 005 All container processing was moved to this section, head container_id.  Previously container processing
+           ;*        existed in both head order_id and head service_resource_cd
+           ;*
+           reply->qual[qual_cnt].container_serv_res[cntr_cnt].container_id             = osrc.container_id
+           reply->qual[qual_cnt].container_serv_res[cntr_cnt].order_serv_res_upd_cnt   = osrc.updt_cnt
+           reply->qual[qual_cnt].container_serv_res[cntr_cnt].service_resource_cd      = osrc.service_resource_cd
+           reply->qual[qual_cnt].container_serv_res[cntr_cnt].specimen_id              = c.specimen_id                     ; 002
+   
+           ;** jmw 01/13/00 status_flag and drawn_dt_tm should be moved to the container level instead of at order level   
+           ;*      in the future.  Result Entry [incorrectly] expects at order level currently.
+           reply->qual[qual_cnt].status_flag                                           = chk_osrc_status_flag
+           reply->qual[qual_cnt].drawn_dt_tm                                           = c.drawn_dt_tm
+           if (c.drawn_id > 0)
+             reply->qual[qual_cnt].drawn_username                                      = pnl.username
+           endif
+       endif
+    endif
+    
+foot o.order_id
+    if (srs_granted = TRUE and order_found = TRUE)
+       if (cntr_cnt > max_cntr_cnt)
+          max_cntr_cnt = cntr_cnt
+       endif
+    endif
+
+foot report
+    stat = alterlist(reply->qual, qual_cnt)
+
+with    nocounter
+
+
+set nErrorStatus = ERROR(sErrorMsg,0)
+if (nErrorStatus > 0)
+    call ADD_REPLY_STATUS_EVENT
+        (
+         /* ScriptStatus        */ "F"
+         /* OperationName       */ , "Select Orders"           
+         /* OperationStatus     */ , "F"
+         /* TargetObjectName    */ , "reply->qual"    
+         /* TargetObjectValue   */ , "CCL Error retrieving orders/containers associated with reqeust Accession #"
+        )
+
+    go to EXIT_SCRIPT
+endif
+
+; Check the status of the service resource security UAR
+if (GetResourceSecurityStatus(0) = "F")
+   call PopulateResSecStatusBlock(0)
+   set reply->status_data->status = GetResourceSecurityStatus(0)
+   go to EXIT_SCRIPT
+endif
+
+;**
+;* Determine if orders found for requested Accession Number
+;**
+
+if (qual_cnt > 0)
+    set sErrorMsg = ""
+    set nErrorStatus = ERROR(sErrorMsg,1)
+
+    ;**
+    ;* For each container associated with each order retrieved above, retrieve Task/Assays, Products and Cells associated 
+    ;* with the order.
+    ;*
+    ;* - Retrieve Task/Assays associated with order in DeptORCWizard from PROFILE_TASK_R
+    ;* - Retrieve Task/Assays associated with Phase Group selected in Result Entry for "Cell/Phase" orders previously retrieved
+    ;*      in Result Entry from BB_ORDER_PHASE and PHASE_GROUP
+    ;* - Retrieve Products associated with Crossmatch or Patient Antigen Type orders previously previously retrieved in
+    ;*      in Result Entry from PRODUCT_EVENT
+    ;* - Retrieve Cells associated with Cell Group selected in Result Entry for "Cell/Phase" orders previously retrieved in
+    ;*      Result Entry from BB_ORDER_CELL
+    ;*
+    select into "nl:"
+        order_id      = reply->qual[d_o.seq].order_id
+        , container_id  = reply->qual[d_o.seq].container_serv_res[d_cntr.seq].container_id
+        , table_ind = decode(oc.seq, "oc", pe.seq, "pe", op.seq, "op", ptr.seq, "ptr", seo.seq, "seo", "xxx")
+        , ptr.task_assay_cd
+        , op.order_phase_id
+        , op.phase_group_cd     
+        , pg.task_assay_cd
+        , pe.product_id
+        , pe.product_event_id
+        , oc.cell_cd
+        , sort_id = decode(oc.seq, oc.order_cell_id, pe.seq, pe.product_event_id, op.seq, pg.task_assay_cd             
+            , ptr.seq, ptr.task_assay_cd, 0.0)
+
+    from
+        (dummyt d_o with seq = value(qual_cnt))
+        , (dummyt d_cntr with seq = value(max_cntr_cnt))
+        , profile_task_r ptr
+        , bb_order_phase op
+        , product_event pe
+        , phase_group pg
+        , bb_order_cell oc
+        , bb_spec_expire_ovrd seo 
+
+    plan    d_o
+    join    d_cntr  where   d_cntr.seq <= reply->qual[d_o.seq].container_serv_res_cnt
+        join    (ptr    where       ptr.catalog_cd = reply->qual[d_o.seq].catalog_cd
+                                      and ptr.active_ind = 1)
+
+        orjoin  (op     where   op.order_id = reply->qual[d_o.seq].order_id
+            join    pg      where   pg.phase_group_cd = op.phase_grp_cd
+                                      and pg.active_ind = 1) 
+        orjoin  (pe     where   pe.order_id = reply->qual[d_o.seq].order_id
+                                  and pe.event_type_cd = in_progress_cd)
+        orjoin  (oc     where   oc.order_id = reply->qual[d_o.seq].order_id)
+        orjoin  (seo     where seo.specimen_id = reply->qual[d_o.seq].container_serv_res[d_cntr.seq].specimen_id
+                      and seo.active_ind = 1)
+
+    order by    order_id, container_id, table_ind, sort_id
+
+    head order_id
+        total_xm_cnt = 0
+
+    head container_id
+        assay_cnt = 0
+        stat = alterlist(reply->qual[d_o.seq].container_serv_res[d_cntr.seq].assays, 5)
+
+        product_cnt = 0
+        stat = alterlist(reply->qual[d_o.seq].container_serv_res[d_cntr.seq].products, 5)
+
+        cell_cnt = 0
+        stat = alterlist(reply->qual[d_o.seq].container_serv_res[d_cntr.seq].cells, 3)
+        
+    head table_ind
+        reply->qual[d_o.seq].phase_grp_cd = op.phase_grp_cd
+
+    detail
+        if (table_ind = "ptr"
+        or table_ind = "op")
+            ;** 
+            ;*Retrieve Task/Assays associated with orders and phase groups
+            ;**
+
+            assay_cnt = assay_cnt + 1
+
+            if (mod(assay_cnt,5) = 1 and assay_cnt != 1)
+                stat = alterlist(reply->qual[d_o.seq].container_serv_res[d_cntr.seq].assays, assay_cnt + 4)
+            endif
+
+            stat = alterlist(reply->qual[d_o.seq].container_serv_res[d_cntr.seq].assays, assay_cnt)
+
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].assays_cnt = assay_cnt
+            if (table_ind = "ptr")
+                reply->qual[d_o.seq].container_serv_res[d_cntr.seq].assays[assay_cnt].task_assay_cd = ptr.task_assay_cd
+                reply->qual[d_o.seq].container_serv_res[d_cntr.seq].assays[assay_cnt].sequence = ptr.sequence
+                reply->qual[d_o.seq].container_serv_res[d_cntr.seq].assays[assay_cnt].pending_ind = ptr.pending_ind
+            elseif (table_ind = "op")
+                reply->qual[d_o.seq].container_serv_res[d_cntr.seq].assays[assay_cnt].task_assay_cd = pg.task_assay_cd
+                reply->qual[d_o.seq].container_serv_res[d_cntr.seq].assays[assay_cnt].order_phase_id = op.order_phase_id
+                reply->qual[d_o.seq].container_serv_res[d_cntr.seq].assays[assay_cnt].sequence = pg.sequence
+                reply->qual[d_o.seq].container_serv_res[d_cntr.seq].assays[assay_cnt].pending_ind = pg.required_ind
+            endif  
+
+        elseif (table_ind = "pe")
+            ;**
+            ;* Retrieve products associated with order, namely for Crossmatch and Antigen Type orders
+            ;**
+
+            ;** count the verified or in progress products to get a total count of products already associated 
+            ;* with the order.  This will help to determine the number of products left to prompt for 
+
+            total_xm_cnt = total_xm_cnt + 1
+  
+            product_cnt = product_cnt + 1
+
+            if (mod(product_cnt,5) = 1 and product_cnt != 1)
+                stat = alterlist(reply->qual[d_o.seq].container_serv_res[d_cntr.seq].products, product_cnt + 4)
+            endif
+
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].products_cnt = product_cnt
+
+            ;** stored at this level in case a product does exist but no results exist 
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].products[product_cnt].product_id = pe.product_id 
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].products[product_cnt].product_event_id = pe.product_event_id 
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].products[product_cnt].updt_cnt = pe.updt_cnt
+
+            ;** bb_result_id from the product_event and result tables should match since the value will never
+            ;* change throughout the xm.  If the product is re-xm (even on same order), a new bb_result_id will be used.
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].products[product_cnt].bb_result_id = pe.bb_result_id 
+
+        elseif (table_ind = "oc")   
+            ;**
+            ;* Retrieve cells associated with order
+            ;**
+
+            cell_cnt = cell_cnt + 1
+
+            if (mod(cell_cnt,3) = 1 and cell_cnt != 3)      
+                stat = alterlist(reply->qual[d_o.seq].container_serv_res[d_cntr.seq].cells, cell_cnt + 2)
+            endif
+
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].cell_cnt = cell_cnt
+
+            ;** stored at this level in case a cell does exist but no results exist 
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].cells[cell_cnt].order_id = order_id
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].cells[cell_cnt].order_cell_id = oc.order_cell_id
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].cells[cell_cnt].cell_cd = oc.cell_cd
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].cells[cell_cnt].product_id = oc.product_id
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].cells[cell_cnt].bb_result_id = oc.bb_result_id
+            reply->qual[d_o.seq].container_serv_res[d_cntr.seq].cells[cell_cnt].order_cell_updt_cnt = oc.updt_cnt
+        elseif (table_ind = "seo")
+            ; Only set expiration for orders with activity type of blood bank.
+            if (reply->qual[d_o.seq].activity_type = ACTIVITY_TYPE_BB_CDF)
+                if ((seo.specimen_id > 0.0) and (seo.active_ind = 1))
+                    ; Found a specimen expiration override, set expiration_dt_tm accordingly.
+                    reply->qual[d_o.seq].container_serv_res[d_cntr.seq].expiration_dt_tm = seo.new_spec_expire_dt_tm
+                endif
+            endif
+        endif                              
+
+    foot container_id
+        stat = alterlist(reply->qual[d_o.seq].container_serv_res[d_cntr.seq].assays, assay_cnt)
+        stat = alterlist(reply->qual[d_o.seq].container_serv_res[d_cntr.seq].products, product_cnt)
+        stat = alterlist(reply->qual[d_o.seq].container_serv_res[d_cntr.seq].cells, cell_cnt)
+
+    foot order_id
+        reply->qual[d_o.seq].total_xm_cnt = total_xm_cnt
+
+    with        nocounter
+
+
+    set nErrorStatus = ERROR(sErrorMsg,0)
+    if (nErrorStatus > 0)
+        call ADD_REPLY_STATUS_EVENT
+            (
+             /* ScriptStatus        */ "F"
+             /* OperationName   */ , "Select Assays"           
+             /* OperationStatus */ , "F"
+             /* TargetObjectName    */ , "reply->qual"    
+             /* TargetObjectValue   */ , "CCL Error retrieving task/assays, phases, products and cells for orders"
+            )
+
+        go to EXIT_SCRIPT
+    endif
+
+;**
+;* Determine if need to utilize flexible specimen and act accordingly. 
+;**
+    set qual_cnt = size(reply->qual, 5)
+    for (qual_idx = 1 to qual_cnt)
+        ; Load flexible specimen preferences (this sub only loads if incorrect preferences are currently loaded).
+        if (LoadFlexParams(reply->qual[qual_idx].order_encntr_facility_cd) = -1)
+            ; Problem loading flexible specimen parameters, log and exit.
+            call ADD_REPLY_STATUS_EVENT
+                (
+                 /* ScriptStatus      */   "F"
+                 /* OperationName     */ , "Load Flex Params"           
+                 /* OperationStatus   */ , "F"
+                 /* TargetObjectName  */ , "flex_param_out"    
+                 /* TargetObjectValue */ , "CCL Error loading flex params"
+                )
+
+            go to EXIT_SCRIPT
+        endif                 
+        
+        set reply->qual[qual_idx].testing_facility_cd = flex_param_out->testing_facility_cd
+        set reply->qual[qual_idx].spec_flex_ind       = flex_param_out->flex_on_ind     
+        
+        ; Determine if activity type is bb and whether flexible specimen is turned on for this testing facility.
+        if ((reply->qual[qual_idx].activity_type = ACTIVITY_TYPE_BB_CDF) and (flex_param_out->flex_on_ind = 1))
+            set container_serv_res_cnt = size(reply->qual[qual_idx].container_serv_res, 5)
+            for (container_serv_res_idx = 1 to container_serv_res_cnt)
+                if (reply->qual[qual_idx].container_serv_res[container_serv_res_idx].expiration_dt_tm = 0.0)
+                    ; A specimen expiration override was not found in the previous select, get flexible specimen expiration.
+                    set reply->qual[qual_idx].container_serv_res[container_serv_res_idx].expiration_dt_tm 
+                        = GetFlexExpiration(reply->person_id,
+                                            0.0, 
+                                            reply->qual[qual_idx].drawn_dt_tm, 
+                                            reply->qual[qual_idx].order_encntr_facility_cd,
+                                            0)
+                endif               
+            endfor            
+        endif
+    endfor
+
+    set reply->status_data.status = "S"    ;Successful
+
+else ; No orders were found, determine if it was because the user had no service resource security.
+
+   if (order_found = TRUE)
+      set operation_name = "RESOURCE SECURITY FAILED"
+   else ; No orders found for request Accession Number
+      set operation_name = "No orders found."
+   endif
+   
+   call ADD_REPLY_STATUS_EVENT
+        (
+         /* ScriptStatus        */ "Z"
+         /* OperationName       */ , operation_name
+         /* OperationStatus     */ , "Z"
+         /* TargetObjectName    */ , "ORDERS"    
+         /* TargetObjectValue   */ , "No orders returned."
+        )
+endif
+
+
+go to EXIT_SCRIPT
+
+
+
+;** 
+;* Subroutines
+;**
+
+declare GET_PROCESSING_CODE_VALUES(0) = i2
+
+subroutine GET_PROCESSING_CODE_VALUES(sub_dummy)
+
+    declare success_ind = i2
+    set success_ind = 0
+
+    ;* Retrieve Order Status Code Values
+
+    set order_status_canceled_cd        = GET_CODE_VALUE(ORDER_STATUS_CODESET,ORDER_STATUS_CANCELED_CDF)
+    set order_status_deleted_cd         = GET_CODE_VALUE(ORDER_STATUS_CODESET,ORDER_STATUS_DELETED_CDF)
+    set order_status_discontinued_cd    = GET_CODE_VALUE(ORDER_STATUS_CODESET,ORDER_STATUS_DISCONTINUED_CDF)
+    set order_status_ordered_cd         = GET_CODE_VALUE(ORDER_STATUS_CODESET,ORDER_STATUS_ORDERED_CDF)
+    set order_status_inprocess_cd       = GET_CODE_VALUE(ORDER_STATUS_CODESET,ORDER_STATUS_INPROCESS_CDF)
+
+
+    ;* Retrieve Department Status Code Values
+
+    set dept_status_labinlab_cd         = GET_CODE_VALUE(DEPT_STATUS_CODESET,DEPT_STATUS_LABINLAB_CDF)
+    set dept_status_labinprocess_cd     = GET_CODE_VALUE(DEPT_STATUS_CODESET,DEPT_STATUS_LABINPROCESS_CDF)
+
+
+    ;* Retrieve Product State Code Values
+
+    set in_progress_cd                  = GET_CODE_VALUE(PRODUCT_STATES_CODESET,IN_PROGRESS_CDF)
+    set crossmatch_cd                   = GET_CODE_VALUE(PRODUCT_STATES_CODESET,CROSSMATCH_CDF)
+
+
+    ;* Retrieve BB Activity Type Code Value
+
+    set bb_activity_cd                  = GET_CODE_VALUE(ACTIVITY_TYPE_CODESET,ACTIVITY_TYPE_BB_CDF)    
+    
+    ;* Retrieve Exception Type Code Value for MSBOS
+    set exception_msbos_cd = uar_get_code_by("MEANING", lEXCEPTION_TYPE_CS, nullterm(sMSBOS_CDF))
+
+
+    ;* Verify valid values returned for all Code_Values
+
+    if (0.0 in 
+            (order_status_canceled_cd
+            , order_status_discontinued_cd
+            , order_status_deleted_cd
+            , order_status_ordered_cd
+            , order_status_inprocess_cd
+            , dept_status_labinlab_cd
+            , dept_status_labinprocess_cd
+            , in_progress_cd
+            , crossmatch_cd
+            , bb_activity_cd
+            , exception_msbos_cd))
+            
+        set success_ind = 0     
+
+        set TargetObjectName = ""
+        set TargetObjectValue = ""
+
+        case (0.0)
+            of order_status_canceled_cd:
+                set TargetObjectName    = "order_status_canceled_cd"
+                set TargetObjectValue   = "Unable to retrieve Cancelled Order Status code value"
+            of order_status_discontinued_cd:
+                set TargetObjectName    = "order_status_discontinued_cd"
+                set TargetObjectValue   = "Unable to retrieve Discontinued Order Status code value"
+            of order_status_deleted_cd:
+                set TargetObjectName    = "order_status_deleted_cd"
+                set TargetObjectValue   = "Unable to retrieve Deleted Order Status code value"
+            of order_status_ordered_cd:
+                set TargetObjectName    = "order_status_ordered_cd"
+                set TargetObjectValue   = "Unable to retrieve Ordered Order Status code value"
+            of order_status_inprocess_cd:
+                set TargetObjectName    = "order_status_inprocess_cd"
+                set TargetObjectValue   = "Unable to retrieve InProcess Order Status code value"
+            of dept_status_labinlab_cd:
+                set TargetObjectName    = "dept_status_labinlab_cd"
+                set TargetObjectValue   = "Unable to retrieve LabInLab Department Status code value"
+            of dept_status_labinprocess_cd:
+                set TargetObjectName    = "dept_status_labinprocess_cd"
+                set TargetObjectValue   = "Unable to retrieve LabInProcess Department Status code value"
+            of in_progress_cd:
+                set TargetObjectName    = "in_progress_cd"
+                set TargetObjectValue   = "Unable to retrieve InProgress Product State code value"
+            of crossmatch_cd:
+                set TargetObjectName    = "crossmatch_cd"
+                set TargetObjectValue   = "Unable to retrieve Crossmatched Product State code value"
+            of bb_activity_cd:
+                set TargetObjectName    = "bb_activity_cd"
+                set TargetObjectValue   = "Unable to retrieve Blood Bank (BB) Activity Type code value"
+            of exception_msbos_cd:
+                set TargetObjectName    = "exception_msbos_cd"
+                set TargetObjectValue   = "Unable to retrieve Blood Bank Exception Type code value for CDF_MEANING = MSBOS"
+            else
+                set reply->status_data->subeventstatus[1].TargetObjectName = "Unknown"
+                set reply->status_data.subeventstatus[1].TargetObjectValue
+                    = "Unidentified error retrieving processing code values"
+
+
+        endcase
+        
+        call ADD_REPLY_STATUS_EVENT
+            (
+             /* ScriptStatus        */ "F"
+             /* OperationName       */ , "uar_get_meaning_by_codeset"
+             /* OperationStatus     */ , "F"
+             /* TargetObjectName    */ , TargetObjectName
+             /* TargetObjectValue   */ , TargetObjectValue
+            )
+
+        
+    else
+        set success_ind = 1
+    endif
+    
+    return(success_ind)
+END         ; end subroutine GET_PROCESSING_CODE_VALUES
+
+
+subroutine ADD_REPLY_STATUS_EVENT
+    (
+     sub_ScriptStatus      
+     , sub_OperationName
+     , sub_OperationStatus
+     , sub_TargetObjectName
+     , sub_TargetObjectValue
+    )
+
+
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alter(reply->status_data.subeventstatus, count1)
+    endif
+
+    set reply->status_data.status                                   = sub_ScriptStatus
+    set reply->status_data.subeventstatus[count1].OperationName     = sub_OperationName
+    set reply->status_data.subeventstatus[count1].OperationStatus   = sub_OperationStatus
+    set reply->status_data.subeventstatus[count1].TargetObjectName  = sub_TargetObjectName
+    set reply->status_data.subeventstatus[count1].TargetObjectValue = sub_TargetObjectValue
+
+    return
+END         ; end subroutine ADD_REPLY_STATUS_EVENT 
+
+
+#EXIT_SCRIPT
+
+/*
+call echo(build("STATUS = ", reply->status_data.status))
+for (v = 1 to count1)
+    call echo(build("..", v, "."))
+    call echo(build("....","OperationName =", reply->status_data.subeventstatus[v].OperationName))
+    call echo(build("....","OperationStatus = ", reply->status_data.subeventstatus[v].OperationStatus))
+    call echo(build("....","TargetObjectName = ", reply->status_data.subeventstatus[v].TargetObjectName))
+    call echo(build("....","TargetObjectValue = ", reply->status_data.subeventstatus[v].TargetObjectValue))
+endfor
+call echo(".")
+call echo(".")
+call echo(build("Order_Status_Canceled_Cd = ",order_status_canceled_cd   ))
+call echo(build("Order_Status_Ordered_Cd = ",order_status_ordered_cd ))             
+call echo(build("Order_Status_InProgress_Cd = ",order_status_inprocess_cd ))        
+call echo(build("Dept_Status_LabInLab_Cd = ",dept_status_labinlab_cd ))             
+call echo(build("Dept_Status_LabInProcess_cd = ",dept_status_labinprocess_cd ))     
+call echo(build("In_Progress = ",in_progress_cd ))
+call echo(build("Crossmatch_Cd = ",crossmatch_cd ))
+call echo(build("BB_Activity_Cd = ",bb_activity_cd ))
+call echo(".")
+call echo(".")
+
+for (x = 1 to size(reply->qual, 5))
+    call echo(build(x, "..",reply->qual[x]->order_id,"..",reply->qual[x]->catalog_cd,"..",reply->qual[x]->order_mnemonic))
+    call echo(build("TOTAL_XM_CNT =", reply->qual[x].total_xm_cnt
+            , "...Status_Flag =", reply->qual[x].status_flag))
+    for (u = 1 to size(reply->qual[x].container_serv_res,5))
+        if (u = 1)
+            call echo(build("..CONTAINER_SERV_RES_CNT = ", reply->qual[x].container_serv_res_cnt))
+        endif
+        call echo(build("..",u,"..",reply->qual[x].container_serv_res[u].container_id
+            , "...", reply->qual[x].container_serv_res[u].service_resource_cd))
+        for (y = 1 to size(reply->qual[x].container_serv_res[u].assays, 5))
+            if (y = 1)
+                call echo(build("....ASSAYS_CNT = ", reply->qual[x].container_serv_res[u].assays_cnt))
+            endif
+            if (reply->qual[x].container_serv_res[u].assays[y].order_phase_id > 0)
+                call echo(build(".....",y,"..",reply->qual[x].container_serv_res[u].assays[y].task_assay_cd,"..","PHASE"))
+            else
+                call echo(build(".....",y,"..",reply->qual[x].container_serv_res[u].assays[y].task_assay_cd))
+            endif
+        endfor
+        for (z = 1 to size(reply->qual[x].container_serv_res[u].products,5))
+            if (z = 1)
+                call echo(build("....PRODUCTS_CNT =",reply->qual[x].container_serv_res[u].products_cnt))
+            endif
+            call echo(build(".....",z,"..",reply->qual[x].container_serv_res[u].products[z].product_id
+                ,"..",reply->qual[x].container_serv_res[u].products[z].product_event_id))
+        endfor
+        for (w = 1 to size(reply->qual[x].container_serv_res[u].cells,5))
+            if (w = 1)
+                call echo(build("....CELL_CNT =", reply->qual[x].container_serv_res[u].cell_cnt))
+            endif
+            if (reply->qual[x].container_serv_res[u].cells[w].cell_cd > 0)
+                call echo(build(".....",w,"..",reply->qual[x].container_serv_res[u].cells[w].cell_cd))
+            else
+                call echo(build(".....",w,"..",reply->qual[x].container_serv_res[u].cells[w].product_id,"..PRODUCT"))
+            endif
+        endfor
+    endfor
+endfor
+*/
+end go      
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,1087 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_wklst_orders/glb_get_wklst_orders.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_WKLST_ORDERS.PRG
+        Object name:            GLB_GET_WKLST_ORDERS
+        Request #:              250077
+ 
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Get all orders for the given worklist_id
+ 
+        Tables read:            accession
+                                accession_order_r
+                                control_lot
+                                control_material
+                                encntr_alias
+                                orders
+                                order_laboratory
+                                person
+                                resource_accession_r
+                                resource_lot_r
+                                worklist
+                                worklist_accession_r
+                                worklist_order_r
+                                worklist_ref
+ 
+        Tables updated:         n/a
+ 
+        Executing from:         General Lab worklist request
+ 
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     500 06/07/96 Newton Hughes        Initial Release                     *
+;     501 01/27/98 Kurt Gugler          add sequence identifier             *
+;     502 08/13/98 Bryan Muehlmeier     Retrieve worklist_alias             *
+;     503 08/18/98 Bryan Muehlmeier     Add person_id, display_key,         *
+;                                       report_status_disp, and             *
+;                                       report_priority_disp to reply       *
+;     504 01/05/99 Bryan Muehlmeier     Return formatted MRN                *
+;     505 11/18/99 Hal Patchen          Return catalog_cd, dept_status_cd,  *
+;                                       report_priority_mean, and QC info   *
+;     506 08/23/02 Mark Brooks          Added service resource security     *
+;                                       Changed to use alter list           *
+;     507 11/13/02 Mark Brooks          Added identifier to the reply       *
+;     508 10/18/04 Scott Sundahl        Return Order Status Meaning and     *
+;                                       worklist_ref_id                     *
+;     509 05/04/06 Joe Troy             Overhaul for performance as well as worklist  *
+;                                       enhancement for feature 87458.      *
+;     510 09/15/06 Scott Haven          Add logic to return case groups.    *
+;     511 02/08/07 Paul Lessin          Return new sequence columns         *
+;     512 02/20/07 Mark Brooks          Change to return pending only       *
+;     513 04/02/07 Scott Sundahl        Filter orders by pending assay      *
+;     514 05/04/07 Ryan Manuel          Changes for BRV.  Only return       *
+;                                       Gen Lab and HLA and return positions*
+;     515 04/17/08 Oliver Barbara       Added code to handle client_alias   *
+;     516 05/29/08 Oliver Barbara       Changes to support sequence numbers *
+;                                       in BRE.                             *
+;     517 08/25/08 Rahul Deshmukh       Fixed logic in order assign correct *
+;                                       lot name for the worklist           *
+;     518 09/08/08 Matt Hlavaty         Qualify organization_alias on       *
+;                                       active_ind                          *
+;     519 10/22/08 Bo Xiong             Fix a wrong resizing logic          *
+;     520 08/09/10 Oliver Barbara       Return pending date and user in     *
+;                                       reply for automatic worklists.      *
+;     521 08/19/10 Oliver Barbara       Return username of "SYSTEM" for some*
+;                                       events. Handle "Paused" status.     *
+;     522 09/03/10 Steve Hendrick       Add qc_group_id to Reply            *
+;     523 09/16/10 Steve Hendrick       Add worklist status_cd to Reply and *
+;                                       retrieve latest date from worklist_event*
+;     524 05/01/11 Ryan Manuel          Support subsections                 *
+;     525 08/06/13 Fitsum Abebe         returned order image indicator      *
+;~DE~**********************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program glb_get_wklst_orders:dba go
+create program glb_get_wklst_orders:dba
+ 
+%i cclsource:pcs_format_age.inc
+ 
+/*
+record request
+(
+  1 worklist_id                 = f8
+  1 pending_only_ind            = i2
+  1 brv_mode_ind                = i2
+  1 position_load_ind           = i2
+)
+*/
+ 
+  record reply
+  (
+    1 worklist_alias                = vc
+    1 display_key                   = vc
+    1 n_orders                      = i4
+    1 worklist_ref_id               = f8
+    1 saved_name                    = vc
+    1 saved_dt_tm                   = dq8
+    1 download_name                 = vc
+    1 download_dt_tm                = dq8
+    1 template_ind                  = i2
+    1 seq_ident_ind                 = i2
+    1 seq_ident_start_nbr           = i4
+    1 seq_ident_beg_range_nbr       = i4
+    1 seq_ident_end_range_nbr       = i4
+    1 pending_orders_cnt            = i4
+    1 qual[*]
+      2 accession_id                = f8
+      2 order_id                    = f8
+      2 encntr_id                   = f8
+      2 order_status_cd             = f8
+      2 order_status_disp           = vc
+      2 order_status_mean           = c12
+      2 dept_status_cd              = f8
+      2 dept_status_disp            = vc
+      2 report_priority_cd          = f8
+      2 report_priority_disp        = vc
+      2 report_priority_mean        = vc
+      2 identifier                  = c20
+      2 lot_id                      = f8
+      2 lot_number                  = vc
+      2 control_id                  = f8
+      2 control_name                = vc
+      2 sequence                    = i4
+      2 accession                   = c20
+      2 person_id                   = f8
+      2 birth_dt_tm                 = dq8
+      2 name_full_formatted         = vc
+      2 med_rec_nbr                 = vc
+      2 catalog_cd                  = f8
+      2 order_mnemonic              = vc
+      2 sequence_ident              = c20
+      2 service_resource_cd         = f8
+      2 service_resource_disp       = vc
+      2 fin                         = vc
+      2 sex_cd                      = f8
+      2 sex_disp                    = vc
+      2 race_cd                     = f8
+      2 race_disp                   = vc
+      2 visit_reason                = vc
+      2 comment_ind                 = i2
+      2 location                    = vc
+      2 specimen_type_cd            = f8
+      2 specimen_type_disp          = vc
+      2 order_physician             = vc
+      2 age                         = vc
+      2 collected_dt_tm             = dq8
+      2 order_dt_tm                 = dq8
+      2 activity_type_cd            = f8
+      2 activity_type_disp          = vc
+      2 activity_type_mean          = c12
+      2 case_groups[*]
+        3 ucm_case_group_id = f8
+      2 request_id                  = vc
+      2 patient_accession_id        = f8
+      2 position_qual[*]
+        3 position                  = c10
+      2 client_alias                = vc
+      2 qc_group_id                 = f8
+      2 order_request_id            = f8
+      2 order_image_ind             = i2
+    1 procedure_inc_flag            = i2
+    1 brv_process_accn_cnt          = i4
+%i cclsource:status_block.inc
+    1 status_cd                     = f8
+    1 status_disp                   = vc
+    1 status_mean                   = c12
+  )
+ 
+  record wo_list
+  (
+    1 qual[*]
+      2 order_id = f8
+      2 catalog_cd = f8
+ 
+  )
+  
+  record valid_codes
+  (
+    1 qual[*]
+      2 code = f8
+  )
+  
+  record req1052579 
+  (
+    1 context = i2
+    1 id_cnt = i4
+    1 id_qual[*]
+      2 id = f8
+  ) 
+%I cclsource:pcs_subevent.inc
+%i cclsource:pcs_resource_security.inc
+%i cclsource:glb_get_wklst_case_groups.inc
+%i cclsource:mic_expand_subs.inc
+%i cclsource:i18n_uar.inc
+
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+
+declare GetActivityTypes(none = i2) = i4 with protect
+ 
+  declare ENCNTR_ALIAS_CS     = i4 with protect, constant(319)
+  declare COMMENT_TYPE_CS     = i4 with protect, constant(14)
+  declare INFO_TYPE_CS        = i4 with protect, constant(355)
+  declare ALIAS_TYPE_CS       = i4 with protect, constant(334)
+  declare ORDER_CONTEXT      = i2 with protect, constant(0)
+       
+  declare dMRNCd              = f8 with protect, noconstant(0.0)
+  declare dFINCd              = f8 with protect, noconstant(0.0)
+  declare dOrdCommentCd       = f8 with protect, noconstant(0.0)
+  declare dOrdNoteCd          = f8 with protect, noconstant(0.0)
+  declare dInfoCommentCd      = f8 with protect, noconstant(0.0)
+  declare dClientOrgCd        = f8 with protect, noconstant(0.0)
+ 
+  declare sRet         = vc with protect, noconstant("")
+  declare nQualCnt            = i4 with protect, noconstant(0)  ; number of orders in reply structure
+  declare n                   = i4 with protect, noconstant(0)
+  declare x                   = i4 with protect, noconstant(0)
+  declare y                   = i4 with protect, noconstant(0)
+  
+  declare lWOCnt              = i4 with protect, noconstant(0)
+  declare dPerformedCd        = f8 with protect, noconstant(0.0)
+
+  declare dServiceResourceCd  = f8 with protect, noconstant(0.0)
+  declare lCnt                           = i4  with protect, noconstant(0)
+  declare lActualSize                    = i4  with protect, noconstant(0)
+  declare lExpandSize                    = i4  with protect, noconstant(0)
+  declare lExpandTotal                   = i4  with protect, noconstant(0)
+  declare lExpandStart                   = i4  with protect, noconstant(1)
+  
+  declare cdf_meaning     = vc with protect,noconstant("")
+  declare code_cnt        = i4 with public, constant(1)
+  declare code_set        = i4 with protect,noconstant(0)
+  declare code_value      = f8 with protect,noconstant(0.0)
+  declare status_building_cd     = f8 with protect,noconstant(0.0)
+  declare status_paused_cd       = f8 with protect,noconstant(0.0)
+  
+  declare nAutomaticWorklistInd = i2 with protect, noconstant(0)
+ 
+  ; default failure
+  set reply->status_data.status = "F"
+ 
+/* Get Code Values */
+  set dMRNCd          = uar_get_code_by("MEANING", ENCNTR_ALIAS_CS, "MRN")
+  set dFINCd          = uar_get_code_by("MEANING", ENCNTR_ALIAS_CS, "FIN NBR")
+  set dOrdCommentCd   = uar_get_code_by("MEANING", COMMENT_TYPE_CS, "ORD COMMENT")
+  set dOrdNoteCd      = uar_get_code_by("MEANING", COMMENT_TYPE_CS, "ORD NOTE")
+  set dInfoCommentCd  = uar_get_code_by("MEANING", INFO_TYPE_CS, "COMMENT")
+  set dPerformedCd    = uar_get_code_by("MEANING", 1901, "PERFORMED")
+  set dClientOrgCd    = uar_get_code_by("MEANING", ALIAS_TYPE_CS, "CLIENT")
+ 
+; check for code values not found
+  if(dMRNCd <= 0.0)
+    set sRet = "MRN"
+  elseif(dFINCd <= 0.0)
+    set sRet = "FIN NBR"
+  elseif(dOrdCommentCd <= 0.0)
+    set sRet = "ORD COMMENT"
+  elseif(dInfoCommentCd <= 0.0)
+    set sRet = "COMMENT"
+  elseif(dOrdNoteCd <= 0.0)
+    set sRet = "ORD NOTE"
+  elseif(dClientOrgCd <= 0.0)
+    set sRet = "CLIENT"
+  else
+    set sRet = ""
+  endif
+ 
+  if(textlen(trim(sRet)) > 0)
+    set reply->status_data.subeventstatus[1].TargetObjectName = "no code for meaning"
+    set reply->status_data.subeventstatus[1].TargetObjectValue = sRet
+    go to exit_script
+  endif
+ 
+  /* Initialize service resource security */
+  call InitResourceSecurity(1)
+ 
+  /* Get worklist level 1 data for the requested worklist_id */
+  ;************************************************************
+  select into "nl:"
+    wr.service_resource_cd
+  from
+    worklist w,
+    worklist_ref wr
+  plan w where
+    w.worklist_id = request->worklist_id
+  join wr where
+    wr.worklist_ref_id = w.worklist_ref_id
+  detail
+    reply->display_key = wr.display_key
+    reply->worklist_ref_id = wr.worklist_ref_id
+    reply->procedure_inc_flag = wr.procedure_inc_flag 
+    reply->worklist_alias = w.worklist_alias
+    reply->template_ind = w.template_ind
+    reply->seq_ident_ind = w.seq_ident_ind
+    reply->seq_ident_start_nbr = w.seq_ident_start_nbr
+    reply->seq_ident_beg_range_nbr = w.seq_ident_beg_range_nbr
+    reply->seq_ident_end_range_nbr= w.seq_ident_end_range_nbr
+    dServiceResourceCd = w.service_resource_cd 
+    reply->status_cd = w.status_cd 
+    nAutomaticWorklistInd = wr.automatic_worklist_ind
+  with nocounter
+ 
+ 
+   set code_set = 90
+   set cdf_meaning = "BUILDING"
+   set stat = uar_get_meaning_by_codeset(code_set, cdf_meaning, code_cnt, code_value)
+   set status_building_cd = code_value
+   
+   set code_set = 90
+   set cdf_meaning = "PAUSED"
+   set stat = uar_get_meaning_by_codeset(code_set, cdf_meaning, code_cnt, code_value)
+   set status_paused_cd = code_value
+ 
+  ; get downloaded and saved date/times... download = 1, save = 2
+  ;*****************************************************************
+  select into "nl:"
+    event_flag = we.event_type_flag
+  from
+    worklist_event we,
+    worklist w,
+    prsnl ps
+  plan we where
+    we.worklist_id = request->worklist_id and
+    we.event_type_flag in(1,2,4)    ; 4 = pending
+  join w where
+    w.worklist_id = we.worklist_id
+  join ps where
+    ps.person_id = we.event_prsnl_id
+  order event_flag, we.event_dt_tm desc
+  head event_flag
+    if(event_flag = 1)
+      reply->download_dt_tm = cnvtdatetime(we.event_dt_tm)
+      reply->download_name = ps.username
+    elseif((event_flag = 2 or event_flag = 4) and  w.status_cd != status_building_cd and w.status_cd != status_paused_cd)
+      if (cnvtdatetime(we.event_dt_tm) > reply->saved_dt_tm )
+        reply->saved_dt_tm = cnvtdatetime(we.event_dt_tm)
+      
+        if(ps.person_id > 0)
+          reply->saved_name = ps.username
+        else
+          reply->saved_name = uar_i18ngetmessage(i18nHandle, "SYSTEM", "SYSTEM")
+        endif
+      endif
+    endif
+  with nocounter
+  
+  
+ 
+  /* Get the list of order ids for the work list.      */
+  ;******************************************************
+  if (request->pending_only_ind = 1)
+    ;* First try to get only pending orders.
+    set lWOCnt = GetWorklistOrders(1)
+ 
+    ;* If no pending orders were found, go ahead and return any orders for the work list.
+    if (lWOCnt = 0)
+      call subevent_add ("SELECT", "Z", "GetWorklistOrders()", "No pending work list orders found!")
+      set lWOCnt = GetWorklistOrders(0)
+    endif
+  else
+    ;* Get all orders for work list regardless of status.
+    set lWOCnt = GetWorklistOrders(0)
+  endif
+ 
+  ;* If no orders were found, set error and exit.
+  if (lWOCnt > 0)
+ 
+    /* Get information for the worklist orders.          */
+    ;******************************************************
+    select into "nl:"
+      seq_nbr = wo.sequence,
+      aor_exists = evaluate(nullind(aor.order_id), 0, 1, 0),
+      c_exists = evaluate(nullind(c.container_id), 0, 1, 0),
+      r_exists = evaluate(nullind(r.ord_rqstn_id), 0, 1, 0),
+      osrc_exists = evaluate(nullind(osrc.service_resource_cd), 0, 1, 0),
+      oa_exists = decode(oa.seq, "Y", "N"),
+      org_alias = cnvtalias(oa.alias, oa.alias_pool_cd)
+    from
+      (DUMMYT d1 with seq = value(lWOCnt)),
+      worklist_order_r wo,
+      orders o,
+      order_serv_res_container osrc,
+      accession_order_r aor,
+      order_laboratory ol,
+      person p,
+      encounter e,
+      prsnl ps,
+      container c,
+      ord_rqstn_ord_r oror,
+      ord_rqstn r,
+      organization_alias oa,
+      (dummyt d_oa with seq = 1)
+    plan d1
+    join wo where
+      wo.worklist_id = request->worklist_id and
+      wo.order_id  = wo_list->qual[d1.seq].order_id
+    join o where
+      o.order_id = wo.order_id
+    join e where
+      e.encntr_id = o.encntr_id
+    join p where
+      p.person_id = o.person_id
+    join ps where
+      ps.person_id = o.last_update_provider_id
+    join osrc where
+      osrc.order_id = outerjoin(wo.order_id) and
+      osrc.service_resource_cd = outerjoin(dServiceResourceCd)
+    join ol where
+      ol.order_id = wo.order_id
+    join aor where
+      aor.order_id = outerjoin(wo.order_id) and
+      aor.primary_flag = outerjoin(0)
+    join c where
+      c.container_id = outerjoin(osrc.container_id) and
+      c.container_id > outerjoin(0.0)
+    join oror where
+      oror.order_id = outerjoin(ol.order_id)
+    join r where
+      r.ord_rqstn_id = outerjoin(oror.ord_rqstn_id)
+    join d_oa
+        where d_oa.seq = 1
+    join oa
+        where e.organization_id = oa.organization_id
+        and oa.org_alias_type_cd = dClientOrgCd
+        and oa.active_ind = 1
+        and oa.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+        and oa.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+    order seq_nbr, wo.order_id
+   
+    head seq_nbr
+      row + 0
+   
+    head wo.order_id
+      nQualCnt = nQualCnt + 1
+      if(mod(nQualCnt, 20) = 1)
+        stat = alterlist(reply->qual, nQualCnt + 19)
+      endif
+      reply->qual[nQualCnt].sequence = wo.sequence
+      reply->qual[nQualCnt].order_id = wo.order_id
+      reply->qual[nQualCnt].sequence_ident = wo.identifier
+      reply->qual[nQualCnt].person_id = p.person_id
+      reply->qual[nQualCnt].name_full_formatted = p.name_full_formatted
+      reply->qual[nQualCnt].catalog_cd = o.catalog_cd
+      reply->qual[nQualCnt].order_mnemonic = o.order_mnemonic
+      reply->qual[nQualCnt].order_dt_tm = cnvtdatetime(o.orig_order_dt_tm)
+      reply->qual[nQualCnt].activity_type_cd = o.activity_type_cd
+      if(aor_exists = 1)
+        reply->qual[nQualCnt].accession = aor.accession
+        reply->qual[nQualCnt].patient_accession_id = aor.accession_id
+      endif
+      reply->qual[nQualCnt].encntr_id = e.encntr_id
+      reply->qual[nQualCnt].report_priority_cd = ol.report_priority_cd
+      reply->qual[nQualCnt].order_status_cd = o.order_status_cd
+      reply->qual[nQualCnt].dept_status_cd = o.dept_status_cd
+      if (osrc_exists = 1)
+        reply->qual[nQualCnt].service_resource_cd = osrc.service_resource_cd
+      endif
+      reply->qual[nQualCnt].sex_cd = p.sex_cd
+      reply->qual[nQualCnt].race_cd = p.race_cd
+      reply->qual[nQualCnt].birth_dt_tm = cnvtdatetime(p.birth_dt_tm)
+      reply->qual[nQualCnt].visit_reason = e.reason_for_visit
+      reply->qual[nQualCnt].age = FormatAge(p.birth_dt_tm, p.deceased_dt_tm, "")
+      if(c_exists = 1)
+        reply->qual[nQualCnt].specimen_type_cd = c.specimen_type_cd
+        reply->qual[nQualCnt].collected_dt_tm = cnvtdatetime(c.drawn_dt_tm)
+      endif
+      reply->qual[nQualCnt].order_physician = ps.name_full_formatted
+      reply->qual[nQualCnt].location = concat(trim(uar_get_code_display(e.loc_facility_cd)), ",",
+                                              trim(uar_get_code_display(e.loc_nurse_unit_cd)), ",",
+                                              trim(uar_get_code_display(e.loc_room_cd)), ",",
+                                              trim(uar_get_code_display(e.loc_bed_cd)))
+      if (r_exists = 1)
+        reply->qual[nQualCnt].request_id = concat(r.client_alias_name, "-", format(r.seq_nbr, "##########;P0"))
+        reply->qual[nQualCnt].order_request_id = r.ord_rqstn_id
+      endif
+
+      if (oa_exists = "Y")
+        reply->qual[nQualCnt].client_alias = org_alias
+      endif
+    with nocounter, outerjoin = d_oa, dontcare = oa
+   
+    if(nQualCnt > 0)
+      ; look for comments/notes
+      ; **********************************************************
+      select into "nl:"
+        comment_exists = decode(pi.seq, 1, oc.seq, 1, ei.seq, 1, 0)
+      from
+        (dummyt d with seq = value(nQualCnt)),
+        order_comment oc,
+        person_info pi,
+        encntr_info ei,
+        dummyt d1,
+        dummyt d2,
+        dummyt d3
+      plan d where
+        d.seq <= nQualCnt
+      join (d1
+        join pi where
+          pi.person_id = reply->qual[d.seq].person_id and
+          pi.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3) and
+          pi.info_type_cd in(dInfoCommentCd) and
+          pi.long_text_id > 0.0
+      )
+      join (d2
+        join oc where
+          oc.order_id = reply->qual[d.seq].order_id and
+          oc.comment_type_cd in(dOrdCommentCd, dOrdNoteCd) and
+          oc.long_text_id > 0.0
+      )
+      join (d3
+        join ei where
+          ei.encntr_id = reply->qual[d.seq].encntr_id and
+          ei.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3) and
+          ei.info_type_cd in(dInfoCommentCd) and
+          ei.long_text_id > 0.0
+      )
+      order d.seq
+      head d.seq
+        reply->qual[d.seq].comment_ind = comment_exists
+      with nocounter, outerjoin = d1, outerjoin = d2,
+      outerjoin = d3, dontcare = oc, dontcare = ei, dontcare = pi
+   
+      ; get mrns/fins
+      ; ****************************************************************
+      select into "nl:"
+        alias_type_cd = ea.encntr_alias_type_cd
+      from
+        (dummyt d with seq = value(nQualCnt)),
+        encntr_alias ea
+      plan d where
+        d.seq <= nQualCnt
+      join ea where
+        ea.encntr_id = reply->qual[d.seq].encntr_id and
+        ea.encntr_alias_type_cd in(dMRNCd, dFINCd) and
+        ea.active_ind = 1 and
+        (ea.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3) and
+        (ea.end_effective_dt_tm > cnvtdatetime(curdate, curtime3) or
+        ea.end_effective_dt_tm = NULL))
+      order ea.encntr_id
+      detail
+        if(alias_type_cd = dMRNCd)
+          reply->qual[d.seq]->med_rec_nbr =
+                concat(reply->qual[d.seq]->med_rec_nbr, trim(cnvtalias(ea.alias, ea.alias_pool_cd)), ",")
+        else
+          reply->qual[d.seq]->fin =
+                concat(reply->qual[d.seq]->fin, trim(cnvtalias(ea.alias, ea.alias_pool_cd)), ",")
+        endif
+      with nocounter
+      
+      ; set image indicator for each order
+      ;****************************************************     
+      set req1052579->context = ORDER_CONTEXT
+      set stat = alterlist(req1052579->id_qual, nQualCnt)
+      set req1052579->id_cnt = nQualCnt
+      ;add each order id from the reply structure to req1052579 record structure.
+      for(x = 1 to nQualCnt)
+        set req1052579->id_qual[x].id = reply->qual[x].order_id
+      endfor
+
+      execute pcs_get_nonclin_doc_alert with replace("REQUEST", "REQ1052579"), replace("REPLY", "REP1052579")
+
+      if (rep1052579->status_data->status = "S" or rep1052579->status_data->status = "Z")
+          for(x = 1 to nQualCnt)
+             ;check to see if there are images for each order id in the reply structure.
+             set stat = locateval(y, 1, rep1052579->qual_cnt, reply->qual[x].order_id, rep1052579->alert_qual[y].entity_id)
+             if(stat > 0)
+                 set reply->qual[x]->order_image_ind = 1
+             endif              
+          endfor          
+      else
+          call subevent_add ("SCRIPT", "F", "pcs_get_nonclin_doc_alert", "Call to pcs_get_nonclin_doc_alert was unsuccessful.")
+      endif
+
+    endif ; end if(nQualCnt > 0)
+  
+  endif
+ 
+  ; get QC accessions for this worklist
+  ; jpm - data duplication may occur in this select for subsections,
+  ; since qc accessions may be defined at multiple test sites.
+  ; **********************************************************************
+  select into "nl:"
+    seq_nbr = war.sequence,
+    dServResCd = rar.service_resource_cd,
+    lot_nbr = substring(1, 20, cl.lot_number)
+  from
+    worklist_accession_r war,
+    accession a,
+    resource_accession_r rar,
+    control_material cm,
+    control_lot cl,
+    resource_lot_r rlr,
+    dummyt d1
+  plan war where
+    war.worklist_id = request->worklist_id
+  join rar where
+    rar.accession_id = war.accession_id
+  join a where
+    a.accession_id = war.accession_id
+  join cm where
+    cm.control_id = rar.control_id
+  join (d1 
+	join cl where
+	  (cl.control_id = rar.control_id) and
+	  (cnvtdatetime(curdate,curtime3) < cl.expiration_dt_tm) and 
+	  ((rar.preactive_ind = 0 and cl.lot_flag = 1) or
+	  (rar.preactive_ind = 1 and cl.lot_flag = 2))	
+	join rlr where
+	  rlr.lot_id = cl.lot_id and
+	  rlr.service_resource_cd = rar.service_resource_cd )
+  order seq_nbr
+  head seq_nbr
+    if(IsResourceViewable(dServResCd) = True)
+      nQualCnt = nQualCnt + 1
+      if(mod(nQualCnt, 10) = 1)
+        stat = alterlist(reply->qual, nQualCnt + 9)
+      endif
+      reply->qual[nQualCnt].sequence = war.sequence
+      reply->qual[nQualCnt].accession_id = war.accession_id
+      reply->qual[nQualCnt].identifier = war.identifier
+      reply->qual[nQualCnt].sequence_ident = war.identifier
+      reply->qual[nQualCnt].service_resource_cd = dServResCd
+      reply->qual[nQualCnt].accession = a.accession
+      reply->qual[nQualCnt].control_id = cm.control_id
+      reply->qual[nQualCnt].lot_id = cl.lot_id
+      reply->qual[nQualCnt].lot_number = lot_nbr
+      reply->qual[nQualCnt].control_name = cm.short_description
+      reply->qual[nQualCnt].qc_group_id = war.qc_group_id 
+
+      stat = alterlist(reply->qual[nQualCnt].position_qual, 1)
+      if (reply->template_ind = 1)
+         reply->qual[nQualCnt].position_qual[1].position = cnvtstring(war.sequence)
+      else
+         reply->qual[nQualCnt].position_qual[1].position = trim(war.identifier)
+      endif
+    endif
+  detail row + 0
+ 
+  with nocounter, outerjoin = d1
+  
+  if (request->position_load_ind = 1 or request->brv_mode_ind = 1)
+    ;populate expand variables
+    set lExpandStart = 1
+    set lActualSize = nQualCnt
+    set lExpandSize = DetermineExpandSize(lActualSize, 20)
+    set lExpandTotal = DetermineExpandTotal(lActualSize, lExpandSize)
+    set nStatus = alterlist(reply->qual, lExpandTotal)
+    for (i = lActualSize + 1 to lExpandTotal)
+        set reply->qual[i].order_id = reply->qual[lActualSize].order_id
+    endfor
+    
+  	if (reply->template_ind = 1)
+	    select into "nl:"
+        lLocStart = lExpandStart
+	    from accession_order_r aor,
+	         worklist_pos_order_r wpor,
+	         worklist_ref_pos wrp,
+	         (dummyt d with seq = value(lExpandTotal/lExpandSize))
+	    plan d    where assign(lExpandStart, evaluate(d.seq, 1, 1, lExpandStart + lExpandSize))
+	    join aor  where aor.primary_flag = 0
+	                and expand(lCnt, lExpandStart, lExpandStart + lExpandSize - 1, aor.order_id, reply->qual[lCnt].order_id)
+	    join wpor where ((wpor.accession_id = aor.accession_id and wpor.person_accession_ind = 1)
+	                 or (wpor.order_id = aor.order_id and wpor.order_id > 0.0))
+	                and wpor.worklist_id = request->worklist_id
+	    join wrp  where wrp.worklist_ref_pos_id = wpor.worklist_ref_pos_id
+	    order by aor.order_id, wrp.position_nbr
+	    head aor.order_id
+	      lPositionCnt = 0
+	    head wrp.position_nbr
+        lLocStop = lLocStart + lExpandSize - 1
+        if (lLocStop > lActualSize)
+          lLocStop = lActualSize
+        endif
+	      lIndex = locateval(lCnt, lLocStart, lLocStop, aor.order_id, reply->qual[lCnt].order_id)
+	      
+        lPositionCnt = lPositionCnt + 1
+        if (mod(lPositionCnt, 10) = 1)
+          stat = alterlist(reply->qual[lIndex].position_qual, lPositionCnt + 9)
+        endif
+        reply->qual[lIndex].position_qual[lPositionCnt].position = cnvtstring(wrp.position_nbr)
+	    detail
+	      row + 0
+	    foot wrp.position_nbr
+	      row + 0
+	    foot aor.order_id
+	      stat = alterlist(reply->qual[lIndex].position_qual, lPositionCnt)
+	    with nocounter
+	  else	    
+	    select into "nl:"
+        lLocStart = lExpandStart,
+        nIdent = cnvtint(wor.identifier)
+	    from worklist_order_r wor,
+	         (dummyt d with seq = value(lExpandTotal/lExpandSize))
+	    plan d    where assign(lExpandStart, evaluate(d.seq, 1, 1, lExpandStart + lExpandSize))
+	    join wor  where wor.worklist_id = request->worklist_id
+	                and expand(lCnt, lExpandStart, lExpandStart + lExpandSize - 1, wor.order_id, reply->qual[lCnt].order_id)
+	    order by wor.order_id, nIdent
+	    head wor.order_id
+	      lPositionCnt = 0
+	    head nIdent
+  	    lPositionCnt = lPositionCnt + 1
+	    detail
+        lLocStop = lLocStart + lExpandSize - 1
+        if (lLocStop > lActualSize)
+          lLocStop = lActualSize
+        endif
+	      lIndex = locateval(lCnt, lLocStart, lLocStop, wor.order_id, reply->qual[lCnt].order_id)
+	      while(lIndex > 0)  	      
+  	      stat = alterlist(reply->qual[lIndex].position_qual, lPositionCnt)
+  	      reply->qual[lIndex].position_qual[lPositionCnt].position = wor.identifier
+  	      
+          lLocStop = lLocStart + lExpandSize - 1
+          if (lLocStop > lActualSize)
+            lLocStop = lActualSize
+          endif
+  	      lIndex = locateval(lCnt, lIndex + 1, lLocStop, wor.order_id, reply->qual[lCnt].order_id)
+  	    endwhile
+	    foot nIdent
+	      row + 0
+	    foot wor.order_id
+	      row + 0
+	    with nocounter
+	  endif
+  endif
+
+  if (request->brv_mode_ind = 1)
+      set reply->brv_process_accn_cnt = 5	  
+	  
+      select into "nl:"
+	  from dm_prefs dp
+	  where dp.pref_domain = "PATHNET"
+	    and dp.pref_section = "BATCH_RESULT_VERF"
+	    and dp.pref_name = "PROCESS_ACCN_CNT"
+	  detail
+      if (dp.pref_nbr < 1)
+        reply->brv_process_accn_cnt = 1
+      elseif (dp.pref_nbr > 20)
+        reply->brv_process_accn_cnt = 20
+      else
+        reply->brv_process_accn_cnt = dp.pref_nbr
+      endif	   
+	  with nocounter
+  endif
+ 
+  if(nQualCnt > 0)
+    set stat = alterlist(reply->qual, nQualCnt)
+    set reply->n_orders = nQualCnt
+    call LoadCaseGroups(NULL)
+    set reply->status_data->status = "S"
+  else
+    set reply->status_data.status = "Z"
+    call subevent_add ("SELECT", "Z", "GetWorklistOrders()", "No work list orders found!")  
+  endif
+ 
+#exit_script
+  if((reply->status_data->status != "F") and (GetResourceSecurityStatus(0) != "S"))
+    call PopulateResSecStatusBlock(0)
+    set reply->status_data->status = GetResourceSecurityStatus(0)
+  endif
+ 
+/*******************************************************************************
+' PURPOSE:    Builds a temporary list of the order ids for the requested worklist.
+' PARAMETERS: None.
+' RETURNS:    None.
+'******************************************************************************/
+declare GetWorklistOrders(nPendingOnlyInd = i2) = i4
+ 
+subroutine GetWorklistOrders(nPendingOnlyInd)
+  declare lOrderCnt           = i4 with protect, noconstant(0)
+  declare lStat               = i4 with protect, noconstant(0)
+  declare lCodeCnt            = i4 with protect, noconstant(0)
+  
+  if (request->brv_mode_ind = 1)
+    set lCodeCnt = GetActivityTypes(0)
+  endif
+  
+  if (nAutomaticWorklistInd = 0 or nPendingOnlyInd = 0)
+    select
+    if (nPendingOnlyInd = 1 and request->brv_mode_ind = 1)
+      plan w
+        where w.worklist_id = request->worklist_id
+      join wr
+        where wr.worklist_ref_id = w.worklist_ref_id
+      join wor
+        where wor.worklist_id = w.worklist_id
+          and wor.order_id > 0.0
+      join osrc
+        where osrc.order_id = wor.order_id
+        and osrc.service_resource_cd = wr.service_resource_cd
+        and osrc.status_flag+0 < 2
+        and osrc.service_resource_cd = dServiceResourceCd
+      join o
+        where o.order_id = wor.order_id
+        and expand(lCnt, 1, lCodeCnt, o.activity_type_cd, valid_codes->qual[lCnt].code) 
+    elseif (request->brv_mode_ind = 1)
+      plan w
+        where w.worklist_id = request->worklist_id
+      join wr
+        where wr.worklist_ref_id = w.worklist_ref_id
+      join wor
+        where w.worklist_id = wor.worklist_id
+      join osrc
+        where osrc.order_id = wor.order_id
+      join o
+        where o.order_id = wor.order_id 
+        and expand(lCnt, 1, lCodeCnt, o.activity_type_cd, valid_codes->qual[lCnt].code)
+    elseif (nPendingOnlyInd = 1)
+      plan w
+        where w.worklist_id = request->worklist_id
+      join wr
+        where wr.worklist_ref_id = w.worklist_ref_id
+      join wor
+        where wor.worklist_id = w.worklist_id
+          and wor.order_id > 0.0
+      join osrc
+        where osrc.order_id = wor.order_id
+        and osrc.service_resource_cd = wr.service_resource_cd
+        and osrc.status_flag+0 < 2
+        and osrc.service_resource_cd = dServiceResourceCd
+      join o 
+        where o.order_id = wor.order_id
+    else
+      plan w
+        where w.worklist_id = request->worklist_id
+      join wr
+        where wr.worklist_ref_id = w.worklist_ref_id
+      join wor
+        where w.worklist_id = wor.worklist_id
+      join osrc
+        where osrc.order_id = wor.order_id
+      join o 
+        where o.order_id = wor.order_id 
+    endif
+    into "nl:"
+    from
+      worklist w
+      ,worklist_ref wr
+      ,worklist_order_r wor
+      ,order_serv_res_container osrc
+      ,orders o
+   
+    detail
+      lOrderCnt = lOrderCnt + 1
+      if (Mod(lOrderCnt, 10) = 1)
+        lStat = alterlist(wo_list->qual, lOrderCnt + 9)
+      endif
+      wo_list->qual[lOrderCnt].order_id = wor.order_id
+      wo_list->qual[lOrderCnt].catalog_cd = o.catalog_cd
+   
+    foot report
+      lStat = alterlist(wo_list->qual, lOrderCnt)
+      if (nPendingOnlyInd = 1)
+        reply->pending_orders_cnt = lOrderCnt
+      endif
+    with nocounter
+  else
+    select
+    if (request->brv_mode_ind = 1)
+      plan wor 
+        where wor.worklist_id = request->worklist_id
+      join r
+        where r.order_id = wor.order_id
+          and r.result_status_cd = dPerformedCd
+      join pr
+        where pr.worklist_id = request->worklist_id
+          and pr.result_id = r.result_id
+      join o
+        where o.order_id = r.order_id
+          and expand(lCnt, 1, lCodeCnt, o.activity_type_cd, valid_codes->qual[lCnt].code) 
+    else
+      plan wor 
+        where wor.worklist_id = request->worklist_id
+      join r
+        where r.order_id = wor.order_id
+          and r.result_status_cd = dPerformedCd
+      join pr
+        where pr.worklist_id = request->worklist_id
+          and pr.result_id = r.result_id
+      join o 
+        where o.order_id = r.order_id
+    endif
+    into "nl:"
+    from
+      worklist_order_r wor
+      ,orders o
+      ,result r
+      ,perform_result pr
+    order by o.order_id
+    
+    head o.order_id
+      lOrderCnt = lOrderCnt + 1
+      if (Mod(lOrderCnt, 10) = 1)
+        lStat = alterlist(wo_list->qual, lOrderCnt + 9)
+      endif
+      wo_list->qual[lOrderCnt].order_id = o.order_id
+      wo_list->qual[lOrderCnt].catalog_cd = o.catalog_cd
+   
+    foot report
+      lStat = alterlist(wo_list->qual, lOrderCnt)
+      if (nPendingOnlyInd = 1)
+        reply->pending_orders_cnt = lOrderCnt
+      endif
+    with nocounter
+  endif
+
+  if ((nPendingOnlyInd = 1) and (reply->procedure_inc_flag = 2))
+
+    record worklist_procs
+    (
+      1 qual[*]
+        2 task_assay_cd = f8
+    )
+    
+    record worklist_detail_orders
+    (
+      1 qual[*]
+        2 order_id = f8
+    )
+    
+    ; build a list of task_assay_cds
+    select into "nl:"
+    
+    from worklist_ref_procedure wrp
+    
+    plan wrp where wrp.worklist_ref_id = reply->worklist_ref_id
+    
+    head report
+      lCount = 0
+    
+    detail
+      lCount = lCount + 1
+      if (size(worklist_procs->qual, 5) < lCount) 
+        stat = alterlist(worklist_procs->qual, lCount + 10)
+      endif
+      worklist_procs->qual[lCount].task_assay_cd = wrp.task_assay_cd 
+    
+    foot report
+      stat = alterlist(worklist_procs->qual, lCount)
+    
+    with nocounter
+  
+    ; determine orders
+    select into "nl:"
+      tac_exists = evaluate(nullind(r.task_assay_cd), false, true, false),
+      ptr_exists = evaluate(nullind(ptr.catalog_cd), false, true, false)
+      
+    from profile_task_r ptr,
+         result r,
+         (dummyt d with seq = value(size(wo_list->qual, 5))),
+         (dummyt d2 with seq = value(size(worklist_procs->qual, 5)))
+    
+    plan d
+    
+    join d2
+    
+    join ptr where ptr.catalog_cd = outerjoin(wo_list->qual[d.seq].catalog_cd)
+               and ptr.pending_ind = outerjoin(1)
+               and ptr.task_assay_cd = outerjoin(worklist_procs->qual[d2.seq].task_assay_cd)
+    
+    join r   where r.task_assay_cd = outerjoin(ptr.task_assay_cd) 
+               and r.order_id = outerjoin(wo_list->qual[d.seq].order_id)
+    
+    order by d.seq
+    
+    head report
+      lCount = 0
+    
+    head d.seq
+      bAdd = false
+    
+    detail
+      if ((tac_exists = false) or (r.result_status_cd = dPerformedCd) or (ptr_exists = false))
+        bAdd = true
+      endif
+    
+    foot d.seq
+      if (bAdd = true)
+        lCount = lCount + 1
+        if (size(worklist_detail_orders->qual, 5) < lCount) 
+          stat = alterlist(worklist_detail_orders->qual, lCount + 10)
+        endif
+        worklist_detail_orders->qual[lCount].order_id = wo_list->qual[d.seq].order_id
+      endif
+    
+    foot report
+      stat = alterlist(worklist_detail_orders->qual, lCount)
+    
+    with nocounter
+    
+    ; update list of worklist orders   
+    set stat = initrec(wo_list)
+    
+    set lOrderCnt = 0
+    set stat = alterlist(wo_list->qual, size(worklist_detail_orders->qual, 5))
+    
+    for (n = 1 to size(worklist_detail_orders->qual, 5))
+      set lOrderCnt = lOrderCnt + 1
+      set wo_list->qual[n].order_id = worklist_detail_orders->qual[n].order_id 
+    endfor
+    
+    set reply->pending_orders_cnt = lOrderCnt
+    
+    free set worklist_procs
+    free set worklist_detail_orders
+  
+  endif 
+ 
+  return(lOrderCnt)
+end ;GetWorklistOrders()
+
+
+subroutine GetActivityTypes(none)
+  declare lTotal = i4 with private, noconstant(0)
+  declare lCurrent = i4 with private, noconstant(1)
+  declare lLoopCount = i4 with private, noconstant(1)
+  declare dCodeValue = f8 with private, noconstant(0.0)
+  declare lRunningTotal = i4 with private, noconstant(0)
+ 
+  while (lCurrent != lTotal)
+    set stat = uar_get_meaning_by_codeset(106, "GLB", lCurrent, dCodeValue)
+    if (stat != 0 or dCodeValue = 0.0)
+      go to EXIT_SCRIPT
+    endif
+    
+    set lTotal = lTotal + 1
+    set lRunningTotal = lRunningTotal + 1
+    
+    set stat = alterlist(valid_codes->qual, lRunningTotal)
+    set valid_codes->qual[lRunningTotal].code = dCodeValue
+  endwhile
+  
+  set lTotal = 0
+  set lCurrent = 1
+  set lLoopCount = 1
+  set dCodeValue = 0.0
+  
+  while (lCurrent != lTotal)
+    set stat = uar_get_meaning_by_codeset(106, "HLA", lCurrent, dCodeValue)
+    if (stat != 0 or dCodeValue = 0.0)
+      go to EXIT_SCRIPT
+    endif
+    
+    set lTotal = lTotal + 1
+    set lRunningTotal = lRunningTotal + 1
+    
+    set stat = alterlist(valid_codes->qual, lRunningTotal)
+    set valid_codes->qual[lRunningTotal].code = dCodeValue
+  endwhile
+  
+  return (lRunningTotal)
+end ;subroutine
+
+free set valid_codes
+free set wo_list
+free set req1052579
+free set rep1052579 
+
+end go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,296 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_person_by_accn/glb_get_person_by_accn.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2000 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_person_by_accn.prg
+        Object name:            glb_get_person_by_accn
+        Request #:              250067
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load person demographic information for a
+                                given accession number.
+                     
+        Tables read:            container_accession
+                                encounter
+                                order_container_r
+                                orders
+                                pathology_case
+                                person
+                                person_alias
+                                
+        Tables updated:         None
+        Executing from:         
+
+        Special Notes:          None
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 01/03/96 Hal Patchen          Initial Release                     *
+;    *001 04/07/98 Hal Patchen          Return formatted alias              *
+;    *002 08/24/00 Hal Patchen          Return encounter id                 *
+;    *003 11/25/03 Andrew Dittrich      Added logic to account for active   *
+;    *                                  and effective person aliases        *
+;    *004 11/03/05 Nick Smith           Remove ORJOIN for AP accessions and *
+;    *                                  simplify script to use AOR table to *
+;    *                                  find the person info.               *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_PERSON_BY_ACCN:dba go    
+             create program GLB_GET_PERSON_BY_ACCN:dba
+     
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  accession                    = c20
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      ( 
+         1  qual[*]
+            2  age                       = vc
+            2  person_id                 = f8
+            2  name_last_key             = vc
+            2  name_first_key            = vc
+            2  name_full_formatted       = vc
+            2  birth_dt_tm               = dq8
+            2  sex_cd                    = f8
+            2  sex_disp                  = vc
+            2  sex_mean                  = c12
+            2  alias                     = vc
+            2  alias_formatted           = vc                          ;001
+            2  encntr_id                 = f8                          ;002
+            2  loc_facility_cd           = f8
+            2  loc_facility_disp         = vc
+            2  loc_nurse_unit_cd         = f8
+            2  loc_nurse_unit_disp       = vc
+            2  loc_room_cd               = f8
+            2  loc_room_disp             = vc
+            2  loc_bed_cd                = f8
+            2  loc_bed_disp              = vc
+            2  reason_for_visit          = vc
+            2  deceased_dt_tm            = dq8
+%i cclsource:status_block.inc
+      )
+%i cclsource:pcs_format_age.inc      
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set CV_REQUIRED_RECS            = 1
+         declare cv_cnt                  = i4
+         set ALIAS_TYPE_CODE_SET         = 4
+         set ALIAS_TYPE_MRN_CDF          = "MRN"
+         declare alias_type_mrn_cd       = f8
+         declare q_cnt                   = i4
+         set activity_type_ap            = 0.0 ;anatomic pathology
+         set stat = uar_get_meaning_by_codeset(106,"AP",1,activity_type_ap)
+
+         set reply->status_data.status = "F"
+
+      /***********************************************************************
+      * Select code values                                                   *
+      ***********************************************************************/
+         select into "nl:"
+            cv.code_value,
+            cv.cdf_meaning
+         from 
+            code_value cv
+         where cv.code_set = ALIAS_TYPE_CODE_SET
+           and cv.cdf_meaning = ALIAS_TYPE_MRN_CDF
+           and cv.active_ind = 1
+           and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+           and  cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+         detail
+            case (cv.cdf_meaning)
+              of ALIAS_TYPE_MRN_CDF:
+                 alias_type_mrn_cd = cv.code_value
+                 cv_cnt = cv_cnt + 1
+            endcase
+         with nocounter
+
+         ;* Verify that all required code value records were read.
+         if (cv_cnt != CV_REQUIRED_RECS)
+            set reply->status_data.subeventstatus[1].OperationName =
+               "SELECT"
+            set reply->status_data.subeventstatus[1].OperationStatus =
+               "F"
+            set reply->status_data.subeventstatus[1].TargetObjectName =
+               "CODE_VALUE TABLE"
+            set reply->status_data.subeventstatus[1].TargetObjectValue =
+               "Unable to load all required code values for script execution"
+            go to Exit_Script
+         endif
+
+      /***********************************************************************
+      * Select person information based on person last name                  *
+      ***********************************************************************/
+         select into "nl:"
+            
+            aor.seq,
+            o1.seq,
+            p1.seq,
+            e1.seq,
+            d_pa1.seq,
+            pa1_exists = decode(pa1.seq, "Y", "N"),
+            pa1.seq,
+            pa1.alias,                                                 ;001
+            pa1.alias_pool_cd,                                         ;001
+            alias_frmt1 = cnvtalias(pa1.alias, pa1.alias_pool_cd)      ;001
+            
+            /* Selection fields:
+            join_path = decode(ca.seq, "ca", 
+                               pc.seq, "pc",
+                                       "none"),
+            ca.accession,
+            ocr.container_id,
+            o1.order_id,
+            p1.person_id,
+            p1.person_type_cd,
+            p1.name_last_key,
+            p1.name_first_key,
+            p1.name_full_formatted,
+            p1.sex_cd,
+            e1.encntr_id,
+            e1.loc_facility_cd,
+            e1.loc_nurse_unit_cd,
+            e1.loc_room_cd,
+            e1.loc_bed_cd,
+            e1.reason_for_visit,
+            d_pa1.seq,
+            pa1_exists = decode(pa1.seq, "Y", "N"),
+            pa1.person_id,
+            pa1.person_alias_type_cd,
+            pa1.alias,
+            pa1.alias_pool_cd,                                         ;001
+            alias_frmt1 = cnvtalias(pa1.alias, pa1.alias_pool_cd),     ;001
+            pc.accession_nbr,
+            p2.person_id,
+            p2.person_type_cd,
+            p2.name_last_key,
+            p2.name_first_key,
+            p2.name_full_formatted,
+            p2.sex_cd,
+            e2.encntr_id,
+            e2.loc_facility_cd,
+            e2.loc_nurse_unit_cd,
+            e2.loc_room_cd,
+            e2.loc_bed_cd,
+            e2.reason_for_visit,
+            d_pa2.seq,
+            pa2_exists = decode(pa2.seq, "Y", "N"),
+            pa2.person_id,
+            pa2.person_alias_type_cd,
+            pa2.alias_pool_cd,                                         ;001
+            alias_frmt2 = cnvtalias(pa2.alias, pa2.alias_pool_cd),     ;001
+            pa2.alias
+            */
+
+         from
+            accession_order_r aor,
+            orders o1,
+            person p1,
+            encounter e1,
+            (dummyt d_pa1 with seq = 1),
+            person_alias pa1
+            
+         plan  aor   where aor.accession = request->accession
+         join  o1    where o1.order_id = aor.order_id
+                       and (aor.primary_flag = 0 or o1.activity_type_cd = activity_type_ap)
+         join  p1    where p1.person_id = o1.person_id
+         join  e1    where e1.encntr_id = o1.encntr_id  
+         join  d_pa1 where d_pa1.seq = 1
+         join  pa1   where pa1.person_id = p1.person_id
+                       and pa1.person_alias_type_cd = alias_type_mrn_cd
+                       and pa1.active_ind = 1                                   ;003
+                       and (cnvtdatetime(curdate,curtime3) between pa1.beg_effective_dt_tm and pa1.end_effective_dt_tm) ;003
+
+         head report
+            q_cnt = 0
+
+         detail         
+            q_cnt = q_cnt + 1
+            if (mod(q_cnt,10) = 1)
+               stat = alterlist(reply->qual, q_cnt + 10)
+            endif
+            reply->qual[q_cnt].person_id = p1.person_id
+            reply->qual[q_cnt].name_last_key = p1.name_last_key
+            reply->qual[q_cnt].name_first_key = p1.name_first_key
+            reply->qual[q_cnt].name_full_formatted = p1.name_full_formatted
+            reply->qual[q_cnt].birth_dt_tm = p1.birth_dt_tm
+            reply->qual[q_cnt].age = FormatAge(p1.birth_dt_tm, p1.deceased_dt_tm, "CHRONOAGE")
+            reply->qual[q_cnt].deceased_dt_tm = p1.deceased_dt_tm
+            reply->qual[q_cnt].sex_cd = p1.sex_cd
+            if (e1.encntr_id > 0.0)
+               reply->qual[q_cnt].encntr_id = e1.encntr_id         ;002
+               reply->qual[q_cnt].loc_facility_cd = e1.loc_facility_cd
+               reply->qual[q_cnt].loc_nurse_unit_cd = e1.loc_nurse_unit_cd
+               reply->qual[q_cnt].loc_room_cd = e1.loc_room_cd
+               reply->qual[q_cnt].loc_bed_cd = e1.loc_bed_cd
+               reply->qual[q_cnt].reason_for_visit = e1.reason_for_visit
+            endif
+            if (pa1_exists = "Y")
+               reply->qual[q_cnt].alias = pa1.alias
+               reply->qual[q_cnt].alias_formatted = alias_frmt1    ;001
+            endif
+            
+         with 
+            nocounter,
+            outerjoin = d_pa1,
+            dontcare = pa1,
+            maxqual(aor, 1),
+            maxqual(pa1, 1)
+
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+         endif
+         set stat = alterlist(reply->qual, q_cnt)
+
+      #Exit_Script
+         end
+         go      
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,224 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_gl_upd_instr_queue/pfmt_gl_upd_instr_queue.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       pfmt_gl_upd_instr_queue.prg
+        Object name:            pfmt_gl_upd_instr_queue
+        Request #:              
+
+        Product:                PathNet
+        Product Team:           Anatomic Pathology
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        To clean up the instr_accn_queue table for
+                    results that were veridied by discern rules.
+
+        Tables read:       DM_PREFS, result, perform_result,instr_accn_queue,
+                                  accession_order_r, perform_result     
+                                
+
+        Tables updated:    instr_accn_queue     
+                                
+
+        Executing from:         
+
+        Special Notes:          ??
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 01/12/05 Eric Smith           Initial Release                     *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+DROP program pfmt_gl_upd_instr_queue:dba go
+CREATE program pfmt_gl_upd_instr_queue:dba
+
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC 
+
+if (requestin->reply->interface_flag != 6 or requestin->reply->status_data->status = "F")
+  go to exit_script 
+endif
+
+
+
+SET LOG_PROGRAM_NAME = "pfmt_gl_upd_instr_queue"                           
+
+/***********************************************************************
+ *   Print date and time to log file.                                  *
+ ***********************************************************************/
+                                      
+
+call LOG_MESSAGE( build("Starting GL Update Instr Queue (",
+                  format(curdate, "MM/DD/YY;;D")," ", 
+                  format(curtime, " HHMM;;M"),")" ), LOG_LEVEL_DEBUG) 
+
+/*****************************************************************
+* Gets the preference for keeping instrument queue records.      *
+*   If no row is found then, keeping the insturment queue records*
+*   is turned off.  Otherwise it is on                           *
+******************************************************************/
+select into "nl:"
+from DM_PREFS dp
+where dp.pref_domain = "PATHNET GLB"
+  and dp.pref_section = "RESULTENTRY"
+  and dp.pref_name = "KeepDiscernIQRecords" 
+  and dp.pref_nbr = 1
+with nocounter
+
+
+if (curqual = 0)
+  go to EXIT_SCRIPT 
+endif
+
+Record iq_records
+(
+1 Qual[*]
+   2  service_resource_cd 	= f8
+   2  accession 			= c20
+   2  results_found_ind     = i2
+)
+
+declare lsub          = i4 with protect, noconstant(0)
+declare lsub2         = i4 with protect, noconstant(0)
+declare lsub3         = i4 with protect, noconstant(0)
+declare dPerformed    = f8 with protect, noconstant(0.0)
+declare dVerified     = f8 with protect, noconstant(0.0)
+declare dCorrected    = f8 with protect, noconstant(0.0)
+declare nFound        = i2 with protect, noconstant(0)
+declare lIQRecords    = i4 with protect, noconstant(0)
+
+set dPerformed = UAR_GET_CODE_BY("MEANING", 1901, "PERFORMED")
+set dVerified = UAR_GET_CODE_BY("MEANING", 1901, "VERIFIED")
+set dCorrected = UAR_GET_CODE_BY("MEANING", 1901, "CORRECTED")
+
+/************************************************************
+* Only process orders if status is verified/corrected       *
+************************************************************/
+for (lsub = 1 to size(requestin->request->orders, 5))
+  select into "nl:"
+    from (dummyt d1 with seq = value(size(requestin->reply->orders[lsub]->assays,5))),
+       result r,
+       perform_result pr,
+       instr_accn_queue iaq
+    plan d1  where requestin->reply->orders[lsub]->assays[d1.seq]->result_status_cd 
+                in (dVerified, dPerformed, dCorrected)
+    join r  where r.result_id = requestin->reply->orders[lsub].assays[d1.seq].result_id
+    join pr where pr.result_id = r.result_id
+              and pr.result_status_cd = r.result_status_cd
+    join iaq where iaq.service_resource_cd = pr.service_resource_cd
+              and iaq.accession = requestin->request->orders[lsub].accession
+              and iaq.in_process_prsnl_id = 0
+    order by iaq.service_resource_cd
+  head iaq.service_resource_cd
+    nFound = 0
+    for (lsub2 = 1 to lIQRecords)
+      if ((iq_records->qual[lsub2].service_resource_cd = iaq.service_resource_cd) 
+                 and (iq_records->qual[lsub2].accession = iaq.accession))
+        nFound = 1 
+        lsub2 = lIQRecords + 1    
+      endif
+    endfor
+    if (nFound = 0)
+      lIQRecords = lIQRecords + 1
+      stat = alterlist(iq_records->Qual, lIQRecords)
+      iq_records->qual[lIQRecords].service_resource_cd = iaq.service_resource_cd
+      iq_records->qual[lIQRecords].accession = iaq.accession
+    endif
+  with nocounter
+
+endfor
+
+/**************************************************************
+* If accession is found on table then set the results_found_ind*
+**************************************************************/
+select into "nl:"
+from (dummyt d1 with seq = lIQRecords),
+      accession_order_r aor,
+      result r, 
+      perform_result pr
+plan d1
+join aor where aor.accession = iq_records->qual[d1.seq].accession
+           and aor.primary_flag = 0
+join r where r.order_id = aor.order_id
+         and r.result_status_cd = dPerformed
+join pr where pr.result_id = r.result_id
+         and pr.result_status_cd = r.result_status_cd
+         and pr.service_resource_cd +0= iq_records->qual[d1.seq].service_resource_cd
+order by pr.perform_result_id
+head pr.perform_result_id
+  iq_records->qual[d1.seq].results_found_ind = 1
+with nocounter
+
+/************************************************************
+* Lock rows for delete                                      *
+************************************************************/
+
+select into "nl:"
+     
+from        
+  instr_accn_queue iaq,
+  (dummyt d with seq = lIQRecords)
+plan d
+join iaq
+where iaq.accession = iq_records->qual[d.seq].accession
+  and iaq.service_resource_cd = iq_records->qual[d.seq].service_resource_cd
+  and iq_records->qual[d.seq].results_found_ind = 0
+  and iaq.in_process_prsnl_id = 0.0
+
+with nocounter, forupdate(iaq)
+  
+if (curqual = 0)
+  go to exit_script
+endif
+  
+/************************************************************
+* Removes the accessions from the queue                     *
+************************************************************/
+delete from instr_accn_queue icq,
+    (dummyt d with seq = lIQRecords)
+  set icq.seq = 1
+plan d
+join icq where icq.accession = iq_records->qual[d.seq].accession
+           and icq.service_resource_cd = iq_records->qual[d.seq].service_resource_cd
+           and iq_records->qual[d.seq].results_found_ind = 0
+           and icq.in_process_prsnl_id = 0.0
+with nocounter
+  
+  CALL ERROR_MESSAGE(0)
+  if (ERROR_MESSAGE > 0)
+    go to EXIT_SCRIPT
+  endif
+
+  
+#EXIT_SCRIPT
+
+call LOG_MESSAGE( build("Ending GL Update Instr Queue (",
+                  format(curdate, "MM/DD/YY;;D")," ", 
+                  format(curtime, " HHMM;;M"),")" ), LOG_LEVEL_DEBUG)
+
+end go
+
+;Generated by GNU enscript 1.6.4.

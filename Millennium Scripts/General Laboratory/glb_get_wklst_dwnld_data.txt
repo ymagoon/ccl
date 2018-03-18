@@ -1,0 +1,606 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_wklst_dwnld_data/glb_get_wklst_dwnld_data.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2006 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_wklst_dwnld_data.prg
+        Object name:            glb_get_wklst_dwnld_data
+        Request #:              250127
+
+        Product:                Worklist Request
+        Product Team:           Pathnet         
+
+        Program purpose:        Get order data for all orders of a specified worklist
+                                id.  Program is to be used from worklist request and
+                                will return all required download data for all orders
+                                within the worklist. Reply returns all orders sorted by
+                                sequence within worklist.
+
+        Tables read:            multiple
+
+        Tables updated:         None
+
+        Executing from:         CPM Script Server
+
+
+********************************************************************************************
+           *              GENERATED MODIFICATION CONTROL LOG              *
+********************************************************************************************
+
+Mod   Date        Engineer                Modification Performed
+---   --------    --------------------    --------------------------------------------------
+001   04/19/06    Joe Troy                Initial Code
+002   05/05/07    Paul Lessin             Add QC accns, download data thru custom CCL script, 
+003   09/08/08    Matt Hlavaty            Qualify organization_alias on active_ind
+********************************************************************************************/
+
+drop program glb_get_wklst_dwnld_data:dba go
+create program glb_get_wklst_dwnld_data:dba
+
+/*
+record request
+(
+  1 worklist_id = f8
+  1 cust_download_script_cd = f8
+)*/
+
+record reply
+(
+%i cclsource:glb_get_wklst_dwnld_data_rep.inc
+)
+
+record WorklistDownloadRec
+(
+%i cclsource:glb_get_wklst_dwnld_data_rep.inc
+)
+
+; constants
+declare ALIAS_TYPE_CS = i4 with protect, constant(319)
+declare ROLE_CS = i4 with protect, constant(333)
+
+; code values
+declare dMRNCd       = f8 with protect, noconstant(0.0)
+declare dFINCd       = f8 with protect, noconstant(0.0)
+declare dAdmitDocCd  = f8 with protect, noconstant(0.0)
+declare dAttendDocCd = f8 with protect, noconstant(0.0)
+declare dOrgAliasCd  = f8 with protect, noconstant(0.0)
+
+declare sRet         = vc with protect, noconstant(" ") ; general working string
+declare sProgramName = vc with protect, noconstant("")  ; download program to execute
+declare lStat        = i4 with protect, noconstant(0)   ; status return value
+declare nAccnSeqInd  = i2 with protect, noconstant(0)   ; the worklist is accession-level
+
+; counts
+declare nOrderCnt    = i4  with protect, noconstant(0)
+declare lQcCnt       = i4  with protect, noconstant(0)
+declare nFirstContainer = i2 with protect, noconstant(0)
+
+; script failed by default
+set reply->status_data->status = "F"
+
+; find all code values, fail script if any not found
+set dMRNCd = uar_get_code_by("MEANING", ALIAS_TYPE_CS, "MRN")
+set dFINCd = uar_get_code_by("MEANING", ALIAS_TYPE_CS, "FIN NBR")
+set dAdmitDocCd = uar_get_code_by("MEANING", ROLE_CS, "ADMITDOC")
+set dAttendDocCd = uar_get_code_by("MEANING", ROLE_CS, "ATTENDDOC")
+set dOrgAliasCd = uar_get_code_by("MEANING", 334, "CLIENT")
+
+if(dMRNCd <= 0.0)
+  set sRet = "MRN"
+elseif(dFINCd <= 0.0)
+  set sRet = "FIN NBR"
+elseif(dAdmitDocCd <= 0.0)
+  set sRet = "ADMITDOC"
+elseif(dAttendDocCd <= 0.0)
+  set sRet = "ATTENDDOC"
+elseif(dOrgAliasCd <= 0.0)
+  set sRet = "CLIENT"
+else
+  set sRet = " "
+endif
+
+if(textlen(trim(sRet)) > 0)
+  ;fail script
+  call HandleError("Code value not found", concat("meaning: ", sRet))
+  go to exit_script
+endif
+
+; Get the name of the custom download script, if any
+if (request->cust_download_script_cd > 0)
+	set sProgramName = cnvtupper(trim(uar_get_definition(request->cust_download_script_cd)))
+	if (textlen(trim(sProgramName)) = 0)
+	  call HandleError("Custom script not found in code table", cnvtstring(request->cust_download_script_cd))
+  	go to exit_script
+	endif
+endif
+
+; retrieve worklist data
+select into "nl:"
+	w.template_ind
+from
+	worklist w,
+	worklist_ref wrp
+plan w where
+	w.worklist_id = request->worklist_id
+join wrp where
+	wrp.worklist_ref_id = w.worklist_ref_id
+detail
+	reply->worklist_id = cnvtstring(w.worklist_id)
+	reply->worklist_alias = w.worklist_alias
+	reply->template_ind = cnvtstring(w.template_ind)
+	reply->service_resource_cd = cnvtstring(w.service_resource_cd)
+	nAccnSeqInd = wrp.accn_seq_ind
+with nocounter
+	
+; now ready to retrieve all order data
+if (reply->template_ind = "0") 
+	select into "nl:"
+	  ea1_exists = evaluate(nullind(ea1.encntr_id), 0, 1, 0),
+	  ea2_exists = evaluate(nullind(ea2.encntr_id), 0, 1, 0),
+	  epr1_exists = evaluate(nullind(epr1.encntr_id), 0, 1, 0),
+	  epr2_exists = evaluate(nullind(epr2.encntr_id), 0, 1, 0),
+	  ps1_exists = evaluate(nullind(ps1.person_id), 0, 1, 0),
+	  ps2_exists = evaluate(nullind(ps2.person_id), 0, 1, 0),
+	  oa_exists = evaluate(nullind(oa.organization_id), 0, 1, 0),
+	  order_mnemonic = cnvtupper(o.order_mnemonic)
+	from
+		worklist_order_r wor,
+	  orders o,
+	  person p,
+	  encounter e,
+	  order_laboratory ol,
+	  accession_order_r aor,
+	  order_container_r ocr,
+	  container_accession ca,
+	  order_serv_res_container osrc,
+	  container c,
+	  encntr_alias ea1,
+	  encntr_alias ea2,
+	  encntr_prsnl_reltn epr1,
+	  encntr_prsnl_reltn epr2,
+	  prsnl ps1,
+	  prsnl ps2,
+	  organization_alias oa
+	plan wor where
+	  wor.worklist_id = request->worklist_id
+	join o where
+	  o.order_id = wor.order_id
+	join p where
+	  p.person_id = o.person_id
+	join e where
+	  e.encntr_id = o.encntr_id
+	join ol where
+	  ol.order_id = o.order_id
+	join aor where
+	  aor.order_id = o.order_id and
+	  aor.primary_flag+0 = 0
+	join ocr where
+	  ocr.order_id = o.order_id
+	join ca where
+		ca.container_id = ocr.container_id
+	join osrc where
+	  osrc.order_id = ocr.order_id and
+	  osrc.container_id = ocr.container_id
+	join c where
+	  c.container_id = ocr.container_id
+	join ea1 where
+	  ea1.encntr_id = outerjoin(o.encntr_id) and
+	  ea1.encntr_alias_type_cd = outerjoin(dMRNCd)
+	join ea2 where
+	  ea2.encntr_id = outerjoin(o.encntr_id) and
+	  ea2.encntr_alias_type_cd = outerjoin(dFINCd)
+	join epr1 where
+	  epr1.encntr_id = outerjoin(o.encntr_id) and
+	  epr1.encntr_prsnl_r_cd = outerjoin(dAttendDocCd)
+	join epr2 where
+	  epr2.encntr_id = outerjoin(o.encntr_id) and
+	  epr2.encntr_prsnl_r_cd = outerjoin(dAdmitDocCd)
+	join ps1 where
+	  ps1.person_id = outerjoin(epr1.prsnl_person_id)
+	join ps2 where
+	  ps2.person_id = outerjoin(epr2.prsnl_person_id)
+	join oa where
+	  oa.organization_id = outerjoin(e.organization_id) and
+	  oa.org_alias_type_cd = outerjoin(dOrgAliasCd) and
+    oa.active_ind = outerjoin(1) and
+    oa.beg_effective_dt_tm <= outerjoin(cnvtdatetime(curdate, curtime3)) and
+    oa.end_effective_dt_tm >= outerjoin(cnvtdatetime(curdate, curtime3))
+	order by wor.sequence, order_mnemonic, ca.accession_container_nbr
+	
+	head wor.sequence
+		nFirstContainer = 0	
+	head order_mnemonic
+		nFirstContainer = 1
+	head ca.accession_container_nbr
+		if (nFirstContainer = 1)
+			nFirstContainer = 0 
+		  ; populate all order data
+		  nOrderCnt = nOrderCnt + 1
+		  if(mod(nOrderCnt, 10) = 1)
+		    stat = alterlist(reply->orders, nOrderCnt + 9)
+		  endif
+		  reply->orders[nOrderCnt].accession = aor.accession
+		  reply->orders[nOrderCnt].age_in_years = cnvtstring(datetimediff(cnvtdatetime(curdate, curtime3), p.birth_dt_tm, 2) / 52)
+		  reply->orders[nOrderCnt].bar_code_nbr = wor.identifier
+		  reply->orders[nOrderCnt].bed_cd = cnvtstring(e.loc_bed_cd)
+		  reply->orders[nOrderCnt].col_status_cd = cnvtstring(ol.report_priority_cd)
+		  reply->orders[nOrderCnt].container_id = cnvtstring(ocr.container_id)
+		  reply->orders[nOrderCnt].frmt_drawn_date = format(c.drawn_dt_tm, "@SHORTDATE;;d")
+		  reply->orders[nOrderCnt].drawn_time = format(c.drawn_dt_tm, "@TIMENOSECONDS;;M")
+		  reply->orders[nOrderCnt].frmt_admit_date = format(e.reg_dt_tm, "@SHORTDATE;;d")
+		  reply->orders[nOrderCnt].frmt_birthday = format(p.birth_dt_tm, "@SHORTDATE;;d")
+		  reply->orders[nOrderCnt].frmt_disc_date = format(e.disch_dt_tm, "@SHORTDATE;;d")
+		  reply->orders[nOrderCnt].frmt_req_col_date = format(c.drawn_dt_tm, "@SHORTDATE;;d")
+		  reply->orders[nOrderCnt].req_col_time = format(c.drawn_dt_tm, "@TIMENOSECONDS;;M")
+		  reply->orders[nOrderCnt].identifier = wor.identifier
+		  reply->orders[nOrderCnt].name = p.name_full_formatted
+		  reply->orders[nOrderCnt].nurse_station_cd = cnvtstring(e.loc_nurse_unit_cd)
+		  reply->orders[nOrderCnt].order_id = cnvtstring(o.order_id)
+		  reply->orders[nOrderCnt].patient_class_cd = cnvtstring(e.encntr_class_cd)
+		  reply->orders[nOrderCnt].patient_encounter_nbr = cnvtstring(e.encntr_id)
+		  reply->orders[nOrderCnt].patient_name = p.name_full_formatted
+		  reply->orders[nOrderCnt].patient_race_cd = cnvtstring(p.race_cd)
+		  reply->orders[nOrderCnt].patient_type_cd = cnvtstring(e.encntr_type_cd)
+		  reply->orders[nOrderCnt].room_cd = cnvtstring(e.loc_room_cd)
+		  reply->orders[nOrderCnt].sample_type_cd = cnvtstring(c.specimen_type_cd)
+		  reply->orders[nOrderCnt].sequence_nbr = cnvtstring(wor.sequence)
+		  reply->orders[nOrderCnt].sex_cd = cnvtstring(p.sex_cd)
+		  reply->orders[nOrderCnt].species_cd = cnvtstring(p.species_cd)
+		  reply->orders[nOrderCnt].patient_name_last = p.name_last
+			reply->orders[nOrderCnt].patient_name_first = p.name_first
+		  if(ps2_exists = 1)
+		    reply->orders[nOrderCnt].admit_doctor_name = ps2.name_full_formatted
+		  endif
+		  if(epr2_exists = 1)
+		    reply->orders[nOrderCnt].admit_doctor_nbr = cnvtstring(epr2.prsnl_person_id)
+		  endif
+		  if(oa_exists = 1)
+		    reply->orders[nOrderCnt].client = oa.alias
+		  endif
+		  if(epr1_exists = 1)
+		    reply->orders[nOrderCnt].doctor = cnvtstring(epr1.prsnl_person_id)
+		  endif
+		  if(ps1_exists = 1)
+		    reply->orders[nOrderCnt].doctor_name = ps1.name_full_formatted
+		  endif
+		  if(ea2_exists = 1)
+		    reply->orders[nOrderCnt].fin_nbr = cnvtalias(ea2.alias, ea2.alias_pool_cd)
+		  endif
+		  if(ea1_exists = 1)
+		    reply->orders[nOrderCnt].frmt_med_nbr = cnvtalias(ea1.alias, ea1.alias_pool_cd)
+		    reply->orders[nOrderCnt].frmt_med_nbr2 = cnvtalias(ea1.alias, ea1.alias_pool_cd)
+		  endif
+		  if (osrc.status_flag = 1 or osrc.status_flag = 2) 
+		    reply->orders[nOrderCnt].in_lab_ind = "1"
+		  else
+		    reply->orders[nOrderCnt].in_lab_ind = "0"
+		  endif
+		endif
+	detail row + 0
+	with nocounter
+	
+	select into "nl:"
+		war.worklist_id
+	from
+		worklist_accession_r war,
+		accession ac
+	plan war where
+		war.worklist_id = request->worklist_id and
+		war.accession_id > 0
+	join ac where
+		ac.accession_id = war.accession_id
+	order by war.sequence, ac.accession_id
+	head report
+		lQcCnt = 0
+	detail
+		lQcCnt = lQcCnt + 1
+	  if(mod(lQcCnt, 10) = 1)
+	    stat = alterlist(reply->qc_accns, lQcCnt + 9)
+	  endif
+	  
+	  reply->qc_accns[lQcCnt].accession_id = cnvtstring(ac.accession_id)
+	  reply->qc_accns[lQcCnt].accession =  ac.accession
+	  reply->qc_accns[lQcCnt].sequence_nbr = cnvtstring(war.sequence)
+	  reply->qc_accns[lQcCnt].identifier = cnvtstring(war.identifier)
+	  reply->qc_accns[lQcCnt].template_position = ""
+  with nocounter
+endif ; reply->template_ind = "0"
+
+
+; Get template worklists
+if (reply->template_ind = "1")
+	select 
+	; Accession-level
+	if (nAccnSeqInd = 1) 
+		plan wpor where
+	  	wpor.worklist_id = request->worklist_id and
+	  	wpor.person_accession_ind = 1
+		join wrp where
+			wrp.worklist_ref_pos_id = wpor.worklist_ref_pos_id
+		join aor where
+			aor.accession_id = wpor.accession_id and 
+			aor.primary_flag+0 = 0
+		join o where
+		  o.order_id = aor.order_id
+		join p where
+		  p.person_id = o.person_id
+		join e where
+		  e.encntr_id = o.encntr_id
+		join ol where
+		  ol.order_id = o.order_id
+		join ocr where
+		  ocr.order_id = o.order_id
+		join ca where
+			ca.container_id = ocr.container_id
+		join osrc where
+		  osrc.order_id = ocr.order_id and
+		  osrc.container_id = ocr.container_id
+		join c where
+		  c.container_id = ocr.container_id
+		join ea1 where
+		  ea1.encntr_id = outerjoin(o.encntr_id) and
+		  ea1.encntr_alias_type_cd = outerjoin(dMRNCd)
+		join ea2 where
+		  ea2.encntr_id = outerjoin(o.encntr_id) and
+		  ea2.encntr_alias_type_cd = outerjoin(dFINCd)
+		join epr1 where
+		  epr1.encntr_id = outerjoin(o.encntr_id) and
+		  epr1.encntr_prsnl_r_cd = outerjoin(dAttendDocCd)
+		join epr2 where
+		  epr2.encntr_id = outerjoin(o.encntr_id) and
+		  epr2.encntr_prsnl_r_cd = outerjoin(dAdmitDocCd)
+		join ps1 where
+		  ps1.person_id = outerjoin(epr1.prsnl_person_id)
+		join ps2 where
+		  ps2.person_id = outerjoin(epr2.prsnl_person_id)
+		join oa where
+		  oa.organization_id = outerjoin(e.organization_id) and
+		  oa.org_alias_type_cd = outerjoin(dOrgAliasCd) and
+      oa.active_ind = outerjoin(1) and
+      oa.beg_effective_dt_tm <= outerjoin(cnvtdatetime(curdate, curtime3)) and
+      oa.end_effective_dt_tm >= outerjoin(cnvtdatetime(curdate, curtime3))
+	else ; order level
+		plan wpor where
+		  wpor.worklist_id = request->worklist_id 
+		join wrp where
+			wrp.worklist_ref_pos_id = wpor.worklist_ref_pos_id
+		join aor where
+			aor.order_id = wpor.order_id and
+			aor.primary_flag+0 = 0
+		join o where
+		  o.order_id = aor.order_id
+		join p where
+		  p.person_id = o.person_id
+		join e where
+		  e.encntr_id = o.encntr_id
+		join ol where
+		  ol.order_id = o.order_id
+		join ocr where
+		  ocr.order_id = o.order_id
+		join ca where
+			ca.container_id = ocr.container_id
+		join osrc where
+		  osrc.order_id = ocr.order_id and
+		  osrc.container_id = ocr.container_id
+		join c where
+		  c.container_id = ocr.container_id
+		join ea1 where
+		  ea1.encntr_id = outerjoin(o.encntr_id) and
+		  ea1.encntr_alias_type_cd = outerjoin(dMRNCd)
+		join ea2 where
+		  ea2.encntr_id = outerjoin(o.encntr_id) and
+		  ea2.encntr_alias_type_cd = outerjoin(dFINCd)
+		join epr1 where
+		  epr1.encntr_id = outerjoin(o.encntr_id) and
+		  epr1.encntr_prsnl_r_cd = outerjoin(dAttendDocCd)
+		join epr2 where
+		  epr2.encntr_id = outerjoin(o.encntr_id) and
+		  epr2.encntr_prsnl_r_cd = outerjoin(dAdmitDocCd)
+		join ps1 where
+		  ps1.person_id = outerjoin(epr1.prsnl_person_id)
+		join ps2 where
+		  ps2.person_id = outerjoin(epr2.prsnl_person_id)
+		join oa where
+		  oa.organization_id = outerjoin(e.organization_id) and
+		  oa.org_alias_type_cd = outerjoin(dOrgAliasCd) and
+      oa.active_ind = outerjoin(1) and
+      oa.beg_effective_dt_tm <= outerjoin(cnvtdatetime(curdate, curtime3)) and
+      oa.end_effective_dt_tm >= outerjoin(cnvtdatetime(curdate, curtime3))
+	endif
+	into "nl:"
+	  ea1_exists = evaluate(nullind(ea1.encntr_id), 0, 1, 0),
+	  ea2_exists = evaluate(nullind(ea2.encntr_id), 0, 1, 0),
+	  epr1_exists = evaluate(nullind(epr1.encntr_id), 0, 1, 0),
+	  epr2_exists = evaluate(nullind(epr2.encntr_id), 0, 1, 0),
+	  ps1_exists = evaluate(nullind(ps1.person_id), 0, 1, 0),
+	  ps2_exists = evaluate(nullind(ps2.person_id), 0, 1, 0),
+	  oa_exists = evaluate(nullind(oa.organization_id), 0, 1, 0),
+	  order_mnemonic = cnvtupper(o.order_mnemonic)
+	from
+		worklist_pos_order_r wpor,
+		worklist_ref_pos wrp,
+	  orders o,
+	  accession_order_r aor,
+	  person p,
+	  encounter e,
+	  order_laboratory ol,
+	  order_container_r ocr,
+	  container_accession ca,
+	  order_serv_res_container osrc,
+	  container c,
+	  encntr_alias ea1,
+	  encntr_alias ea2,
+	  encntr_prsnl_reltn epr1,
+	  encntr_prsnl_reltn epr2,
+	  prsnl ps1,
+	  prsnl ps2,
+	  organization_alias oa	
+	order by wrp.position_nbr, order_mnemonic, ca.accession_container_nbr
+	head wrp.position_nbr
+		nFirstContainer = 0	
+	head order_mnemonic
+		nFirstContainer = 1
+	head ca.accession_container_nbr
+		if (nFirstContainer = 1)
+			nFirstContainer = 0 
+		  ; populate all order data
+		  nOrderCnt = nOrderCnt + 1
+		  if(mod(nOrderCnt, 10) = 1)
+		    stat = alterlist(reply->orders, nOrderCnt + 9)
+		  endif
+		  reply->orders[nOrderCnt].accession = aor.accession
+		  reply->orders[nOrderCnt].age_in_years = cnvtstring(datetimediff(cnvtdatetime(curdate, curtime3), p.birth_dt_tm, 2) / 52)
+		  reply->orders[nOrderCnt].bar_code_nbr = ""
+		  reply->orders[nOrderCnt].bed_cd = cnvtstring(e.loc_bed_cd)
+		  reply->orders[nOrderCnt].col_status_cd = cnvtstring(ol.report_priority_cd)
+		  reply->orders[nOrderCnt].container_id = cnvtstring(ocr.container_id)
+		  reply->orders[nOrderCnt].frmt_drawn_date = format(c.drawn_dt_tm, "@SHORTDATE;;d")
+		  reply->orders[nOrderCnt].drawn_time = format(c.drawn_dt_tm, "@TIMENOSECONDS;;M")
+		  reply->orders[nOrderCnt].frmt_admit_date = format(e.reg_dt_tm, "@SHORTDATE;;d")
+		  reply->orders[nOrderCnt].frmt_birthday = format(p.birth_dt_tm, "@SHORTDATE;;d")
+		  reply->orders[nOrderCnt].frmt_disc_date = format(e.disch_dt_tm, "@SHORTDATE;;d")
+		  reply->orders[nOrderCnt].frmt_req_col_date = format(c.drawn_dt_tm, "@SHORTDATE;;d")
+		  reply->orders[nOrderCnt].req_col_time = format(c.drawn_dt_tm, "@TIMENOSECONDS;;M")
+		  reply->orders[nOrderCnt].identifier = ""
+		  reply->orders[nOrderCnt].name = p.name_full_formatted
+		  reply->orders[nOrderCnt].nurse_station_cd = cnvtstring(e.loc_nurse_unit_cd)
+		  reply->orders[nOrderCnt].order_id = cnvtstring(o.order_id)
+		  reply->orders[nOrderCnt].patient_class_cd = cnvtstring(e.encntr_class_cd)
+		  reply->orders[nOrderCnt].patient_encounter_nbr = cnvtstring(e.encntr_id)
+		  reply->orders[nOrderCnt].patient_name = p.name_full_formatted
+		  reply->orders[nOrderCnt].patient_race_cd = cnvtstring(p.race_cd)
+		  reply->orders[nOrderCnt].patient_type_cd = cnvtstring(e.encntr_type_cd)
+		  reply->orders[nOrderCnt].room_cd = cnvtstring(e.loc_room_cd)
+		  reply->orders[nOrderCnt].sample_type_cd = cnvtstring(c.specimen_type_cd)
+		  reply->orders[nOrderCnt].sequence_nbr = cnvtstring(wrp.position_nbr)
+		  reply->orders[nOrderCnt].sex_cd = cnvtstring(p.sex_cd)
+		  reply->orders[nOrderCnt].species_cd = cnvtstring(p.species_cd)
+		  reply->orders[nOrderCnt].patient_name_last = p.name_last
+			reply->orders[nOrderCnt].patient_name_first = p.name_first
+		  reply->orders[nOrderCnt].template_position = wrp.position_display_txt
+		  reply->orders[nOrderCnt].template_position_dilution = cnvtstring(wrp.dilution_cd)
+		  reply->orders[nOrderCnt].bar_code_nbr = ""
+		  reply->orders[nOrderCnt].identifier = ""
+		  if(ps2_exists = 1)
+		    reply->orders[nOrderCnt].admit_doctor_name = ps2.name_full_formatted
+		  endif
+		  if(epr2_exists = 1)
+		    reply->orders[nOrderCnt].admit_doctor_nbr = cnvtstring(epr2.prsnl_person_id)
+		  endif
+		  if(oa_exists = 1)
+		    reply->orders[nOrderCnt].client = oa.alias
+		  endif
+		  if(epr1_exists = 1)
+		    reply->orders[nOrderCnt].doctor = cnvtstring(epr1.prsnl_person_id)
+		  endif
+		  if(ps1_exists = 1)
+		    reply->orders[nOrderCnt].doctor_name = ps1.name_full_formatted
+		  endif
+		  if(ea2_exists = 1)
+		    reply->orders[nOrderCnt].fin_nbr = cnvtalias(ea2.alias, ea2.alias_pool_cd)
+		  endif
+		  if(ea1_exists = 1)
+		    reply->orders[nOrderCnt].frmt_med_nbr = cnvtalias(ea1.alias, ea1.alias_pool_cd)
+		    reply->orders[nOrderCnt].frmt_med_nbr2 = cnvtalias(ea1.alias, ea1.alias_pool_cd)
+		  endif
+		  if (osrc.status_flag = 1 or osrc.status_flag = 2) 
+		    reply->orders[nOrderCnt].in_lab_ind = "1"
+		  else
+		    reply->orders[nOrderCnt].in_lab_ind = "0"
+		  endif
+		endif
+	detail row + 0
+	with nocounter
+
+	select into "nl:"
+		wpor.worklist_id
+	from
+	  worklist_pos_order_r wpor,
+	  worklist_ref_pos wrp,
+	  accession ac
+	plan wpor where
+		wpor.worklist_id = request->worklist_id and
+		wpor.person_accession_ind = 0 and
+		wpor.accession_id > 0
+	join wrp where
+		wrp.worklist_ref_pos_id = wpor.worklist_ref_pos_id
+	join ac where
+	  ac.accession_id = wpor.accession_id
+	order by wrp.position_nbr, wpor.accession_id
+	head report
+		lQcCnt = 0
+	detail
+		lQcCnt = lQcCnt + 1
+	  if(mod(lQcCnt, 10) = 1)
+	    stat = alterlist(reply->qc_accns, lQcCnt + 9)
+	  endif
+	  
+	  reply->qc_accns[lQcCnt].accession_id = cnvtstring(ac.accession_id)
+	  reply->qc_accns[lQcCnt].accession =  ac.accession
+		reply->qc_accns[lQcCnt].sequence_nbr = cnvtstring(wrp.position_nbr)
+	  reply->qc_accns[lQcCnt].identifier = ""
+	  reply->qc_accns[lQcCnt].template_position = wrp.position_display_txt
+  with nocounter
+endif ;reply->template_ind = "1"
+
+; resize quals to actual size
+set lStat = alterlist(reply->orders, nOrderCnt)
+set	lStat = alterlist(reply->qc_accns, lQcCnt)
+set reply->order_cnt = nOrderCnt
+set	reply->qc_accns_cnt = lQcCnt
+
+if (reply->order_cnt > 0 or reply->qc_accns_cnt > 0)
+	if (textlen(trim(sProgramName)) > 0)
+		set lStat = moverec(REPLY,WORKLISTDOWNLOADREC)
+		execute value(sProgramName)
+		set reply->status_data->status = WorklistDownloadRec->status_data->status
+		case (reply->status_data->status)
+			of "F":
+				call HandleError("Error in custom script", sProgramName)
+			of "Z":
+				call HandleError("Nothing written to file", sProgramName)
+		endcase
+	else
+		set reply->status_data->status = "S"
+	endif
+else
+	set reply->status_data->status = "Z"
+endif
+	
+declare HandleError(sTarName = vc, sTarValue = vc) = null
+subroutine HandleError(sTarName, sTarValue)
+   declare lErrorCnt = i4 with private, noconstant(0)
+   
+   set lErrorCnt = lErrorCnt + 1
+   if (lErrorCnt > 1)
+      set stat = alter(reply->status_data.subeventstatus, lErrorCnt)
+   endif
+	set reply->status_data.subeventstatus[lErrorCnt].OperationName      = "glb_get_wklst_dwnld_data"
+	set reply->status_data.subeventstatus[lErrorCnt].OperationStatus    = "F"
+	set reply->status_data.subeventstatus[lErrorCnt].TargetObjectName   = sTarName
+	set reply->status_data.subeventstatus[lErrorCnt].TargetObjectValue  = sTarValue
+END 
+
+#exit_script
+free record WorklistDownloadRec
+end go
+
+;Generated by GNU enscript 1.6.4.

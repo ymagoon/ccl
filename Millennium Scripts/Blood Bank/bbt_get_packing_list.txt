@@ -1,0 +1,525 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Generatetagslabels/BBT_GET_PACKING_LIST.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *       Revision      (c) 1984-2006 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+ 
+        Source file name:       bbt_get_packing_list.prg
+        Object name:            bbt_get_packing_list
+        Request #:              225094
+ 
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Retrieve dispense packing lists
+ 
+        Tables read:            blood_product,code_value,encounter
+                               ,encntr_alias,encntr_alias_hist,person
+                               ,person_alias,person_name_hist,product
+                               ,prsnl,product_event,orders
+ 
+        Tables updated:         none
+ 
+        Executing from:         Dispense
+ 
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    * Mod Date     Engineer             Comment                            *
+;    * --- -------- -------------------- ---------------------------------- *
+;    * 001 07/18/06  Matt Cummings        Initial Release                   *
+;	 * 002 01/24/08	 Amy Gum			  Add owner and inventory area cd to*
+;	 *									  the reply		     				*												
+;    * 003 03/31/09  Kiran Vankadaru      Populate the historic names for   *
+;    *                                    person combine                    *												
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program bbt_get_packing_list:dba go
+create program bbt_get_packing_list:dba
+ 
+%i cclsource:BBT_GetBBPreference.inc ; for historic demographics
+ 
+/************************************************
+ * Request record
+ ************************************************
+	record request
+ 	(
+ 		1	person_id		=	f8
+ 		1	event_dt_tm		=	dq8
+ 		1	pc_location_cd	=	f8
+ 	)
+*/
+ 
+/************************************************
+ * Reply record
+ ************************************************/
+	record reply
+	(
+		1	Packing_Lists[*]
+			2	list_date_dt_tm				=	dq8
+			2	name						=	vc
+			2	mrn							=	vc
+			2	person_id					=	f8
+			2	encntr_id					=	f8
+			2	reason_cd					=	f8
+			2	courier						=	c40
+			2	bbidnbr						=	c20
+			2	locn_cd						=	f8
+			2	visinsp_cd					=	f8
+			2	username					=	c10
+			2	Product_List[*]
+				3	product_nbr				=	vc
+				3	product_cd				=	f8
+				3	product_disp			=	c40
+				3	product_desc			=	c60
+				3	cur_abo_cd				=	f8
+				3	cur_abo_disp			=	c40
+				3	cur_rh_cd				=	f8
+				3	cur_rh_disp				=	c40
+				3	product_expire_dt_tm	=	dq8
+				3	product_id				=	f8
+				3	product_event_id		=	f8
+				3	cur_owner_area_cd		= 	f8
+				3	cur_inv_area_cd			= 	f8
+%i cclsource:status_block.inc
+	)
+ 
+record Temp
+(
+	1	Packing_Lists[*]
+			2	active_ind					=	i2
+			2	related_encntr_id			=	f8
+			2	related_event_type_cd		=	f8
+			2	anchor_dt_tm				=	dq8
+			2	list_date_dt_tm				=	dq8
+			2	name						=	vc
+			2	mrn							=	vc
+			2	person_id					=	f8
+			2	encntr_id					=	f8
+			2	reason_cd					=	f8
+			2	courier						=	c40
+			2	bbidnbr						=	c20
+			2	locn_cd						=	f8
+			2	visinsp_cd					=	f8
+			2	username					=	c10
+			2	Product_List[*]
+				3	product_nbr				=	vc
+				3	product_cd				=	f8
+				3	product_disp			=	c40
+				3	product_desc			=	c60
+				3	cur_abo_cd				=	f8
+				3	cur_abo_disp			=	c40
+				3	cur_rh_cd				=	f8
+				3	cur_rh_disp				=	c40
+				3	product_expire_dt_tm	=	dq8
+				3	product_id				=	f8
+				3	product_event_id		=	f8
+				3   order_id                =   f8
+				3	cur_owner_area_cd		= 	f8
+				3	cur_inv_area_cd			= 	f8
+)
+ 
+set reply->status_data->status = "F"
+set reply->status_data.subeventstatus.OperationName = "bbt_get_packing_list"
+ 
+set modify predeclare
+ 
+; Store relevant event type codes. Dispense events are the main events used
+; to get the packing lists. Crossmatch and Assignment events are used to
+; retrieve historic demographics.
+declare EVENT_TYPE_CROSSMATCHED = f8
+   with protect, constant(uar_get_code_by("MEANING",1610,"3"))
+declare EVENT_TYPE_ASSIGNED = f8
+   with protect, constant(uar_get_code_by("MEANING",1610,"1"))
+declare EVENT_TYPE_DISPENSED = f8
+   with protect, constant(uar_get_code_by("MEANING",1610,"4"))
+if( (EVENT_TYPE_CROSSMATCHED < 0) or (EVENT_TYPE_ASSIGNED < 0) or (EVENT_TYPE_DISPENSED < 0) )
+   go to EndScript
+endif
+; Store for historic name retrieval
+declare code_cnt = i4 with protect,noconstant(1)
+declare CURRENT_NAME_TYPE_CD = f8 with protect,noconstant(0.0)
+declare stat = f8 with protect,noconstant(0.0)
+set stat = uar_get_meaning_by_codeset(213,"CURRENT",code_cnt
+   ,CURRENT_NAME_TYPE_CD)
+if(CURRENT_NAME_TYPE_CD < 0)
+   go to EndScript
+endif
+
+; Store the value combine add code value
+declare COMBINE_ADD_CD = f8 with protect, constant(uar_get_code_by("MEANING", 327, "ADD"))
+if (COMBINE_ADD_CD < 0)
+   go to EndScript
+endif
+
+; Store the value of Active Status Cd
+declare ACTIVE_STATUS_CD = f8 with protect, constant(uar_get_code_by("MEANING", 48, "ACTIVE"))
+if (ACTIVE_STATUS_CD < 0)
+   go to EndScript
+endif
+
+; Store for historic MRN retrieval
+declare EA_MRN_CD = f8 with protect,constant(uar_get_code_by("MEANING",319,"MRN"))
+if(EA_MRN_CD < 0)
+   go to EndScript
+endif
+ 
+declare CURRENT_TIME = dq8 with protect, constant(cnvtdatetime(Curdate
+   ,curtime3))
+ 
+; packing list and product index variables
+declare pl_cnt = i4 with protect,noconstant(0)
+declare prod_cnt = i4 with protect,noconstant(0)
+declare reply_pl_cnt = i4 with protect,noconstant(0)
+ 
+declare get_next = i4 with protect,noconstant(0)
+declare alias_cnt = i4 with protect,noconstant(0)
+
+declare current_person_id       = f8 with protect, noconstant(0.0)
+declare dorder_id               = f8 with protect, noconstant(0.0)
+declare dproduct_event_id       = f8 with protect, noconstant(0.0)
+
+;Slightly < one minute, expressed as a fraction of a day, used for rounding up
+declare dMINUTE            = f8  with protect, constant(1/1440.0)
+ 
+; Get all dispensed packing lists for this person, and optionally at a certain
+; event_dt_tm
+SELECT INTO "nl:"
+   *
+   FROM Product_Event pe,Patient_Dispense pd,Product_Event pe2,Orders o
+   ,Person p,Prsnl pr,Blood_Product bp,Product prod
+   ,Encntr_Alias ea
+   PLAN pe
+   WHERE pe.person_id = request->person_id
+      AND (
+         (cnvtdatetime(request->event_dt_tm) = NULL)
+         OR (datetimediff(pe.event_dt_tm,cnvtdatetime(request->event_dt_tm)) = 0)
+      )
+      AND pe.event_type_cd = EVENT_TYPE_DISPENSED
+ 
+   JOIN pd
+ 
+   WHERE pe.product_event_id = pd.product_event_id
+ 
+   JOIN p
+   where p.person_id = request->person_id
+ 
+   JOIN pr
+   WHERE pe.event_prsnl_id = pr.person_id
+ 
+   Join prod
+   WHERE prod.product_id = pe.product_id
+ 
+   Join bp
+   WHERE outerjoin(prod.product_id) = bp.product_id
+ 
+   JOIN ea
+   WHERE outerjoin(pe.encntr_id) = ea.encntr_id
+      AND ea.encntr_alias_type_cd = outerjoin(EA_MRN_CD)
+      AND ea.active_ind = outerjoin(1)
+ 
+   ; pe2 is used for historic demographics. The historic demographics will come
+   ; from the assignment or crossmatch events.
+   JOIN pe2
+   WHERE pe.related_product_event_id = pe2.product_event_id
+      AND (
+         (pe2.event_type_cd = 0)
+         OR  (pe2.event_type_cd = EVENT_TYPE_CROSSMATCHED)
+         OR  (pe2.event_type_cd = EVENT_TYPE_ASSIGNED)
+      )
+ 
+   JOIN o
+   WHERE pe2.order_id = o.order_id
+ 
+   ORDER BY pe.event_dt_tm
+; A packing list is defined as a set of dispense events that occurred at a
+; certain point in time, ie. a specific event_dt_tm. So this will run for
+; every packing list in the set.
+HEAD pe.event_dt_tm
+   pl_cnt = pl_cnt + 1
+   ; initialize counter for products in this packing list.
+   prod_cnt = 0
+   if(pl_cnt > size(Temp->Packing_Lists,5))
+      stat = alterlist(Temp->Packing_Lists,pl_cnt+9)
+   endif
+   Temp->Packing_Lists[pl_cnt].list_date_dt_tm = pe.event_dt_tm
+   ; Next two lines, store current name and MRN. These won't be stored in reply
+   ; if the user enables the historic demographic preference.
+   Temp->Packing_Lists[pl_cnt].name = p.name_full_formatted
+   Temp->Packing_Lists[pl_cnt].mrn = cnvtalias(ea.alias,ea.alias_pool_cd)
+   Temp->Packing_Lists[pl_cnt].person_id  = p.person_id
+   Temp->Packing_Lists[pl_cnt].encntr_id  =  pe.encntr_id
+   Temp->Packing_Lists[pl_cnt].reason_cd  = pd.dispense_reason_cd
+   Temp->Packing_Lists[pl_cnt].courier    = pd.dispense_courier_text
+   Temp->Packing_Lists[pl_cnt].bbidnbr    = pd.bb_id_nbr
+   Temp->Packing_Lists[pl_cnt].locn_cd    = pd.dispense_to_locn_cd
+   Temp->Packing_Lists[pl_cnt].username   = pr.username
+   Temp->Packing_Lists[pl_cnt].visinsp_cd = pd.dispense_vis_insp_cd
+DETAIL
+   ; If there is at least one active dispense event in this list, then the entire
+   ; packing list will be returned.
+   if(pe.active_ind)
+      Temp->Packing_Lists[pl_cnt].active_ind = 1
+   endif
+   prod_cnt = prod_cnt + 1
+   ; date for this packing list. Also stores event_type_cd and encntr_id of
+   ; related event since they are also needed to retrieve and order the hist.
+   ; demographics.
+   if(pe2.product_event_id > 0)
+      if(Temp->Packing_Lists[pl_cnt].anchor_dt_tm = 0)
+         if(pe2.order_id > 0)
+            Temp->Packing_Lists[pl_cnt].anchor_dt_tm = o.current_start_dt_tm
+         else
+            Temp->Packing_Lists[pl_cnt].anchor_dt_tm = pe2.event_dt_tm
+         endif
+         Temp->Packing_Lists[pl_cnt].related_event_type_cd = pe2.event_type_cd
+         Temp->Packing_Lists[pl_cnt].related_encntr_id     = pe2.encntr_id
+      else
+         if(pe2.order_id > 0)
+            if( datetimediff(o.current_start_dt_tm,
+               Temp->Packing_Lists[pl_cnt].anchor_dt_tm,4) >= 0.0)
+               Temp->Packing_Lists[pl_cnt].anchor_dt_tm = o.current_start_dt_tm
+               Temp->Packing_Lists[pl_cnt].related_event_type_cd = pe2.event_type_cd
+               Temp->Packing_Lists[pl_cnt].related_encntr_id     = pe2.encntr_id
+            endif
+         else
+            if(datetimediff(pe2.event_dt_tm,
+               Temp->Packing_Lists[pl_cnt].anchor_dt_tm,4) >= 0.0)
+               Temp->Packing_Lists[pl_cnt].anchor_dt_tm = pe2.event_dt_tm
+               Temp->Packing_Lists[pl_cnt].related_event_type_cd = pe2.event_type_cd
+               Temp->Packing_Lists[pl_cnt].related_encntr_id     = pe2.encntr_id
+            endif
+         endif
+      endif
+   endif
+   stat = alterlist(Temp->Packing_Lists[pl_cnt].Product_List,prod_cnt)
+   Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].product_cd = prod.product_cd
+   Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].product_id = prod.product_id
+   Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].product_event_id
+      = pe.product_event_id
+   Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].order_id
+      = pe.order_id
+   Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].product_expire_dt_tm
+      = prod.cur_expire_dt_tm
+   Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].cur_owner_area_cd = prod.cur_owner_area_cd
+   Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].cur_inv_area_cd = prod.cur_inv_area_cd
+      
+   ; Store blood product information, if it exists.
+   if(bp.cur_abo_cd > 0)
+      Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].product_nbr
+         = concat(bp.supplier_prefix,prod.product_nbr," ",prod.product_sub_nbr)
+      Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].cur_abo_cd
+         = bp.cur_abo_cd
+      Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].cur_rh_cd
+         = bp.cur_rh_cd
+   else
+      Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].product_nbr
+         = concat(prod.product_nbr," ",prod.product_sub_nbr)
+   endif
+FOOT REPORT
+   stat = alterlist(Temp->Packing_Lists,pl_cnt)
+WITH nocounter
+ 
+; Gets the preference telling us whether the user wants to see historic
+; demographics.
+declare use_hist_demo_ind = i2 with protect,noconstant(0)
+set use_hist_demo_ind = BbtGetHistoricInfoPreference( request->pc_location_cd )
+ 
+declare prod_max_cnt = i4 with protect,noconstant(0)
+; Loop through temporary packing lists, and insert any active lists into
+; the reply
+declare temp_pl_cnt = i4 with protect,constant(pl_cnt)
+for(pl_cnt = 1 to temp_pl_cnt)
+   if(Temp->Packing_Lists[pl_cnt].active_ind = 1)
+      set reply_pl_cnt = reply_pl_cnt + 1
+      if( reply_pl_cnt > size(reply->Packing_Lists,5))
+         set stat = alterlist(reply->Packing_Lists,reply_pl_cnt+9)
+      endif
+      ; Get historic demographics
+      if( (use_hist_demo_ind = 1) and (Temp->Packing_Lists[pl_cnt].related_event_type_cd > 0) )
+      ; Get the historic MRN
+      set get_next = 0
+      set alias_cnt = 0
+      SELECT
+         if(Temp->Packing_Lists[pl_cnt].related_event_type_cd
+            = EVENT_TYPE_CROSSMATCHED)
+            ORDER BY eah.transaction_dt_tm desc
+         else
+            ORDER BY eah.transaction_dt_tm
+         endif
+        INTO "nl:"
+      *
+      FROM Encntr_Alias ea,Encntr_Alias_Hist eah
+ 
+      PLAN ea
+      WHERE ea.encntr_id = Temp->Packing_Lists[pl_cnt].related_encntr_id
+      AND ea.encntr_alias_type_cd = EA_MRN_CD
+ 
+      JOIN eah
+      WHERE eah.encntr_alias_id = ea.encntr_alias_id AND eah.active_ind = 1
+      DETAIL
+         if
+         (
+            Temp->Packing_Lists[pl_cnt].related_event_type_cd
+            = EVENT_TYPE_CROSSMATCHED and get_next = 0
+            and (datetimediff(Temp->Packing_Lists[pl_cnt].anchor_dt_tm,eah.transaction_dt_tm,4) <= -1)
+         )
+            get_next = 1
+         elseif
+         (
+         	(
+         	   Temp->Packing_Lists[pl_cnt].related_event_type_cd
+               = EVENT_TYPE_CROSSMATCHED and get_next = 1
+               and (datetimediff(Temp->Packing_Lists[pl_cnt].anchor_dt_tm,eah.transaction_dt_tm,4) >= -1)
+            )
+            or
+            (
+               (Temp->Packing_Lists[pl_cnt].related_event_type_cd != EVENT_TYPE_CROSSMATCHED)
+               and datetimediff(CURRENT_TIME,eah.transaction_dt_tm,4)
+               >= datetimediff(CURRENT_TIME,Temp->Packing_Lists[pl_cnt].anchor_dt_tm,4)
+            )
+         )
+            reply->Packing_Lists[reply_pl_cnt].mrn = eah.alias
+            get_next = 0
+            alias_cnt = alias_cnt + 1
+            ;call echo(build("MRN1: ", eah.alias))
+         endif
+          ;call echo(build("MRN1: ", eah.alias))
+      WITH nocounter
+      
+      ; No hist encounter level MRN exists, use current
+      if( alias_cnt = 0 )
+         set reply->Packing_Lists[reply_pl_cnt].mrn =
+         Temp->Packing_Lists[pl_cnt].mrn
+      endif
+      ; Get the historic name
+
+	  set current_person_id = Temp->Packing_Lists[pl_cnt].person_id
+	  set dorder_id = 0.0
+	  set dproduct_event_id = 0.0
+	  set alias_cnt = 0
+      if(Temp->Packing_Lists[pl_cnt].Product_List[1].order_id > 0.0)
+          set dorder_id = Temp->Packing_Lists[pl_cnt].Product_List[1].order_id
+          set dproduct_event_id = -1
+      elseif (Temp->Packing_Lists[pl_cnt].Product_List[1].product_event_id > 0.0)
+          set dproduct_event_id = Temp->Packing_Lists[pl_cnt].Product_List[1].product_event_id
+          set dorder_id = -1
+      endif
+             
+      select into "nl:"
+            pc.from_person_id
+      from person_combine_det pcd,
+           person_combine pc
+ 
+      plan pcd where ((pcd.entity_id = dorder_id and pcd.entity_name = "ORDERS")
+               Or (pcd.entity_id = dproduct_event_id and pcd.entity_name IN ("ASSIGN", "PATIENT_DISPENSE")))
+      join pc where pc.person_combine_id = pcd.person_combine_id
+               and pc.active_status_cd = ACTIVE_STATUS_CD
+               and pc.active_status_dt_tm >= cnvtdatetime(Temp->Packing_Lists[pl_cnt].anchor_dt_tm)
+               and pc.active_ind = 1
+ 
+      order by pc.active_status_dt_tm
+ 
+      Head Report
+          current_person_id = pc.from_person_id
+      with nocounter
+             
+      select into "nl:"
+           pnh.name_full
+      from person_name_hist pnh
+      plan pnh where pnh.person_id = current_person_id
+               and pnh.name_type_cd = CURRENT_NAME_TYPE_CD
+               and pnh.transaction_dt_tm <= 
+                     cnvtdatetime(datetimeadd(Temp->Packing_Lists[pl_cnt].anchor_dt_tm, dMINUTE))
+               and not exists (select
+                                   pcd.entity_id
+                               from person_combine_det pcd
+                               where pcd.entity_id = pnh.person_name_hist_id
+                                     and pcd.entity_name = "PERSON_NAME_HIST"
+                                     and pcd.combine_action_cd = COMBINE_ADD_CD)
+                                                             
+      order by pnh.transaction_dt_tm desc
+      Head Report
+           alias_cnt = alias_cnt + 1
+           reply->Packing_Lists[reply_pl_cnt].name = pnh.name_full
+      with nocounter
+       
+      ; No hist encounter level name exists, use current
+      if(alias_cnt = 0)
+         set reply->Packing_Lists[reply_pl_cnt].name = Temp->Packing_Lists[pl_cnt].name
+      endif
+      ; Get current demographics
+      else
+         set reply->Packing_Lists[reply_pl_cnt].name = Temp->Packing_Lists[pl_cnt].name
+         set reply->Packing_Lists[reply_pl_cnt].mrn = Temp->Packing_Lists[pl_cnt].mrn
+      endif
+      ; Transfer data for rest of the data from the temporary structure over
+      ; to the reply
+      set reply->Packing_Lists[reply_pl_cnt].list_date_dt_tm = Temp->Packing_Lists[pl_cnt].list_date_dt_tm
+      set reply->Packing_Lists[reply_pl_cnt].person_id = Temp->Packing_Lists[pl_cnt].person_id
+      set reply->Packing_Lists[reply_pl_cnt].encntr_id = Temp->Packing_Lists[pl_cnt].encntr_id
+      set reply->Packing_Lists[reply_pl_cnt].reason_cd = Temp->Packing_Lists[pl_cnt].reason_cd
+      set reply->Packing_Lists[reply_pl_cnt].courier = Temp->Packing_Lists[pl_cnt].courier
+      set reply->Packing_Lists[reply_pl_cnt].bbidnbr = Temp->Packing_Lists[pl_cnt].bbidnbr
+      set reply->Packing_Lists[reply_pl_cnt].locn_cd = Temp->Packing_Lists[pl_cnt].locn_cd
+      set reply->Packing_Lists[reply_pl_cnt].visinsp_cd = Temp->Packing_Lists[pl_cnt].visinsp_cd
+      set reply->Packing_Lists[reply_pl_cnt].username = Temp->Packing_Lists[pl_cnt].username
+      set stat = alterlist(reply->Packing_Lists[reply_pl_cnt].Product_List
+         ,size(Temp->Packing_Lists[pl_cnt].Product_List,5))
+      set prod_max_cnt = size(Temp->Packing_Lists[pl_cnt].Product_List,5)
+      for(prod_cnt = 1 to prod_max_cnt)
+         set reply->Packing_Lists[reply_pl_cnt].Product_List[prod_cnt].product_nbr
+            = Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].product_nbr
+         set reply->Packing_Lists[reply_pl_cnt].Product_List[prod_cnt].product_cd
+            = Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].product_cd
+         set reply->Packing_Lists[reply_pl_cnt].Product_List[prod_cnt].product_id
+            = Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].product_id
+         set reply->Packing_Lists[reply_pl_cnt].Product_List[prod_cnt].product_event_id
+            = Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].product_event_id
+         set reply->Packing_Lists[reply_pl_cnt].Product_List[prod_cnt].cur_abo_cd
+            = Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].cur_abo_cd
+         set reply->Packing_Lists[reply_pl_cnt].Product_List[prod_cnt].cur_rh_cd
+            = Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].cur_rh_cd
+         set reply->Packing_Lists[reply_pl_cnt].Product_List[prod_cnt].product_expire_dt_tm
+            = Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].product_expire_dt_tm
+         set reply->Packing_Lists[reply_pl_cnt].Product_List[prod_cnt].cur_owner_area_cd
+         	= Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].cur_owner_area_cd
+         set reply->Packing_Lists[reply_pl_cnt].Product_List[prod_cnt].cur_inv_area_cd
+         	= Temp->Packing_Lists[pl_cnt].Product_List[prod_cnt].cur_inv_area_cd
+      endfor
+   endif
+endfor
+
+if( size(reply->Packing_Lists,5) = 0)
+   set reply->status_data.status = "Z"
+else
+   set stat = alterlist(reply->Packing_Lists,reply_pl_cnt)
+   set reply->status_data.status = "S"
+endif
+ 
+#EndScript
+ 
+end go
+ 
+
+;Generated by GNU enscript 1.6.4.

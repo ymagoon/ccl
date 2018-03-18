@@ -1,0 +1,460 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_add_equation/glb_add_equation.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_ADD_EQUATION.PRG
+        Object name:            GLB_ADD_EQUATION
+        Request #:              250062
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Insert a new equation into the database
+
+        Tables read:            n/a
+
+        Tables updated:         equation
+                                equation_component
+
+        Executing from:         General Lab build/maintain equation tool
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 02/28/96 Dennis Boyer         Initial Release                     *
+;     001 03/28/98 Chad Moats           Added LookBack Minutes to request   *
+;     002 12/01/98 Chris Heil           Add support for unknown ages        *
+;     003 12/10/99 Chris Heil           Add units_cd to equation_component  *
+;                                       table for Doc Management.           *
+;     004 09/30/03 Kyle Treadway        Added DTA versioning code           *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_ADD_EQUATION:dba go
+      create program GLB_ADD_EQUATION:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 equation_id             = f8
+         1 task_assay_cd           = f8
+         1 service_resource_cd     = f8
+         1 unknown_age_ind         = i2   ; 002
+         1 age_from_units_cd       = f8
+         1 age_from_minutes        = i4
+         1 age_to_units_cd         = f8
+         1 age_to_minutes          = i4
+         1 sex_cd                  = f8
+         1 species_cd              = f8
+         1 equation_description    = c2000
+         1 desc_with_quotes        = c200
+         1 active_dt_tm            = dq8
+         1 inactive_dt_tm          = dq8
+         1 default_ind             = i2
+         1 active_ind              = i2
+         1 equation_postfix        = c2000
+         1 components[x]
+           2 result_status_cd      = f8
+           2 included_assay_cd     = f8
+           2 name                  = vc
+           2 default_value         = f8
+           2 cross_drawn_dt_tm_ind = i2
+           2 time_window_minutes   = i4
+           2 time_window_back_minutes   = i4   ;001
+           2 result_req_flag       = i2
+           2 variable_prompt       = vc
+           2 constant_value        = f8
+           2 component_flag        = i2
+           2 units_cd              = f8   ;003
+           2 look_time_direction_flag =i2
+      )
+*/
+
+record reqinfo
+( 1 commit_ind  = i2
+  1 updt_id     = f8
+  1 position_cd = f8
+  1 updt_app    = i4
+  1 updt_task   = i4
+  1 updt_req    = i4
+  1 updt_applctx= i4
+)
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+         1 equation_id             = f8
+         1 status_data
+           2 status                = c1
+           2 subeventstatus[1]
+             3 OperationName       = c15
+             3 OperationStatus     = c1
+             3 TargetObjectName    = c15
+             3 TargetObjectValue   = vc
+      )
+
+
+/****************************************************************************
+*       Versioning records                                                  *
+*****************************************************************************/
+record version_request
+(
+  1 task_assay_cd         = f8
+)
+
+record version_reply
+(
+%i cclsource:status_block.inc
+)
+
+
+	#Script
+	set failed = "F"
+	set equation_id = 0.0
+	set tmpseq = 0
+	set comp_cnt = size(request->components,5)
+	set reply->status_data->status = "F"
+
+
+
+
+	declare obuff = c2000
+	set obuff = fillstring(2000," ")
+
+	;the following code changes the equation to a postfix format
+	if(request->equation_postfix = "")
+
+       declare iret = i4
+	   declare inlen = i4
+	   declare inbuff = c2000
+	   declare olen = i4
+
+	   set inbuff = fillstring(2000," ")
+       set inbuff = request->desc_with_quotes
+       set inlen  = textlen(trim(request->desc_with_quotes))
+       set olen   = 2000
+
+       declare uar_eparser(inbuff,inlen,obuff,olen) = i2
+       set iret = uar_eparser(inbuff,inlen,obuff,olen)
+
+     else
+       ;if postfix is passed in, no need to convert
+       set obuff = request->equation_postfix
+
+     endif
+
+/****************************************************************************
+*       Archive the current version of the dta before we update             *
+*****************************************************************************/
+if( checkprg("DCP_ADD_DTA_VERSION") ) ; make sure program exists
+  set version_request->task_assay_cd = request->task_assay_cd
+  execute dcp_add_dta_version
+  with replace(request,version_request),
+       replace(reply,version_reply)
+
+  if (version_reply->status_data->status = "F")
+    go to versioning_failed
+  endif
+
+endif
+
+
+/*******************************************************************/
+/* Inactivate equations with same demographics as new equation     */
+/* if it is the default it will remove it                          */
+/*******************************************************************/
+;CALL ECHO(obuff, 1)
+      if (request->active_ind = 1)
+        UPDATE INTO
+           equation e
+        SET
+           e.inactive_dt_tm   = cnvtdatetime(curdate,curtime3),
+           e.active_ind       = 0,
+           e.default_ind      = 0,
+           e.updt_dt_tm       = cnvtdatetime(curdate,curtime3),
+           e.updt_id          = reqinfo->updt_id,
+           e.updt_applctx     = reqinfo->updt_applctx,
+           e.updt_cnt         = e.updt_cnt + 1
+        WHERE
+           (e.task_assay_cd = request->task_assay_cd and
+            e.service_resource_cd = request->service_resource_cd and
+            e.unknown_age_ind = request->unknown_age_ind and      ; 002
+            e.age_from_units_cd = request->age_from_units_cd and
+            e.age_from_minutes = request->age_from_minutes and
+            e.age_to_units_cd = request->age_to_units_cd and
+            e.age_to_minutes = request->age_to_minutes and
+            e.sex_cd = request->sex_cd and
+            e.species_cd = request->species_cd)
+            or e.equation_id = request->equation_id
+        WITH
+           nocounter
+      endif
+
+/*******************************************************************/
+/* If the equation to be added is designated as the default for    */
+/* this assay, any currently existing default must be reset.  Only */
+/* one default per assay may exist.                                */
+/*******************************************************************/
+      if (request->default_ind > 0)
+         SELECT
+            into "nl:"
+               e.*
+         FROM
+            equation e
+         WHERE
+            e.task_assay_cd = request->task_assay_cd
+            and e.default_ind > 0
+         WITH
+            nocounter,
+            forupdate(e)
+
+         if (curqual != 0)
+            UPDATE
+               into equation e
+            SET
+               e.default_ind = 0,
+               e.updt_id = reqinfo->updt_id,
+               e.updt_task = reqinfo->updt_task,
+               e.updt_applctx = reqinfo->updt_applctx,
+               e.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+               e.updt_cnt = e.updt_cnt + 1
+            WHERE
+               e.task_assay_cd = request->task_assay_cd
+               and request->default_ind > 0
+         endif
+      endif
+
+/*******************************************************************/
+/* Get new equation_id.                                            */
+/*******************************************************************/
+      SELECT
+         into "nl:"
+            y = seq(reference_seq,nextval) "##################;rp0"
+      FROM
+         dual
+      DETAIL
+         equation_id = cnvtreal(y)
+         reply->equation_id = equation_id
+      WITH
+         format, counter
+      if (curqual = 0)
+         go to seq_failed
+      endif
+      set request->equation_id = equation_id
+
+/*******************************************************************/
+/* Insert row into equation table.                                 */
+/*******************************************************************/
+      INSERT
+         into equation e
+      SET
+         e.equation_id          = equation_id,
+         e.task_assay_cd        = request->task_assay_cd,
+         e.service_resource_cd  = request->service_resource_cd,
+         e.unknown_age_ind      = request->unknown_age_ind,     ; 002
+         e.age_from_units_cd    = request->age_from_units_cd,
+         e.age_from_minutes     = request->age_from_minutes,
+         e.age_to_units_cd      = request->age_to_units_cd,
+         e.age_to_minutes       = request->age_to_minutes,
+         e.sex_cd               = request->sex_cd,
+         e.species_cd           = request->species_cd,
+         e.equation_description = request->equation_description,
+         e.equation_postfix     = obuff,
+         e.active_dt_tm         = cnvtdatetime(curdate,curtime3),
+         e.inactive_dt_tm       = cnvtdatetime("31 DEC 2100 00:00"),
+         e.default_ind          = request->default_ind,
+         e.active_ind           = request->active_ind,
+         e.updt_dt_tm           = cnvtdatetime(curdate,curtime3),
+         e.updt_cnt             = 0,
+         e.updt_task            = reqinfo->updt_task,
+         e.updt_id              = reqinfo->updt_id,
+         e.updt_applctx         = reqinfo->updt_applctx
+      WITH
+         nocounter
+
+      if (curqual = 0)
+         go to e_insert_failed
+      endif
+
+/*******************************************************************/
+/* Insert rows into equation component table.                      */
+/*******************************************************************/
+      INSERT
+         into equation_component ec,
+              (dummyt d1 with seq = value(comp_cnt))
+      SET
+         tmpseq = tmpseq + 1,
+         ec.equation_id = equation_id,
+         ec.sequence = tmpseq,
+         ec.result_status_cd      = request->components[d1.seq]->result_status_cd,
+         ec.included_assay_cd     = request->components[d1.seq]->included_assay_cd,
+         ec.name                  = request->components[d1.seq]->name,
+         ec.default_value         = request->components[d1.seq]->default_value,
+         ec.cross_drawn_dt_tm_ind = request->components[d1.seq]->cross_drawn_dt_tm_ind,
+         ec.look_time_direction_flag =request->components[d1.seq]->look_time_direction_flag,
+         ec.time_window_minutes   = request->components[d1.seq]->time_window_minutes,
+         ec.time_window_back_minutes   = request->components[d1.seq]->time_window_back_minutes,         /*001*/
+         ec.result_req_flag       = request->components[d1.seq]->result_req_flag,
+         ec.variable_prompt       = request->components[d1.seq]->variable_prompt,
+         ec.constant_value        = request->components[d1.seq]->constant_value,
+         ec.component_flag        = request->components[d1.seq]->component_flag,
+         ec.units_cd              = request->components[d1.seq]->units_cd,                              ;003
+         ec.updt_id               = reqinfo->updt_id,
+         ec.updt_task             = reqinfo->updt_task,
+         ec.updt_applctx          = reqinfo->updt_applctx,
+         ec.updt_dt_tm            = cnvtdatetime(curdate,curtime3),
+         ec.updt_cnt              = 0
+      PLAN (d1
+      JOIN ec
+         where ec.equation_id = equation_id
+           and ec.sequence = d1.seq)
+      WITH
+         nocounter,
+         outerjoin = d1,
+         dontexist
+
+      if (curqual = 0)
+         go to ec_insert_failed
+      endif
+      go to exit_script
+
+/********************************************************************/
+/* Executed if dta versioning call fails                            */
+/********************************************************************/
+#versioning_failed
+     set reply->status_data->subeventstatus[1]->operationname =
+         "upd"
+     set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+     set reply->status_data->subeventstatus[1]->targetobjectname =
+         "dcp_add_dta_version"
+     set reply->status_data->subeventstatus[1]->targetobjectvalue =
+             build("Insert aborted.  DTA Versioning failed:",
+                   version_reply->status_data->targetobjectvalue)
+     set failed = "T"
+     go to exit_script
+
+
+/********************************************************************/
+/* Executed if select on equation table row to be updated fails     */
+/********************************************************************/
+     #equation_select_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "get"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "equation table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/
+/* Executed if equation update fails                                */
+/********************************************************************/
+     #equation_update_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "equation table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/
+/* Executed if sequence cannot be obtained.                         */
+/********************************************************************/
+     #seq_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "seq"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "equation_id"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/
+/* Executed if equation table insert is unsuccessful.               */
+/********************************************************************/
+     #e_insert_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "equation table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/
+/* Executed if equation_component table insert is unsuccessful.     */
+/********************************************************************/
+     #ec_insert_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "equation_component table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+      if (failed = "F")
+         set reply->status_data->status = "S"
+         commit
+      else
+         rollback
+      endif
+      
+free record version_request
+free record version_reply
+
+END
+GO
+
+;Generated by GNU enscript 1.6.4.

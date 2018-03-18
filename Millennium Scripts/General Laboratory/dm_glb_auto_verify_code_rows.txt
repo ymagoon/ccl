@@ -1,0 +1,236 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/dm_glb_auto_verify_code_rows/dm_glb_auto_verify_code_rows.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 2004 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       dm_glb_auto_verify_code_rows.prg
+        Object name:            dm_glb_auto_verify_code_rows
+        Request #:              n/a
+
+        Product:                PathNet
+        Product Team:           General Lab
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        To purge rows from the auto_verify_code table.
+
+        Tables read:            auto_verify_code
+
+        Tables updated:         None
+
+        Executing from:         Ops job/dm_purge_data
+
+        Special Notes:          n/a
+****************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 07/19/04 Erik Ankrom          Initial Release                     *
+;     002 01/02/09 Joshua Hyde          Revised for performance improvements*
+;     003 09/25/09 Joshua Hyde          Reinstated changes regressed by     *
+;                                       previous modification               *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program dm_glb_auto_verify_code_rows:dba go
+create program dm_glb_auto_verify_code_rows:dba
+
+%I cclsource:pcs_code.inc 
+
+/***********************************************************************
+*   Request/Reply Record                                               *
+***********************************************************************/
+
+  /*
+  record request
+  (
+    1 max_rows            = f8
+    1 purge_flag          = i2
+    1 last_run_date       = vc ; in YYYYMMDDHHMMSScc format
+    1 tokens[*]
+      2 token_str         = vc
+      2 value             = vc
+  )
+  record reply
+  (
+    1 err_msg             = vc
+    1 err_code            = i4
+    1 table_name          = vc
+    1 rows_between_commit = i4
+    1 rows[*]
+      2 row_id            = vc
+%i cclsource:status_block.inc
+  )
+  */
+
+set reply->status_data.status = "F"
+
+set reply->table_name = "AUTO_VERIFY_CODE"
+set reply->rows_between_commit = minval(10000, request->max_rows)
+
+/***********************************************************************
+*   Declarations                                                       *
+***********************************************************************/
+declare lDaysToKeep                     = i4 with protect, noconstant(0)
+declare lTokenNdx                       = i4 with protect, noconstant(0)
+
+declare result_status_performed_cd      = f8 with protect, noconstant(0.0)
+declare result_status_inreview_cd       = f8 with protect, noconstant(0.0)
+declare result_status_corrinreview_cd   = f8 with protect, noconstant(0.0)
+
+declare batchSize                       = f8 with protect, noconstant(50000.0)
+declare maxID                           = f8 with protect, noconstant(0.0)
+declare curMinID                        = f8 with protect, noconstant(1.0)
+declare curMaxID                        = f8 with protect, noconstant(0.0)
+declare rowsLeft                        = i4 with protect, noconstant(request->max_rows)
+declare rows                            = i4 with protect, noconstant(0)
+
+set i18nHandle = 0
+set h = uar_i18nLocalizationInit(i18nHandle, curprog, "", curcclrev)
+  
+/***********************************************************************
+*   Script                                                             *
+***********************************************************************/
+set result_status_performed_cd = GetCodeValueByMeaning(1901, "PERFORMED")
+set result_status_inreview_cd = GetCodeValueByMeaning(1901, "INREVIEW")
+set result_status_corrinreview_cd = GetCodeValueByMeaning(1901, "CORRINREV")
+
+if(result_status_performed_cd = 0.0)
+    set reply->err_code = -1
+    set reply->status_data.status = "F"
+    set reply->err_msg = uar_i18ngetmessage(i18nHandle, "PERFORMED", "Unable to find CDF meaning 'PERFORMED' in code set 1901.")
+    go to EXIT_SCRIPT
+endif
+
+if(result_status_inreview_cd = 0.0)
+    set reply->err_code = -1
+    set reply->status_data.status = "F"
+    set reply->err_msg = uar_i18ngetmessage(i18nHandle, "INREVIEW", "Unable to find CDF meaning 'INREVIEW' in code set 1901.")
+    go to EXIT_SCRIPT
+endif
+
+if(result_status_corrinreview_cd = 0.0)
+    set reply->err_code = -1
+    set reply->status_data.status = "F"
+    set reply->err_msg = uar_i18ngetmessage(i18nHandle, "CORRINREV", "Unable to find CDF meaning 'CORRINREV' in code set 1901.")
+    go to EXIT_SCRIPT
+endif
+
+; Get # of days to purge from the 'tokens' list
+for (lTokenNdx = 1 to size(request->tokens, 5))
+    if (request->tokens[lTokenNdx].token_str = "DAYSTOKEEP")
+        set lDaysToKeep = ceil(cnvtreal(request->tokens[lTokenNdx].value))
+    endif
+endfor
+
+; Check if tokens are valid
+if (lDaysToKeep < 5)
+    set reply->err_code = -1
+    set reply->status_data.status = "F"
+    set reply->err_msg = uar_i18nbuildmessage(i18nHandle, "TOKENOUTOFRANGE",
+                                "You must keep at least 5 days' worth of data.  You entered %1 days or did not enter any value.",
+                                "i",
+                                lDaysToKeep)
+    go to EXIT_SCRIPT
+endif
+
+; If first batch, use minimum PK index on driver table
+if(batch_ndx = 1)
+    select into "nl:"
+        seqval = min(avc.parent_entity_id)
+    from auto_verify_code avc
+    where avc.parent_entity_id > 0
+    detail
+        curMinID = maxval(cnvtreal(seqval), 1.0)
+    with nocounter
+else
+    set curMinID = sbr_fetch_starting_id(NULL)
+endif
+
+; Fetch the max ID for evaluation
+select into "nl:"
+    seqval = max(avc.parent_entity_id)
+from auto_verify_code avc
+detail
+    maxID = cnvtreal(seqval)
+with nocounter
+
+set curMaxID = curMinID + (batchSize - 1)
+
+; Table is large enough to require batching
+while(curMinID <= maxID and rowsLeft > 0)
+    ; Retrieve rowids that meet Purge Criteria
+    select into "nl:"
+        avc.rowid
+    from auto_verify_code avc
+    where parser(sbr_getROWIDNotExists("avc.parent_entity_id between curMinID and curMaxID", "avc"))
+      and avc.updt_dt_tm <= cnvtdatetime(curdate - lDaysToKeep, curtime3)
+      and avc.parent_entity_id > 0.0
+      and ((avc.parent_entity_name = "PERFORM_RESULT"
+           and not exists (select
+                                pr.perform_result_id
+                           from perform_result pr
+                           where pr.perform_result_id = avc.parent_entity_id
+                             and pr.result_status_cd IN (result_status_performed_cd, result_status_inreview_cd,
+                                                         result_status_corrinreview_cd))
+           )
+           or
+           (avc.parent_entity_name = "QC_RESULT"
+            and not exists (select
+                                qr.qc_result_id
+                            from qc_result qr
+                            where qr.qc_result_id = avc.parent_entity_id
+                              and qr.result_status_cd = result_status_performed_cd)
+           )
+          )
+    detail
+        rows = rows + 1
+        if(mod(rows, 50) = 1)
+            stat = alterlist(reply->rows, rows + 49)
+        endif
+        reply->rows[rows].row_id = avc.rowid
+    with nocounter, maxqual(avc, value(rowsLeft))
+
+    set reply->err_code = error(reply->err_msg, 1)
+    if(reply->err_code > 0)
+        set reply->status_data.status = "F"
+        set reply->err_msg = uar_i18nbuildmessage(i18nHandle, "COLLECTERROR", "Failed in row collection: %1", "s", 
+                                                  nullterm(reply->err_msg))
+        go to EXIT_SCRIPT
+    endif
+    
+    call sbr_update_starting_id(curMinID)    
+    set curMinID = curMaxID + 1
+    set curMaxID = curMinID + (batchSize - 1)
+    set rowsLeft = request->max_rows - rows
+endwhile
+
+set stat = alterlist(reply->rows, rows)
+
+set reply->status_data.status = "S"
+set reply->err_code = 0
+
+#EXIT_SCRIPT
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

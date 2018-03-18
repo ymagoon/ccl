@@ -1,0 +1,470 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_upd_av_instr_params/glb_upd_av_instr_params.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_UPD_AV_INSTR_PARAMS.PRG
+        Object name:            GLB_UPD_AV_INSTR_PARAMS
+        Request #:              250129
+
+        Product:                General Lab - Quality Control           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Update autoverification parameters 
+                                for a given service_resource
+
+        Tables read:            n/a
+
+        Tables updated:         av_res_cat,
+                                lab_instrument
+
+        Executing from:         AutoVerifyBuild
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 03/26/97 Chad Moats           Initial Release                     *
+;     001 03/17/00 Chris Heil           Rewrite                             *
+;     002 08/04/00 Chris Heil           Set av_flag to 1 when av on.        *
+;     003 08/24/00 Chris Heil           Fill out auto_verify_flag, not      *
+;                                         av_flag.                          *
+;     004 10/04/00 Chris Heil           Remove mods 2 and 3; flag moved to  *
+;                                         auto_verify table.                *
+;     005 09/04/01 Gary Runde           Update av_check_part_qc_flag        *
+;     006 03/17/06 Ryan Manuel          Added schedule fields.              *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program   GLB_UPD_AV_INSTR_PARAMS:dba go    
+create program GLB_UPD_AV_INSTR_PARAMS:dba
+
+%i cclsource:glb_script_logging.inc
+     
+/***********************************************************************
+ *   Request Record                                                    *
+ ***********************************************************************/
+/*
+  record request                                      
+  (                                       
+     1 service_resource_cd       = f8
+     1 av_ind                    = i2
+     1 av_flag                   = i2
+     1 av_qc_ind                 = i2
+     1 av_req_qc_ind             = i2
+     1 av_chk_part_qc_ind        = i2       ;005 -- No longer used
+     1 orderable_flag            = i2
+     1 av_part_ind               = i2       ;001 -- No longer used
+     1 av_qc_part_ind            = i2
+     1 schedule_cd               = f8
+     1 holiday_schedule_cd       = f8
+     1 order_flags[*]
+       2 av_res_cat_id           = f8
+       2 catalog_cd              = f8
+       2 av_res_cat_flag         = i2
+       2 assoc_catalog_cd        = f8
+     1 av_check_part_qc_flag     = i2       ;005
+  ) 
+*/
+
+/***********************************************************************
+ *   Reply Record                                                      *
+ ***********************************************************************/
+  record reply
+  ( 
+     1 status_data
+       2 status                = c1
+       2 subeventstatus[1]
+         3 OperationName       = c15
+         3 OperationStatus     = c1
+         3 TargetObjectName    = c15
+         3 TargetObjectValue   = vc
+  )
+
+/***********************************************************************
+ *   Internal Record                                                   *
+ ***********************************************************************/
+  record flag
+  ( 
+     1 hold_flags[*]
+       2 action_flag   = i4   ; 0 = do nothing, 1 = insert, 2 = activate
+     1 delete_flags[*]
+       2 av_res_cat_id = f8
+  )
+
+/***********************************************************************
+ *   Initialize Variable                                               *
+ ***********************************************************************/
+  set log_program_name = "GLB_UPD_AV_INSTR_PARAMS"
+  set log_override_ind = 0
+
+  set failed = "F"
+  set error_ind = 0
+  set no_chg_ind = 0
+  set insert_ind = 0
+  set delete_cnt = 0
+  set activate_ind = 0
+  set reply->status_data->status = "F"
+  set o_cnt = size(request->order_flags, 5)
+  set stat = alterlist(flag->hold_flags, o_cnt)
+  
+  ;declare variable to hold the av_check_part_qc_flag or av_chk_part_qc_ind + 1  ;005
+  ;depending on whether the av_check_part_qc_flag exists                         ;005
+  declare av_check_part_qc_value = i2 with public, noconstant(0)                 ;005
+   
+  if (request->av_check_part_qc_flag = 0)                                        ;005
+    set av_check_part_qc_value = request->av_chk_part_qc_ind + 1                 ;005
+  else                                                                           ;005
+    set av_check_part_qc_value = request->av_check_part_qc_flag                  ;005
+  endif                                                                          ;005
+
+ /***********************************************************************
+  *   Lock rows in lab_instrument table.                                *
+  ***********************************************************************/
+  SELECT into "nl:"
+    l.*
+  FROM lab_instrument l
+  PLAN l
+    where l.service_resource_cd = request->service_resource_cd
+
+  DETAIL
+      if ((l.av_ind                = request->av_ind) and
+          (l.av_flag               = request->av_flag) and
+          (l.av_qc_ind             = request->av_qc_ind) and
+          (l.av_req_qc_ind         = request->av_req_qc_ind) and
+          (
+             ((l.av_chk_part_qc_ind    = request->av_chk_part_qc_ind) and
+             (request->av_check_part_qc_flag = 0))            
+             or
+             ((l.av_check_part_qc_flag = av_check_part_qc_value) and
+             (request->av_check_part_qc_flag > 0))
+          ) and
+          (l.av_qc_part_ind        = request->av_qc_part_ind) and
+          (l.holiday_schedule_cd   = request->holiday_schedule_cd) and
+          (l.schedule_cd           = request->schedule_cd))
+        no_chg_ind = 1
+      endif
+
+  WITH forupdate(l),
+       nocounter
+
+  if (ERROR_MESSAGE(1) = 1)
+    go to exit_script
+  endif
+
+  if (error_ind = 1)
+    go to lock_error
+  endif
+
+  if (request->orderable_flag = 0)
+    if (no_chg_ind = 1)
+      go to no_change
+    endif
+
+    /***********************************************************************
+     *   Update Lab Instrument table                                       *
+     ***********************************************************************/
+      UPDATE 
+        into lab_instrument l
+      SET
+        l.av_ind                = request->av_ind,
+        l.av_qc_ind             = request->av_qc_ind,
+        l.av_req_qc_ind         = request->av_req_qc_ind,
+        l.av_chk_part_qc_ind    = request->av_chk_part_qc_ind,
+        l.av_qc_part_ind        = request->av_qc_part_ind,
+        l.updt_cnt              = l.updt_cnt + 1,
+        l.updt_task             = reqinfo->updt_task,
+        l.updt_id               = reqinfo->updt_id,
+        l.updt_dt_tm            = cnvtdatetime(curdate,curtime3),
+        l.updt_applctx          = reqinfo->updt_applctx,
+        l.av_check_part_qc_flag = av_check_part_qc_value,                         ;005
+        l.schedule_cd           = request->schedule_cd,
+        l.holiday_schedule_cd   = request->holiday_schedule_cd
+      WHERE 
+        l.service_resource_cd = request->service_resource_cd
+      WITH nocounter
+
+      if (ERROR_MESSAGE(1) = 1)
+        go to exit_script
+      endif
+  else    
+    /***********************************************************************
+     *   Determine which records should be inactivated on table.           *
+     ***********************************************************************/
+      SELECT into "nl:"
+        arc.av_res_cat_id
+      FROM av_res_cat arc
+      PLAN arc
+        WHERE arc.service_resource_cd = request->service_resource_cd
+          and arc.active_ind = 1
+          and arc.av_res_cat_id > 0
+      
+      DETAIL
+        found_ind = 0
+        for (cnt = 1 to o_cnt)
+          if ((arc.catalog_cd  = request->order_flags[cnt].catalog_cd)
+          and (arc.av_res_cat_flag = request->order_flags[cnt].av_res_cat_flag)
+          and (arc.assoc_catalog_cd = request->order_flags[cnt].assoc_catalog_cd))
+            found_ind = 1
+          endif
+        endfor
+        if (found_ind = 0)
+          no_chg_ind = 0
+          delete_cnt = delete_cnt + 1
+          if (mod(delete_cnt, 100) = 1)
+           stat = alterlist(flag->delete_flags, delete_cnt + 100)
+          endif
+          flag->delete_flags[delete_cnt]->av_res_cat_id = arc.av_res_cat_id
+        endif
+
+      FOOT REPORT
+        stat = alterlist(flag->delete_flags, delete_cnt)
+
+      WITH nocounter
+
+      if (ERROR_MESSAGE(1) = 1)
+        go to exit_script
+      endif
+
+      if (no_chg_ind = 1 and o_cnt = 0)
+        go to no_change
+      endif
+
+      if (o_cnt > 0)
+    /***********************************************************************
+     *   Determine which records are already on AV Resource Catalog table. *
+     ***********************************************************************/
+      SELECT into "nl:"
+        arc_ind = decode(arc.seq, "Y", "N")
+      FROM
+        (dummyt d1 with seq = value(o_cnt)),
+        (dummyt d2 with seq = 1),
+        av_res_cat arc
+      PLAN d1
+      JOIN d2
+        WHERE d2.seq = 1
+      JOIN arc
+        WHERE arc.av_res_cat_id > 0
+          and arc.service_resource_cd = request->service_resource_cd
+          and arc.catalog_cd          = request->order_flags[d1.seq].catalog_cd
+          and arc.av_res_cat_flag     = request->order_flags[d1.seq].av_res_cat_flag
+          and arc.assoc_catalog_cd    = request->order_flags[d1.seq].assoc_catalog_cd
+
+      DETAIL
+        if (arc_ind = "Y")
+           if (arc.active_ind = 0)
+              no_chg_ind = 0
+              activate_ind = 1
+              flag->hold_flags[d1.seq]->action_flag = 2  ; activate
+           else
+              flag->hold_flags[d1.seq]->action_flag = 0  ; do nothing
+           endif
+        else
+          no_chg_ind = 0
+          insert_ind = 1
+          flag->hold_flags[d1.seq]->action_flag = 1      ; insert
+        endif
+
+      WITH outerjoin = d2,
+           nocounter
+
+      if (ERROR_MESSAGE(1) = 1)
+        go to exit_script
+      endif
+
+      if (no_chg_ind = 1)
+        go to no_change
+      endif
+
+    /***********************************************************************
+     *   Activate rows that are on table, but not active.                  *
+     ***********************************************************************/
+      if (activate_ind = 1)
+        UPDATE 
+          into av_res_cat arc,
+               (dummyt d1 with seq = value(o_cnt))
+        SET
+          arc.active_ind       = 1,
+          arc.updt_cnt         = arc.updt_cnt + 1,
+          arc.updt_dt_tm       = cnvtdatetime(curdate,curtime3),
+          arc.updt_task        = reqinfo->updt_task,
+          arc.updt_id          = reqinfo->updt_id,
+          arc.updt_applctx     = reqinfo->updt_applctx
+        PLAN d1
+          WHERE flag->hold_flags[d1.seq]->action_flag = 2
+        JOIN arc
+          WHERE arc.active_ind          = 0
+            and arc.service_resource_cd = request->service_resource_cd
+            and arc.catalog_cd          = request->order_flags[d1.seq].catalog_cd
+            and arc.av_res_cat_flag     = request->order_flags[d1.seq].av_res_cat_flag
+            and arc.assoc_catalog_cd    = request->order_flags[d1.seq].assoc_catalog_cd
+        WITH nocounter
+
+        if (ERROR_MESSAGE(1) = 1)
+          go to exit_script
+        endif
+      endif
+
+    /***********************************************************************
+     *   Insert rows that are not on table.                                *
+     ***********************************************************************/
+      if (insert_ind = 1)
+        for (cnt = 1 to o_cnt)
+          if (flag->hold_flags[cnt]->action_flag = 1)
+            set hold_id = 0.0
+
+            ;***************************
+            ; Retrieve new sequence
+            ;***************************
+            SELECT into "nl:"
+              y = seq(reference_seq, nextval) "##################;rp0"
+            FROM 
+              dual
+            DETAIL
+              hold_id = cnvtreal(y)
+            WITH
+               format, counter
+
+            if (ERROR_MESSAGE(1) = 1)
+              go to exit_script
+            endif
+
+            ;***************************
+            ; Insert into table
+            ;***************************
+            INSERT
+              into av_res_cat arc
+            SET
+              arc.av_res_cat_id       = hold_id,
+              arc.service_resource_cd = request->service_resource_cd,
+              arc.catalog_cd          = request->order_flags[cnt].catalog_cd,
+              arc.av_res_cat_flag     = request->order_flags[cnt].av_res_cat_flag,
+              arc.assoc_catalog_cd    = request->order_flags[cnt].assoc_catalog_cd,
+              arc.active_ind          = 1,
+              arc.updt_cnt            = 0,
+              arc.updt_dt_tm          = cnvtdatetime(curdate,curtime3),
+              arc.updt_task           = reqinfo->updt_task,
+              arc.updt_id             = reqinfo->updt_id,
+              arc.updt_applctx        = reqinfo->updt_applctx
+            PLAN arc
+            WITH nocounter
+
+            if (ERROR_MESSAGE(1) = 1)
+              go to exit_script
+            endif
+          endif
+        endfor
+      endif
+      endif
+
+    /***********************************************************************
+     *   Inactivate rows that are on the table, but no longer used.        *
+     ***********************************************************************/
+      if (delete_cnt > 0)
+        UPDATE 
+          into av_res_cat arc,
+               (dummyt d1 with seq = value(delete_cnt))
+        SET
+          arc.active_ind       = 0,
+          arc.updt_cnt         = arc.updt_cnt + 1,
+          arc.updt_dt_tm       = cnvtdatetime(curdate,curtime3),
+          arc.updt_task        = reqinfo->updt_task,
+          arc.updt_id          = reqinfo->updt_id,
+          arc.updt_applctx     = reqinfo->updt_applctx
+        PLAN d1
+        JOIN arc
+          WHERE arc.av_res_cat_id = flag->delete_flags[d1.seq]->av_res_cat_id
+        WITH nocounter
+
+        if (ERROR_MESSAGE(1) = 1)
+          go to exit_script
+        endif
+      endif
+
+    /***********************************************************************
+     *   Update Lab Instrument table                                       *
+     ***********************************************************************/
+      UPDATE 
+        into lab_instrument l
+      SET
+        l.updt_cnt              = l.updt_cnt + 1,
+        l.updt_task             = reqinfo->updt_task,
+        l.updt_id               = reqinfo->updt_id,
+        l.updt_dt_tm            = cnvtdatetime(curdate,curtime3),
+        l.updt_applctx          = reqinfo->updt_applctx
+      WHERE
+        l.service_resource_cd = request->service_resource_cd
+      WITH nocounter
+
+      if (ERROR_MESSAGE(1) = 1)
+        go to exit_script
+      endif
+  endif
+
+  go to exit_script
+/***********************************************************************
+ *   Error message routines                                            *
+ ***********************************************************************/
+#lock_error
+  set reply->status_data->status = "F"
+  set reply->status_data->subeventstatus[1]->operationname = 
+     "LOCK"
+  set reply->status_data->subeventstatus[1]->operationstatus = 
+     "F"
+  set reply->status_data->subeventstatus[1]->targetobjectname = 
+     "LAB_INSTRUMENT"
+  set reply->status_data->subeventstatus[1]->targetObjectValue = 
+     "TABLE"
+  set failed = "T"
+  go to exit_script
+
+#no_change
+  set reply->status_data->status = "Z"
+  set reply->status_data->subeventstatus[1]->operationname = 
+     "UPDATE"
+  set reply->status_data->subeventstatus[1]->operationstatus = 
+     "Z"
+  set reply->status_data->subeventstatus[1]->targetobjectname = 
+     "LAB_INSTRUMENT"
+  set reply->status_data->subeventstatus[1]->targetObjectValue = 
+     "TABLE"
+  set failed = "T"
+  go to exit_script
+
+/***********************************************************************
+ *   Exit Script                                                       *
+ ***********************************************************************/
+#exit_script
+   if (failed = "F")
+      set reply->status_data->status = "S"
+      commit
+   else
+      rollback
+   endif
+
+  call uar_SysDestroyHandle(hSys)
+end go
+
+;Generated by GNU enscript 1.6.4.

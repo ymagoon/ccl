@@ -1,0 +1,797 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Producthistoryreview/BBT_GET_PRODUCT_HISTORY.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2004 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_product_history.prg 
+        Object name:            bbt_get_product_history
+        Request #:              225270
+
+        Product:                PathNet Transfusion                 
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        retrieve product history (product_events) for requested product_id
+
+        Tables read:            product, blood_product, product_event, code_value, person,
+                                person_alias, accession_order_r, organization,
+        Tables updated:         none
+        Executing from:         variety
+
+        Special Notes:          This is used where ever Complete Product History
+                                can be viewed. As of 5/2/2011 this includes
+                                Product History Review and Patient Product Inquiry
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 01/30/97 Jon Weekes           Initial Release                     *
+;     001 07/16/97 Jon Weekes           Modified to 1) return received state*
+;               and 2) return release and return information                *
+;     002 6/17/98  Amy Therrien         Modified to return name of courier  *
+;                                       when product dispensed to patient   *
+;     003 05/03/99 Doug Saus            Replaced code_value select with uar *
+;     004 08/03/99 Jon Weekes           Corrected uar processing to check   *
+;                                       for _cd > 0 instead of cur_qual for mrn*
+;     005 08/06/99 Jon Weekes           Added qualification for encntr_id   *
+;                                       > 0 when joining to encntr_alias    *
+;	  006 12/28/01 Chris Noe		    Added historical fields to the reply    *
+;						                and logic to check the history 	    *
+;						                tables if product not found in live.*
+;     007 02/18/02 Chris Noe            Added supplier_prefix to the reply  *
+;                                       structure and return it if one exists*
+;                                       for a live or historical product.   *
+;     008 07/02/03 Chris Noe            Removed join to Transfer table.     *
+;                                       Added join to bb_inventory_transfer *
+;                                       and bb_device_transfer.             *
+;     009 08/11/04 Jason Coy            Update to return the                *
+;                                       reinstate_reason_cd from the xm     *
+;                                       table or the method_cd from the     *
+;                                       destruction table when available.   *
+;                                       Update to prevent junk data from    *
+;                                       being pulled from the 0.0 row of the*
+;                                       prsnl table. Also, update to return *
+;                                       the return courier name and         *
+;                                       information. Also, change           *
+;                                       "ea.encntr_id = outerjoin(0)" to    *
+;                                       "ea.encntr_id > outerjoin (0)".     *
+;     010 01/24/08 Rahul Deshpande      Add return_temperature and          *
+;                                       return_temperature_degree_cd  as F8s*
+;                                       to the reply->qual structure.       *
+;	  011 02/20/09 Sachin Yadav         Added return_temperature_txt to the *
+;                                       reply structure.                    *
+;     012 08/20/10 AS019178             Fix for CR 1-4112965511,to populate *
+;                                       reply structure by qualifying       *
+;                                       on primary accession for the order  *
+;     013 02/07/10 Amy Gum	            Add Device to Reply					*
+;     014 11/04/13 Fitsum Abebe         Returned backdated on date/time for *
+;                                       dispense product events.            *
+;     015 02/17/12 Fitsum Abebe         Returned blood bank id, visual insp *
+;                                       and orderable information.          *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_get_product_history:dba go
+create program bbt_get_product_history:dba
+
+/*
+record request
+(
+ 1  product_id      = f8
+)
+*/
+
+record reply  
+(
+ 1  product_id          = f8
+ 1  product_nbr         = c20
+ 1  product_sub_nbr     = c5
+ 1  product_cd          = f8
+ 1  product_disp        = c40
+ 1  cur_expire_dt_tm    = dq8
+ 1  cur_supplier_id     = f8
+ 1  cur_supplier_name   = c50
+ 1  derivative_ind      = i2
+ 1  cur_abo_cd          = f8
+ 1  cur_abo_disp        = c40
+ 1  cur_rh_cd           = f8
+ 1  cur_rh_disp         = c40
+ 1  cur_avail_qty       = i4
+ 1  cur_intl_units      = i4
+ 1  qual[*]
+     2  release_ind             = i2
+     2  product_event_id        = f8
+     2  event_dt_tm             = dq8
+     2  event_type_cd           = f8
+     2  event_type_disp         = c40
+     2  event_type_mean         = c12
+     2  reason_cd               = f8
+     2  reason_disp             = c40
+     2  event_prsnl_id          = f8
+     2  event_prsnl_username    = c10
+     2  event_prsnl_name        = c50
+     2  person_id               = f8
+     2  name_full_formatted     = c50
+     2  encntr_id               = f8
+     2  mrn_alias               = c20
+     2  order_id                = f8
+     2  accession               = c21
+     2  active_ind              = i2
+     2  orig_qty                = i4
+     2  cur_qty                 = i4
+     2  orig_intl_units         = i4
+     2  cur_intl_units          = i4
+     2  dispense_courier        = c100
+     2  return_courier          = c100
+     2  expected_usage_dt_tm    = dq8
+     2  donated_by_relative_ind = i2
+     2  return_temperature 		= f8
+     2  return_temperature_txt  = c15
+     2  return_temperature_degree_cd = f8
+     2  return_temperature_degree_disp = c40
+     2  return_temperature_degree_mean = c12
+     2  device_disp				= c40
+     2  device_id				= f8
+     2  location_disp			= c40
+     2  location_cd				= f8
+     2  backdated_on_dt_tm      = dq8 
+     2  visual_insp_disp        = vc 
+     2  bb_id_nbr               = vc
+     2  order_disp              = vc
+     2  ordering_physician_disp = vc
+ 1	contributor_system_cd = f8	
+ 1	contributor_system_disp	= c40
+ 1	upload_dt_tm 		= dq8	
+ 1	cross_reference		= c40
+ 1	historical_ind		= i2
+ 1  supplier_prefix     = c5
+%i cclsource:status_block.inc
+)
+
+record internal
+(
+ 1  null_dt_tm          = dq8
+)
+
+/*
+ * Initialize Constants 
+ */
+    set alias_type_code_set    = 319
+    set mrn_alias_cdf_meaning  = "MRN"
+
+/*
+ * Initialize Globals
+ */
+    set gsub_dummy = ""
+    set mrn_alias_type_cd       = 0.0
+    set reply->status_data->status = "F"
+    set count1 = 0
+    set prod_cnt = 0
+    set qual_cnt = 0
+    set event_cnt = 0
+    set null_dt_tm  = cnvtdatetime("")
+    
+    DECLARE sCDF_BLOOD = C12 WITH CONSTANT("BLOOD")
+    DECLARE nBBHIST_EVENT_CNT = I4 WITH NOCONSTANT(0)
+
+    set exception_c40 = fillstring(40, " ") ; to be used in DECODE as device name exception
+%i cclsource:bbt_get_event_type_cds_init.inc
+
+/* Get event_type code_values */
+set get_event_type_cds_status = GET_EVENT_TYPE_CDS(gsub_dummy)
+
+if (get_event_type_cds_status = "F"
+or 0.0 in (available_event_type_cd, received_event_type_cd, transferred_event_type_cd, transferred_from_event_type_cd, 
+           issued_event_type_cd))
+    set reply->status_data->status = "F"
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alter(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->subeventstatus[count1]->OperationName = "get event_type code_values"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "code_value"
+    if (get_event_type_cds_status = "F")
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+            = "could not et event_type code_values, select failed"
+    elseif (available_event_type_cd = 0.0)
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+            = "could not get available event_type_cd"
+    elseif (received_event_type_cd = 0.0)
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+            = "could not get received event_type_cd"
+    elseif (transferred_event_type_cd = 0.0)
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+            = "could not get transferred event_type_cd"
+    elseif (transferred_from_event_type_cd = 0.0)
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+            = "could not get transferred from event_type_cd"
+    elseif (issued_event_type_cd = 0.0)
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+            = "could not get dispensed from event_type_cd"
+    endif
+    go to EXIT_SCRIPT
+endif
+
+/* Get mrn_alias_type_cd */
+set mrn_alias_type_cd = GET_CODE_VALUE(alias_type_code_set, mrn_alias_cdf_meaning)
+if (mrn_alias_type_cd <= 0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get mrn_alias_type_cd"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_product_history"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+        = "could not get mrn alias type code_value"
+    go to EXIT_SCRIPT
+endif
+
+;declare no_dt_tm = dq8
+
+select  into "nl:"
+    table_ind = decode(xm.seq, "15xm ", tfn.seq, "13tfn  ", qu.seq, "12qu   ", pd.seq, "11pd   ",
+        dsp.seq, "10dsp  ", dst.seq, "09dst  ", a.seq, "08a    ", r.seq, "07r    ",
+        org.seq, "02org  ", drv.seq, "01drv  ", bp.seq, "00bp   ", bbit.seq, "06BIT", bbdt.seq, "06BDT", "xxxxx"),
+;    table_ind = decode(aor.seq, "aor ", pera.seq, "pera", prsnl.seq, "prsnl", 
+;        org.seq, "org  ", drv.seq, "1drv ", bp.seq, "0bp  ", "xxxx"),
+    p.product_id,
+    p.product_cd,
+    p.product_nbr,
+    p.product_sub_nbr,
+    p.cur_supplier_id,
+    p.cur_expire_dt_tm,
+    org.org_name,
+    bp.cur_abo_cd,
+    bp.cur_rh_cd,
+    drv.cur_avail_qty,
+    drv.cur_intl_units,
+    pe.seq,
+    pe.active_ind,
+    pe.product_event_id,
+    pe.event_dt_tm,
+    pe.event_type_cd,
+    pe.event_prsnl_id,
+    pe.person_id,    
+
+    orig_qty = decode(tfn.seq, tfn.orig_transfused_qty,
+                        qu.seq, qu.orig_quar_qty, pd.seq, pd.orig_dispense_qty,
+                        dsp.seq, dsp.disposed_qty, dst.seq, dst.destroyed_qty,
+                        a.seq, a.orig_assign_qty, r.seq, r.orig_rcvd_qty, 
+                        bbit.seq, bbit.transferred_qty, 0),
+    orig_intl_units = decode(tfn.seq, tfn.transfused_intl_units,
+                        qu.seq, qu.orig_quar_intl_units, pd.seq, pd.orig_dispense_intl_units,
+                        dsp.seq, dsp.disposed_intl_units,
+                        a.seq, a.orig_assign_intl_units, r.seq, r.orig_intl_units,
+                        bbit.seq, bbit.transferred_intl_unit, 0),
+    cur_qty = decode(tfn.seq, tfn.cur_transfused_qty,
+                        qu.seq, qu.cur_quar_qty, pd.seq, pd.cur_dispense_qty,
+                        dsp.seq, dsp.disposed_qty, dst.seq, dst.destroyed_qty,
+                        a.seq, a.cur_assign_qty, 0),
+    cur_intl_units = decode(tfn.seq, tfn.transfused_intl_units,
+                        qu.seq, qu.cur_quar_intl_units, pd.seq, pd.cur_dispense_intl_units,
+                        dsp.seq, dsp.disposed_intl_units,
+                        a.seq, a.cur_assign_intl_units, 0),
+    reason_cd = decode(xm.seq, xm.xm_reason_cd,  
+                        qu.seq, qu.quar_reason_cd, pd.seq, pd.dispense_reason_cd,
+                        dsp.seq, dsp.reason_cd, a.seq, a.assign_reason_cd,  bbit.seq, bbit.transfer_reason_cd,
+                        bbdt.seq, bbdt.reason_cd,   0.0),
+    release_ind = decode(ar.seq, "ar", dr.seq, "dr", qr.seq, "qr", xm.seq, "xm", "xx"),
+    release_dt_tm = decode(ar.seq, ar.release_dt_tm, dr.seq, dr.return_dt_tm, 
+                                    qr.seq, qr.release_dt_tm, xm.seq, xm.release_dt_tm, internal->null_dt_tm), 
+    release_qty = decode(ar.seq, ar.release_qty, dr.seq, dr.return_qty, qr.seq, qr.release_qty, 0),
+    release_intl_units = decode(ar.seq, ar.release_intl_units, dr.seq, dr.return_intl_units, qr.seq, qr.release_intl_units, 0),
+    release_prsnl_id = decode(ar.seq, ar.release_prsnl_id, dr.seq, dr.return_prsnl_id, qr.seq, qr.release_prsnl_id,
+                                xm.seq, xm.release_prsnl_id, 0.0),
+    release_reason_cd = decode(ar.seq, ar.release_reason_cd, dr.seq, dr.return_reason_cd, qr.seq, qr.release_reason_cd,
+                                xm.seq, xm.release_reason_cd, 0.0),                              
+    unknown_patient_text = decode(pd.seq, concat("Emer Disp: "
+        ,  pd.unknown_patient_text), fillstring(50," ")),
+    reinstate_cd = decode(xm.seq, xm.reinstate_reason_cd, 0.0),
+    method_cd = decode(dst.seq, dst.method_cd, 0.0),
+    to_device_name = decode(bid_to.seq, bid_to.description, exception_c40),
+    from_device_name = decode(bid_from.seq, bid_from.description, exception_c40),
+    dispense_device_name = decode(bid_disp.seq, bid_disp.description, exception_c40),
+    transfer_mean = decode(bbdt.seq, trim(uar_get_code_meaning(bbdt.reason_cd)), pd.seq, "DISPENSE", ""),
+    location_cd = decode(bbit.seq, bbit.to_inv_area_cd, pd.seq, pd.dispense_to_locn_cd, r.seq, pe.inventory_area_cd, 0.0),
+    transferred_from_location_cd = decode(bbit.seq, bbit.from_inv_area_cd, 0.0),
+    backdated_on_dt_tm = decode(pd.seq, pd.backdated_on_dt_tm, internal->null_dt_tm),
+    bb_id_nbr = decode(a.seq, a.bb_id_nbr, pd.seq, pd.bb_id_nbr, xm.seq, xm.bb_id_nbr, ""),    
+    vis_insp_cd = decode(r.seq, r.vis_insp_cd, pd.seq, pd.dispense_vis_insp_cd, dr.seq, dr.return_vis_insp_cd, 0.0),
+    disp_prov   = decode(dph.seq, dph.name_full_formatted, "")
+ from
+    product p,
+    (dummyt d_p with seq = 1),
+    organization org,
+    product_event pe,
+    (dummyt d_x with seq = 1),
+    blood_product bp,
+    derivative drv,
+    receipt r,
+    assign a,
+    (dummyt d_ar with seq = 1),
+    assign_release ar,
+    destruction dst,
+    disposition dsp,
+    patient_dispense pd,
+    (dummyt d_dr with seq = 1),
+    dispense_return dr,
+    quarantine qu,
+    (dummyt d_qr with seq = 1),
+    quarantine_release qr,
+    transfusion tfn,
+    crossmatch xm,
+    prsnl pl,
+    prsnl pl2,
+    bb_inventory_transfer bbit,
+    bb_device_transfer bbdt,
+    auto_directed ad,
+    bb_inv_device bid_to,
+    bb_inv_device bid_from,
+    bb_inv_device bid_disp,
+    (dummyt d_ph with seq = 1),
+    prsnl dph
+plan   p       where   p.product_id          = request->product_id
+join   d_p     where   d_p.seq               = 1
+    join   bp      where   bp.product_id         = p.product_id
+    orjoin drv     where   drv.product_id        = p.product_id
+    orjoin org     where   org.organization_id   = p.cur_supplier_id
+    orjoin pe      where   pe.product_id         = p.product_id
+        join   (d_x   where   d_x.seq               = 1                                              ;outerjoin(d_x)
+               join   (r      where   r.product_event_id    = pe.product_event_id)
+               orjoin (a      where   a.product_event_id    = pe.product_event_id
+                      join    d_ar    where   d_ar.seq              = 1                              ;outerjoin(d_ar)
+                      join    ar      where   ar.product_event_id   = a.product_event_id)
+               orjoin (dsp    where   dsp.product_event_id  = pe.product_event_id)
+               orjoin (dst    where   dst.product_event_id  = pe.product_event_id)
+               orjoin (pd     where   pd.product_event_id   = pe.product_event_id
+                      join   (d_ph   where   d_ph.seq  = 1 
+                              join    dph    where  pd.dispense_prov_id > 0 and
+                                                    dph.person_id = pd.dispense_prov_id)
+               		  join    bid_disp where bid_disp.bb_inv_device_id = pd.device_id
+                      join    pl      where   pl.person_id          = pd.dispense_courier_id
+                      join    (d_dr   where   d_dr.seq              = 1                              ;outerjoin(d_dr)
+                              join    dr      where   dr.product_event_id   = pd.product_event_id
+                              join    pl2     where   pl2.person_id         = dr.return_courier_id))
+               orjoin (qu     where   qu.product_event_id   = pe.product_event_id
+                      join    (d_qr   where   d_qr.seq              = 1                              ;outerjoin(d_qr)
+                              join    qr      where   qr.product_event_id   = qu.product_event_id))
+               orjoin (tfn    where   tfn.product_event_id  = pe.product_event_id)
+               orjoin (xm     where   xm.product_event_id   = pe.product_event_id)
+               orjoin (bbit   where   bbit.product_event_id = pe.product_event_id 
+               			or (pe.event_type_cd = transferred_from_event_type_cd and bbit.to_product_event_id = pe.product_event_id))
+               orjoin (bbdt   where   bbdt.product_event_id = pe.product_event_id
+               		  join bid_to where bid_to.bb_inv_device_id = bbdt.to_device_id
+               		  join bid_from where bid_from.bb_inv_device_id = bbdt.from_device_id)
+               orjoin (ad     where   ad.product_event_id = pe.product_event_id))
+               
+            
+order by p.product_id, pe.product_event_id, table_ind
+
+head report
+    stat = alterlist(reply->qual, 10)
+    orig_rcvd_qty = 0
+    orig_rcvd_intl_units = 0
+    orig_avail_units = 0
+    orig_avail_qty = 0
+head p.product_id
+    reply->product_id           = p.product_id
+    reply->product_nbr          = p.product_nbr
+    reply->product_sub_nbr      = p.product_sub_nbr
+    reply->product_cd           = p.product_cd
+    reply->cur_expire_dt_tm     = cnvtdatetime(p.cur_expire_dt_tm)
+    reply->historical_ind		= 0
+
+head pe.product_event_id
+    if (pe.seq > 0)
+        event_cnt = event_cnt + 1
+        if (mod(event_cnt, 10) = 1 and event_cnt != 1)
+            stat = alterlist(reply->qual, event_cnt + 9)
+        endif
+        reply->qual[event_cnt]->release_ind                 = 0
+        reply->qual[event_cnt]->product_event_id            = pe.product_event_id
+        reply->qual[event_cnt]->event_dt_tm                 = cnvtdatetime(pe.event_dt_tm)
+        reply->qual[event_cnt]->event_type_cd               = pe.event_type_cd
+        
+        ;Set reason_cd to reinstate_cd or method_cd if exists. Otherwise set to reason_cd.
+        ;The value returned will be displayed in the reason column on the frontend app. 
+        if (reinstate_cd > 0.0)
+            reply->qual[event_cnt].reason_cd                = reinstate_cd
+        elseif (method_cd > 0.0)
+            reply->qual[event_cnt].reason_cd                = method_cd
+        else
+            reply->qual[event_cnt].reason_cd                = reason_cd
+        endif
+        
+        reply->qual[event_cnt]->event_prsnl_id              = pe.event_prsnl_id
+        reply->qual[event_cnt]->person_id                   = pe.person_id
+        ; NOTE:  name_full_formatted is set to unknown_patient_text if it exists.  If a patient
+        ;        has already been associated with an emergency dispense, then the correct patient
+        ;        name will be moved to name_full_formatted in the next select
+        reply->qual[event_cnt]->name_full_formatted         = unknown_patient_text
+        reply->qual[event_cnt]->encntr_id                   = pe.encntr_id
+        reply->qual[event_cnt]->order_id                    = pe.order_id
+        reply->qual[event_cnt]->active_ind                  = pe.active_ind
+        reply->qual[event_cnt]->orig_qty                    = orig_qty
+        reply->qual[event_cnt]->cur_qty                     = cur_qty
+        reply->qual[event_cnt]->orig_intl_units             = orig_intl_units
+        reply->qual[event_cnt]->cur_intl_units              = cur_intl_units
+        reply->qual[event_cnt]->ordering_physician_disp     = disp_prov
+        if (pl.person_id > 0)
+           reply->qual[event_cnt]->dispense_courier         = pl.name_full_formatted
+        else
+           reply->qual[event_cnt]->dispense_courier         = pd.dispense_courier_text
+        endif
+        
+        if (pl2.person_id > 0)
+           reply->qual[event_cnt].return_courier            = pl2.name_full_formatted   
+        else
+           reply->qual[event_cnt].return_courier            = dr.return_courier_text 
+        endif
+        
+        reply->qual[event_cnt].expected_usage_dt_tm         = ad.expected_usage_dt_tm
+        reply->qual[event_cnt].donated_by_relative_ind      = ad.donated_by_relative_ind
+        reply->qual[event_cnt].visual_insp_disp             = uar_get_code_display(vis_insp_cd)
+        reply->qual[event_cnt].bb_id_nbr                    = bb_id_nbr
+                     
+        if((transfer_mean = "SYS_MOVEIN")
+			or (transfer_mean = "TRNSFRALLO")
+			or (transfer_mean = "TRNSFRUNALLO")
+			or (transfer_mean = "SYS_RTNSTOCK"))
+			;Device Name from To Device
+			reply->qual[event_cnt]->device_disp                 = to_device_name
+		elseif ((transfer_mean = "SYS_MOVEOUT")
+			or (transfer_mean = "SYS_TRANSOUT")
+			or (transfer_mean = "SYS_EMEROUT"))
+			;Device Name from From Device
+			reply->qual[event_cnt]->device_disp                 = from_device_name
+		elseif(transfer_mean = "DISPENSE")
+			if(pd.device_id > 0)
+				reply->qual[event_cnt]->device_disp                 = dispense_device_name
+			else
+				reply->qual[event_cnt]->device_disp                 = pd.dispense_cooler_text
+			endif
+		else
+			reply->qual[event_cnt]->device_disp                 = to_device_name
+		endif
+
+		if(location_cd <= 0 
+			AND pe.event_type_cd in (modified_product_event_type_cd, pooled_product_event_type_cd))
+			reply->qual[event_cnt]->location_disp = uar_get_code_display(pe.inventory_area_cd)
+		elseif(pe.event_type_cd = transferred_from_event_type_cd)
+			;Transferred From Event
+			reply->qual[event_cnt]->location_disp = uar_get_code_display(transferred_from_location_cd)
+		else
+			;Everything Else
+			reply->qual[event_cnt]->location_disp = uar_get_code_display(location_cd)
+		endif
+		reply->qual[event_cnt]->backdated_on_dt_tm = backdated_on_dt_tm
+    endif
+
+head table_ind
+    if (table_ind = "00bp   ") 
+        reply->derivative_ind       = 0
+        reply->cur_abo_cd           = bp.cur_abo_cd
+        reply->cur_rh_cd            = bp.cur_rh_cd
+        reply->supplier_prefix      = bp.supplier_prefix
+    elseif (table_ind = "01drv  ")
+        cur_avail_qty               = drv.cur_avail_qty
+        reply->derivative_ind = 1
+        reply->cur_avail_qty        = drv.cur_avail_qty
+        reply->cur_intl_units       = drv.cur_intl_units
+    elseif (table_ind = "02org  ")
+        reply->cur_supplier_id      = p.cur_supplier_id
+        reply->cur_supplier_name    = org.org_name
+    elseif (table_ind = "07r    ")
+        orig_rcvd_qty               = r.orig_rcvd_qty
+        orig_rcvd_intl_units        = r.orig_intl_units
+    endif
+
+detail
+    if (pe.seq > 0 
+    and ((release_ind = "ar")
+            or (release_ind = "qr")
+            or (release_ind = "dr")
+            or (release_ind = "xm"
+                and release_dt_tm != NULL)))
+        event_cnt = event_cnt + 1
+        if (mod(event_cnt, 10) = 1 and event_cnt != 1)
+            stat = alterlist(reply->qual, event_cnt + 9)
+        endif
+        reply->qual[event_cnt]->release_ind                 = 1
+        reply->qual[event_cnt]->product_event_id            = pe.product_event_id
+        reply->qual[event_cnt]->event_dt_tm                 = cnvtdatetime(release_dt_tm)
+        reply->qual[event_cnt]->event_type_cd               = pe.event_type_cd
+        reply->qual[event_cnt]->reason_cd                   = release_reason_cd
+        reply->qual[event_cnt]->event_prsnl_id              = release_prsnl_id
+        reply->qual[event_cnt]->person_id                   = pe.person_id
+        reply->qual[event_cnt]->name_full_formatted         = " "
+        reply->qual[event_cnt]->encntr_id                   = pe.encntr_id
+        reply->qual[event_cnt]->order_id                    = pe.order_id
+        reply->qual[event_cnt]->active_ind                  = reqdata->inactive_status_cd
+        reply->qual[event_cnt]->orig_qty                    = release_qty
+        reply->qual[event_cnt]->cur_qty                     = 0
+        reply->qual[event_cnt]->orig_intl_units             = release_intl_units
+        reply->qual[event_cnt]->cur_intl_units              = 0
+        reply->qual[event_cnt]->ordering_physician_disp     = disp_prov 
+              
+        if (pl.person_id > 0)
+           reply->qual[event_cnt]->dispense_courier         = pl.name_full_formatted
+        else
+           reply->qual[event_cnt]->dispense_courier         = pd.dispense_courier_text
+        endif   
+   
+        if (pl2.person_id > 0)
+           reply->qual[event_cnt].return_courier            = pl2.name_full_formatted   
+        else
+           reply->qual[event_cnt].return_courier            = dr.return_courier_text 
+        endif
+        reply->qual[event_cnt].visual_insp_disp             = uar_get_code_display(vis_insp_cd)
+        reply->qual[event_cnt].bb_id_nbr                    = bb_id_nbr
+        if(release_ind = "dr")
+        	reply->qual[event_cnt].return_temperature 		= dr.return_temperature_value
+        	reply->qual[event_cnt].return_temperature_txt   = dr.return_temperature_txt
+        	reply->qual[event_cnt].return_temperature_degree_cd  =		dr.return_temperature_degree_cd
+        endif
+    endif
+foot report
+    if (reply->derivative_ind = 1)
+        ; For derivatives, move current available quantity from derivative to cur_qty for ACTIVE
+        ; available state.  Move original received quantity from received state to orig_qty for
+        ; ALL available states.
+        event = 0
+        for (event = 1 to event_cnt)
+            if (reply->qual[event]->event_type_cd = available_event_type_cd)
+	        	if(orig_rcvd_qty > 0 and orig_avail_qty!=0)
+	            	;A product originally received and then had avail qty transferred out or in
+	            	reply->qual[event]->orig_qty            = orig_rcvd_qty+orig_avail_qty
+	                reply->qual[event]->orig_intl_units     = orig_rcvd_intl_units+orig_avail_units
+	            elseif(orig_rcvd_qty > 0)
+	            	;A product received and has no transfers
+	            	reply->qual[event]->orig_qty            = orig_rcvd_qty
+	                reply->qual[event]->orig_intl_units     = orig_rcvd_intl_units
+	            else
+					;A product created from a transfer
+	            	reply->qual[event]->orig_qty            = orig_avail_qty
+	                reply->qual[event]->orig_intl_units     = orig_avail_units
+	            endif
+                if (reply->qual[event]->active_ind = 1)
+                    reply->qual[event]->cur_qty         = reply->cur_avail_qty
+                    reply->qual[event]->cur_intl_units  = reply->cur_intl_units
+                endif
+            endif
+        endfor
+    endif
+with    nocounter, outerjoin(d_x), outerjoin(d_ar), outerjoin(d_qr), outerjoin(d_dr), outerjoin(d_ph)
+
+set stat = alterlist(reply->qual, event_cnt)
+
+select into "nl:"
+    d.seq, 
+    product_event_id = reply->qual[d.seq]->product_event_id,
+    table_ind = decode(aor.seq, "06aor  ", ea.seq, "05ea   ", per.seq, "04per  ", prsnl.seq, "03prsnl", "xxxxx"),
+    prsnl.username,
+    prsnl_per.name_full_formatted,
+    per.name_full_formatted,
+    per_active_status_disp = cv_per.display,
+;    pera.alias,
+    ea.alias,
+    aor.accession,
+    order_disp = decode(o.seq, o.order_mnemonic, ""),
+    ordering_physician_disp = decode(phy.seq, phy.name_full_formatted, "")
+from
+    (dummyt d with seq = value(event_cnt)),    
+    person prsnl_per,
+    prsnl prsnl,
+    person per,
+    code_value cv_per,
+    encntr_alias ea,
+    accession_order_r aor,
+    orders o,
+    prsnl phy
+plan    d
+    join  (prsnl_per   where   prsnl_per.person_id    = reply->qual[d.seq]->event_prsnl_id
+                                and prsnl_per.person_id != NULL
+                                and prsnl_per.person_id > 0
+        join    prsnl       where   prsnl.person_id     = reply->qual[d.seq]->event_prsnl_id
+                              and   prsnl.person_id     > 0)
+    orjoin  (per         where   per.person_id          = reply->qual[d.seq]->person_id
+                                   and per.person_id    != NULL
+                                   and per.person_id    > 0
+        join    cv_per      where cv_per.code_value     = per.active_status_cd)
+    orjoin  (ea          where  ea.encntr_id            = reply->qual[d.seq]->encntr_id
+                                  and ea.encntr_id      != NULL                                     ; 005
+                                  and ea.encntr_id      > 0                                         ; 005
+                                  and ea.encntr_alias_type_cd = mrn_alias_type_cd
+                                  and ea.active_ind     = 1
+                                  and ea.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                                  and ea.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+    orjoin  (aor         where   aor.order_id           = reply->qual[d.seq]->order_id
+                                   and aor.order_id     != NULL
+                                   and aor.order_id     > 0
+                                   and aor.primary_flag = 0
+                join o   where o.order_id = aor.order_id
+                join phy where phy.person_id = o.last_update_provider_id)
+            
+order by    d.seq, table_ind
+
+detail
+    if (table_ind = "03prsnl")
+        reply->qual[d.seq]->event_prsnl_username        = prsnl.username
+        reply->qual[d.seq]->event_prsnl_name            = prsnl_per.name_full_formatted
+    elseif (table_ind = "04per  ")
+        if (per.active_ind = 1)
+            reply->qual[d.seq]->name_full_formatted         = per.name_full_formatted
+         else
+            reply->qual[d.seq]->name_full_formatted 
+                = concat("<", trim(cv_per.display), "> ", trim(per.name_full_formatted))
+        endif                
+    elseif (table_ind = "05ea   ")
+        reply->qual[d.seq]->mrn_alias               = cnvtalias(ea.alias,ea.alias_pool_cd)
+    elseif (table_ind = "06aor  ")
+        reply->qual[d.seq]->accession               = cnvtacc(aor.accession)
+        reply->qual[d.seq]->order_disp              = order_disp
+        ;for dispense events, the ordering physician is already populated with the previous select query.
+        if(reply->qual[d.seq]->event_type_cd != issued_event_type_cd)
+            reply->qual[d.seq]->ordering_physician_disp = ordering_physician_disp
+        endif
+    endif
+with    nocounter
+
+
+
+set count1 = count1 + 1
+if (count1 != 1)
+    set stat = alter(reply->status_data->subeventstatus, count1)
+endif
+if (curqual = 0)
+    select into "nl:"
+	    hp.*
+	    , hpe.* 
+	from
+		bbhist_product hp
+		, bbhist_product_event hpe
+		, person per
+		, prsnl p
+		, organization o
+		, encntr_alias ea
+	plan hp		 	 
+		where hp.product_id = request->product_id	
+	join hpe
+		where hpe.product_id = hp.product_id
+	join per
+		where per.person_id = outerjoin(hpe.person_id)
+	join p
+		where p.person_id = outerjoin(hpe.prsnl_id) 
+	join o
+		where o.organization_id = hp.supplier_id
+	join ea
+		where ea.encntr_id = outerjoin(hpe.encntr_id)
+		  and ea.encntr_alias_type_cd = outerjoin(mrn_alias_type_cd)
+		  and ea.encntr_id > outerjoin(0.0)
+		  and ea.active_ind = outerjoin(1)
+		  and ea.beg_effective_dt_tm <= outerjoin(cnvtdatetime(curdate,curtime3))
+		  and ea.end_effective_dt_tm >= outerjoin(cnvtdatetime(curdate,curtime3))
+	order
+		hp.product_id
+		, hpe.product_event_id
+	head report
+		stat = alterlist(reply->qual, 10)
+		nBBHIST_EVENT_CNT = 0
+	head hp.product_id
+		reply->product_id = hp.product_id
+		reply->product_nbr = hp.product_nbr
+		reply->product_sub_nbr = hp.product_sub_nbr
+		reply->product_cd = hp.product_cd
+		reply->product_disp = uar_get_code_display(hp.product_cd)
+		reply->cur_expire_dt_tm = cnvtdatetime(hp.expire_dt_tm)
+		reply->cur_supplier_id = hp.supplier_id
+		reply->cur_supplier_name = o.org_name
+		if (uar_get_code_meaning(hp.product_class_cd) = sCDF_BLOOD)
+			reply->derivative_ind = 0
+		else
+			reply->derivative_ind = 1
+		endif
+		reply->cur_abo_cd = hp.abo_cd
+		reply->cur_rh_cd = hp.rh_cd	
+		reply->contributor_system_cd = hp.contributor_system_cd
+		reply->upload_dt_tm = cnvtdatetime(hp.upload_dt_tm)
+		reply->cross_reference = hp.cross_reference
+		reply->historical_ind = 1
+		reply->supplier_prefix = hp.supplier_prefix					
+	head hpe.product_event_id
+		nBBHIST_EVENT_CNT = nBBHIST_EVENT_CNT + 1
+        if (mod(nBBHIST_EVENT_CNT, 10) = 1 and nBBHIST_EVENT_CNT != 1)
+            stat = alterlist(reply->qual, nBBHIST_EVENT_CNT + 9)
+        endif
+        reply->qual[nBBHIST_EVENT_CNT]->product_event_id = hpe.product_event_id
+        reply->qual[nBBHIST_EVENT_CNT]->event_dt_tm = cnvtdatetime(hpe.event_dt_tm)
+        reply->qual[nBBHIST_EVENT_CNT]->event_type_cd = hpe.event_type_cd
+        reply->qual[nBBHIST_EVENT_CNT]->reason_cd = hpe.reason_cd
+        reply->qual[nBBHIST_EVENT_CNT]->event_prsnl_id = hpe.prsnl_id
+        reply->qual[nBBHIST_EVENT_CNT]->event_prsnl_username = p.username
+        reply->qual[nBBHIST_EVENT_CNT]->event_prsnl_name = p.name_full_formatted
+        reply->qual[nBBHIST_EVENT_CNT]->person_id = per.person_id
+        reply->qual[nBBHIST_EVENT_CNT]->name_full_formatted = per.name_full_formatted
+        reply->qual[nBBHIST_EVENT_CNT]->encntr_id = hpe.encntr_id
+        if (hpe.encntr_id > 0.0)
+        	reply->qual[nBBHIST_EVENT_CNT]->mrn_alias = cnvtalias(ea.alias,ea.alias_pool_cd)
+		endif        	
+        reply->qual[nBBHIST_EVENT_CNT]->active_ind = hpe.active_ind
+        reply->qual[nBBHIST_EVENT_CNT]->cur_qty = hpe.qty
+        reply->qual[nBBHIST_EVENT_CNT]->cur_intl_units = hpe.international_unit
+	detail
+		row + 0						
+	foot hpe.product_event_id
+		row + 0
+	foot hp.product_id
+		stat = alterlist(reply->qual, nBBHIST_EVENT_CNT)
+	foot report
+		row + 0
+	with nocounter
+												   
+    if (curqual = 0)
+	    set reply->status_data->status = "Z"
+	    set reply->status_data->subeventstatus[1]->OperationName    = "get product history"
+	    set reply->status_data->subeventstatus[1]->OperationStatus  = "Z"
+	    set reply->status_data->subeventstatus[1]->TargetObjectName = "bbt_get_product_history"
+	    set reply->status_data->subeventstatus[1]->TargetObjectValue = 
+	        "No product history found for requested product_id"
+	else
+    	set reply->status_data->status = "S"
+	endif
+else
+    set reply->status_data->status = "S"
+endif
+
+go to EXIT_SCRIPT
+
+declare GET_CODE_VALUE(sub_code_set, sub_cdf_meaning) = f8
+
+subroutine GET_CODE_VALUE(sub_code_set, sub_cdf_meaning)
+    /*
+     * Retrieve code_value using passed code_set and meaning
+     */
+    set gsub_code_value = 0.0
+    set cdf_meaning = fillstring(12," ")
+    set cdf_meaning = sub_cdf_meaning
+    set stat = uar_get_meaning_by_codeset(sub_code_set,cdf_meaning,1,gsub_code_value)
+    RETURN(gsub_code_value)
+END     ; end subroutine GET_CODE_VALUE
+
+%i cclsource:bbt_get_event_type_cds_sub.inc
+
+#EXIT_SCRIPT
+
+end go
+
+;Generated by GNU enscript 1.6.4.

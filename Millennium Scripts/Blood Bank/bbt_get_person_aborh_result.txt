@@ -1,0 +1,584 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBCompXMElig/BBT_GET_PERSON_ABORH_RESULT.PRG Turn on black mode
+
+ 
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2006 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       bbt_get_person_aborh_result.prg
+        Object name:            bbt_get_person_aborh_result
+        Request #:              225566
+ 
+        Product:                Pathnet
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Retrive person aborh results for a given person_id
+ 
+ 
+        Tables read:            person_aborh_result, person_aborh
+ 
+        Tables updated:         none
+        Executing from:         Computer Crossmatch
+ 
+        Special Notes:          none
+******************************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+ 
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *001 07/30/98 Doug Saus            Initial Release                     *
+;    *002 02/20/99 Doug Saus            Added temporary return of contributor system cd
+;    *003 02/23/99 Doug Saus            Increased size of accession returned*
+;    *004 02/26/99 Doug Saus            Added return of result_event_dt_tm  *
+;    *005 03/29/99 Doug Saus            Removed selects to code_value and
+;    *                                  added debug_ind
+;    *006 04/14/99 Doug Saus            Added nullreport to selects to fix
+;                                       problem with erroneous script error
+;    *007 07/29/02 Ronda Zheng          Join to prsnl table to retrieve tech_id
+;    *008 02/17/05 Jason Osborn         Get specimen_id from container table
+;    *                                  instead of person_aborh_result table.
+;    *009 04/03/06 Tom Brecht           Return interface flag               *
+;    *010 08/17/06 Jason Coy            Update with flexible specimen logic.*
+;    *008 08/30/07 Jason Coy            Update to return unformatted accn,  *
+;    *                                  accession id and order_id in reply. *
+;    *009 08/20/10 AS019178             Fix for CR 1-4112965511,to populate *
+;                                       reply structure by qualifying       *
+;                                       on primary accession for the order  *
+;     010 10/10/13 Satish Joshi         Filtered the specimens based on the *
+;                                       facility when the filter_by_facility*
+;                                       is set to yes for the pc_location   *
+;                                       facility.                           *
+;	  011 03/31/14 Gayatri Samala       fix for CR 1-7701258819 (Multiple 
+;										Blood bank scripts perform poorly when
+;										patients have a lot of historical data.)
+;~DE~************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program bbt_get_person_aborh_result:dba go
+create program bbt_get_person_aborh_result:dba
+ 
+/*
+record request
+(
+  1 debug_ind   =  i2 ;005
+  1 person_id   =  f8
+  1 pc_facility_cd =  f8
+)
+*/
+ 
+record reply
+(
+ 1  contributor_system_cd               = f8 ;002
+ 1  contributor_system_disp             = c40 ;002
+ 1  contributor_system_mean             = c12 ;002
+ 1  qual[*]
+   2  person_aborh_rs_id                = f8
+   2  encntr_id                         = f8
+   2  result_id                         = f8
+   2  result_cd                         = f8
+   2  result_disp                       = vc
+   2  result_mean                       = c12
+   2  active_status_dt_tm               = dq8
+   2  updt_cnt                          = i4
+   2  updt_dt_tm                        = dq8
+   2  container_id                      = f8
+   2  specimen_id                       = f8
+   2  drawn_dt_tm                       = dq8
+   2  person_aborh_id                   = f8
+   2  pa_person_aborh_id                = f8
+   2  pa_found_ind                      = i2
+   2  pa_active_ind                     = i2
+   2  accession                         = c30 ;003
+   2  result_event_dt_tm                = dq8 ;004
+   2  username                          = c25
+   2  interface_flag                    = i2
+   2  expiration_dt_tm                  = dq8
+   2  encntr_facility_cd                = f8
+   2  spec_flex_ind                     = i2
+   2  unformatted_accession             = c20
+   2  accession_id                      = f8
+   2  order_id                          = f8
+   2  testing_facility_cd                 = f8
+%i cclsource:status_block.inc
+)
+ 
+free set temp
+record temp
+(
+   1 Facilities[*]
+     2 enc_facility_cd                    = f8
+     2 test_facility_cd                   = f8
+)
+
+; Include the following file for flexible specimen implementation.
+%i cclsource:BBT_GetBBPreference.inc
+%i cclsource:bbt_calc_flex_expiration.inc
+%i cclsource:bbt_scripts_common.inc
+ 
+;002 begin
+set count1 = 0
+set stat = 0
+set select_ok_ind = 0
+set select_ok_ind2 = 0
+declare PopulateReply(NULL) = NULL
+declare qual_idx       = i4 with protect, noconstant(0)
+declare qual_count     = i4 with protect, noconstant(0)
+declare filter_by_facility = i2 with protect, noconstant(0)
+declare testing_facility_cd = f8 with protect, noconstant(0.0)
+declare pc_facility_cd = f8 with protect, noconstant(0.0)
+declare test_facility_cd = f8 with protect, noconstant(0.0)
+declare FacilityIdxHold  = i4 with protect, noconstant(0)
+declare facility_count   = i4 with protect, noconstant(0)
+declare x_idx            = i4 with protect, noconstant(0)
+ 
+set pc_facility_cd = request->pc_facility_cd
+set test_facility_cd = BbtGetFlexSpecTestingFacility(request->pc_facility_cd)
+
+    if (test_facility_cd = -1)
+    	set count1 = count1 + 1
+    	if (count1 > 1)
+        	set stat = alterlist(reply->status_data->subeventstatus, count1)
+    	endif
+    	set reply->status_data->status = "F"
+    	set reply->status_data->subeventstatus[count1]->OperationName = "get test_facility_code"
+    	set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    	set reply->status_data->subeventstatus[count1]->TargetObjectName = "SCRIPT #225566"
+    	set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get test facility code"
+    	go to EXIT_SCRIPT
+    endif
+
+ 
+if (test_facility_cd > 0)
+set pc_facility_cd = test_facility_cd
+endif
+ 
+set filter_by_facility = BbtGetFlexFilterByFacility(pc_facility_cd)
+ 
+select into "nl:"
+    pa.contributor_system_cd
+ 
+from
+    person_aborh pa
+ 
+where pa.person_id = request->person_id
+ 
+head report
+    select_ok_ind = 0
+ 
+detail
+    reply->contributor_system_cd = pa.contributor_system_cd
+ 
+foot report
+    select_ok_ind = 1
+ 
+with nocounter, nullreport ;006
+ 
+if (select_ok_ind = 0)
+    set reply->status_data->subeventstatus[1]->OperationName
+        = "select"
+    set reply->status_data->subeventstatus[1]->OperationStatus
+        = "Z"
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+        = "person_aborh_result"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue
+        = "contributor system cd could not be retrieved for person_id"
+    set reply->status_data.status = "F"
+endif
+ 
+;002 end
+ 
+;004 begin
+ 
+declare verified_status_cd          = f8
+declare corrected_status_cd         = f8
+declare gsub_code_value             = f8
+ 
+ 
+set result_stat_code_set            = 1901
+ 
+set verified_status_cdf_meaning     = fillstring(12," ") ;005
+set corrected_status_cdf_meaning     = fillstring(12," ") ;005
+set verified_status_cdf_meaning     = "VERIFIED"
+set corrected_status_cdf_meaning    = "CORRECTED"
+set verified_status_cd              = 0.0
+set corrected_status_cd             = 0.0
+ 
+set code_cnt                        = 1
+ 
+;005 Begin
+/*****************************/
+/* Select verified_status_cd */
+/*****************************/
+ 
+set stat = uar_get_meaning_by_codeset(result_stat_code_set, verified_status_cdf_meaning, code_cnt, gsub_code_value)
+ 
+if (request->debug_ind = 1)
+    call echo(stat)
+    call echo(result_stat_code_set)
+    call echo(verified_status_cdf_meaning)
+    call echo(gsub_code_value)
+    call echo(" ")
+endif
+ 
+if (stat = 1)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get code_value"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get verified status code_value"
+    go to EXIT_SCRIPT
+else
+    set verified_status_cd = gsub_code_value
+endif
+ 
+/******************************/
+/* Select corrected_status_cd */
+/******************************/
+set code_cnt = 1
+ 
+set stat = uar_get_meaning_by_codeset(result_stat_code_set, corrected_status_cdf_meaning, code_cnt, gsub_code_value)
+ 
+if (request->debug_ind)
+    call echo(stat)
+    call echo(result_stat_code_set)
+    call echo(corrected_status_cdf_meaning)
+    call echo(gsub_code_value)
+    call echo(" ")
+endif
+ 
+if (stat = 1)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get corrected status code_value"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get corrected status code_value"
+    go to EXIT_SCRIPT
+else
+    set corrected_status_cd = gsub_code_value
+endif
+;004 end
+;005 end
+ 
+/* Initialize Variables */
+set count = 0
+ 
+select into "nl:"
+    par.person_aborh_rs_id
+    , par.encntr_id
+    , par.result_id
+    , par.result_cd
+    , par.active_status_dt_tm
+    , par.updt_cnt
+    , par.updt_dt_tm
+    , par.container_id
+    , par.specimen_id
+    , par.drawn_dt_tm
+    , par.person_aborh_id
+    , pa.person_aborh_id
+    , pa.active_ind
+    , accession_number = decode(aor.seq, uar_fmt_accession(aor.accession,size(aor.accession,1))," ")
+    , pnl.username
+from
+    person_aborh_result par
+    , encounter e
+    , result r
+    , perform_result pr
+    , result_event re
+    , (dummyt d_aor  with seq = 1)
+    , accession_order_r  aor
+    , (dummyt d_pa with seq = 1)
+    , person_aborh      pa
+    , prsnl pnl
+    , container c
+    , (dummyt d_seo with seq = 1)
+    , bb_spec_expire_ovrd   seo
+ 
+plan par where par.person_id        = request->person_id
+           and par.active_ind       = 1
+ 
+join e   where e.encntr_id          = par.encntr_id
+ 
+join r   where r.result_id          = par.result_id
+           and par.result_id        > 0
+           and par.result_id       != NULL
+ 
+;004 begin
+join pr  where pr.result_id              = r.result_id
+           and (pr.result_status_cd      = verified_status_cd
+               or pr.result_status_cd    = corrected_status_cd)
+           and pr.perform_result_id     != NULL
+           and pr.perform_result_id      > 0
+join c   where c.container_id = pr.container_id
+join re  where re.result_id              = r.result_id
+           and re.perform_result_id      = pr.perform_result_id
+           and re.event_type_cd          = pr.result_status_cd
+ 
+join pnl where pnl.person_id             = re.event_personnel_id
+           and re.event_personnel_id    != NULL
+           and re.event_personnel_id     > 0
+ 
+join (d_aor where d_aor.seq = 1
+    join aor where aor.order_id         = r.order_id
+                   and r.order_id       > 0
+                   and r.order_id      != NULL
+                   and aor.primary_flag = 0)
+;004 end
+join (d_pa where d_pa.seq = 1
+    join pa  where pa.person_aborh_id   = par.person_aborh_id
+               and par.person_aborh_id  > 0
+               and par.person_aborh_id != NULL)
+ 
+join (d_seo where d_seo.seq = 1
+ 
+join seo     where seo.specimen_id           = c.specimen_id
+               and seo.active_ind            = 1)
+ 
+head report
+    select_ok_ind2 = 0
+    facility_count = 0
+    FacilityIdxHold = 0
+ 
+detail
+	FacilityIdxHold = locateval(x_idx, 1, size(temp->Facilities, 5), e.loc_facility_cd, temp->Facilities[x_idx].enc_facility_cd)
+  	if (FacilityIdxHold <= 0)
+  		; transfusion service facility is not yet retrieved for this encounter facility.
+    	facility_count = facility_count + 1
+    	if (facility_count > size(temp->Facilities,5))
+   			stat = alterlist(temp->Facilities, facility_count + 9)
+    	endif
+ 
+ 		temp->Facilities[facility_count].enc_facility_cd = e.loc_facility_cd
+ 		temp->Facilities[facility_count].test_facility_cd = BbtGetFlexSpecTestingFacility (e.loc_facility_cd)
+ 
+    	FacilityIdxHold = facility_count
+    endif
+    testing_facility_cd = temp->Facilities[FacilityIdxHold].test_facility_cd
+    
+	if (filter_by_facility = 1)
+		spec_in_facility = BBtCheckSpecimenInFacility(e.loc_facility_cd,testing_facility_cd,
+		pc_facility_cd,filter_by_facility)
+		call echo(BUILD("spec_in_facility:",spec_in_facility))
+		if (spec_in_facility = 1)
+			call PopulateReply(NULL)
+		endif
+	else
+		call PopulateReply(NULL)
+	endif
+ 
+foot report
+    select_ok_ind2 = 1
+    if (facility_count > 0)
+        stat = alterlist(temp->Facilities, facility_count)
+	endif
+ 
+with nocounter, nullreport, dontcare(aor), outerjoin(d_pa), dontcare(pa), outerjoin(d_seo)
+ 
+if (curqual = 0)
+    if (select_ok_ind2 = 1) then
+        set reply->status_data.status = "Z" ;002
+    else
+        set reply->status_data.status = "F"
+    endif
+    set reply->status_data->subeventstatus[1]->OperationName
+        = "select"
+    set reply->status_data->subeventstatus[1]->OperationStatus
+        = "Z"
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+        = "person_aborh_result"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue
+        = "No aborh results exist for person_id"
+else
+    if (select_ok_ind != 0) ;002
+        set reply->status_data.status = "S" ;002
+    endif ;002
+endif
+ 
+/****************************************************************************
+*  Determine flexible specimen expiration where needed.                     *
+****************************************************************************/
+set qual_count = size(reply->qual, 5)
+set facility_count = 0
+set FacilityIdxHold = 0
+ 
+for (qual_idx = 1 to qual_count)
+    ; Load flexible specimen preferences one time for each transfusion service facility
+	set FacilityIdxHold = locateval(x_idx, 1, size(FacilityInfo->Facilities, 5), reply->qual[qual_idx].testing_facility_cd,
+  								FacilityInfo->Facilities[x_idx].testing_facility_cd)
+  	if (FacilityIdxHold <= 0)
+  		; transfusion service facility has never been added to the structure.
+    	set facility_count = facility_count + 1
+    	if (facility_count > size(FacilityInfo->Facilities,5))
+   			set stat = alterlist(FacilityInfo->Facilities, facility_count)
+    	endif
+ 
+ 		set FacilityInfo->Facilities[facility_count].testing_facility_cd = reply->qual[qual_idx].testing_facility_cd
+ 		; read flexible specimen parameters set at transfusion service facility using LoadFlexParams()
+    	call GetFlexSpecimenParams (facility_count, reply->qual[qual_idx].encntr_facility_cd, 1, fillstring(10, " "))
+    	set FacilityIdxHold = facility_count
+    else
+    	call GetFlexSpecimenParams (FacilityIdxHold, reply->qual[qual_idx].encntr_facility_cd, 0, fillstring(10, " "))
+   	endif
+ 
+ 	if (FacilityInfo->Facilities[FacilityIdxHold].load_flex_params = -1)
+  		; Problem loading flexible specimen parameters, log and exit.
+        set count1 = count1 + 1
+ 
+        if (count1 > 1)
+            set stat = alterlist(reply->status_data->subeventstatus, count1)
+        endif
+ 
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[count1]->OperationName = "load flex spec params"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_person_aborh_result"
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not load flex spec params"
+        go to EXIT_SCRIPT
+    endif
+ 
+    set reply->qual[qual_idx].spec_flex_ind = flex_param_out->flex_on_ind
+ 
+    ; Determine if flexible specimen is turned on for this testing facility.
+    if (flex_param_out->flex_on_ind = 1)
+        ; Determine if specimen expiration override was found in the previous select.
+        if (reply->qual[qual_idx].expiration_dt_tm = 0.0)
+                    ; Get flexible specimen expiration.
+                    set reply->qual[qual_idx].expiration_dt_tm
+                        = GetFlexExpirationForPerson( request->person_id,
+                                             0.0,
+                                             reply->qual[qual_idx].drawn_dt_tm,
+                                             reply->qual[qual_idx].encntr_facility_cd,
+                                             0)
+        	if (reply->qual[qual_idx].expiration_dt_tm = -1)
+        		set count1 = count1 + 1
+         		if (count1 > 1)
+            		set stat = alterlist(reply->status_data->subeventstatus, count1)
+        		endif
+ 
+        		set reply->status_data->status = "F"
+        		set reply->status_data->subeventstatus[count1]->OperationName = "get flex expiration for person"
+       			set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+        		set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_person_aborh_result"
+        		set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not set expiration date time"
+        		go to EXIT_SCRIPT
+        	endif
+        endif
+    endif
+endfor
+ 
+if (facility_count > 0)
+        set stat = alterlist(FacilityInfo->Facilities, facility_count)
+endif
+
+#EXIT_SCRIPT
+;005 begin
+if (request->debug_ind = 1)
+    set item_cnt = cnvtint(size(reply->qual, 5))
+    call echo(reply->status_data.status)
+    for (item = 1 to item_cnt)
+        call echo(build(item, ".",
+            reply->qual[item]->person_aborh_rs_id           , "/",
+            reply->qual[item]->encntr_id                    , "/",
+            reply->qual[item]->result_id                    , "/",
+            reply->qual[item]->result_cd                    , "/",
+            reply->qual[item]->active_status_dt_tm          , "/",
+            reply->qual[item]->updt_cnt                     , "/",
+            reply->qual[item]->updt_dt_tm                   , "/",
+            reply->qual[item]->container_id                 , "/",
+            reply->qual[item]->specimen_id                  , "/",
+            reply->qual[item]->drawn_dt_tm                  , "/",
+            reply->qual[item]->person_aborh_id              , "/",
+            reply->qual[item]->pa_person_aborh_id           , "/",
+            reply->qual[item]->pa_found_ind                 , "/",
+            reply->qual[item]->pa_active_ind                , "/",
+            reply->qual[item]->accession                    , "/",
+            reply->qual[item]->accession_id                 , "/",
+            reply->qual[item]->unformatted_accession        , "/",
+            reply->qual[item]->order_id                     , "/",
+            reply->qual[item].username                      , " / ",
+            reply->qual[item]->result_event_dt_tm           ))
+    endfor
+endif
+;005 end
+subroutine PopulateReply(NULL)
+    set count = count + 1
+    set stat = alterlist(reply->qual, count)
+ 
+    set reply->qual[count].person_aborh_rs_id       = par.person_aborh_rs_id
+    set reply->qual[count].encntr_id                = par.encntr_id
+    set reply->qual[count].result_id                = par.result_id
+    set reply->qual[count].result_cd                = par.result_cd
+    set reply->qual[count].active_status_dt_tm      = par.active_status_dt_tm
+    set reply->qual[count].updt_cnt                 = par.updt_cnt
+    set reply->qual[count].updt_dt_tm               = par.updt_dt_tm
+    set reply->qual[count].container_id             = par.container_id
+    set reply->qual[count].specimen_id              = c.specimen_id
+    set reply->qual[count].drawn_dt_tm              = c.drawn_dt_tm
+    set reply->qual[count].person_aborh_id          = par.person_aborh_id
+    set reply->qual[count].result_event_dt_tm       = cnvtdatetime(re.event_dt_tm)
+    set reply->qual[count].username                 = pnl.username
+    if (aor.seq > 0)
+        set reply->qual[count].accession            = accession_number
+        set reply->qual[count].accession_id         = aor.accession_id
+        set reply->qual[count].unformatted_accession= aor.accession
+    else
+        set reply->qual[count].accession             = " "
+    endif
+    if (pa.seq > 0)
+        set reply->qual[count].pa_found_ind         = 1
+        set reply->qual[count].pa_active_ind        = pa.active_ind
+        set reply->qual[count].pa_person_aborh_id   = pa.person_aborh_id
+    else
+        set reply->qual[count].pa_found_ind         = 0
+        set reply->qual[count].pa_active_ind        = 0
+        set reply->qual[count].pa_person_aborh_id   = 0.0
+    endif
+    set reply->qual[count].interface_flag           = pr.interface_flag
+ 
+    set reply->qual[count].encntr_facility_cd       = e.loc_facility_cd
+    set reply->qual[count].order_id                 = r.order_id
+    set reply->qual[count].testing_facility_cd      = testing_facility_cd
+ 
+    if ((seo.specimen_id > 0.0) and (seo.active_ind = 1))
+        ; Found a specimen expiration override, set expiration_dt_tm accordingly.
+        set reply->qual[count].expiration_dt_tm  = seo.new_spec_expire_dt_tm
+    endif
+ 
+end
+end go
+ 
+
+;Generated by GNU enscript 1.6.4.

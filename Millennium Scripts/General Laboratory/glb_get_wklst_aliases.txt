@@ -1,0 +1,277 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_wklst_aliases/glb_get_wklst_aliases.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GLB_GET_WKLST_ALIASES.PRG
+        Object name:            GLB_GLB_GET_WKLST_ALIASES
+        Request #:              250088
+
+        Product:                General Lab           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Get a list of aliases for all worklists
+                                for a given service resource or for a given
+                                worklist_ref_id.
+                                Also gets creation date/time so worklist can
+                                be identified by creation date.
+                                If service resource = 0 and worklist_ref_id = 0
+                                then get all worklists.
+
+        Tables read:            worklist
+
+        Tables updated:         n/a
+
+        Executing from:         General Lab worklist request
+
+        Special Notes:          n/a
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 06/06/96 Newton Hughes        Initial Release                     *
+;     001 05/05/06 Joe Troy             Add download_ind to specify worklist has *
+;                                       been downloaded.                         *
+;     002 08/09/10 Oliver Barbara       Update to retrieve pending info for *
+;                                       automatic worklists.                *
+;     003 08/19/10 Oliver Barbara       Return username of "SYSTEM" for some*
+;                                       events.                             *
+;     004 09/20/10 Oliver Barbara       Send back saved date and user if    *
+;                                       list is saved after pending event.  *
+;     005 10/13/10 Steve Hendrick       Only return number of completed auto*
+;                                       worklists x days old as indicated.  *
+;~DE~*****************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+  
+      DROP PROGRAM glb_get_wklst_aliases:dba GO
+      CREATE PROGRAM glb_get_wklst_aliases:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      RECORD request
+      (
+        1 service_resource_cd = f8
+        1 worklist_ref_id = f8
+        1 exclude_complete_ind = i2
+        1 complete_lookback_days = i4
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      RECORD reply
+      (
+        1 nbr_wklsts 		= i4
+        1 wklsts[*]
+          2 worklist_id 	= f8
+          2 worklist_alias 	= c25
+          2 worklist_dt_tm	= dq8
+          2 downloaded_ind = i2
+          2 worklist_status_cd = f8
+          2 worklist_pending_dt_tm = dq8
+          2 worklist_pending_user = vc
+%i cclsource:status_block.inc
+      )
+      
+%i cclsource:i18n_uar.inc
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+
+#script
+        declare cdf_meaning     = vc with protect,noconstant("")
+        declare code_cnt        = i4 with public, constant(1)
+        declare code_set        = i4 with protect,noconstant(0)
+        declare code_value      = f8 with protect,noconstant(0.0)
+        declare status_pending_cd     = f8 with protect,noconstant(0.0)
+        declare status_in_process_cd  = f8 with protect,noconstant(0.0)
+        declare status_complete_cd    = f8 with protect,noconstant(0.0)
+
+        set code_set = 90
+        set cdf_meaning = "PENDING"
+        set stat = uar_get_meaning_by_codeset(code_set, cdf_meaning, code_cnt, code_value)
+        set status_pending_cd = code_value
+        
+        set code_set = 90
+        set cdf_meaning = "INPROCESS"
+        set stat = uar_get_meaning_by_codeset(code_set, cdf_meaning, code_cnt, code_value)
+        set status_in_process_cd = code_value
+        
+        set code_set = 90
+        set cdf_meaning = "COMPLETE"
+        set stat = uar_get_meaning_by_codeset(code_set, cdf_meaning, code_cnt, code_value)
+        set status_complete_cd = code_value
+
+
+      SET reply->status_data->status = "F"
+      SET nwklsts = 0
+
+      if (request->exclude_complete_ind = 1 and (request->worklist_ref_id !=0 or request->service_resource_cd != 0))
+        SELECT 
+          if (request->worklist_ref_id != 0 and request->complete_lookback_days = 0)
+              distinct
+              plan w where w.worklist_ref_id = request->worklist_ref_id AND w.status_cd != status_complete_cd
+              join we where we.worklist_id = w.worklist_id
+              and we.event_type_flag = 3      ;only include those rows with a building event
+              order by w.worklist_id 
+              
+          elseif (request->worklist_ref_id != 0 and request->complete_lookback_days > 0)
+              distinct
+              plan w where w.worklist_ref_id = request->worklist_ref_id
+              join we where we.worklist_id = w.worklist_id
+              AND (we.event_type_flag in (3, 6, 7))     ;building or complete events
+              order by w.worklist_id 
+          elseif (request->service_resource_cd != 0 and request->complete_lookback_days = 0)
+              distinct
+              plan w where w.service_resource_cd = request->service_resource_cd AND w.status_cd != status_complete_cd
+              join we where we.worklist_id = w.worklist_id
+              and we.event_type_flag = 3      ;only include those rows with a building event
+              order by w.worklist_id 
+          
+          elseif (request->service_resource_cd != 0 and request->complete_lookback_days > 0)
+              distinct
+              plan w where w.service_resource_cd = request->service_resource_cd
+              join we where we.worklist_id = w.worklist_id
+              AND (we.event_type_flag in (3, 6, 7))     ;building or complete events
+              order by w.worklist_id 
+          endif
+        INTO "nl:"
+          w.worklist_id
+          , w.worklist_alias
+          , w.worklist_dt_tm
+          , we.event_dt_tm
+          , we.event_type_flag 
+        FROM
+          worklist w,
+          worklist_event we
+
+        HEAD w.worklist_id
+          complete_found = 0
+        DETAIL
+          if (we.event_type_flag in (6, 7))
+            complete_found = 1
+            complete_dt_tm = we.event_dt_tm 
+          endif
+        FOOT w.worklist_id 
+          add_to_reply = 0
+          if (complete_found = 1 and request->complete_lookback_days > 0 )
+            if (DATETIMEDIFF(CNVTDATETIME(CURDATE,CURTIME3), complete_dt_tm  ) <= request->complete_lookback_days)
+              add_to_reply = 1
+            endif
+          endif
+          
+          if (complete_found = 0)
+            add_to_reply = 1
+          endif
+          
+          if (add_to_reply = 1)
+            nwklsts = nwklsts + 1
+            IF (mod(nwklsts, 10) = 1)
+              stat = alterlist(reply->wklsts, nwklsts + 9)
+            ENDIF
+            reply->nbr_wklsts = nwklsts
+            reply->wklsts[nwklsts]->worklist_id = w.worklist_id
+            reply->wklsts[nwklsts]->worklist_alias = w.worklist_alias
+            reply->wklsts[nwklsts]->worklist_dt_tm = w.worklist_dt_tm
+            reply->wklsts[nwklsts].downloaded_ind = w.downloaded_ind
+            reply->wklsts[nwklsts].worklist_status_cd = w.status_cd
+          endif
+        WITH
+          NOCOUNTER        
+      else
+        SELECT
+          IF (request->worklist_ref_id != 0)
+            WHERE w.worklist_ref_id = request->worklist_ref_id
+          ELSEIF (request->service_resource_cd != 0)
+            WHERE w.service_resource_cd = request->service_resource_cd
+          ENDIF
+        INTO "nl:"
+          w.worklist_id
+          , w.worklist_alias
+          , w.worklist_dt_tm
+        FROM
+          worklist w
+  
+        DETAIL
+          nwklsts = nwklsts + 1
+          IF (mod(nwklsts, 10) = 1)
+            stat = alterlist(reply->wklsts, nwklsts + 9)
+          ENDIF
+          reply->nbr_wklsts = nwklsts
+          reply->wklsts[nwklsts]->worklist_id = w.worklist_id
+          reply->wklsts[nwklsts]->worklist_alias = w.worklist_alias
+          reply->wklsts[nwklsts]->worklist_dt_tm = w.worklist_dt_tm
+          reply->wklsts[nwklsts].downloaded_ind = w.downloaded_ind
+          reply->wklsts[nwklsts].worklist_status_cd = w.status_cd
+        WITH
+          NOCOUNTER
+      endif
+  
+      IF (curqual = 0)
+        SET reply->status_data->status = "Z"
+        go to exit_script
+      ELSE
+        SET reply->status_data->status = "S"
+        set stat = alterlist(reply->wklsts, nwklsts)
+      ENDIF
+
+
+        ; Retrieve pending date/time and username for automatic worklists
+        select into "nl:"
+                event_flag = we.event_type_flag
+        from    (dummyt d1 with seq = value(reply->nbr_wklsts)),
+                worklist_event we,
+                prsnl p
+        plan    d1
+        join    we where reply->wklsts[d1.seq].worklist_status_cd in 
+                         (status_pending_cd, status_in_process_cd, status_complete_cd) 
+                and we.worklist_id = reply->wklsts[d1.seq].worklist_id
+                and we.event_type_flag in (2, 4)              ; 2 = saved, 4 = pending
+        join    p where p.person_id = we.event_prsnl_id
+        order   event_flag, we.event_dt_tm desc
+        head event_flag
+            ; ensure that we only use the most recent saved or pending date and user
+            if (cnvtdatetime(we.event_dt_tm) > reply->wklsts[d1.seq].worklist_pending_dt_tm)
+                reply->wklsts[d1.seq].worklist_pending_dt_tm = we.event_dt_tm
+                
+                if(p.person_id > 0)
+                   reply->wklsts[d1.seq].worklist_pending_user = p.name_full_formatted
+                else
+                   reply->wklsts[d1.seq].worklist_pending_user = uar_i18ngetmessage(i18nHandle, "SYSTEM", "SYSTEM")
+                endif
+            endif
+        with nocounter
+        
+#exit_script
+      END GO
+
+;Generated by GNU enscript 1.6.4.

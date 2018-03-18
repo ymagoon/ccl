@@ -1,0 +1,174 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_gl_complete_order/pfmt_gl_complete_order.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       pfmt_gl_complete_order.prg
+        Object name:            pfmt_gl_complete_order
+        Request #:              560201 (Order Server Step ID)
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Call Order Server to complete an order.
+
+        Tables read:            orders
+
+        Tables updated:         none
+
+        Executing from:         Process Server
+
+        Special Notes:          Triggered from Request 250074.
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 04/08/97 Jeff Fry             Initial Release                     *
+;    *001 08/24/99 Gary Runde           Add error logging to msgview        *
+;    *002 01/29/01 SD4221		Improve error logging 		    *			
+;					Feature :- 15673
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program pfmt_gl_complete_order:dba go
+create program pfmt_gl_complete_order:dba
+
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC                                  ;001
+SET LOG_PROGRAM_NAME = "pfmt_gl_complete_order"                      ;001
+
+/***********************************************************************
+ *   Print date and time to log file.                                  *
+ ***********************************************************************/
+  select into "nl:"                                                ;001
+    currentdate = cnvtdatetime(curdate,curtime3)                   ;001
+  detail                                                           ;001
+    sText = fillstring(254, " ")                                   ;001
+    sText = "{{Script::PFMT_GL_COMPLETE_ORDER}} Beginning..."      ;001
+    call uar_SysEvent(hSys, 4, "ScriptBegin", NULLTERM(sText))     ;001
+  with nocounter                                                   ;001
+
+
+/**** Main Processing ****/
+
+set ORDER_ACTION_CODESET  = 6003
+set ACTION_COMPLETE_CDF   = "COMPLETE"
+set ACTION_COMPLETE_CD    = 0.0
+set ORDER_STATUS_CODESET  = 6004
+set ORDERED_CDF           = "ORDERED"
+set ORDERED_CD            = 0.0
+set IN_PROCESS_CDF        = "INPROCESS"
+set IN_PROCESS_CD         = 0.0
+set complete_cnt          = 0
+
+if ( requestin->reply->status_data->status = "F" )
+     set reqinfo->commit_ind = 0
+;002     Call LOG_MESSAGE("  Requestin failure", LOG_LEVEL_ERROR) 			;001
+     Call LOG_MESSAGE("  Requestin failure", LOG_LEVEL_INFO) 			;002
+     go to EXIT_SCRIPT
+endif
+
+select into "nl:"
+    cv.code_value
+  from code_value cv
+  where (cv.code_set = ORDER_ACTION_CODESET and 
+         cv.cdf_meaning = ACTION_COMPLETE_CDF)
+  or    (cv.code_set = ORDER_STATUS_CODESET and
+         cv.cdf_meaning in (ORDERED_CDF, IN_PROCESS_CDF))
+
+  detail
+     case (cv.cdf_meaning)
+       of ACTION_COMPLETE_CDF:
+             ACTION_COMPLETE_CD = cv.code_value
+       of ORDERED_CDF:
+             ORDERED_CD = cv.code_value
+       of IN_PROCESS_CDF:
+             IN_PROCESS_CD = cv.code_value
+     endcase
+
+with nocounter
+
+CALL ERROR_MESSAGE(0)                                                                   ;001
+
+set nbr_of_orders = size(requestin->request->orders, 5)
+for (oidx = 1 to nbr_of_orders)
+   Call LOG_MESSAGE( build("  Processing OrderID =",
+               requestin->request->orders[oidx]->order_id), LOG_LEVEL_DEBUG)		;001
+
+   ;Look for orders that need to be completed.
+   if (requestin->reply->orders[oidx]->complete_ind = 1)
+      select into "nl:"
+           o.order_id
+        from orders o
+        where o.order_id = requestin->request->orders[oidx]->order_id
+        and   o.order_status_cd in (ORDERED_CD, IN_PROCESS_CD)
+      
+      with nocounter
+
+      CALL ERROR_MESSAGE(0)                                                             ;001
+
+      if (curqual = 0)
+         Call LOG_MESSAGE("  --> Order Status Does Not Qualify", LOG_LEVEL_DEBUG)	;001
+      else
+         Call LOG_MESSAGE("  --> Order Status Qualifies", LOG_LEVEL_DEBUG)		;001
+         set complete_cnt = complete_cnt + 1
+         set stat = alterlist(replyout->orderList, complete_cnt)
+         set replyout->orderList[complete_cnt]->orderId =
+            requestin->request->orders[oidx]->order_id
+         set replyout->orderList[complete_cnt]->lastUpdtCnt =
+            requestin->request->orders[oidx]->updt_cnt
+         set replyout->orderList[complete_cnt]->actionTypeCd =
+            ACTION_COMPLETE_CD
+         set replyout->orderList[complete_cnt]->orderDtTm =
+            cnvtdatetime(curdate,curtime)
+         set replyout->orderList[complete_cnt]->catalogCd =
+            requestin->request->orders[oidx]->catalog_cd
+         set replyout->orderList[complete_cnt]->catalogTypeCd =
+            requestin->request->orders[oidx]->catalog_type_cd
+      endif
+   else
+      Call LOG_MESSAGE("  --> Order Not Complete -> Skipping", LOG_LEVEL_DEBUG)		;001
+   endif
+endfor
+
+if (complete_cnt = 0)
+   set reqinfo->commit_ind = 0
+else
+   set reqinfo->commit_ind = 1
+endif
+
+#EXIT_SCRIPT
+Call LOG_MESSAGE( build("Ending GL Complete Order (",
+                  format(curdate, "MM/DD/YY;;D")," ", 
+                  format(curtime, " HHMM;;M"),")" ), LOG_LEVEL_DEBUG)                   ;001
+
+call uar_SysDestroyHandle(hSys)   ;001
+
+end go
+
+;Generated by GNU enscript 1.6.4.

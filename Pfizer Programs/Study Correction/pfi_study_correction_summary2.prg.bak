@@ -1,0 +1,316 @@
+/* 	*******************************************************************************
+ 
+	Script Name:	pfi_study_correction_summary.prg
+	Description:	A report of study corrections located on the STUDY_CORRECTION
+					table - all study corrections confirmed by an admin. This report
+					is included on the parent report pfi_study_audit_trail_parent
+					that contains the study correction report and the new audit trail
+					report.
+ 
+	Date Written:	March 17, 2015
+	Written By:		Yitzhak Magoon
+					Pfizer
+ 
+	Executed from:	Explorer Menu
+ 
+	*******************************************************************************
+								REVISION INFORMATION
+	*******************************************************************************
+	Rev	Date		By			Comment
+	---	-----------	-----------	---------------------------------------------------
+ 	001 4/23/15   Magoon, Yitzhak Fixed report to correctly display collection date/time
+ 								  changes when there are not any and there are timepoint changes.
+ 								  Timepoint page header was displaying Timepoint for both
+ 								  pages.
+ 	002 6/23/16   Magoon, Yitzhak Added date filter for the corrections
+	******************************************************************************* */
+ 
+ 
+drop program pfi_study_correction_summary2 go
+create program pfi_study_correction_summary2
+ 
+prompt
+	"Output to File/Printer/MINE" = "MINE"      ;* Enter or select the printer or file name to send this report to.
+	;<<hidden>>"Enter Protocol" = ""
+	, "Protocol" = 0
+	, "Apply a date range to the query" = "0"
+	, "Enter the date range" = "CURDATE"
+	, "No prompt" = "CURDATE"
+ 
+with OUTDEV, protocol, date_range, from_dt, to_dt
+ 
+declare gCnt = i2
+declare num = i4
+declare pos = i4
+declare cor_reason_var = i2
+declare nopage = i2 ;001
+declare tp_no_exist = i2 ;001
+declare err_flag = i2
+ 
+record data (
+	1 study_correction[*]
+		2 correction_type		= c15
+		2 cor_reason			= f8
+		2 cur_coll_dt_tm		= dq8
+		2 old_coll_dt_tm		= dq8
+		2 cur_timepoint			= c15
+		2 old_timepoint			= c15
+		2 group_id				= f8
+		2 request_user_id		= f8
+		2 request_user			= c40
+		2 request_dt_tm			= dq8
+		2 admin_user_id			= f8
+		2 admin_user			= c40
+		2 corrected_dt_tm		= dq8
+)
+ 
+/**************************************************************
+; Define the date range										;002
+**************************************************************/
+IF ($DATE_RANGE = "1")
+	SET vFROM_DT = $FROM_DT
+	SET vTO_DT = $TO_DT
+ELSE
+	SET vFROM_DT = BUILD("01-JAN-2005")
+	SET vTO_DT = BUILD("01-SEP-2099")
+ENDIF ;end 002
+ 
+select distinct into "nl:"
+	group_id = sc.group_id
+	, correction_type = sc.correction_type
+	, cor_reason = sc.correction_reason_cd
+	, cur_coll_dt_tm = sc.new_coll_dt_tm
+	, old_coll_dt_tm = sc.old_coll_dt_tm
+	, cur_timepoint = sc.new_timepoint
+	, old_timepoint = sc.old_timepoint
+	, request_user_id = sc.request_user_id
+	, request_dt_tm = sc.request_dt_tm
+	, admin_user_id = sc.admin_user_id
+	, corrected_dt_tm = sc.corrected_dt_tm
+from
+	study_correction sc
+where sc.organization_id = cnvtreal($protocol)
+	and sc.accession_id > 0
+	and sc.corrected_dt_tm between cnvtdatetime(vFROM_DT)			;002
+	and cnvtdatetime(concat(vTO_DT,char(32),"235959"))				;002
+ 
+order by
+	correction_type
+	, group_id
+head report
+	row + 0
+detail
+	gCnt = gCnt + 1
+ 
+	if (gCnt > size(data->study_correction,5))
+		stat = alterlist(data->study_correction, gCnt + 4)
+	endif
+ 
+	data->study_correction[gCnt].group_id = group_id
+	data->study_correction[gCnt].correction_type = correction_type
+	data->study_correction[gCnt].cor_reason = cor_reason
+	data->study_correction[gCnt].cur_coll_dt_tm = cur_coll_dt_tm
+	data->study_correction[gCnt].old_coll_dt_tm = old_coll_dt_tm
+	data->study_correction[gCnt].cur_timepoint = trim(cur_timepoint,3)
+	data->study_correction[gCnt].old_timepoint = trim(old_timepoint,3)
+	data->study_correction[gCnt].request_user_id = request_user_id
+	data->study_correction[gCnt].request_dt_tm = request_dt_tm
+	data->study_correction[gCnt].admin_user_id = admin_user_id
+	data->study_correction[gCnt].corrected_dt_tm = corrected_dt_tm
+foot report
+	stat = alterlist(data->study_correction, gCnt)
+with nocounter
+ 
+if (curqual = 0)
+	set err_flag = 1
+endif
+ 
+ call echorecord(data)
+ 
+;get user who requested
+select into "nl:"
+	request_user = p.name_full_formatted
+from
+	prsnl p
+	, (dummyt d with seq = size(data->study_correction,5))
+plan d
+join p where p.person_id = data->study_correction[d.seq].request_user_id
+ 
+detail
+	data->study_correction[d.seq].request_user = request_user
+with nocounter
+ 
+;get user who wrote data
+select into "nl:"
+	admin_user = p.name_full_formatted
+from
+	prsnl p
+	, (dummyt d with seq = size(data->study_correction,5))
+plan d
+join p where p.person_id = data->study_correction[d.seq].admin_user_id
+ 
+detail
+	data->study_correction[d.seq].admin_user = admin_user
+with nocounter
+ 
+/*   ************************************************    */
+/***    Begin Output Report for View and Submission    ***/
+/*   ************************************************    */
+ 
+execute reportrtl
+%i ccluserdir:pfi_study_correction_summary2.dvl
+;%i must be in the first two columns of the source code file.
+;Assuming you changed the program name in your file to
+;1_your_initials_add_layt_to_prg.
+set d0= PageBreak(0) ;sets new page from wherever the audit trail report ended
+set d0 = InitializeReport(0)
+ 
+;print date for report
+set cPrintDate = format(cnvtdatetime(curdate,curtime3),"MM/DD/YYYYHH:MM;;Q")
+ 
+set cUser = fillstring(50," ") ;user for report
+select into "nl:"
+	user = p.name_full_formatted
+from
+	prsnl p
+plan p where p.person_id = reqinfo->updt_id
+detail
+	cUser = user
+with nocounter
+set cUser = trim(cUser)
+ 
+set cProtocol = fillstring(25," ") ;protocol name for report
+select into "nl:"
+	protocol = o.org_name
+from
+	organization o
+plan o where o.organization_id = $protocol
+detail
+	cProtocol = protocol
+with nocounter
+ 
+set cProtocol = trim(cProtocol)
+ 
+ 
+set _fEndDetail = RptReport->m_pageWidth - RptReport->m_marginBottom
+ 
+call echorecord(data)
+ 
+if (err_flag = 1)
+	go to ERROR_OUTPUT
+endif
+ 
+select into $outdev
+	group_id = data->study_correction[d.seq].group_id
+	, correction_type = trim(data->study_correction[d.seq].correction_type)
+	, cor_reason = uar_get_code_display(data->study_correction[d.seq].cor_reason)
+	, cur_coll_dt_tm = format(data->study_correction[d.seq].cur_coll_dt_tm, "DD-MMM-YYYY HH:MM;;d")
+	, old_coll_dt_tm = format(data->study_correction[d.seq].old_coll_dt_tm, "DD-MMM-YYYY HH:MM;;d")
+	, cur_timepoint = data->study_correction[d.seq].cur_timepoint
+	, old_timepoint = data->study_correction[d.seq].old_timepoint
+	, request_user_id = data->study_correction[d.seq].request_user_id
+	, request_user = trim(data->study_correction[d.seq].request_user)
+	, request_dt_tm = format(data->study_correction[d.seq].request_dt_tm, "DD-MMM-YYYY HH:MM;;d")
+	, admin_user_id = data->study_correction[d.seq].admin_user_id
+	, admin_user = trim(data->study_correction[d.seq].admin_user)
+	, corrected_dt_tm = format(data->study_correction[d.seq].corrected_dt_tm, "DD-MMM-YYYY HH:MM;;d")
+from
+	(dummyt d with seq = size(data->study_correction,5))
+ 
+plan d
+ 
+order by
+	correction_type
+	, group_id
+ 
+head report
+											;001
+	;if (correction_type = "COLLECTION")				;001
+		cor_reason_var = 1 ;assume always coll dt/tm change until detail changes to timepoint.
+	;endif												;001
+	d0 = PageHeader(Rpt_Render)
+	if (correction_type = "TIMEPOINT" and d.seq = 1)    ;001
+		d0 = NoData(0)									;001
+	endif												;001
+ 
+	flip = 0
+head page												;001
+	row + 0												;001
+detail
+	if (correction_type = "COLLECTION")
+		if (_Yoffset + CollDt(1) + FootPage(1) > _fEndDetail)
+ 
+			_Yoffset = 7.2
+ 			d0 = FootPage(0)
+ 			Call PageBreak(0)
+ 			d0 = PageHeader(0)
+ 		else
+ 			d0 = CorrType(0)
+			d0 = CollDt(0)
+		endif
+	else
+		cor_reason_var = 0
+		flip = flip + 1 ;when flip is set to 1 and 1 only, page break will be called
+		if (_Yoffset + Timepoint(1) + FootPage(1) > _fEndDetail)
+			_Yoffset = 7.2
+ 			d0 = FootPage(0)
+ 			Call PageBreak(0)
+ 			d0 = PageHeader(0)
+ 		else
+ 			if (flip = 1)
+ 				_Yoffset = 7.2
+ 				d0 = FootPage(0)
+ 				Call PageBreak(0)
+ 				d0 = PageHeader(Rpt_Render)
+ 			endif
+ 			d0 = CorrType(0)
+			d0 = Timepoint(0)
+		endif
+ 
+	endif
+foot page										;001
+if (cor_reason_var = 1)
+	_Yoffset = 7.2								;001
+	d0 = FootPage(0)							;001
+endif
+foot report
+	;if no timepoint exists, then cor_reason_var will never be set to 0
+	if (cor_reason_var = 1)						;001
+		cor_reason_var = 0						;001
+		Call PageBreak(0)						;001
+		d0 = PageHeader(Rpt_Render)				;001
+		d0 = NoData(0)							;001
+	endif
+	_Yoffset = 7.2
+	d0 = FootPage(0)
+	d0 = FootReport(0)
+with nocounter, nullreport
+ 
+ 
+#ERROR_OUTPUT
+if (err_flag = 1)
+	set cor_reason_var = 1
+	set d0 = PageHeader(Rpt_Render)
+	set d0 = NoData(0)
+ 
+	set _Yoffset = 7.2
+	set d0 = FootPage(0)
+	;set d0 = FootReport(0)					;001
+ 
+	Call PageBreak(0)
+ 
+	set cor_reason_var = 0
+	set d0 = PageHeader(Rpt_Render)
+	set d0 = NoData(0)
+ 
+	set _Yoffset = 7.2
+	set d0 = FootPage(0)
+	set d0 = FootReport(0)
+endif
+ 
+set d0 = FinalizeReport($OutDev)
+ 
+end
+go
+; pfi_study_correction_summary "MINE",658636 go
+ 

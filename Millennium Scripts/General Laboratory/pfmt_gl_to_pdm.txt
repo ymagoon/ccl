@@ -1,0 +1,1280 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_gl_to_pdm/pfmt_gl_to_pdm.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       pfmt_gl_to_pdm.prg
+        Object name:            pfmt_gl_to_pdm
+        Request #:              n/a
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Update PDM_DATA_POINT and PDM_RESULT tables with
+                                qualifying patient rows
+
+        Tables read:            PERSON
+                                PDM_RANGES
+                                PDM_PARAMS
+
+        Tables updated:         none
+
+        Executing from:         Process Server
+
+        Special Notes:          Triggered from Request 250074.
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 10/11/98 Chad Moats           Initial Release                     *
+;    *001 03/16/99 Gary Runde           Do not post performed only results  *
+;                                       Use reply perform ID instead of     *
+;                                       request perform id                  *
+;    *002 08/24/99 Gary Runde           Add error logging to msgview        *
+;    *003 05/19/00 Gary Runde           Use last pdm results perf dt/tm     *
+;                                            as qc results perf dt/tm       *
+;                                       Misc PDM changes                    *
+;    *004 08/16/01 Mike Gabrick         Add checking for twice-verified     *
+;                                       result                              *
+;    *005 04/18/07 Tom Brecht           Add Selects to lock pdm rows prior  *
+;                                       to update.                          *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program pfmt_gl_to_pdm:dba go
+create program pfmt_gl_to_pdm:dba
+
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC
+SET LOG_PROGRAM_NAME = "pfmt_gl_to_pdm"
+
+call LOG_MESSAGE ("Starting GL to PDM", LOG_LEVEL_DEBUG)
+call LOG_MESSAGE ("8", LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build ("Starting accession: ", requestin->request->orders[1]->accession), LOG_LEVEL_DEBUG)
+
+if ( requestin->reply->status_data->status = "F" )
+     set reqinfo->commit_ind = 0
+     call LOG_MESSAGE ("Requestin failure", LOG_LEVEL_DEBUG)
+     go to EXIT_SCRIPT
+endif
+
+declare iFailReasonFlag = i2            ;004
+
+record pdm_ref
+  (
+   1 ranges[*]
+     2  pdm_param_id            = f8
+     2  pdm_range_id            = f8
+     2  param_active_ind        = i2                ;003
+     2  range_active_ind        = i2                ;003
+     2  accession_id            = f8                ;003
+     2  service_resource_cd     = f8
+     2  task_assay_cd           = f8
+     2  result_eval_flag        = i2
+     2  nbr_results             = i4
+     2  min_nbr_results         = i4
+     2  time_period_minutes     = i4
+     2  time_period_units_cd    = f8
+     2  rule_id                 = f8
+     2  sex_cd                  = f8
+     2  species_cd              = f8
+     2  age_from_minutes        = i4
+     2  age_from_units_cd       = f8
+     2  age_to_minutes          = i4
+     2  age_to_units_cd         = f8
+     2  result_low              = f8
+     2  result_high             = f8
+     2  mean                    = f8
+     2  std_dev                 = f8
+     2  o_indx                  = i4
+     2  a_indx                  = i4
+     2  dp_cnt                  = i4
+     2  data_points[*]
+        3  pdm_dp_id            = f8
+        3  beg_effective_dt_tm  = dq8
+        3  end_effective_dt_tm  = dq8
+        3  sequence             = i4
+        3  updt_cnt             = i4
+   )
+
+%i cclsource:glb_evaluate_qc_rule.inc
+
+declare cur_pdm_dp_id = f8 with protect, noconstant(0.0)
+declare pdm_dp_id = f8 with protect, noconstant(0.0)
+set o_cnt = size( requestin->request->orders, 5 )
+set o_indx = 0
+set a_cnt = 0
+set a_indx = 0
+set r_cnt = 0
+set r_indx = 0
+set dp_cnt = 0
+set cur_person_id = 0.0
+set cur_sex_cd = 0.0
+set cur_species_cd = 0.0
+set cur_service_resource_cd = 0.0
+set cur_task_assay_cd = 0.0
+set cur_accession_id = 0.0                                    ;003
+set cur_birth_dt_tm = cnvtdatetime(curdate,curtime3)
+set current_dt_tm = cnvtdatetime(curdate,curtime3)
+set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+set qc_perform_dt_tm = cnvtdatetime(curdate, curtime3)
+set iFailReasonFlag = 0                     ;004
+
+for (o_indx = 1 to o_cnt)
+  set a_cnt = size( requestin->request->orders[o_indx]->assays, 5)
+  set cur_accession_id = requestin->request->orders[o_indx].accession_id
+
+/***************************************************************************/
+/* For everytime a person changes, retrieve the gender, species and birth  */
+/* date and time for that person                                           */
+/***************************************************************************/
+  if(cur_person_id != requestin->request->orders[o_indx].person_id)
+    select into "nl:"
+      p.person_id
+    from person p
+    plan p
+      where p.person_id = requestin->request->orders[o_indx].person_id
+    detail
+      cur_person_id = p.person_id,
+      cur_sex_cd = p.sex_cd,
+      cur_species_cd = p.species_cd,
+      cur_birth_dt_tm = p.birth_dt_tm
+    with
+      nocounter
+    CALL ERROR_MESSAGE(0)
+  endif
+
+  for (a_indx = 1 to a_cnt)
+    set cur_service_resource_cd = requestin->request->orders[o_indx]->assays[a_indx].service_resource_cd
+    set cur_task_assay_cd = requestin->request->orders[o_indx]->assays[a_indx].task_assay_cd
+
+call LOG_MESSAGE (build("cur_service_resource_cd:", cur_service_resource_cd), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("cur_task_assay_cd:", cur_task_assay_cd), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("cur_accession_id:", cur_accession_id), LOG_LEVEL_DEBUG)
+    ;for each assay/resource check to make sure it has not been added to pdm_ref yet     ;003
+    if (check_for_dups (cur_service_resource_cd,                                         ;003
+                         cur_task_assay_cd,                                              ;003
+                         cur_accession_id) = 0)                                          ;003
+
+/***************************************************************************/
+/* For each assay, retreive the pdm parameters and store them in the       */
+/* pdm_ref array                                                           */
+/***************************************************************************/
+    set age_in_minutes = DATETIMEDIFF(current_dt_tm,cur_birth_dt_tm)*1440
+
+/**********003 begin new code *************************/
+    ;add select to check for active data points, removing the dontcare to check
+    ;for ranges that have been changed but still have active data points going
+    ;we want to finish the active data point before starting a new one with the new range
+    set found_dp_info = 0
+
+    select into "nl:"
+      p.pdm_param_id,
+      r.pdm_range_id,
+      dp.sequence
+    from
+      pdm_params p,
+      pdm_ranges r,
+      pdm_data_point dp
+    plan p
+      where p.service_resource_cd = cur_service_resource_cd and
+            p.task_assay_cd = cur_task_assay_cd and
+            cnvtdatetime(curdate,curtime3) between p.beg_effective_dt_tm and p.end_effective_dt_tm
+    join r
+      where r.pdm_param_id = p.pdm_param_id and
+            cnvtdatetime(curdate,curtime3) between r.beg_effective_dt_tm and r.end_effective_dt_tm and
+            (r.sex_cd = cur_sex_cd or r.sex_cd = 0) and
+            (r.species_cd = cur_species_cd or r.species_cd = 0) and
+            age_in_minutes between r.age_from_minutes and r.age_to_minutes
+    join dp
+      where dp.pdm_range_id = r.pdm_range_id and
+            dp.active_ind = 1 and
+            dp.pdm_param_id = r.pdm_param_id 
+;            cnvtdatetime(curdate,curtime) between dp.beg_effective_dt_tm and dp.end_effective_dt_tm
+    order by p.pdm_param_id, r.pdm_range_id, dp.sequence
+    head r.pdm_range_id
+      dp_cnt = 0
+      r_cnt = r_cnt + 1
+      if (mod(r_cnt,5) = 1)
+        stat =  alterlist(pdm_ref->ranges,r_cnt + 5)
+      endif
+      pdm_ref->ranges[r_cnt].pdm_param_id = r.pdm_param_id
+      pdm_ref->ranges[r_cnt].pdm_range_id = r.pdm_range_id,
+      pdm_ref->ranges[r_cnt].param_active_ind = p.active_ind,              ;003
+      pdm_ref->ranges[r_cnt].range_active_ind = r.active_ind,              ;003
+      pdm_ref->ranges[r_cnt].accession_id = cur_accession_id,              ;003
+      pdm_ref->ranges[r_cnt].service_resource_cd = p.service_resource_cd,
+      pdm_ref->ranges[r_cnt].task_assay_cd = p.task_assay_cd,
+      pdm_ref->ranges[r_cnt].result_eval_flag = p.result_eval_flag,
+      pdm_ref->ranges[r_cnt].nbr_results = p.nbr_results,
+      pdm_ref->ranges[r_cnt].min_nbr_results = p.min_nbr_results,
+      pdm_ref->ranges[r_cnt].time_period_minutes = p.time_period_minutes,
+      pdm_ref->ranges[r_cnt].time_period_units_cd = p.time_period_units_cd,
+      pdm_ref->ranges[r_cnt].rule_id = p.rule_id,
+      pdm_ref->ranges[r_cnt].sex_cd = r.sex_cd,
+      pdm_ref->ranges[r_cnt].species_cd = r.species_cd,
+      pdm_ref->ranges[r_cnt].age_from_minutes = r.age_from_minutes,
+      pdm_ref->ranges[r_cnt].age_from_units_cd = r.age_from_units_cd,
+      pdm_ref->ranges[r_cnt].age_to_minutes = r.age_to_minutes,
+      pdm_ref->ranges[r_cnt].age_to_units_cd = r.age_to_units_cd,
+      pdm_ref->ranges[r_cnt].result_low = r.result_low,
+      pdm_ref->ranges[r_cnt].result_high = r.result_high,
+      pdm_ref->ranges[r_cnt].mean = r.mean,
+      pdm_ref->ranges[r_cnt].std_dev = r.std_dev,
+      pdm_ref->ranges[r_cnt].o_indx = o_indx,
+      pdm_ref->ranges[r_cnt].a_indx = a_indx
+    detail
+      found_dp_info = 1
+      dp_cnt = dp_cnt + 1
+      if (mod(dp_cnt,5) = 1)
+        stat =  alterlist(pdm_ref->ranges[r_cnt]->data_points, dp_cnt + 5)
+      endif
+      pdm_ref->ranges[r_cnt].dp_cnt = dp_cnt,
+      pdm_ref->ranges[r_cnt]->data_points[dp_cnt].pdm_dp_id = dp.pdm_dp_id,
+      pdm_ref->ranges[r_cnt]->data_points[dp_cnt].beg_effective_dt_tm = dp.beg_effective_dt_tm,
+      pdm_ref->ranges[r_cnt]->data_points[dp_cnt].end_effective_dt_tm = dp.end_effective_dt_tm,
+      pdm_ref->ranges[r_cnt]->data_points[dp_cnt].sequence = dp.sequence
+      pdm_ref->ranges[r_cnt]->data_points[dp_cnt].updt_cnt = dp.updt_cnt
+
+    foot r.pdm_range_id
+        stat = alterlist(pdm_ref->ranges[r_cnt]->data_points, dp_cnt)
+    with nocounter
+
+    CALL ERROR_MESSAGE(0)
+/*****************003 end new code*********************/
+
+    if (found_dp_info = 0)                                                           ;003
+    ;if no data points were found with the above select, go get the param/range info ;003
+    select into "nl:"
+      p.pdm_param_id,
+      r.pdm_range_id
+;003      dp.sequence,
+;003      dp_exists = decode(dp.seq, "Y", "N"),
+;003      d1.seq
+    from
+      pdm_params p,
+      pdm_ranges r
+;003      pdm_data_point dp,
+;003      (dummyt d1 with seq = 1)
+    plan p
+      where p.service_resource_cd = cur_service_resource_cd and
+            p.task_assay_cd = cur_task_assay_cd and
+            cnvtdatetime(curdate,curtime3) between p.beg_effective_dt_tm and p.end_effective_dt_tm
+    join r
+      where r.pdm_param_id = p.pdm_param_id and
+            cnvtdatetime(curdate,curtime3) between r.beg_effective_dt_tm and r.end_effective_dt_tm and
+            (r.sex_cd = cur_sex_cd or r.sex_cd = 0) and
+            (r.species_cd = cur_species_cd or r.species_cd = 0) and
+            age_in_minutes between r.age_from_minutes and r.age_to_minutes
+;003    join d1 where d1.seq = 1
+;003    join dp
+;003      where dp.pdm_range_id = r.pdm_range_id and
+;003            dp.active_ind = 1
+;003            cnvtdatetime(curdate,curtime) between dp.beg_effective_dt_tm and dp.end_effective_dt_tm
+    order by p.pdm_param_id, r.pdm_range_id   ;003, dp.sequence
+    head r.pdm_range_id
+      dp_cnt = 0
+      r_cnt = r_cnt + 1
+      if (mod(r_cnt,5) = 1)
+        stat =  alterlist(pdm_ref->ranges,r_cnt + 5)
+      endif
+      pdm_ref->ranges[r_cnt].pdm_param_id = r.pdm_param_id
+      pdm_ref->ranges[r_cnt].pdm_range_id = r.pdm_range_id,
+      pdm_ref->ranges[r_cnt].param_active_ind = p.active_ind,              ;003
+      pdm_ref->ranges[r_cnt].range_active_ind = r.active_ind,              ;003
+      pdm_ref->ranges[r_cnt].accession_id = cur_accession_id,              ;003
+      pdm_ref->ranges[r_cnt].service_resource_cd = p.service_resource_cd,
+      pdm_ref->ranges[r_cnt].task_assay_cd = p.task_assay_cd,
+      pdm_ref->ranges[r_cnt].result_eval_flag = p.result_eval_flag,
+      pdm_ref->ranges[r_cnt].nbr_results = p.nbr_results,
+      pdm_ref->ranges[r_cnt].min_nbr_results = p.min_nbr_results,
+      pdm_ref->ranges[r_cnt].time_period_minutes = p.time_period_minutes,
+      pdm_ref->ranges[r_cnt].time_period_units_cd = p.time_period_units_cd,
+      pdm_ref->ranges[r_cnt].rule_id = p.rule_id,
+      pdm_ref->ranges[r_cnt].sex_cd = r.sex_cd,
+      pdm_ref->ranges[r_cnt].species_cd = r.species_cd,
+      pdm_ref->ranges[r_cnt].age_from_minutes = r.age_from_minutes,
+      pdm_ref->ranges[r_cnt].age_from_units_cd = r.age_from_units_cd,
+      pdm_ref->ranges[r_cnt].age_to_minutes = r.age_to_minutes,
+      pdm_ref->ranges[r_cnt].age_to_units_cd = r.age_to_units_cd,
+      pdm_ref->ranges[r_cnt].result_low = r.result_low,
+      pdm_ref->ranges[r_cnt].result_high = r.result_high,
+      pdm_ref->ranges[r_cnt].mean = r.mean,
+      pdm_ref->ranges[r_cnt].std_dev = r.std_dev,
+      pdm_ref->ranges[r_cnt].o_indx = o_indx,
+      pdm_ref->ranges[r_cnt].a_indx = a_indx
+    with nocounter
+    endif                                                                  ;003
+;003    detail
+;003      if (dp_exists = "Y")
+;003        dp_cnt = dp_cnt + 1
+;003        if (mod(dp_cnt,5) = 1)
+;003          stat =  alterlist(pdm_ref->ranges[r_cnt]->data_points, dp_cnt + 5)
+;003        endif
+;003        pdm_ref->ranges[r_cnt].dp_cnt = dp_cnt,
+;003        pdm_ref->ranges[r_cnt]->data_points[dp_cnt].pdm_dp_id = dp.pdm_dp_id,
+;003        pdm_ref->ranges[r_cnt]->data_points[dp_cnt].beg_effective_dt_tm = dp.beg_effective_dt_tm,
+;003        pdm_ref->ranges[r_cnt]->data_points[dp_cnt].end_effective_dt_tm = dp.end_effective_dt_tm,
+;003        pdm_ref->ranges[r_cnt]->data_points[dp_cnt].sequence = dp.sequence
+;003      endif
+
+;003    foot r.pdm_range_id
+;003        stat = alterlist(pdm_ref->ranges[r_cnt]->data_points, dp_cnt)
+;003         outerjoin = d1
+
+    CALL ERROR_MESSAGE(0)
+
+    endif ;check for dups = 0                                                      ;003
+
+  endfor
+endfor
+
+set stat = alterlist(pdm_ref->ranges, r_cnt)
+if (r_cnt = 0)
+   set reqinfo->commit_ind = 0
+call LOG_MESSAGE ("No PDM Parameters Found", LOG_LEVEL_DEBUG)
+   go to EXIT_SCRIPT
+endif
+
+
+for (r_indx = 1 to r_cnt)
+
+  set new_ref_failed = 0
+  set cur_pdm_dp_id = 0.0
+  set cur_dp_sequence = 0
+  set cur_order_nbr = pdm_ref->ranges[r_indx].o_indx
+  set cur_assay_nbr = pdm_ref->ranges[r_indx].a_indx
+
+
+call LOG_MESSAGE (build("TASK ASSAY CODE:",
+pdm_ref->ranges[r_indx].task_assay_cd), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("SERV RES CODE:",
+pdm_ref->ranges[r_indx].service_resource_cd), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("RESULT VALUE = ",
+requestin->request->orders[cur_order_nbr]->assays[cur_assay_nbr].result_value_numeric), LOG_LEVEL_DEBUG)
+
+  if (validate(requestin->request->orders[cur_order_nbr]->assays[cur_assay_nbr]->fail_reason_flag, -1) = -1)  ;004
+    set iFailReasonFlag = 0                                               ;004
+  else                                                      ;004
+    set iFailReasonFlag = requestin->request->orders[cur_order_nbr]->assays[cur_assay_nbr]->fail_reason_flag  ;004
+  endif                                                     ;004
+    if (requestin->request->orders[cur_order_nbr]->assays[cur_assay_nbr].result_value_numeric
+      between pdm_ref->ranges[r_indx].result_low and pdm_ref->ranges[r_indx].result_high
+      and requestin->request->orders[cur_order_nbr].assays[cur_assay_nbr].;001
+                result_status_cd in (cd->verify_status_cd,                ;001
+                                     cd->auto_verify_status_cd)          ;003
+                and (iFailReasonFlag != 4))                                   ;004
+;003                                     cd->correct_status_cd))              ;001
+call LOG_MESSAGE ("TRIM REQUIREMENTS MET", LOG_LEVEL_DEBUG)
+/***************************************************************************/
+/* For each pdm_range_id, see if there is a pdm_dp_id associated to it on  */
+/* the pdm_data_point table.  If not, then a new pdm_dp_id will be created */
+/***************************************************************************/
+       if (pdm_ref->ranges[r_indx].dp_cnt = 0)
+/****************SHOULD ONLY BE HERE WHEN NO DATA POINTS EXIST AT ALL FOR THIS PDM RANGE ID****************/
+call LOG_MESSAGE (build("No PDM data points found for rangeID:",
+                         pdm_ref->ranges[r_indx].pdm_range_id), LOG_LEVEL_DEBUG)
+          set cur_pdm_dp_id = insert_data_point (r_indx, 1, 1)
+          set dp_indx = 1
+          set result_sequence = get_pdm_result_sequence(r_indx, dp_indx)
+call LOG_MESSAGE (build("dp_indx:", dp_indx), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("cur_pdm_dp_id:", cur_pdm_dp_id), LOG_LEVEL_ERROR)
+call LOG_MESSAGE (build("result_sequence:", result_sequence), LOG_LEVEL_ERROR)
+          if (result_sequence = -999)
+            go to exit_script
+          endif
+       else
+call LOG_MESSAGE (build("PDM data points found for rangeID:",
+                         pdm_ref->ranges[r_indx].pdm_range_id), LOG_LEVEL_DEBUG)
+          set dp_indx = pdm_ref->ranges[r_indx].dp_cnt
+          set cur_pdm_dp_id = pdm_ref->ranges[r_indx]->data_points[dp_indx].pdm_dp_id
+          set result_sequence = get_pdm_result_sequence(r_indx, dp_indx)
+call LOG_MESSAGE (build("dp_indx:", dp_indx), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("cur_pdm_dp_id:", cur_pdm_dp_id), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("result_sequence:", result_sequence), LOG_LEVEL_DEBUG)
+          if (result_sequence = -999)
+            go to exit_script
+          endif
+call LOG_MESSAGE (build("result_eval_flag:",
+                         pdm_ref->ranges[r_indx].result_eval_flag), LOG_LEVEL_DEBUG)
+/***************************************************************************/
+/* See if the current pdm_dp_id is expired                                 */
+/***************************************************************************/
+
+call LOG_MESSAGE ("Start Check for creating QCResult", LOG_LEVEL_DEBUG)
+
+          if (pdm_ref->ranges[r_indx].result_eval_flag = 0) ;by result
+              
+              if (pdm_ref->ranges[r_indx].nbr_results = result_sequence)
+              	set pdm_ref->ranges[r_indx].dp_cnt = 0
+              	set cur_pdm_dp_id = insert_data_point (r_indx, 1, 1)
+          		set dp_indx = 1
+          		set result_sequence = get_pdm_result_sequence(r_indx, dp_indx)
+              endif
+
+          elseif (pdm_ref->ranges[r_indx].result_eval_flag = 1) ;by date
+              if (cnvtdatetime(curdate, curtime3) > pdm_ref->ranges[r_indx]->data_points[dp_indx].end_effective_dt_tm)
+                if (result_sequence >= pdm_ref->ranges[r_indx].min_nbr_results)                ;003
+                    ;make sure that the minimum number of results has been met                 ;003
+call LOG_MESSAGE ("MinNumber of Results met, create QCResult for time period eval", LOG_LEVEL_DEBUG)
+                    call create_qc_result(r_indx, dp_indx, 1)
+                    if (inactivate_data_point(r_indx, 1) = 0)
+                        ;when inactivating data point we check to see if ranges need to be
+                        ;inacativated...if range inactivated and new ranges does not meet
+                        ;the requirements, do not insert new Data point / pdm result
+                        set new_ref_failed = 1
+                    else
+                        set new_ref_failed = 0
+                    endif
+                    if (new_ref_failed = 0)
+                      set next_sequence = pdm_ref->ranges[r_indx]->data_points[dp_cnt].sequence + 1
+                      set dp_indx = dp_indx + 1
+                      set cur_pdm_dp_id = insert_data_point (r_indx, next_sequence, dp_indx)
+                      set result_sequence = 0
+                    endif
+                else
+                    ;if number of results not met, then carry forward DP another time period
+                    call update_data_point(r_indx, dp_indx)
+                endif                                                                          ;003
+              endif
+          else ;by both
+              set new_row_added = 0
+              if (pdm_ref->ranges[r_indx].nbr_results = result_sequence)
+              	set pdm_ref->ranges[r_indx].dp_cnt = 0
+              	set cur_pdm_dp_id = insert_data_point (r_indx, 1, 1)
+          		set dp_indx = 1
+          		set result_sequence = get_pdm_result_sequence(r_indx, dp_indx)
+              endif	
+              if ((new_row_added != 1) and (new_ref_failed = 0))
+                 if (cnvtdatetime(curdate, curtime3) > pdm_ref->ranges[r_indx]->data_points[dp_indx].end_effective_dt_tm)
+                    if (result_sequence >= pdm_ref->ranges[r_indx].min_nbr_results)                ;003
+call LOG_MESSAGE ("MinNumber of Results met, create QCResult for both eval", LOG_LEVEL_DEBUG)
+                      ;make sure that the minimum number of results has been met
+                       call create_qc_result(r_indx, dp_indx, 1)
+                       if (inactivate_data_point(r_indx, 1) = 0)
+                          ;when inactivating data point we check to see if ranges need to be
+                          ;inacativated...if range inactivated and new ranges does not meet
+                          ;the requirements, do not insert new Data point / pdm result
+                          set new_ref_failed = 1
+                       else
+                          set new_ref_failed = 0
+                       endif
+                       if (new_ref_failed = 0)
+                          set next_sequence = pdm_ref->ranges[r_indx]->data_points[dp_cnt].sequence + 1
+                          set dp_indx = dp_indx + 1
+                          set cur_pdm_dp_id = insert_data_point (r_indx, next_sequence, dp_indx)
+                          set result_sequence = 0
+                       endif
+                    else
+                       ;if number of results not met, then carry forward DP another time period
+                       call update_data_point(r_indx, dp_indx)
+                    endif
+                 endif
+              endif                               ;if(new_row_added != 1)
+          endif                                   ;if (pdm_ref->ranges[r_indx].result_eval_flag = 0) ;by result
+call LOG_MESSAGE ("END Check for creating QCResult", LOG_LEVEL_DEBUG)
+
+       endif                                      ;if (pdm_ref->ranges[r_indx].dp_cnt = 0)
+
+        /*************************************/
+        /* Add PDM result                    */
+        /*************************************/
+
+     if (new_ref_failed = 0)
+       call LOG_MESSAGE ("OFF TO insert_pdm_result", LOG_LEVEL_DEBUG)
+       call insert_pdm_result(r_indx, dp_indx, result_sequence + 1)
+       call LOG_MESSAGE ("BACK FROM insert_pdm_result", LOG_LEVEL_DEBUG)
+
+      /***************************************************************************/
+      /* If by result or both, check and see if the nbr_results has been met     */
+      /***************************************************************************/
+
+       if (pdm_ref->ranges[r_indx].result_eval_flag = 0 or
+           pdm_ref->ranges[r_indx].result_eval_flag = 2)  ;by result or both
+
+             if (pdm_ref->ranges[r_indx].nbr_results <= result_sequence + 1)
+                 ;in activate all active rows on the pdm_data_point
+call LOG_MESSAGE ("Number of Results met after the insert of the PDM Result", LOG_LEVEL_DEBUG)
+call LOG_MESSAGE ("Create QC Result", LOG_LEVEL_DEBUG)
+                 call create_qc_result(r_indx, dp_indx, 0)
+                 if (inactivate_data_point(r_indx, 0) = 0)
+                   ;when inactivating data point we check to see if ranges need to be
+                   ;inacativated...if range inactivated and new ranges does not meet
+                   ;the requirements, do not insert new Data point / pdm result
+                    set new_ref_failed = 1
+                 else
+                    set new_ref_failed = 0
+                 endif
+             endif
+       endif
+     endif
+  else
+call LOG_MESSAGE ("This result did not meet the trimming requirements", LOG_LEVEL_DEBUG)
+  endif
+
+
+endfor                     ;for (r_indx = 1 to r_cnt)
+
+
+subroutine insert_data_point ( indx, dp_sequence, new_dp_indx )
+
+call LOG_MESSAGE("In insert_data_point", LOG_LEVEL_DEBUG)
+
+    set new_pdm_dp_id = 0.0
+    if (dp_sequence < 0 or dp_sequence = NULL)
+      set dp_sequence = 0
+    endif
+
+    SELECT
+      into "nl:"
+      y = seq(reference_seq,nextval) "##################;rp0"
+    FROM
+      dual
+    DETAIL
+      new_pdm_dp_id = y
+    WITH
+      format, counter
+
+    CALL ERROR_MESSAGE(0)
+
+    set beg_dt_tm = cnvtdatetime(curdate,curtime3)
+    if (pdm_ref->ranges[indx].result_eval_flag = 0)
+call LOG_MESSAGE("Number of results, easy!", LOG_LEVEL_DEBUG)
+      set end_dt_tm = cnvtdatetime("31-DEC-2100 00:00")
+    else
+/****************003 begin new code *********************/
+      ;hard code to check for 24 hours
+      ;if 24 hr time period found use 00:00 to 23:59 always
+      ;This is for MCVH_VA as a temp fix
+      if (pdm_ref->ranges[indx].time_period_minutes = 1440)
+call LOG_MESSAGE("Hard Code 24 Hour time period", LOG_LEVEL_DEBUG)
+           if (pdm_ref->ranges[indx].dp_cnt > 0)
+               set beg_dt_tm = cnvtdatetime(curdate, 000000)
+               set end_dt_tm = cnvtdatetime(curdate, 235959)
+           else
+               set beg_dt_tm = cnvtdatetime(curdate+1, 000000)
+               set end_dt_tm = cnvtdatetime(curdate+1, 235959)
+           endif
+      else
+call LOG_MESSAGE("normal time period", LOG_LEVEL_DEBUG)
+           set temp_add_mins = 0.00
+           set temp_add_mins = (pdm_ref->ranges[indx].time_period_minutes / 1440.00)
+           ;set the begin date/time to be the end date/time of the previous data point
+           if (pdm_ref->ranges[indx].dp_cnt > 0)
+                set beg_dt_tm =
+                     cnvtdatetime(pdm_ref->ranges[indx]->data_points[new_dp_indx-1].end_effective_dt_tm)
+           endif
+
+           set end_dt_tm = datetimeadd(cnvtdatetime(beg_dt_tm), temp_add_mins)
+           ;check to make sure the current date/time is between the new beg and end
+
+           if (cnvtdatetime(curdate, curtime3) between cnvtdatetime(beg_dt_tm)
+                                                   and cnvtdatetime(end_dt_tm))
+call LOG_MESSAGE("Time Period is valid", LOG_LEVEL_DEBUG)
+               set found_dp_range = 1
+           else
+call LOG_MESSAGE("Time Period is not valid", LOG_LEVEL_DEBUG)
+               set found_dp_range = 0
+           endif
+           ;if not keep adding the time period to the dates until we find a time period
+           ;where the current date/time falls in
+           while (found_dp_range = 0)
+call LOG_MESSAGE("in while loop", LOG_LEVEL_DEBUG)
+                set beg_dt_tm = cnvtdatetime(end_dt_tm)
+                set end_dt_tm = datetimeadd(cnvtdatetime(beg_dt_tm), temp_add_mins)
+                ;check to see if the current date/time is in this new time range
+                if (cnvtdatetime(curdate, curtime3) between cnvtdatetime(beg_dt_tm)
+                                                        and cnvtdatetime(end_dt_tm))
+                    set found_dp_range = 1
+                endif
+           endwhile
+call LOG_MESSAGE("out of while loop", LOG_LEVEL_DEBUG)
+      endif
+    endif
+
+/****************003 END new code *********************/
+
+call LOG_MESSAGE (build("NEW pdm_dp_id:",
+new_pdm_dp_id), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("beg_dt_tm VALUE:",
+format(cnvtdatetime(beg_dt_tm), "mm/dd/yy hh:mm:ss;;d")), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("end_dt_tm VALUE:",
+format(cnvtdatetime(end_dt_tm), "mm/dd/yy hh:mm:ss;;d")), LOG_LEVEL_DEBUG)
+
+    INSERT
+      into pdm_data_point dp
+    SET
+      dp.pdm_dp_id              = new_pdm_dp_id,
+      dp.pdm_param_id           = pdm_ref->ranges[indx].pdm_param_id,
+      dp.pdm_range_id           = pdm_ref->ranges[indx].pdm_range_id,
+      dp.active_ind             = 1,
+      dp.beg_effective_dt_tm    = cnvtdatetime(beg_dt_tm),
+      dp.end_effective_dt_tm    = cnvtdatetime(end_dt_tm),
+      dp.sequence               = dp_sequence,
+      dp.updt_dt_tm             = cnvtdatetime(curdate,curtime3),
+      dp.updt_cnt               = 0,
+      dp.updt_task              = reqinfo->updt_task,
+      dp.updt_id                = reqinfo->updt_id,
+      dp.updt_applctx           = reqinfo->updt_applctx
+    WITH nocounter
+
+  if (validate(XXDEBUG, -99) = -99)
+      commit
+  endif
+
+    CALL ERROR_MESSAGE(0)
+    set stat =  alterlist(pdm_ref->ranges[indx]->data_points, new_dp_indx)
+
+    set pdm_ref->ranges[indx].dp_cnt = new_dp_indx
+    set pdm_ref->ranges[indx]->data_points[new_dp_indx].pdm_dp_id = new_pdm_dp_id
+    set pdm_ref->ranges[indx]->data_points[new_dp_indx].beg_effective_dt_tm = cnvtdatetime(beg_dt_tm)
+    set pdm_ref->ranges[indx]->data_points[new_dp_indx].end_effective_dt_tm = cnvtdatetime(end_dt_tm)
+    set pdm_ref->ranges[indx]->data_points[new_dp_indx].sequence = dp_sequence
+
+call LOG_MESSAGE("insert_data_point successful", LOG_LEVEL_DEBUG)
+    return (new_pdm_dp_id)
+end
+
+
+subroutine inactivate_data_point (indx, TimePeriodQual)
+
+call LOG_MESSAGE("In inactivate_data_point", LOG_LEVEL_DEBUG)
+
+  if (TimePeriodQual = 0)
+    ;if not time period, then update the end_effective_dt_tm
+call LOG_MESSAGE("inactivate Num Results Data Point, end_eff set", LOG_LEVEL_DEBUG)
+    SELECT
+      into "nl:"
+      dp.pdm_param_id
+    FROM
+      pdm_data_point dp
+    PLAN dp
+      where dp.pdm_param_id = pdm_ref->ranges[indx].pdm_param_id 
+        and dp.pdm_range_id = pdm_ref->ranges[indx].pdm_range_id
+        and dp.active_ind = 1
+    WITH
+      format, forupdate(dp)
+    if (error_message(0) > 0)
+      call LOG_MESSAGE("Error - Row not locked successfully, skip this update", LOG_LEVEL_ERROR)
+      set reqinfo->commit_ind = 0
+      go to exit_script
+    endif
+    UPDATE
+      into pdm_data_point dp
+    SET
+      dp.active_ind             = 0,
+      dp.end_effective_dt_tm    = cnvtdatetime(qc_perform_dt_tm),
+      dp.updt_dt_tm             = cnvtdatetime(curdate,curtime3),
+      dp.updt_cnt               = dp.updt_cnt + 1,
+      dp.updt_task              = reqinfo->updt_task,
+      dp.updt_id                = reqinfo->updt_id,
+      dp.updt_applctx           = reqinfo->updt_applctx
+    WHERE
+      dp.pdm_param_id = pdm_ref->ranges[indx].pdm_param_id 
+      and dp.pdm_range_id = pdm_ref->ranges[indx].pdm_range_id
+      and dp.active_ind = 1
+    WITH
+      nocounter
+    CALL ERROR_MESSAGE(0)
+
+  else
+    ;if time period, then do not update the end_effective_dt_tm
+call LOG_MESSAGE("inactivate Time Period Data Point, end_eff not set", LOG_LEVEL_DEBUG)
+    SELECT
+      into "nl:"
+      dp.pdm_param_id
+    FROM
+      pdm_data_point dp
+    PLAN dp
+      where dp.pdm_param_id = pdm_ref->ranges[indx].pdm_param_id
+        and dp.pdm_range_id = pdm_ref->ranges[indx].pdm_range_id
+        and dp.active_ind = 1
+    WITH
+      format, forupdate(dp)
+    if (error_message(0) > 0)
+      call LOG_MESSAGE("Error - Row not locked successfully, skip this update", LOG_LEVEL_ERROR)
+      set reqinfo->commit_ind = 0
+      go to exit_script
+    endif
+    UPDATE
+      into pdm_data_point dp
+    SET
+      dp.active_ind             = 0,
+      dp.updt_dt_tm             = cnvtdatetime(curdate,curtime3),
+      dp.updt_cnt               = dp.updt_cnt + 1,
+      dp.updt_task              = reqinfo->updt_task,
+      dp.updt_id                = reqinfo->updt_id,
+      dp.updt_applctx           = reqinfo->updt_applctx
+    WHERE
+      dp.pdm_param_id = pdm_ref->ranges[indx].pdm_param_id
+      and dp.pdm_range_id = pdm_ref->ranges[indx].pdm_range_id
+      and dp.active_ind = 1
+    WITH
+      nocounter
+    CALL ERROR_MESSAGE(0)
+  endif
+
+  if (validate(XXDEBUG, -99) = -99)
+    commit
+  endif
+
+    ;call the check_pdm_params sub to check to see if the pdm_params             ;003
+    ;and pdm_ranges table need to be updated because this could be the last      ;003
+    ;data point for this param/range                                             ;003
+call LOG_MESSAGE("call check_pdm_params", LOG_LEVEL_DEBUG)                       ;003
+    set PdmReturn = check_pdm_params(indx)                                       ;003
+call LOG_MESSAGE(build("check_pdm_params returned:", PdmReturn) ,LOG_LEVEL_DEBUG);003
+    return(value(PdmReturn))
+call LOG_MESSAGE("inactivate_data_point successful", LOG_LEVEL_DEBUG)
+
+end
+
+subroutine get_pdm_result_sequence (indx, d_indx)
+
+call LOG_MESSAGE("IN get_pdm_result_sequence", LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("GETTING RESULT SEQ FOR pdm_dp_id =",
+pdm_ref->ranges[indx]->data_points[d_indx].pdm_dp_id), LOG_LEVEL_DEBUG)
+
+    set p_sequence = 0
+    declare sString1 = vc
+    declare sString2 = vc
+    declare sString3 = vc
+    
+    SELECT into "nl"
+      pdp.pdm_dp_id
+    FROM
+      pdm_data_point pdp
+    PLAN pdp
+      where pdp.pdm_dp_id = pdm_ref->ranges[indx]->data_points[d_indx].pdm_dp_id
+        and pdp.pdm_dp_id > 0.0
+    detail
+      if (pdp.updt_cnt != pdm_ref->ranges[indx]->data_points[d_indx].updt_cnt)
+        
+        p_sequence = -999
+        
+        sString1 = "UPDT_CNT Changed on PDM_DATA_POINT table between select and get_pdm_result_sequence"
+
+        sString2 = build("DB BEG DtTm =:",
+                                        format(cnvtdatetime(pdp.beg_effective_dt_tm), "mm/dd/yy hh:mm:ss;;d"),
+                                        "DB END DtTm =:",
+                                        format(cnvtdatetime(pdp.end_effective_dt_tm), "mm/dd/yy hh:mm:ss;;d"),
+                                        "CURRENT DtTm =:",
+                                        format(cnvtdatetime(curdate, curtime3), "mm/dd/yy hh:mm:ss;;d"))
+
+        sString3 =  build("Record Struct Beg Dt Tm =:",
+                                        format(cnvtdatetime(pdm_ref->ranges[indx]->data_points[d_indx].
+                                                            beg_effective_dt_tm), "mm/dd/yy hh:mm:ss;;d"),
+                                        "Record Struct END Dt Tm =:",
+                                        format(cnvtdatetime(pdm_ref->ranges[indx]->data_points[d_indx].
+                                                            end_effective_dt_tm), "mm/dd/yy hh:mm:ss;;d"))
+      endif
+    with nocounter
+
+    if (p_sequence = -999)
+      call LOG_MESSAGE(build(sString1,sString2, sString3 ), LOG_LEVEL_DEBUG)
+      return (p_sequence)
+    endif
+    
+    SELECT into "nl"
+      pr.sequence
+    FROM
+      pdm_result pr
+    PLAN pr
+      where pr.pdm_dp_id = pdm_ref->ranges[indx]->data_points[d_indx].pdm_dp_id
+    ORDER pr.sequence desc
+    HEAD REPORT
+      p_sequence = pr.sequence
+    DETAIL
+      row+0
+    WITH nocounter
+    CALL ERROR_MESSAGE(0)
+
+call LOG_MESSAGE (build("p_sequence =", p_sequence), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE("get_pdm_result_sequence successful", LOG_LEVEL_DEBUG)
+
+    return(p_sequence)
+end
+
+/****************003 Begin New code ***********************************/
+
+;Check for duplicates...When retrieving the pdm range/param info at the beginning,
+;call this sub to verify that this task_assay / service_resource / accession has not been added yet
+subroutine check_for_dups (dResourceCd, dAssayCd, dAccnID)
+
+call LOG_MESSAGE ("in check_for_dups", LOG_LEVEL_DEBUG)
+     set pdmCnt = 0
+     set FoundDup = 0
+     ;loop through the current pdm_ref structure, looking for dups
+     for (pdmCnt = 1 to r_cnt)
+call LOG_MESSAGE (build("Accession =:",pdm_ref->ranges[pdmCnt].accession_id), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("service_resource_cd =:",pdm_ref->ranges[pdmCnt].service_resource_cd), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("task_assay_cd =:",pdm_ref->ranges[pdmCnt].task_assay_cd), LOG_LEVEL_DEBUG)
+          if ((pdm_ref->ranges[pdmCnt].accession_id        = value(dAccnID))
+          and (pdm_ref->ranges[pdmCnt].service_resource_cd = value(dResourceCd))
+          and (pdm_ref->ranges[pdmCnt].task_assay_cd       = value(dAssayCd)))
+call LOG_MESSAGE (build("Found Dup, Accession =:",dAccnID), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("Found Dup, Resource =:",dResourceCd), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("Found Dup, Assay =:",dAssayCd), LOG_LEVEL_DEBUG)
+              ;if duplicate found, get out of for loop
+              set FoundDup = 1
+              set pdmCnt = r_cnt + 1
+         endif
+     endfor
+
+call LOG_MESSAGE ("done with check_for_dups", LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("Found Value =:",FoundDup), LOG_LEVEL_DEBUG)
+     ;return whether dup found or not
+     return (value(FoundDup))
+end
+
+
+;If the number of results was not met for this current PDM data point
+;in the specified time period, extend the data point one more time period
+
+subroutine update_data_point (uIndx, uDpIndx)
+
+call LOG_MESSAGE ("in update_data_point", LOG_LEVEL_DEBUG)
+
+      set temp_add_mins = 0.00
+      set temp_add_mins = (pdm_ref->ranges[uIndx].time_period_minutes / 1440.00)
+      set beg_dt_tm = cnvtdatetime(pdm_ref->ranges[uIndx].data_points[uDpIndx].beg_effective_dt_tm)
+      set temp_dt_tm = cnvtdatetime(pdm_ref->ranges[uIndx].data_points[uDpIndx].end_effective_dt_tm)
+      set end_dt_tm = datetimeadd(cnvtdatetime(temp_dt_tm), temp_add_mins)
+      ;check to make sure the current date/time is between the new beg and end
+      if (cnvtdatetime(curdate, curtime3) between cnvtdatetime(beg_dt_tm)
+                                              and cnvtdatetime(end_dt_tm))
+          set found_dp_range = 1
+      else
+          set found_dp_range = 0
+      endif
+      ;if not keep adding the time period to the dates until we find a time period
+      ;where the current date/time falls in
+      while (found_dp_range = 0)
+call LOG_MESSAGE ("new dp times not valid", LOG_LEVEL_DEBUG)
+          set end_dt_tm = datetimeadd(cnvtdatetime(end_dt_tm), temp_add_mins)
+           ;check to see if the current date/time is in this new time range
+          if (cnvtdatetime(curdate, curtime3) between cnvtdatetime(beg_dt_tm)
+                                                  and cnvtdatetime(end_dt_tm))
+               set found_dp_range = 1
+          endif
+      endwhile
+
+call LOG_MESSAGE (build("New End DtTm =:",
+format(cnvtdatetime(end_dt_tm), "mm/dd/yy hh:mm:ss;;d")), LOG_LEVEL_DEBUG)
+
+      ;found the data point time range, carry forward the end_effective_dt_tm
+      SELECT
+        into "nl:"
+        dp.pdm_dp_id
+      FROM
+        pdm_data_point dp
+      PLAN dp
+        where dp.pdm_dp_id = pdm_ref->ranges[uIndx].data_points[uDpIndx].pdm_dp_id
+      WITH
+        format, forupdate(dp)
+      if (error_message(0) > 0)
+        call LOG_MESSAGE("Error - Row not locked successfully, skip this update", LOG_LEVEL_ERROR)
+        set reqinfo->commit_ind = 0
+        go to exit_script
+      endif
+      update
+         into pdm_data_point dp
+      set
+        dp.end_effective_dt_tm    = cnvtdatetime(end_dt_tm),
+        dp.updt_dt_tm             = cnvtdatetime(curdate,curtime3),
+        dp.updt_cnt               = dp.updt_cnt + 1,
+        dp.updt_task              = reqinfo->updt_task,
+        dp.updt_id                = reqinfo->updt_id,
+        dp.updt_applctx           = reqinfo->updt_applctx
+      where
+        dp.pdm_dp_id = pdm_ref->ranges[uIndx].data_points[uDpIndx].pdm_dp_id
+      with
+        nocounter
+
+      CALL ERROR_MESSAGE(0)
+
+      if (validate(XXDEBUG, -99) = -99)
+        commit
+      endif
+      
+call LOG_MESSAGE ("update_data_point successful", LOG_LEVEL_DEBUG)
+
+end
+
+
+;Check the PDM_PARAM and PDM_RANGE active_ind, if they are zero, then
+;the param/range has been updated and this is the last data point for
+;the inactive param/range, so set the end_effective_dt_tm for the
+;param/range
+
+subroutine check_pdm_params (indx)
+
+   set Changed = 0
+call LOG_MESSAGE("in check_pdm_params", LOG_LEVEL_DEBUG)
+   if (pdm_ref->ranges[indx].range_active_ind = 0)
+       ;if the active_ind is zero, then update the
+       ;pdm_ranges end_effective_dt_tm
+       SELECT
+         into "nl:"
+         r.pdm_range_id
+       FROM
+         pdm_ranges r
+       PLAN r
+         where r.pdm_range_id = pdm_ref->ranges[indx].pdm_range_id
+       WITH
+         format, forupdate(r)
+       if (error_message(0) > 0)
+         call LOG_MESSAGE("Error - Row not locked successfully, skip this update", LOG_LEVEL_ERROR)
+         set reqinfo->commit_ind = 0
+         go to exit_script
+       endif
+
+       update into pdm_ranges r
+       set
+         r.end_effective_dt_tm = cnvtdatetime(curdate, curtime3),
+         r.updt_applctx        = reqinfo->updt_applctx,
+         r.updt_cnt            = r.updt_cnt + 1,
+         r.updt_dt_tm          = cnvtdatetime(curdate, curtime3),
+         r.updt_id             = reqinfo->updt_id,
+         r.updt_task           = reqinfo->updt_task
+       where r.pdm_range_id = pdm_ref->ranges[indx].pdm_range_id
+       with nocounter
+       CALL ERROR_MESSAGE(0)
+call LOG_MESSAGE("check_pdm_params range updated", LOG_LEVEL_DEBUG)
+       set Changed = 1
+   endif
+
+   if (pdm_ref->ranges[indx].param_active_ind = 0)
+       ;if the active_ind is zero, then update the
+       ;pdm_params end_effective_dt_tm
+       SELECT
+         into "nl:"
+         p.pdm_param_id
+       FROM
+         pdm_params p
+       PLAN p
+         where p.pdm_param_id = pdm_ref->ranges[indx].pdm_param_id
+       WITH
+         format, forupdate(p)
+       if (error_message(0) > 0)
+         call LOG_MESSAGE("Error - Row not locked successfully, skip this update", LOG_LEVEL_ERROR)
+         set reqinfo->commit_ind = 0
+         go to exit_script
+       endif
+
+       update into pdm_params p
+       set
+         p.end_effective_dt_tm = cnvtdatetime(curdate, curtime3),
+         p.updt_applctx        = reqinfo->updt_applctx,
+         p.updt_cnt            = p.updt_cnt + 1,
+         p.updt_dt_tm          = cnvtdatetime(curdate, curtime3),
+         p.updt_id             = reqinfo->updt_id,
+         p.updt_task           = reqinfo->updt_task
+       where p.pdm_param_id = pdm_ref->ranges[indx].pdm_param_id
+       with nocounter
+       CALL ERROR_MESSAGE(0)
+       set Changed = 1
+call LOG_MESSAGE("check_pdm_params param updated", LOG_LEVEL_DEBUG)
+   endif
+
+   if (Changed = 1)
+       if (validate(XXDEBUG, -99) = -99)
+         commit
+       endif
+call LOG_MESSAGE("need to update ranges/params in pdm_ref struct", LOG_LEVEL_DEBUG)
+       set n_order_nbr = pdm_ref->ranges[indx].o_indx
+       set n_assay_nbr = pdm_ref->ranges[indx].a_indx
+       set d_result_value =
+              requestin->request->orders[n_order_nbr]->assays[n_assay_nbr].result_value_numeric
+       set d_serv_res_cd = pdm_ref->ranges[indx].service_resource_cd
+       set d_assay_cd = pdm_ref->ranges[indx].task_assay_cd
+       set d_birth_dt_tm = cnvtdatetime(curdate,curtime3)
+       set current_dt_tm2 = cnvtdatetime(curdate,curtime3)
+       set d_sex_cd = 0.0
+       set d_species_cd = 0.0
+
+       select into "nl:"
+         p.person_id
+       from person p
+       plan p
+         where p.person_id = requestin->request->orders[n_order_nbr].person_id
+       detail
+         d_sex_cd = p.sex_cd,
+         d_species_cd = p.species_cd,
+         d_birth_dt_tm = p.birth_dt_tm
+       with nocounter
+
+       set d_min_age = DATETIMEDIFF(current_dt_tm2, d_birth_dt_tm)*1440
+call LOG_MESSAGE("Done retrieving info for person.", LOG_LEVEL_DEBUG)
+call LOG_MESSAGE("Go get info from pdm_ranges and pdm_params.", LOG_LEVEL_DEBUG)
+      ;if anything has changed, need to update the pdm_ref structure with new info
+       select into "nl:"
+         p.pdm_param_id,
+         r.pdm_range_id
+       from
+         pdm_params p,
+         pdm_ranges r
+       plan p
+         where p.service_resource_cd = d_serv_res_cd and
+               p.task_assay_cd = d_assay_cd and
+               cnvtdatetime(curdate,curtime3) between p.beg_effective_dt_tm and p.end_effective_dt_tm
+               and p.active_ind = 1
+       join r
+         where r.pdm_param_id = p.pdm_param_id and
+               cnvtdatetime(curdate,curtime3) between r.beg_effective_dt_tm and r.end_effective_dt_tm and
+               (r.sex_cd = d_sex_cd or r.sex_cd = 0) and
+               (r.species_cd = d_species_cd or r.species_cd = 0) and
+               d_min_age between r.age_from_minutes and r.age_to_minutes and
+               d_result_value between r.result_low and r.result_high
+               and r.active_ind = 1
+       order by p.pdm_param_id, r.pdm_range_id
+       head r.pdm_range_id
+         pdm_ref->ranges[indx].pdm_param_id = r.pdm_param_id
+         pdm_ref->ranges[indx].pdm_range_id = r.pdm_range_id,
+         pdm_ref->ranges[indx].param_active_ind = p.active_ind,              ;003
+         pdm_ref->ranges[indx].range_active_ind = r.active_ind,              ;003
+         pdm_ref->ranges[indx].service_resource_cd = p.service_resource_cd,
+         pdm_ref->ranges[indx].task_assay_cd = p.task_assay_cd,
+         pdm_ref->ranges[indx].result_eval_flag = p.result_eval_flag,
+         pdm_ref->ranges[indx].nbr_results = p.nbr_results,
+         pdm_ref->ranges[indx].min_nbr_results = p.min_nbr_results,
+         pdm_ref->ranges[indx].time_period_minutes = p.time_period_minutes,
+         pdm_ref->ranges[indx].time_period_units_cd = p.time_period_units_cd,
+         pdm_ref->ranges[indx].rule_id = p.rule_id,
+         pdm_ref->ranges[indx].sex_cd = r.sex_cd,
+         pdm_ref->ranges[indx].species_cd = r.species_cd,
+         pdm_ref->ranges[indx].age_from_minutes = r.age_from_minutes,
+         pdm_ref->ranges[indx].age_from_units_cd = r.age_from_units_cd,
+         pdm_ref->ranges[indx].age_to_minutes = r.age_to_minutes,
+         pdm_ref->ranges[indx].age_to_units_cd = r.age_to_units_cd,
+         pdm_ref->ranges[indx].result_low = r.result_low,
+         pdm_ref->ranges[indx].result_high = r.result_high,
+         pdm_ref->ranges[indx].mean = r.mean,
+         pdm_ref->ranges[indx].std_dev = r.std_dev
+       with nocounter
+
+       if (curqual = 0)
+call LOG_MESSAGE("New PDM ranges/params did not qualify do not insert datapoint", LOG_LEVEL_DEBUG)
+          return (0)
+       else
+call LOG_MESSAGE("New PDM ranges/params did qualify insert new datapoint", LOG_LEVEL_DEBUG)
+          return (1)
+       endif
+   else                  ;if (Changed = 1)
+call LOG_MESSAGE("don't need to update ranges/params in pdm_ref", LOG_LEVEL_DEBUG)
+      return (1)
+   endif                 ;if (Changed = 1)
+
+call LOG_MESSAGE("check_pdm_params done success", LOG_LEVEL_DEBUG)
+end
+/****************003 End New code ***********************************/
+
+subroutine insert_pdm_result (indx, d_indx, p_sequence)
+
+call LOG_MESSAGE("In insert_pdm_result", LOG_LEVEL_DEBUG)
+
+    set order_nbr = pdm_ref->ranges[indx].o_indx
+    set assay_nbr = pdm_ref->ranges[indx].a_indx
+    if (pdm_ref->ranges[indx].std_dev = 0)
+        set new_zscore = 0
+    else
+        set new_zscore = (requestin->request->orders[order_nbr]->assays[assay_nbr].result_value_numeric
+                      - pdm_ref->ranges[indx].mean) / pdm_ref->ranges[indx].std_dev
+    endif
+
+call LOG_MESSAGE (build("Result Value =",
+requestin->request->orders[order_nbr]->assays[assay_nbr].result_value_numeric), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("zscore =", new_zscore), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("PERFORM RESULT ID =",
+requestin->reply->orders[order_nbr]->assays[assay_nbr].perform_result_id), LOG_LEVEL_DEBUG)
+
+    if(requestin->reply->orders[order_nbr]->assays[assay_nbr].perform_result_id != 0)      ;001
+call LOG_MESSAGE (build("DATA POINT ID =",
+pdm_ref->ranges[indx]->data_points[d_indx].pdm_dp_id), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("RESULT sequence =", p_sequence), LOG_LEVEL_DEBUG)
+         INSERT
+             into pdm_result p
+         SET
+             p.pdm_dp_id               = pdm_ref->ranges[indx]->data_points[d_indx].pdm_dp_id,
+             p.sequence                = p_sequence,
+             p.perform_dt_tm           = cnvtdatetime(requestin->reply->orders[order_nbr]->
+                                                      assays[assay_nbr].perform_dt_tm),                  ;001
+             p.perform_result_id       = requestin->reply->orders[order_nbr]->
+                                                      assays[assay_nbr].perform_result_id,               ;001
+             p.zscore                  = new_zscore,
+             p.updt_dt_tm              = cnvtdatetime(curdate,curtime3),
+             p.updt_cnt                = 0,
+             p.updt_task               = reqinfo->updt_task,
+             p.updt_id                 = reqinfo->updt_id,
+             p.updt_applctx            = reqinfo->updt_applctx
+          with nocounter
+
+          if (validate(XXDEBUG, -99) = -99)
+            commit
+          endif
+call LOG_MESSAGE("insert_pdm_result successful", LOG_LEVEL_DEBUG)
+    else
+call LOG_MESSAGE("PDM ERROR:  PERFORM_RESULT_ID = 0", LOG_LEVEL_DEBUG)
+    endif
+
+end
+
+subroutine create_qc_result (indx, d_indx, TimeExpired)
+
+call LOG_MESSAGE("In create_qc_result", LOG_LEVEL_DEBUG)
+
+    set result_cnt = 0
+    set cum_result_value = 0.0
+    set qc_result_value = 0.0
+    set qc_std_dev = 0.0
+    set order_nbr = pdm_ref->ranges[indx].o_indx
+    set assay_nbr = pdm_ref->ranges[indx].a_indx
+    set last_seq = 0
+
+    SELECT into "nl:"
+      p.pdm_dp_id,
+      pr.perform_result_id
+    FROM
+      pdm_result p,
+      perform_result pr
+    PLAN p
+      where p.pdm_dp_id = pdm_ref->ranges[indx]->data_points[d_indx].pdm_dp_id
+    JOIN pr
+      where pr.perform_result_id = p.perform_result_id
+    HEAD pr.perform_result_id
+      if (p.sequence > last_seq)                               ;003
+          ;get the last data points perform dt/tm              ;003
+          ;and use as qc results perform date time             ;003
+          qc_perform_dt_tm = cnvtdatetime(p.perform_dt_tm)     ;003
+          last_seq = p.sequence                                ;003
+      endif                                                    ;003
+      result_cnt = result_cnt + 1
+      cum_result_value = cum_result_value + pr.result_value_numeric
+    DETAIL
+      row+0
+    WITH nocounter
+CALL ERROR_MESSAGE(0)
+
+call LOG_MESSAGE (build("RESULT COUNT =", result_cnt), LOG_LEVEL_DEBUG)
+
+;get new qc_result_id
+    set new_qc_result_id = 0.0
+    SELECT into "nl:"
+      next_seq_nbr = seq(pathnet_seq,nextval) "######################;rp0"
+    FROM dual
+    DETAIL
+      new_qc_result_id = next_seq_nbr
+    WITH nocounter, format
+
+    if (result_cnt > 0)
+      set qc_result_value = cum_result_value / result_cnt
+    endif
+
+    if (TimeExpired = 1)
+        set qc_perform_dt_tm =
+                 cnvtdatetime(pdm_ref->ranges[indx]->data_points[d_indx].end_effective_dt_tm)   ;003
+    endif
+
+call LOG_MESSAGE (build("new_qc_result_id =", new_qc_result_id), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("TimeExpired Value =", TimeExpired), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("qc_result_value =", qc_result_value), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("qc_perform_dt_tm VALUE:",
+format(cnvtdatetime(qc_perform_dt_tm), "mm/dd/yy hh:mm:ss;;d")), LOG_LEVEL_DEBUG)
+
+    INSERT
+      into qc_result q
+    SET
+      q.qc_result_id            = new_qc_result_id,
+      q.lot_id                  = 0,
+      q.service_resource_cd     = pdm_ref->ranges[indx].service_resource_cd,
+      q.task_assay_cd           = pdm_ref->ranges[indx].task_assay_cd,
+      q.result_status_cd        = CD->verify_status_cd,
+      q.perform_personnel_id    = requestin->request->orders[order_nbr]->assays[assay_nbr].perform_personnel_id,
+;003      q.perform_dt_tm           = cnvtdatetime(requestin->request->orders[order_nbr]->assays[assay_nbr].perform_dt_tm),
+      q.perform_dt_tm           = cnvtdatetime(qc_perform_dt_tm),                                            ;003
+      q.result_type_cd          = requestin->request->orders[order_nbr]->assays[assay_nbr].result_type_cd,
+      q.result_value_numeric    = qc_result_value,
+      q.nomenclature_id         = 0,
+      q.rule_id                 = pdm_ref->ranges[indx].rule_id,
+      q.numeric_raw_value       = qc_result_value,
+      q.prev_result_id          = 0,
+      q.mean                    = pdm_ref->ranges[indx].mean,
+      q.clinical_std_dev        = pdm_ref->ranges[indx].std_dev,
+      q.statistical_std_dev     = pdm_ref->ranges[indx].std_dev,
+      q.abs_low                 = pdm_ref->ranges[indx].result_low,
+      q.abs_high                = pdm_ref->ranges[indx].result_high,
+      q.control_id              = 0,
+      q.preactive_ind           = 0,
+      q.result_control_cd       = 0, ;?
+      q.result_process_cd       = CD->num_normal_cd,
+      q.qc_group_id             = 0,
+      q.interface_flag          = requestin->request->orders[order_nbr]->assays[assay_nbr].interface_flag,
+      q.comment_ind             = 0,
+      q.qc_result_type_flag     = 1,
+      q.pdm_param_id            = pdm_ref->ranges[indx].pdm_param_id,
+      q.pdm_range_id            = pdm_ref->ranges[indx].pdm_range_id,
+      q.pdm_dp_id               = pdm_ref->ranges[indx]->data_points[d_indx].pdm_dp_id,
+      q.updt_dt_tm              = cnvtdatetime(curdate,curtime3),
+      q.updt_cnt                = 0,
+      q.updt_task               = reqinfo->updt_task,
+      q.updt_id                 = reqinfo->updt_id,
+      q.updt_applctx            = reqinfo->updt_applctx
+    WITH nocounter
+
+    CALL ERROR_MESSAGE(0)
+    set rule_stat = 0
+
+    if (validate(XXDEBUG, -99) = -99)
+      commit
+    endif
+call LOG_MESSAGE("OFF TO PERFORM QC RULES", LOG_LEVEL_DEBUG)
+
+    set rule_stat = performRule(0, pdm_ref->ranges[indx].service_resource_cd, pdm_ref->ranges[indx].task_assay_cd,
+                                   cnvtdatetime(requestin->request->orders[order_nbr]->assays[assay_nbr].perform_dt_tm),
+                                   1, pdm_ref->ranges[indx].rule_id)
+    CALL ERROR_MESSAGE(0)
+call LOG_MESSAGE("BACK FROM PERFORM QC RULES", LOG_LEVEL_DEBUG)
+    if (validate(XXDEBUG, -99) = -99)
+      commit
+    endif
+end
+
+set reqinfo->commit_ind = 1
+if (validate(XXDEBUG, -99) = -99) 
+  commit
+endif
+#EXIT_SCRIPT
+call LOG_MESSAGE ("GL TO PDM processing complete", LOG_LEVEL_DEBUG)                                     ;002
+
+call uar_SysDestroyHandle(hSys)                                                                         ;002
+
+end go
+
+;Generated by GNU enscript 1.6.4.

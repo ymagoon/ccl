@@ -1,0 +1,396 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_order_info/glb_get_order_info.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1998 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_order_info.prg
+        Object name:            glb_get_order_info
+        Request #:              250151
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load additional order information.
+
+        Tables read:            code_value
+                                order_action
+                                order_alias
+                                prsnl
+
+        Tables updated:         None
+        Executing from:         
+
+        Special Notes:          
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 03/02/98 Hal Patchen          Initial Release                     *
+;    *001 08/30/99 Chris Heil           Format aliases using cnvtalias      *
+;    *002 09/22/06 Rahul Patel          added ordering provider data to reply *
+;    *003 04/23/10 Antony Greetan       Fix for Performance Feature# 250645 *
+;    *004 09/29/10 Steve Hendrick       Retrieve worklists associate w/ orders*
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_ORDER_INFO:dba go
+             create program GLB_GET_ORDER_INFO:dba
+     
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  orders[x]
+            2  order_id                  = f8
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      ( 
+         1  qual_cnt                     = i4
+         1  qual[*]
+            2  order_id                  = f8
+            2  order_prsnl_id            = f8
+            2  order_prsnl_name          = vc
+            2  order_alias               = vc
+            2  order_prsnl_username		= vc	;002
+            2  ordering_provider_id		= f8   ;002
+            2  ordering_provider_name		= vc ;002
+            2  ordering_provider_username	= vc	;002
+            2  group_ids[*]
+                3  name_display          = vc
+                3  group_accn_formatted  = c25
+            2  worklists[*]
+                3  worklist_id           = f8
+                3  worklist_alias        = c25
+%i cclsource:status_block.inc
+      )
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set ORDER_ALIAS_CODESET         = 754
+         set ORDER_ALIAS_PLACERORDID_CDF = "PLACERORDID"
+         declare order_alias_placerordid_cd = f8
+         set ORD_ACTION_TYPE_CODESET     = 6003
+         set ORD_ACTION_TYPE_ORDER_CDF   = "ORDER"
+         declare ord_action_type_order_cd  = f8
+         declare nbr_of_orders           = i4
+         declare q_cnt                   = i4
+         declare lCnt                    = i4 with protected, noconstant(0)
+         declare gCnt                    = i4 with protected, noconstant(0)
+         declare lReplySize              = i4 with protected, noconstant(0)
+
+         declare actual_size             = i4   with protected, noconstant(0)
+         declare expand_size             = i4   with protected, noconstant(0)
+         declare expand_total            = i4   with protected, noconstant(0)
+         declare expand_start            = i4   with protected, noconstant(1)
+         declare expand_stop             = i4   with protected, noconstant(0)
+         declare num                     = i4   with protected, noconstant(0)
+         declare lWorklistCnt            = i4   with protected, noconstant(0)
+         declare nSeqVal                 = i2   with protected, noconstant(0)
+         declare nEXPAND_SIZE            = i2   with protected, constant(200)
+         set reply->status_data.status = "F"
+
+      /***********************************************************************
+      * Select processing code values                                        *
+      ***********************************************************************/
+         
+         set order_alias_placerordid_cd = uar_get_code_by("MEANING", ORDER_ALIAS_CODESET, nullterm(ORDER_ALIAS_PLACERORDID_CDF))
+         set ord_action_type_order_cd = uar_get_code_by("MEANING", ORD_ACTION_TYPE_CODESET, nullterm(ORD_ACTION_TYPE_ORDER_CDF))
+
+         ;* Verify that all required code value records were read.
+         if (order_alias_placerordid_cd <= 0.0 or ord_action_type_order_cd <= 0.0) 	
+            set reply->status_data.subeventstatus[1].OperationName =
+               "SELECT"
+            set reply->status_data.subeventstatus[1].OperationStatus =
+               "F"
+            set reply->status_data.subeventstatus[1].TargetObjectName =
+               "CODE_VALUE TABLE"
+            set reply->status_data.subeventstatus[1].TargetObjectValue =
+               "Unable to load all required code values for script execution"
+            go to Exit_Script
+         endif
+
+      /***********************************************************************
+      * Select order action and personnel info                               *
+      ***********************************************************************/
+         set nbr_of_orders = size(request->orders, 5)
+	set actual_size = size(request->orders,5)
+	set expand_size = nEXPAND_SIZE
+  if ( mod(actual_size,expand_size) = 0 )
+    set expand_total = actual_size
+  else
+	  set expand_total = actual_size + (expand_size - mod(actual_size,expand_size))
+	endif
+	set expand_start = 1
+	set expand_stop = nEXPAND_SIZE
+	set num = 0
+	;increase the size of the list to expand_total
+	;increasing the list size allows always passing the same number of elements in the
+	; IN clause that is generated by the expand()
+	set stat = alterlist(request->orders, expand_total)
+	;set the added positions of list equal to the last item in the list
+	for(idx = actual_size+1 to expand_total)
+		set request->orders[idx].order_id =  request->orders[actual_size].order_id
+	endfor
+            
+         select into "nl:"
+            oa.seq,
+            oa_pl.seq,
+      	    oa_pl2.seq,
+            lIndex = locateval(lCnt, 1, actual_size, oa.order_id, request->orders[lCnt].order_id)
+
+         from
+            order_action oa,
+            prsnl oa_pl,
+            prsnl oa_pl2,	;002
+           (dummyt d with seq = value(expand_total/expand_size))
+		;Use dummyt to execute query with expand_size number of elements in the IN clause.
+		;Expand_total/expand_size returns the number of times the query will be executed.
+		;Expand_start and expand_stop are reset using assign()
+  
+	plan d where
+		assign(expand_start,evaluate(d.seq,1,1,expand_start+expand_size))
+			and assign(expand_stop,expand_start+(expand_size-1))
+	join oa where
+		expand(num,expand_start,expand_stop, oa.order_id, request->orders[num].order_id)
+                      and oa.action_type_cd = ord_action_type_order_cd
+ 
+	join oa_pl where
+		oa_pl.person_id = oa.action_personnel_id
+                      and oa_pl.person_id > 0.0
+ 
+	join oa_pl2 where
+		 oa_pl2.person_id = oa.order_provider_id
+         				
+         order by lIndex
+
+         head report
+            q_cnt = 0
+            stat = alterlist(request->orders, actual_size)
+
+         head lIndex
+            q_cnt = q_cnt + 1
+            stat = alterlist(reply->qual, q_cnt)
+            reply->qual_cnt = q_cnt
+            reply->qual[q_cnt].order_id = oa.order_id
+            reply->qual[q_cnt].order_prsnl_id = oa_pl.person_id
+            reply->qual[q_cnt].order_prsnl_name = oa_pl.name_full_formatted
+            reply->qual[q_cnt].order_prsnl_username = oa_pl.username	;002
+            reply->qual[q_cnt].ordering_provider_id = oa_pl2.person_id	;002
+            reply->qual[q_cnt].ordering_provider_name = oa_pl2.name_full_formatted ;002
+            reply->qual[q_cnt].ordering_provider_username = oa_pl2.username	;002
+         
+         with 
+            nocounter
+
+	  /***********************************************************************
+      * Select order alias info                                              *
+      ***********************************************************************/
+		 set lReplySize = size(reply->qual, 5)
+
+         select into "nl:"
+            alias_frmt = cnvtalias(oal.alias, oal.alias_pool_cd),             ;001
+            oal.seq,
+            lIndex = locateval(lCnt, 1, nbr_of_orders, oal.order_id, request->orders[lCnt].order_id)
+
+         from
+            order_alias oal
+ 
+         where expand(lCnt, 1, nbr_of_orders, oal.order_id, request->orders[lCnt].order_id)
+           and oal.order_alias_type_cd = order_alias_placerordid_cd
+
+         order by lIndex 
+
+         head lIndex
+            lReplyIndex = locateval(lCnt, 1, lReplySize, oal.order_id, reply->qual[lCnt].order_id)
+            if (lReplyIndex = 0)
+              q_cnt = q_cnt + 1
+              stat = alterlist(reply->qual, q_cnt)
+              reply->qual_cnt = q_cnt
+              reply->qual[q_cnt].order_id = oal.order_id
+              reply->qual[q_cnt].order_alias = alias_frmt
+            else
+              reply->qual[lReplyIndex].order_alias = alias_frmt
+            endif
+        
+         with 
+            nocounter
+
+	  /***********************************************************************
+      * Select group identifier info                                         *
+      ***********************************************************************/
+		 set lReplySize = size(reply->qual, 5)
+		set expand_start = 1
+		set expand_stop = nEXPAND_SIZE
+		set stat = alterlist(request->orders, expand_total)
+		set num = 0
+		;set the added positions of list equal to the last
+		;item in the list
+		for(idx = actual_size+1 to expand_total)
+		   set request->orders[idx].order_id =  request->orders[actual_size].order_id
+		endfor
+
+		set lCnt=0
+         select into "nl:"
+            lIndex = locateval(lCnt, 1, actual_size, pogr.order_id, request->orders[lCnt].order_id)
+
+         from
+            pcs_order_group_r pogr,
+            pcs_order_group pog,
+            accession a,
+            (dummyt d with seq = value(expand_total/expand_size))
+            ;Use dummyt to execute query with expand_size number of elements in the IN clause
+            ;Expand_total/expand_size returns the number of times the query will be executed.
+            ;Expand_start and expand_stop are reset using assign()
+ 
+          plan d where
+            assign(expand_start,evaluate(d.seq,1,1,expand_start+expand_size))
+            	and assign(expand_stop,expand_start+(expand_size-1))
+         Join pogr
+              where expand(num,expand_start,expand_stop, pogr.order_id, request->orders[num].order_id)
+                and pogr.active_ind = 1
+         join pog
+              where pog.pcs_order_group_id = pogr.pcs_order_group_id
+                and pog.active_ind = 1
+         join a
+              where a.accession_id = pog.group_accession_id
+
+         order by lIndex, pog.pcs_order_group_id
+
+         head report
+            stat = alterlist(request->orders, actual_size)
+
+         head lIndex
+            lReplyIndex = locateval(lCnt, 1, lReplySize, pogr.order_id, reply->qual[lCnt].order_id)
+            if (lReplyIndex = 0)
+              q_cnt = q_cnt + 1
+              stat = alterlist(reply->qual, q_cnt)
+              reply->qual_cnt = q_cnt
+              reply->qual[q_cnt].order_id = pogr.order_id
+            else
+              q_cnt = lReplyIndex
+            endif
+        
+            gCnt = 0
+
+          head pog.pcs_order_group_id
+            gCnt = gCnt + 1
+            if (gCnt > size(reply->qual[q_cnt].group_ids, 5))
+              stat = alterlist(reply->qual[q_cnt].group_ids, gCnt + 4)
+            endif
+            
+            reply->qual[q_cnt].group_ids[gCnt]->name_display = pog.group_name
+            reply->qual[q_cnt].group_ids[gCnt]->group_accn_formatted = uar_fmt_accession(a.accession, size(a.accession,1))
+
+         foot lIndex
+            if (gCnt > 0)
+              stat = alterlist(reply->qual[q_cnt].group_ids, gCnt)
+            endif
+
+         with 
+            nocounter
+
+	  /***********************************************************************
+      * Find any worklists associated with the orders                      *
+      ***********************************************************************/
+		    set lReplySize = size(reply->qual, 5)
+        set expand_start = 1
+
+		    if (lReplySize <= expand_size)
+          set expand_stop = lReplySize
+          set nSeqVal = 1
+        else
+          set expand_stop = nEXPAND_SIZE
+          set stat = alterlist(reply->qual, expand_total)
+          set num = 0
+          ;set the added positions of list equal to the last
+          ;item in the list
+          for(idx = lReplySize+1 to expand_total)
+             set reply->qual[idx].order_id =  reply->qual[lReplySize].order_id
+          endfor
+          set nSeqVal = expand_total/expand_size
+        endif
+
+        select into "nl:"
+
+         from
+            worklist_order_r wor,
+            worklist w,
+            (dummyt d with seq = nSeqVal)
+            ;Use dummyt to execute query with expand_size number of elements in the IN clause
+            ;Expand_total/expand_size returns the number of times the query will be executed.
+            ;Expand_start and expand_stop are reset using assign()
+ 
+         ;if expand_stop = lReplySize then we either have only one batch or we are processing the last batch
+         plan d where
+            assign(expand_start,evaluate(d.seq,1,1,expand_start+expand_size))
+            	and assign(expand_stop,evaluate(expand_stop,lReplySize,lReplySize,expand_start+(expand_size-1)))
+
+         join wor where expand(lCnt, expand_start, expand_stop, wor.order_id, reply->qual[lCnt].order_id)
+         join w where wor.worklist_id = w.worklist_id 
+
+         detail
+            lReplyIndex = locateval(lCnt, 1, lReplySize, wor.order_id, reply->qual[lCnt].order_id)
+            if (lReplyIndex > 0 and expand_start <= expand_stop)
+              lWorklistCnt = size(reply->qual[lReplyIndex].worklists, 5) + 1
+              stat = alterlist(reply->qual[lReplyIndex].worklists, lWorklistCnt)
+              reply->qual[lReplyIndex].worklists[lWorklistCnt].worklist_id = wor.worklist_id 
+              reply->qual[lReplyIndex].worklists[lWorklistCnt].worklist_alias = w.worklist_alias
+            endif
+
+         foot report
+            stat = alterlist(reply->qual, lReplySize)   
+        
+         with 
+            nocounter
+
+
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+         endif
+         set stat = alterlist(reply->qual, q_cnt)
+
+      #Exit_Script
+         end
+         go      
+
+;Generated by GNU enscript 1.6.4.

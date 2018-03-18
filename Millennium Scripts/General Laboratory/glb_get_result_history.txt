@@ -1,0 +1,578 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_result_history/glb_get_result_history.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1998 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_result_history.prg
+        Object name:            glb_get_result_history
+        Request #:              250128
+
+        Product:                General Lab                     
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve result history information for
+                                given order_id and task_assay_cd.  
+                                
+        Tables read:            code_value
+                                data_map
+                                long_text
+                                perform_result
+                                prsnl
+                                resource_group
+                                result
+                                result_event
+
+        Tables updated:         none
+        Executing from:
+
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 05/06/97 Hal Patchen          Initial Release                     *
+;    *001 08/08/97 Hal Patchen          Add Feasible/Linear Ranges          *
+;    *002 09/19/97 Hal Patchen          Add Autoverification logic          *
+;    *003 11/13/97 Hal Patchen          Add subsection level data map check *
+;    *004 05/05/98 Hal Patchen          Verify subsection level data map    *
+;    *                                  is associated with route test site  *
+;    *005 07/04/08 Rahul Deshmukh       Added nomenclature_id               *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_RESULT_HISTORY:dba go
+             create program GLB_GET_RESULT_HISTORY:dba
+
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  order_id                     = f8
+         1  task_assay_cd                = f8
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      ( 
+         1  qual[*]
+            2  result_id                 = f8
+            2  perform_result_id         = f8
+            2  event_sequence            = i4
+            2  service_resource_cd       = f8
+            2  service_resource_disp     = vc
+            2  event_type_cd             = f8
+            2  event_type_disp           = vc
+            2  event_type_mean           = vc
+            2  result_type_cd            = f8
+            2  result_type_disp          = vc
+            2  result_type_mean          = vc
+            2  result_value_dt_tm        = dq8
+            2  result_value_numeric      = f8
+            2  numeric_raw_value         = f8
+            2  less_great_flag           = i2
+            2  result_value_alpha        = vc
+            2  long_text_id              = f8
+            2  rtf_text                  = vc
+            2  ascii_text                = vc
+            2  event_dt_tm               = dq8
+            2  event_personnel_id        = f8
+            2  event_name_full_formatted = vc
+            2  perform_dt_tm             = dq8
+            2  perform_personnel_id      = f8
+            2  perform_name_full_formatted = vc
+            2  normal_cd                 = f8
+            2  normal_disp               = vc
+            2  normal_mean               = vc
+            2  critical_cd               = f8
+            2  critical_disp             = vc
+            2  critical_mean             = vc
+            2  review_cd                 = f8
+            2  review_disp               = vc
+            2  review_mean               = vc
+            2  linear_cd                 = f8                          ;001
+            2  linear_disp               = c40                         ;001
+            2  linear_mean               = c12                         ;001
+            2  feasible_cd               = f8                          ;001
+            2  feasible_disp             = c40                         ;001
+            2  feasible_mean             = c12                         ;001
+            2  delta_cd                  = f8
+            2  delta_disp                = vc
+            2  delta_mean                = vc
+            2  normal_range_flag         = i2  ;1 = Low, 2 = High, 3 = Both
+            2  normal_low                = f8
+            2  normal_high               = f8
+            2  normal_alpha              = vc
+            2  units_cd                  = f8
+            2  units_disp                = vc
+            2  dilution_factor           = f8                          ;001
+            2  data_map_ind              = i2
+            2  max_digits                = i4
+            2  min_digits                = i4
+            2  min_decimal_places        = i4
+            2  qc_override_cd            = f8
+            2  qc_override_disp          = c40
+            2  qc_override_mean          = c12
+            2  notify_cd                 = f8
+            2  notify_disp               = vc
+            2  notify_mean               = c12
+            2  nomenclature_id           = f8
+%i cclsource:status_block.inc
+      )
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+;002         set CV_REQUIRED_RECS            = 3
+;004         set CV_REQUIRED_RECS            = 4                           ;002
+         set CV_REQUIRED_RECS            = 5                           ;004
+         declare cv_cnt                  = i4
+         set RESULT_STATUS_CODESET       = 1901
+         set RESULT_STATUS_PERFORMED_CDF = "PERFORMED"
+         set RESULT_STATUS_VERIFIED_CDF  = "VERIFIED"
+         set RESULT_STATUS_AUTOVERIFIED_CDF  = "AUTOVERIFIED"          ;002
+         set RESULT_STATUS_CORRECTED_CDF = "CORRECTED"
+         declare result_status_performed_cd = f8
+         declare result_status_verified_cd  = f8
+         declare result_status_autoverified_cd  = f8                   ;002
+         declare result_status_corrected_cd = f8
+         set SERV_RES_TYPE_CODESET       = 223                         ;004
+         set SERV_RES_SUBSECTION_CDF     = "SUBSECTION"                ;003
+         declare serv_res_subsection_cd  = f8                          ;004
+         set DATA_MAP_TYPE_FLAG          = 0
+         declare q_cnt                   = i4
+         declare stat                    = i4
+
+         set reply->status_data.status = "F"
+         set q_cnt = 0
+
+      /***********************************************************************
+      * Load result status code set                                          *
+      ***********************************************************************/
+         set cv_cnt = 0
+
+         select into "nl:"
+            cv.code_set,
+            cv.code_value
+         from
+            code_value cv
+;004         where cv.code_set = RESULT_STATUS_CODESET
+;004           and cv.cdf_meaning in ( RESULT_STATUS_PERFORMED_CDF,
+;004                                   RESULT_STATUS_VERIFIED_CDF,
+;004                                   RESULT_STATUS_AUTOVERIFIED_CDF,     ;002
+;004                                   RESULT_STATUS_CORRECTED_CDF )
+         where ((cv.code_set = RESULT_STATUS_CODESET                   ;004
+             and cv.cdf_meaning in ( RESULT_STATUS_PERFORMED_CDF,      ;004
+                                     RESULT_STATUS_VERIFIED_CDF,       ;004
+                                     RESULT_STATUS_AUTOVERIFIED_CDF,   ;004
+                                     RESULT_STATUS_CORRECTED_CDF ))    ;004
+           or   (cv.code_set = SERV_RES_TYPE_CODESET                   ;004
+             and cv.cdf_meaning = SERV_RES_SUBSECTION_CDF))            ;004
+           and cv.active_ind = 1
+           and (cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+             and  cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+         detail
+            if (cv.code_set = RESULT_STATUS_CODESET)
+               case (cv.cdf_meaning)
+                 of RESULT_STATUS_PERFORMED_CDF:
+                    result_status_performed_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_STATUS_VERIFIED_CDF:
+                    result_status_verified_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_STATUS_AUTOVERIFIED_CDF:                    ;002
+                    result_status_autoverified_cd = cv.code_value      ;002
+                    cv_cnt = cv_cnt + 1                                ;002
+                 of RESULT_STATUS_CORRECTED_CDF:
+                    result_status_corrected_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+            if (cv.code_set = SERV_RES_TYPE_CODESET)                   ;004
+               case (cv.cdf_meaning)                                   ;004
+                 of SERV_RES_SUBSECTION_CDF:                           ;004
+                    serv_res_subsection_cd = cv.code_value             ;004
+                    cv_cnt = cv_cnt + 1                                ;004
+               endcase                                                 ;004
+            endif                                                      ;004
+         with nocounter
+
+         ;* Verify that all required code value records were read.
+         if (cv_cnt != CV_REQUIRED_RECS)
+            set reply->status_data.subeventstatus[1].OperationName =   ;004
+               "SELECT"                                                ;004
+            set reply->status_data.subeventstatus[1].OperationStatus = ;004
+               "F"                                                     ;004
+            set reply->status_data.subeventstatus[1].TargetObjectName = ;004
+               "CODE_VALUE TABLE"                                      ;004
+            set reply->status_data.subeventstatus[1].TargetObjectValue = ;004
+               "Unable to load all required code values for script execution" ;004
+            go to Exit_Script
+         endif
+
+      /***********************************************************************
+      * Load result history                                                  *
+      ***********************************************************************/
+         select into "nl:"
+            r.seq,
+            re_key = build(re.result_id, "_",
+                           re.perform_result_id, "_", 
+                           re.event_sequence),
+            re.seq,
+            p_re.seq,
+            pr.seq,
+            normal_low_null = nullind(pr.normal_low),
+            normal_high_null = nullind(pr.normal_high),
+            lt.seq,
+            p_pr.seq,
+            d_dm.seq,
+;003            data_map_resource_exists = decode(dm.seq, "Y", "N"),
+            data_map_exists = decode(dm.seq, "Y", "N"),                ;003
+            dm.seq,
+            d_rg.seq,                                                  ;004
+            rg_exists = decode(rg.seq, "Y", "N"),                      ;004
+            rg.seq                                                     ;004
+;003            d_dmg.seq,
+;003            data_map_group_exists = decode(dmg.seq, "Y", "N"),
+;003            dmg.seq
+;004            cv_dm.seq                                                  ;003
+
+            /* Selected fields:
+            r.result_id,
+            re_key = build(re.result_id, "_",
+                           re.perform_result_id, "_", 
+                           re.event_sequence),
+            re.result_id,
+            re.perform_result_id,
+            re.event_sequence,
+            re.event_type_cd,
+            re.event_reason,
+            re.event_dt_tm,
+            re.event_personnel_id,
+            p_re.name_full_formatted,
+            pr.perform_result_id,
+            pr.result_status_cd,
+            pr.result_type_cd,
+            pr.result_value_dt_tm,
+            pr.result_value_numeric,
+            pr.numeric_raw_value,
+            pr.less_great_flag,
+            pr.result_value_alpha,  
+            pr.long_text_id,
+            pr.ascii_text,    
+            pr.perform_dt_tm,
+            pr.perform_personnel_id,
+            pr.service_resource_cd,
+            pr.normal_cd,
+            pr.critical_cd,
+            pr.review_cd,
+            pr.linear_cd,                                              ;001
+            pr.feasible_cd,                                            ;001
+            pr.delta_cd,
+            normal_low_null = nullind(pr.normal_low),
+            normal_high_null = nullind(pr.normal_high),
+            pr.normal_low,
+            pr.normal_high,
+            pr.normal_alpha,
+            pr.units_cd,
+            pr.dilution_factor,                                        ;001
+            lt.long_text_id,
+            lt.long_text,
+            p_pr.name_full_formatted,
+            d_dm.seq,
+;003            data_map_resource_exists = decode(dm.seq, "Y", "N"),
+            data_map_exists = decode(dm.seq, "Y", "N"),                ;003
+            dm.service_resource_cd,
+            dm.task_assay_cd,
+            dm.data_map_type_flag,
+            dm.max_digits,
+            dm.min_digits,
+            dm.min_decimal_places,
+;003            d_dmg.seq,
+;003            data_map_group_exists = decode(dmg.seq, "Y", "N"),
+;003            dmg.service_resource_cd,
+;003            dmg.task_assay_cd,
+;003            dmg.data_map_type_flag,
+;003            dmg.max_digits,
+;003            dmg.min_digits,
+;003            dmg.min_decimal_places
+;004            cv_dm.cdf_meaning                                          ;003
+            d_rg.seq,                                                  ;004
+            rg_exists = decode(rg.seq, "Y", "N"),                      ;004
+            rg.parent_service_resource_cd,                             ;004
+            rg.child_service_resource_cd,                              ;004
+            rg.resource_group_type_cd,                                 ;004
+            rg.root_service_resource_cd                                ;004
+            */
+         
+         from
+            result r,
+            result_event re,
+            prsnl p_re,
+            perform_result pr,
+            long_text lt,
+            prsnl p_pr,
+            dummyt d_dm,
+            data_map dm,
+            (dummyt d_rg with seq = 1),                                ;004
+            resource_group rg                                          ;004
+;003            dummyt d_dmg,
+;003            data_map dmg
+;004            code_value cv_dm                                           ;003
+         
+         plan r     where r.order_id = request->order_id
+                      and r.task_assay_cd = request->task_assay_cd
+         join re    where re.result_id = r.result_id
+                      and re.event_type_cd 
+                             in ( result_status_performed_cd,
+                                  result_status_verified_cd,
+                                  result_status_autoverified_cd,       ;002
+                                  result_status_corrected_cd )
+         join p_re  where p_re.person_id = re.event_personnel_id
+         join pr    where pr.perform_result_id = re.perform_result_id 
+                      and pr.result_id = re.result_id
+         join lt    where lt.long_text_id = pr.long_text_id
+         join p_pr  where p_pr.person_id = pr.perform_personnel_id
+         join d_dm  where d_dm.seq = 1
+;003         join dm    where dm.service_resource_cd = pr.service_resource_cd
+;003                      and dm.task_assay_cd = r.task_assay_cd
+         join dm    where dm.task_assay_cd = r.task_assay_cd           ;003
+                      and dm.data_map_type_flag = DATA_MAP_TYPE_FLAG
+                      and dm.active_ind = 1
+                      and dm.beg_effective_dt_tm <=
+                                            cnvtdatetime(curdate,curtime3)
+                      and dm.end_effective_dt_tm >=
+                                            cnvtdatetime(curdate,curtime3)
+         join d_rg  where d_rg.seq = 1                                 ;004
+         join rg    where rg.parent_service_resource_cd =              ;004
+                            dm.service_resource_cd                     ;004
+                      and rg.child_service_resource_cd =               ;004
+                            pr.service_resource_cd                     ;004
+                      and rg.resource_group_type_cd =                  ;004
+                            serv_res_subsection_cd                     ;004
+                      and rg.root_service_resource_cd = 0.0            ;004
+;003         join d_dmg where d_dmg.seq = 1
+;003         join dmg   where dmg.service_resource_cd = 0.0
+;003                      and dmg.task_assay_cd = r.task_assay_cd
+;003                      and dmg.data_map_type_flag = DATA_MAP_TYPE_FLAG
+;003                      and dmg.active_ind = 1
+;003                      and dmg.beg_effective_dt_tm <=
+;003                                            cnvtdatetime(curdate,curtime3)
+;003                      and dmg.end_effective_dt_tm >=
+;003                                            cnvtdatetime(curdate,curtime3)
+;004         join cv_dm  where cv_dm.code_value = dm.service_resource_cd   ;003
+
+		; We don't have ORDER BY because it will cause unix error exceeding 32892.
+
+         head report
+            q_cnt = 0
+            data_map_level = 0                                         ;003
+
+         head re_key
+            data_map_level = 0                                         ;003
+            q_cnt = q_cnt + 1
+            if (mod(q_cnt,10) = 1)
+               stat = alterlist(reply->qual, q_cnt + 10)
+            endif
+            reply->qual[q_cnt].result_id = 
+              r.result_id
+            reply->qual[q_cnt].perform_result_id = 
+              pr.perform_result_id
+            reply->qual[q_cnt].event_sequence = 
+              re.event_sequence
+            reply->qual[q_cnt].service_resource_cd = 
+              pr.service_resource_cd
+            reply->qual[q_cnt].event_type_cd = 
+              re.event_type_cd
+            reply->qual[q_cnt].result_type_cd = 
+              pr.result_type_cd
+            reply->qual[q_cnt].result_value_dt_tm = 
+              pr.result_value_dt_tm
+            reply->qual[q_cnt].result_value_numeric = 
+              pr.result_value_numeric
+            reply->qual[q_cnt].numeric_raw_value = 
+              pr.numeric_raw_value
+            reply->qual[q_cnt].less_great_flag = 
+              pr.less_great_flag
+            reply->qual[q_cnt].result_value_alpha = 
+              pr.result_value_alpha
+            if (pr.long_text_id > 0.0)
+               reply->qual[q_cnt].rtf_text = 
+                 lt.long_text
+            endif
+            reply->qual[q_cnt].nomenclature_id = 
+              pr.nomenclature_id
+            reply->qual[q_cnt].long_text_id = 
+              pr.long_text_id
+            reply->qual[q_cnt].ascii_text = 
+              pr.ascii_text
+            reply->qual[q_cnt].event_dt_tm = 
+              re.event_dt_tm
+            reply->qual[q_cnt].event_personnel_id = 
+              re.event_personnel_id
+            if (re.event_personnel_id > 0.0)
+               reply->qual[q_cnt].event_name_full_formatted = 
+                 p_re.name_full_formatted
+            endif
+            reply->qual[q_cnt].perform_dt_tm = 
+              pr.perform_dt_tm
+            reply->qual[q_cnt].perform_personnel_id =
+              pr.perform_personnel_id
+            if (pr.perform_personnel_id > 0.0)
+               reply->qual[q_cnt].perform_name_full_formatted = 
+                 p_pr.name_full_formatted
+            endif
+            reply->qual[q_cnt].normal_cd = 
+              pr.normal_cd
+            reply->qual[q_cnt].qc_override_cd = 
+              pr.qc_override_cd
+            reply->qual[q_cnt].critical_cd = 
+              pr.critical_cd
+            reply->qual[q_cnt].review_cd = 
+              pr.review_cd
+            reply->qual[q_cnt].linear_cd =                             ;001 
+              pr.linear_cd                                             ;001
+            reply->qual[q_cnt].feasible_cd =                           ;001 
+              pr.feasible_cd                                           ;001
+            reply->qual[q_cnt].delta_cd = 
+              pr.delta_cd
+            reply->qual[q_cnt].notify_cd = 
+              pr.notify_cd
+            if (normal_low_null = 0 
+            and normal_high_null = 1)
+               ;* Normal low only exists
+               reply->qual[q_cnt].normal_range_flag = 1
+            elseif (normal_low_null = 1 
+                and normal_high_null = 0)
+               ;* Normal high only exists
+               reply->qual[q_cnt].normal_range_flag = 2
+            elseif (normal_low_null = 0
+                and normal_high_null = 0)
+               ;* Both normal low and high exists
+               reply->qual[q_cnt].normal_range_flag = 3
+            else
+               reply->qual[q_cnt].normal_range_flag = 0
+            endif
+            reply->qual[q_cnt].normal_low = 
+              pr.normal_low
+            reply->qual[q_cnt].normal_high = 
+              pr.normal_high
+            reply->qual[q_cnt].normal_alpha = 
+              pr.normal_alpha
+            reply->qual[q_cnt].units_cd = 
+              pr.units_cd
+            reply->qual[q_cnt].dilution_factor =                       ;001
+              pr.dilution_factor                                       ;001
+            reply->qual[q_cnt].data_map_ind = 0
+
+         detail
+;003            if (reply->qual[q_cnt].data_map_ind = 0)
+;003               if (data_map_resource_exists = "Y")
+;003                  reply->qual[q_cnt].data_map_ind = 1
+;003                  reply->qual[q_cnt].max_digits = 
+;003                    dm.max_digits
+;003                  reply->qual[q_cnt].min_digits = 
+;003                    dm.min_digits
+;003                  reply->qual[q_cnt].min_decimal_places = 
+;003                    dm.min_decimal_places
+;003               elseif (data_map_group_exists = "Y")
+;003                  reply->qual[q_cnt].data_map_ind = 1
+;003                  reply->qual[q_cnt].max_digits = 
+;003                    dmg.max_digits
+;003                  reply->qual[q_cnt].min_digits = 
+;003                    dmg.min_digits
+;003                  reply->qual[q_cnt].min_decimal_places = 
+;003                    dmg.min_decimal_places
+;003               endif
+;003            endif
+            if (data_map_exists = "Y")                                 ;003
+               ;* Check for exact match on data map                    ;003
+               if (data_map_level <= 2                                 ;003
+               and dm.service_resource_cd > 0.0                        ;003
+               and dm.service_resource_cd = pr.service_resource_cd)    ;003
+                  data_map_level = 3                                   ;003
+                  reply->qual[q_cnt].data_map_ind = 1                  ;003
+                  reply->qual[q_cnt].max_digits = dm.max_digits        ;003
+                  reply->qual[q_cnt].min_digits = dm.min_digits        ;003
+                  reply->qual[q_cnt].min_decimal_places =              ;003
+                    dm.min_decimal_places                              ;003
+               endif                                                   ;003
+               ;* Check for subsection level data map                  ;003
+               if (data_map_level <= 1                                 ;003
+               and dm.service_resource_cd > 0.0                        ;003
+               and rg_exists = "Y"                                     ;004
+               and rg.parent_service_resource_cd =                     ;004
+                             dm.service_resource_cd                    ;004
+               and rg.child_service_resource_cd =                      ;004
+                             pr.service_resource_cd)                   ;004
+;004               and cv_dm.cdf_meaning = SERV_RES_SUBSECTION_CDF)        ;003
+                  data_map_level = 2                                   ;003
+                  reply->qual[q_cnt].data_map_ind = 1                  ;003
+                  reply->qual[q_cnt].max_digits = dm.max_digits        ;003
+                  reply->qual[q_cnt].min_digits = dm.min_digits        ;003
+                  reply->qual[q_cnt].min_decimal_places =              ;003
+                    dm.min_decimal_places                              ;003
+               endif                                                   ;003
+               ;* Check for default all resources level data map       ;003
+               if (data_map_level = 0                                  ;003
+               and dm.service_resource_cd = 0.0)                       ;003
+                  data_map_level = 1                                   ;003
+                  reply->qual[q_cnt].data_map_ind = 1                  ;003
+                  reply->qual[q_cnt].max_digits = dm.max_digits        ;003
+                  reply->qual[q_cnt].min_digits = dm.min_digits        ;003
+                  reply->qual[q_cnt].min_decimal_places =              ;003
+                    dm.min_decimal_places                              ;003
+               endif                                                   ;003
+            endif                                                      ;003
+        
+         foot report
+            stat = alterlist(reply->qual, q_cnt)
+
+         with 
+            nocounter,
+            outerjoin = d_dm,
+            dontcare = dm,
+            outerjoin = d_rg,                                          ;004
+            dontcare = rg                                              ;004
+;004            dontcare = cv_dm                                           ;003
+;003            outerjoin = d_dmg,
+;003            dontcare = dmg
+
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"   ;Successful
+         else
+            set reply->status_data.status = "Z"   ;Zero qualified
+         endif
+
+      #Exit_Script        
+         end
+         go      
+
+;Generated by GNU enscript 1.6.4.

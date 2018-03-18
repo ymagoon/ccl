@@ -1,0 +1,280 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_test_site_procs/glb_get_test_site_procs.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1999 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_TEST_SITE_PROCS.PRG
+        Object name:            GLB_GET_TEST_SITE_PROCS
+        Request #:              250048
+
+        Product:                General Lab           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Return all of the procedures for a given test
+                                site.  If the test site is a group, all
+                                procedures for the group of test sites are
+                                returned.
+
+        Tables read:            assay_processing_r
+                                discrete_task_assay
+
+        Tables updated:         n/a
+
+        Executing from:         General Lab worklist application
+                                General Lab database building tool
+                                General Lab qc reference build tool
+
+        Special Notes:          n/a
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 12/20/95 Dennis Boyer         Initial Release                     *
+;    *001 04/05/99 Hal Patchen          Performance enhancement and return  *
+;    *                                  orderable resource route level.     *
+;    *002 01/07/02 Sasi Gandham         Add Fields to Order By for Head     *
+;    *003 01/08/02 Raj Mishra           Changed head to detail              *
+;    *004 09/24/02 Chuck Figas          CAPEP00067476                       *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_TEST_SITE_PROCS:dba go    
+      create program GLB_GET_TEST_SITE_PROCS:dba
+     
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request                                      
+      (                                       
+         1 service_resource_cd  = f8
+         1 dta_only_ind         = i2
+      ) 
+*/
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      ( 
+        1  nbr_orders                  = i4
+        1  orders[*]
+           2  catalog_cd               = f8
+           2  catalog_disp             = vc
+           2  dept_display_name        = vc                            ;001
+           2  resource_route_lvl       = i4                            ;001
+        1  nbr_assays                  = i4
+        1  assays[*]
+           2  task_assay_cd            = f8
+           2  task_assay_disp          = vc
+           2  default_result_type_cd   = f8
+           2  default_result_type_disp = vc
+           2  default_result_type_mean = vc
+%i cclsource:status_block.inc
+      )
+
+/********************************************************************/
+/* Resource array                                                   */
+/********************************************************************/
+
+      record resc
+      (
+         1 nbr_resc                = i4
+         1 resc_list[*]
+           2 service_resource_cd   = f8
+      )
+
+      declare dHelixChargeOrderCd     = f8 with protect, noconstant(0.0)
+
+      set dHelixChargeOrderCd = uar_get_code_by("MEANING", 5801, "HLX_CO")
+
+     #Script
+      set reply->status_data->status = "F"
+      set order_cnt = 0
+      set assay_cnt = 0
+      set max_assays = 0
+      set resc->nbr_resc = 0
+
+      set resc_cnt = 1
+      if (mod(resc_cnt,2) = 1)  
+         set stat = alterlist(resc->resc_list,resc_cnt + 2)  
+      endif
+      set resc->resc_list[1]->service_resource_cd = request->service_resource_cd
+
+/********************************************************************/
+/* Select resource list                                             */
+/********************************************************************/
+      SELECT into "nl:"
+         r.child_service_resource_cd
+      FROM
+         resource_group r
+      WHERE r.parent_service_resource_cd = request->service_resource_cd
+;001        AND r.root_service_resource_cd = 0.0
+        AND r.root_service_resource_cd + 0 = 0.0                       ;001
+      DETAIL
+         resc_cnt = resc_cnt + 1
+         if (mod(resc_cnt,2) = 1)  
+            stat = alterlist(resc->resc_list,resc_cnt + 2)  
+         endif
+         resc->resc_list[resc_cnt]->service_resource_cd =  
+            r.child_service_resource_cd
+         resc->nbr_resc = resc_cnt
+      WITH
+         nocounter              
+
+      if (resc->nbr_resc = 0)
+         set resc->nbr_resc = 1
+      endif
+      set stat = alterlist(resc->resc_list,resc->nbr_resc)
+      set nbr_resources = size(resc->resc_list,5)
+
+/********************************************************************/
+/* Select orders for resource(s)                                    */
+/********************************************************************/
+    if (request->dta_only_ind = 0)
+      SELECT into "nl:"
+         orl.catalog_cd
+        ,oc.resource_route_lvl                                         ;001
+      FROM 
+         orc_resource_list orl,
+         order_catalog oc,                                             ;001
+         (dummyt d1 with seq = value(nbr_resources))
+      PLAN d1         
+      JOIN orl
+         where orl.service_resource_cd =
+               resc->resc_list[d1.seq]->service_resource_cd
+          and orl.active_ind = 1                                       
+      JOIN oc                                                          ;001
+         where oc.catalog_cd = orl.catalog_cd                          ;001
+           and oc.active_ind = 1
+           and oc.activity_subtype_cd + 0.0 != dHelixChargeOrderCd
+      ORDER BY                                                         ;001
+         orl.catalog_cd                                                ;001
+      HEAD orl.catalog_cd
+         order_cnt = order_cnt + 1
+         if (mod(order_cnt,5) = 1)
+            stat = alterlist(reply->orders, order_cnt + 5)
+         endif
+         reply->nbr_orders = order_cnt
+         reply->orders[order_cnt]->catalog_cd = orl.catalog_cd
+         reply->orders[order_cnt]->resource_route_lvl =                ;001
+           oc.resource_route_lvl                                       ;001
+         reply->orders[order_cnt]->dept_display_name =                 ;001
+           oc.dept_display_name                                        ;001
+      WITH
+         nocounter
+    endif
+
+/********************************************************************/
+/* Select assays for resource(s)                                    */
+/********************************************************************/
+      SELECT into "nl:"
+         a.task_assay_cd,
+         dta.task_assay_cd
+      FROM 
+         (dummyt d3 with seq = value(nbr_resources)),
+         assay_processing_r a,
+	 discrete_task_assay dta
+      PLAN d3         
+      JOIN a
+         where a.service_resource_cd = resc->resc_list[d3.seq]->service_resource_cd
+	 and a.active_ind = 1 
+      JOIN dta
+         where dta.task_assay_cd = a.task_assay_cd      
+
+      detail
+         assay_cnt = assay_cnt + 1
+         if (mod(assay_cnt,5) = 1)
+            stat = alterlist(reply->assays, assay_cnt + 5)
+         endif
+         reply->nbr_assays = assay_cnt
+         reply->assays[assay_cnt]->task_assay_cd = dta.task_assay_cd
+;001         CALL ECHO(reply->assays[assay_cnt]->task_assay_cd, 1)
+         reply->assays[assay_cnt]->default_result_type_cd = dta.default_result_type_cd
+      WITH
+         nocounter
+
+      set stat = alterlist(reply->assays, assay_cnt)
+
+
+/********************************************************************/ 
+/*  Get orderables for this service resource                        */
+/********************************************************************/
+    if (request->dta_only_ind = 0)
+      select into "nl:"
+        p.catalog_cd
+       ,oc.resource_route_lvl                                          ;001
+      from profile_task_r p,
+        order_catalog oc,                                              ;001
+        (dummyt d1 with seq = value(assay_cnt))
+      plan d1
+      join p where p.task_assay_cd = reply->assays[d1.seq].task_assay_cd
+             and p.active_ind = 1
+      join oc where oc.catalog_cd = p.catalog_cd                       ;001
+                and oc.resource_route_lvl = 2                          ;004
+                and oc.active_ind = 1                                  
+      detail
+        found = 0
+        for (cnt = 1 to order_cnt)
+          if(p.catalog_cd = reply->orders[cnt].catalog_cd)
+            found = 1
+          endif
+        endfor
+        if (found = 0)
+          order_cnt = order_cnt + 1
+          if (mod(order_cnt,5) = 1)
+            stat = alterlist(reply->orders,order_cnt + 5)
+          endif
+          reply->orders[order_cnt]->catalog_cd        = p.catalog_cd
+          reply->orders[order_cnt]->resource_route_lvl =               ;001
+            oc.resource_route_lvl                                      ;001
+          reply->orders[order_cnt]->dept_display_name =                ;001
+            oc.dept_display_name                                       ;001
+          reply->nbr_orders = order_cnt
+        endif
+      with nocounter
+
+      set stat = alterlist(reply->orders, order_cnt)
+    endif
+
+    if ((order_cnt = 0) and (assay_cnt = 0))
+       set reply->status_data->subeventstatus[1]->OperationName = "SELECT"
+       set reply->status_data->subeventstatus[1]->OperationStatus = "Z"
+       set reply->status_data->subeventstatus[1]->TargetObjectName = "TABLE"
+       set reply->status_data->subeventstatus[1]->TargetObjectValue = "ASSAY_PROCESSING_R"
+       set reply->status_data->status = "Z"
+    else    
+       set reply->status_data->status = "S"
+    endif
+
+    free record resc
+end
+go      
+
+;Generated by GNU enscript 1.6.4.

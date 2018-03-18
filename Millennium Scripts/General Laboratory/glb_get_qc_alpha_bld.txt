@@ -1,0 +1,252 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_qc_alpha_bld/glb_get_qc_alpha_bld.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_QC_ALPHA_BLD.PRG
+        Object name:            GLB_GET_QC_ALPHA_BLD
+        Request #:              257521
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve default alpha responses for assay
+                                from the order catalog
+
+        Tables read:            REFERENCE_RANGE_FACTOR,
+                                ALPHA_RESPONSES,
+                                NOMENCLATURE
+
+        Tables updated:         n/a
+
+        Executing from:         QC Material Build
+
+        Special Notes:          None
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 07/19/96 Kevin Brunner        Initial Release                     *
+;     001 12/16/97 Mike Goings          Return mnemonic on nomenclature     *
+;     002 03/23/98 Chad Moats           Default process_cd to reviewed      *
+;     003 03/11/99 Chad Moats           Check for only ACTIVE alphas        *
+;     004 04/26/99 Chad Moats           Pull alpha response from service    *
+;                                       resource passed in or where sr_cd=0 *
+;     005 08/24/00 Chris Heil           Prevent CRMSynch error in QCMaint   *
+;                                         by changing to dynamic lists and  *
+;                                         tracking max independent of       *
+;                                         alterlist.                        *
+;     006 10/11/00 Gary Runde           Use alterlist intead of alter       *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_QC_ALPHA_BLD:dba go
+      create program GLB_GET_QC_ALPHA_BLD:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 service_resource_cd   = f8
+         1 assays[x]
+           2 task_assay_cd       = f8
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+         1 assay_list[*]
+           2 task_assay_cd          = f8
+           2 alpha_responses_cnt    = i4
+           2 alpha_list[*]
+             3 nomenclature_id      = f8
+             3 source_string        = vc
+             3 mnemonic             = vc        /* 001 */
+             3 result_process_cd    = f8
+         1 status_data
+           2 status                  = c1
+           2 subeventstatus[1]
+             3 OperationName         = c15
+             3 OperationStatus       = c1
+             3 TargetObjectName      = c15
+             3 TargetObjectValue     = vc
+      )
+
+      #Script
+         declare stat                    = i4
+         declare q_cnt                   = i4
+         declare a_cnt                   = i4
+         declare max_a_cnt               = i4
+         declare nbr_of_assays           = i4
+         declare review_cd               = f8
+         if (request->service_resource_cd = null)				;004
+           set request->service_resource_cd = 0					;004
+         endif									;004
+         set reply->status_data.status = "F"
+         set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+         set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+      /***********************************************************************
+      * Get ALP_REVIEW code value                                            *
+      ***********************************************************************/
+         select into "nl:"
+            c.code_value
+         from code_value c
+         where c.code_set = 1902
+           and c.cdf_meaning = "ALP_REVIEW"
+         detail
+           review_cd = c.code_value
+         with
+           nocounter
+
+      /***********************************************************************
+      * Select reference ranges                                              *
+      ***********************************************************************/
+         set nbr_of_assays = size(request->assays,5)
+
+         select into "nl:"
+            d1.seq,
+            rr.reference_range_factor_id,
+            rr.service_resource_cd,
+            rr.task_assay_cd,
+            ar.nomenclature_id,
+            ar.result_process_cd,
+            ar.sequence,
+            n.nomenclature_id,
+            n.mnemonic,                 /* 001 */
+            n.source_string
+
+         from
+            (dummyt d1 with seq = value(nbr_of_assays)),
+            reference_range_factor rr,
+            alpha_responses ar,
+            nomenclature n
+
+         plan    d1
+         join    rr   where rr.task_assay_cd =
+                              request->assays[d1.seq].task_assay_cd
+                        and (rr.service_resource_cd = request->service_resource_cd      ;004
+                              or rr.service_resource_cd = 0)                            ;004
+                        and rr.active_ind = 1
+         join    ar   where ar.reference_range_factor_id =
+                            rr.reference_range_factor_id
+                        and ar.active_ind = 1                                           ;003
+         join    n    where ar.nomenclature_id = n.nomenclature_id
+
+         order
+            rr.task_assay_cd,
+            ar.sequence
+
+        head report
+            q_cnt = 0
+            a_cnt = 0
+            max_a_cnt = 0
+
+         head rr.task_assay_cd
+            q_cnt = q_cnt + 1
+            if (mod(q_cnt,5) = 1)
+               stat = alterlist(reply->assay_list, q_cnt + 5)
+            endif
+            reply->assay_list[q_cnt].task_assay_cd = rr.task_assay_cd
+            reply->assay_list[q_cnt].alpha_responses_cnt = 0
+            a_cnt = 0
+
+         detail
+           found_ind = 0
+           i = 1
+           while (found_ind = 0 and
+                  i <= a_cnt)
+               if (ar.nomenclature_id
+                   = reply->assay_list[q_cnt].alpha_list[i].nomenclature_id)
+                  found_ind = 1
+               endif
+             i = i + 1
+           endwhile
+           if (found_ind = 0)
+               a_cnt = a_cnt + 1
+               if (mod(a_cnt,5) = 1)
+	              stat = alterlist(reply->assay_list[q_cnt].alpha_list, a_cnt + 5)
+               endif
+               if (a_cnt > max_a_cnt)
+                  max_a_cnt = a_cnt
+               endif
+               reply->assay_list[q_cnt].alpha_responses_cnt = a_cnt
+               reply->assay_list[q_cnt].alpha_list[a_cnt].nomenclature_id =
+                 ar.nomenclature_id
+               reply->assay_list[q_cnt].alpha_list[a_cnt].result_process_cd =
+                 ar.result_process_cd
+               if (reply->assay_list[q_cnt].alpha_list[a_cnt].result_process_cd = 0)
+                 reply->assay_list[q_cnt].alpha_list[a_cnt].result_process_cd = review_cd
+               endif
+               reply->assay_list[q_cnt].alpha_list[a_cnt].mnemonic = n.mnemonic  /* 001 */
+               reply->assay_list[q_cnt].alpha_list[a_cnt].source_string =
+                 n.source_string
+           endif
+
+         foot rr.task_assay_cd
+            row+0
+
+         with nocounter
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/
+      #Resize_Reply
+         if (curqual > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+            set q_cnt = 1
+            set max_a_cnt = 1
+         endif
+;006         set stat = alter(reply->assay_list, q_cnt)
+         set stat = alterlist(reply->assay_list, q_cnt)                                 ;006
+         if (max_a_cnt = 0)
+;006            set stat = alter(reply->assay_list[1].alpha_list, max_a_cnt)
+            set stat = alterlist(reply->assay_list[1].alpha_list, max_a_cnt)            ;006
+         endif
+
+         go to exit_script
+
+      /***********************************************************************
+      * Exit Script                                                          *
+      ***********************************************************************/
+      #exit_script
+
+         end go
+
+;Generated by GNU enscript 1.6.4.

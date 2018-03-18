@@ -1,0 +1,583 @@
+ ;;Solution_Test/script/PathNet -- Common Services/pcs_get_pat_display_data/pcs_get_pat_display_data.prg Turn on black mode
+
+  /*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Author:                 Paul Lessin 
+        Date Written:           10/18/05
+        Source file name:       PCS_GET_PAT_DISPLAY_DATA.PRG
+        Object name:            PCS_GET_PAT_DISPLAY_DATA
+        Request #:              n/a
+
+        Product:                Pathnet Common Services                         
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        This script recalls patient data for a
+                                requested set of fields
+        Tables read:            
+        
+        Tables updated:         None
+        Executing from:         Patient Demographics control
+        Special Notes:           
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 10/18/05 Paul Lessin          Initial Release                     *
+;     002 11/06/05 Josh Arnold          Set Current in Historical if
+;                                       historical is  requested.
+;     003 06/07/06 Paul Lessin          Fix historical MRN                  *
+;     004 08/18/06 Matt Schile          Added linked_person_ind to the reply*
+;                                       and removed "Z" status              *
+;	  005 02/21/08 Vankadaru Kiran		Fixing Historical Age to the age at *
+;										Collected date and time				*
+;	  006 06/06/08 Vankadaru Kiran		Fixing Historical Age to the age at *
+; 										Collected date & time when Historical*
+;										indicator is OFF					*
+;     007 03/13/09 Vankadaru Kiran      Populating Historical Demographics  *
+;                                       when person combine occurs          *
+;     008 05/25/10 Kevin Power          Resolve performance issue for Helix *
+;                                       cases                               *
+;	  009 06/03/10 Abhroneel Chowdhury	Fixed defect CR 1-3870241921        *
+;     010 09/18/13 T.Gray		Added CBI - CerbatchIndex to pcs_apps.*
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program PCS_GET_PAT_DISPLAY_DATA:dba go
+create program PCS_GET_PAT_DISPLAY_DATA:dba
+
+set modify predeclare
+
+/*****************************************************
+* Structures and Includes
+*****************************************************/
+/*
+record request(
+	1  person_id         = f8
+	1  encntr_id         = f8
+	1  order_id          = f8
+	1  historical_dt_tm  = dq8
+	1  pat_fields[*]
+	   2  field_cd       = f8
+	1  app_key           = c12
+	1  container_id      = f8
+	1  ap_case_id        = f8
+)
+*/
+
+record reply (
+	1  pat_fields[*]
+	   2  field_cd       = f8
+	   2  value_type     = i2
+	   2  current_ind    = i2
+	   2  value_text     = vc
+	   2  value_date     = dq8
+	   2  value_numeric  = f8
+   	   2  value_cd       = f8
+   	   2  value_disp     = c40
+   	   2  value_mean     = c12
+  1  linked_person_ind = i2  
+%i cclsource:status_block.inc
+  1  birth_tz=i4
+)
+
+
+Record requested_fields(
+  1 qual[*]
+    2 field_cd     = f8
+    2 field_mean   = c12
+    2 current_mean = c12
+    2 reply_idx    = i4
+)
+
+%i cclsource:i18n_uar.inc
+%i cclsource:pcs_subevent.inc
+%i cclsource:pcs_format_age.inc
+%i cclsource:pcs_get_pat_display_data.inc
+
+declare HierarchLocation(dEncntrStatusCd = f8, dLocFacilityCd = f8, dLocNurseUnitCd = f8, dLocRoomCd = f8,
+       		        dLocBedCd = f8, sOrgName = vc) = null with protect
+declare NursAmbLocation(dLocNurseUnitCd = f8, dLocRoomCd = f8, dLocBedCd = f8) = null with protect
+declare RoomBedLocation(dLocRoomCd = f8, dLocBedCd = f8) = null with protect
+
+/*****************************************************
+* Variables and Constants
+*****************************************************/
+declare nStat              = i2  with protect, noconstant(0)
+declare sIcdList           = vc  with protect, noconstant("") ;Comma-delimited list of ICD9 codes
+declare sAliasList         = vc  with protect, noconstant("") ;|| delimited list of aliases
+declare nEnctnrDocSet      = i2  with protect, noconstant(0)  ;For determining whether to set Attending into Encounter Doc
+
+declare sAge               = vc  with protect, noconstant("") ;Used to return values from subroutines called within Selects
+declare sLoc               = vc  with protect, noconstant("")
+
+declare nHistLoadInd       = i2  with protect, noconstant(0)   ;Historical data will be recalled
+declare nHistRequestInd    = i2  with protect, noconstant(0)   ;Historical fields were requested
+
+declare dHistoryCd         = f8  with protect, noconstant(0.0) ;Code value of History(20790) 
+declare dCurrentNameTypeCd = f8  with protect, noconstant(0.0) ;Code value of Current(213) 
+declare dCombineAddCd      = f8  with protect, noconstant(0.0) ;Code Value of Add(327)
+declare dDisEncStatusCd    = f8  with protect, noconstant(0.0) ;Code value of Discharged(216)
+declare dAdmitEncPrsnlRCd  = f8  with protect, noconstant(0.0) ;Code value of Admitdoc(333)
+declare dAttendEncPrsnlRCd = f8  with protect, noconstant(0.0) ;Code value of Attenddoc(333)
+declare dReferEncPrsnlRCd  = f8  with protect, noconstant(0.0) ;Code value of Referdoc(333)
+declare dAdmitDiagTypeCd   = f8  with protect, noconstant(0.0) ;Code value of Admit(17)
+declare dOrdDiagTypeCd     = f8  with protect, noconstant(0.0) ;Code value of OrderIcd9(23549)
+declare dMrnAliasTypeCd    = f8  with protect, noconstant(0.0) ;Code value of MRN(4) 
+declare dCmrnAliasTypeCd   = f8  with protect, noconstant(0.0) ;Code value of Community MRN(4) 
+declare dSsnAliasTypeCd    = f8  with protect, noconstant(0.0) ;Code value of SSN(4) 
+declare dNhsAliasTypeCd    = f8  with protect, noconstant(0.0) ;Code value of NHIN(4)
+declare dMilitaryAliasTypeCd = f8 with protect, noconstant(0.0) ;Code value of MILITARYID(4)
+declare dOutreachAliasTypeCd = f8 with protect, noconstant(0.0) ;Code value of OUTREACH(4)
+declare dHicrAliasTypeCd   = f8  with protect, noconstant(0.0) ;Code value of HICR(4)
+declare dIntldAliasTypeCd  = f8  with protect, noconstant(0.0) ;Code value of INTLD(4)
+declare dNmdpdAliasTypeCd  = f8  with protect, noconstant(0.0) ;Code value of NMDPD(4)
+declare dNmdprAliasTypeCd  = f8  with protect, noconstant(0.0) ;Code value of NMDPR(4)
+declare dOpodAliasTypeCd   = f8  with protect, noconstant(0.0) ;Code value of OPOD(4)
+declare dOporAliasTypeCd   = f8  with protect, noconstant(0.0) ;Code value of OPOR(4)
+declare dUnosdAliasTypeCd  = f8  with protect, noconstant(0.0) ;Code value of UNOSD(4)
+declare dVisitAliasTypeCd  = f8  with protect, noconstant(0.0) ;Code value of VISIT(319) 
+declare dEmrnAliasTypeCd   = f8  with protect, noconstant(0.0) ;Code value of Encounter MRN(319) 
+declare dEfinAliasTypeCd   = f8  with protect, noconstant(0.0) ;Code value of Encounter FIN(319)
+declare dPhnAliasTypeCd    = f8  with protect, noconstant(0.0) ;Code value of PHN - SHIN(4)
+declare dOrderActionTypeCd = f8  with protect, noconstant(0.0) ;Code value of Order(6003)
+declare dModifyActionTypeCd= f8  with protect, noconstant(0.0) ;Code value of Modify(6003)
+declare dActivateActionTypeCd = f8  with protect, noconstant(0.0) ;Code value of Activate(6003)
+declare dFamilyCd          = f8  with protect, noconstant(0.0) ;Code value of Family(351)
+declare dActiveStatusCd    = f8 with protect, noconstant(0.0) ;Code value of Active(CS 48)
+declare dOrderId           = f8  with protect, noconstant(0.0)
+declare dBbProductEventId  = f8  with protect, noconstant(0.0)
+declare dApCaseId          = f8  with protect, noconstant(0.0)
+declare dCurrentPersonId = f8 with protect, noconstant(0.0)
+ 
+declare lReqCnt            = i4  with protect, noconstant(0)  ;Number of fields in request
+declare lFieldCnt          = i4  with protect, noconstant(0)  ;Number of fields in temporary field structure
+
+declare lIdx               = i4  with protect, noconstant(0)  ;Indexes for EXPAND
+declare h                  = i4  with protect, noconstant(0)
+
+declare dLastPersonAliasId = f8  with protect, noconstant(0.0)
+ 
+declare lHISTORYCODESET    = i4  with protect, constant(20790);Code set constants
+declare lFIELDCODESET      = i4  with protect, constant(4000821)
+
+
+declare lBATCHSIZE         = i4  with protect, constant(100)  ;Batch size for Expand
+declare lStart             = i4  with protect, noconstant(0)  ;expand starting
+declare lLoopCnt           = i4  with protect, noconstant(0)  ;expand loop count
+declare lTempCnt           = i4  with protect, noconstant(0)  ;temporary count
+
+declare sDELIM             = c3  with protect, constant(" / ")
+
+;Slightly < one minute, expressed as a fraction of a day, used for rounding up
+declare dMINUTE            = f8  with protect, constant(1/1450.0) 
+
+declare mic_apps           = vc  with protect, constant("MICINQ|MICLOGIN|MICRE")
+declare hla_apps           = vc  with protect, constant("HAPLOCHART|HLAHIST|DEFORGDON|DEFORGREC|DEFPERSREL")
+declare ap_apps            = vc  with protect, 
+    constant("CASEFIND|CASESTATUS|CYTORE|HISTINQ|MAINTCASE|ONLRVW|ONLRVWWRD|PTOE|TRANS|TRANSWRD")
+declare pcs_apps           = vc  with protect, constant("ORV|DOE|RQ|CBI")
+declare glb_apps           = vc  with protect, constant("ARE|POCRE")
+declare scs_apps           = vc  with protect, constant("SPECLOGIN|COLLINQ|CONTINQ|MODCOLL")
+declare osm_apps           = vc  with protect, constant("ROE")
+declare hla_alias_apps     = vc  with protect, 
+        constant("ORV|DOE|RQ|SPECLOGIN|COLLINQ|CONTINQ|MODCOLL|ARE|POCRE|HAPLOCHART|HLAHIST|DEFORGDON|DEFORGREC|DEFPERSREL|UCM")
+        
+;Variables used for PHN
+declare sMnemOnorOff = vc with protect, noconstant("")
+declare sPHNAlias = vc with protect, noconstant("")
+declare dPHNAliasPoolCd = f8 with protect, noconstant(0.0)
+
+;Variable used to store case collected date & time
+declare case_collect_dt_tm = dq8 with protect
+
+;*store a temporary list of orderId's
+declare hlx_order_cnt = i4 with protect, noconstant(0)
+record hlx_orders
+(
+  1 list[*]
+    2 order_id = f8
+)
+
+/*********************************************************************
+/* Preliminaries
+***********************************************************************/
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev) 
+
+set lReqCnt = size(request->pat_fields, 5)
+if (lReqCnt = 0)
+	set reply->status_data->status = "Z"
+	call subevent_add("GET","Z","Request", "Failure -- No fields in  request")
+	go to Exit_Script
+endif
+
+set reply->status_data->status = "F"
+if (request->person_id = 0)
+	call subevent_add("GET","F","Request", "Failure -- No person_id in request")
+	go to Exit_Script
+endif
+
+set nStat = uar_get_meaning_by_codeset(lHISTORYCODESET, "HISTORY", 1, dHistoryCd)
+
+set nStat = uar_get_meaning_by_codeset(213, "CURRENT", 1, dCurrentNameTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (213 - CURRENT)")
+  go to Exit_Script
+endif
+
+set nStat = uar_get_meaning_by_codeset(48, "ACTIVE", 1, dActiveStatusCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (48 - ACTIVE)")
+  go to Exit_Script
+endif 
+ 
+set nStat = uar_get_meaning_by_codeset(327, "ADD", 1, dCombineAddCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (327 - ADD)")
+  go to Exit_Script
+endif
+ 
+set nStat = uar_get_meaning_by_codeset(4, "MRN", 1, dMrnAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (4 - MRN)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "CMRN", 1, dCMrnAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (4 - CMRN)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "SSN", 1, dSsnAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (4 - SSN)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "NHIN", 1, dNhsAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (4 - NHIN)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "MILITARYID", 1, dMilitaryAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR", "F", "UAR", "CODE_VALUE (4 - MILITARYID)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "OUTREACH", 1, dOutreachAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR", "F", "UAR", "CODE_VALUE (4 - OUTREACH)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "HICR", 1, dHicrAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR", "F", "UAR", "CODE_VALUE (4 - HICR)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "INTLD", 1, dIntldAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR", "F", "UAR", "CODE_VALUE (4 - INTLD)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "NMDPD", 1, dNmdpdAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR", "F", "UAR", "CODE_VALUE (4 - NMDPD)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "NMDPR", 1, dNmdprAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR", "F", "UAR", "CODE_VALUE (4 - NMDPR)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "OPOD", 1, dOpodAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR", "F", "UAR", "CODE_VALUE (4 - OPOD)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "OPOR", 1, dOporAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR", "F", "UAR", "CODE_VALUE (4 - OPOR)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "UNOSD", 1, dUnosdAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR", "F", "UAR", "CODE_VALUE (4 - UNOSD)")
+  go to Exit_Script
+endif
+
+set nStat = uar_get_meaning_by_codeset(319, "VISITID", 1, dVisitAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (319 - VISITID)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(319, "MRN", 1, dEmrnAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (319 - MRN)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(319, "FIN NBR", 1, dEfinAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (319 - FIN NBR)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(4, "SHIN", 1, dPhnAliasTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR", "F", "UAR", "CODE_VALUE (4 - SHIN)")
+  go to Exit_Script
+endif
+
+set nStat = uar_get_meaning_by_codeset(261, "DISCHARGED", 1, dDisEncStatusCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (261 - DISCHARGED)")
+  go to Exit_Script
+endif
+
+set nStat = uar_get_meaning_by_codeset(333, "ADMITDOC", 1, dAdmitEncPrsnlRCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (333 - ADMITDOC)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(333, "ATTENDDOC", 1, dAttendEncPrsnlRCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (333 - ATTENDDOC)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(333, "REFERDOC", 1, dReferEncPrsnlRCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (333 - REFERDOC)")
+  go to Exit_Script
+endif
+
+set nStat = uar_get_meaning_by_codeset(17, "ADMIT", 1, dAdmitDiagTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (17 - ADMIT)")
+  go to Exit_Script
+endif
+
+set nStat = uar_get_meaning_by_codeset(23549, "ORDERICD9", 1, dOrdDiagTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (23549 - ORDERICD9)")
+  go to Exit_Script
+endif
+
+set nStat = uar_get_meaning_by_codeset(6003, "ORDER", 1, dOrderActionTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (6003 - ORDER)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(6003, "MODIFY", 1, dModifyActionTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (6003 - MODIFY)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(6003, "ACTIVATE", 1, dActivateActionTypeCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (6003 - ACTIVATE)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(351, "FAMILY", 1, dFamilyCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (351 - FAMILY)")
+  go to Exit_Script
+endif
+
+if (findstring(request->app_key, hla_apps) and (request->encntr_id = 0.0)) 
+    SELECT into "nl:"
+    FROM encounter e
+    WHERE e.person_id = request->person_id
+    ORDER BY e.beg_effective_dt_tm desc
+    DETAIL
+          request->encntr_id = e.encntr_id
+    WITH maxrec = 1
+endif
+
+if (request->ap_case_id > 0.0)
+   SELECT into "nl:"
+   FROM pathology_case pc
+   WHERE request->ap_case_id = pc.case_id
+   DETAIL
+         if (request->encntr_id = 0.0)
+            request->encntr_id = pc.encntr_id
+         endif
+         case_collect_dt_tm = cnvtdatetime(pc.case_collect_dt_tm)
+         if (nullind(pc.main_report_cmplete_dt_tm) = 0)
+           request->historical_dt_tm = cnvtdatetime(pc.main_report_cmplete_dt_tm)
+         else
+           request->historical_dt_tm = cnvtdatetime(pc.case_collect_dt_tm)   
+         endif   
+   WITH nocounter
+endif
+
+/*********************************************************************
+/*  Record relationships between historial and current fields.
+**********************************************************************/
+SELECT into "nl:"
+	pdf.current_field_cd
+FROM pcs_demographic_field pdf
+PLAN pdf WHERE expand(lIdx, 1, lReqCnt, pdf.field_cd, request->pat_fields[lIdx].field_cd, lBATCHSIZE)
+DETAIL
+	lFieldCnt = lFieldCnt + 1
+	if (mod(lFieldCnt, 5) = 1)
+		nStat = alterlist(requested_fields->qual, lFieldCnt + 4)
+    endif
+    requested_fields->qual[lFieldCnt].field_cd = pdf.field_cd
+	requested_fields->qual[lFieldCnt].field_mean = uar_get_code_meaning(pdf.field_cd)
+    
+	if (pdf.historical_ind = 1)
+		requested_fields->qual[lFieldCnt].current_mean = uar_get_code_meaning(pdf.current_field_cd)
+		nHistRequestInd = 1
+    endif
+FOOT report
+	nStat = alterlist(requested_fields->qual, lFieldCnt)
+WITH nocounter
+
+/*********************************************************************
+/*  Set defaults and historical-possible flag
+**********************************************************************/
+if (request->order_id > 0 and (request->encntr_id = 0 or request->historical_dt_tm = 0))
+	SELECT into "nl:"
+		o.encntr_id
+	FROM orders o
+	WHERE o.order_id = request->order_id
+	DETAIL
+		if (request->encntr_id = 0)
+			request->encntr_id = o.encntr_id
+		endif
+		if (request->historical_dt_tm = 0)
+			request->historical_dt_tm = o.current_start_dt_tm
+		endif
+	WITH nocounter
+endif
+ 
+/* Determine the historical_dt_tm and encntr_id when request has a product_event_id and no order_id */
+ 
+If (request->order_id = 0 and request->product_event_id > 0)
+	SELECT into "nl:"
+		pe.event_dt_tm
+	FROM product_event pe
+	WHERE pe.product_event_id = request->product_event_id
+	DETAIL
+		if (request->historical_dt_tm = 0)
+			request->historical_dt_tm = pe.event_dt_tm
+		endif
+		if (request->encntr_id = 0)
+			request->encntr_id = pe.encntr_id
+		endif
+	WITH nocounter
+Endif
+if (request->historical_dt_tm = 0)
+	;If we don't have an historical date then history not requested
+	set nHistRequestInd = 0
+else
+	;Round up the historical datetime to work around filing-time round-off errors
+	set request->historical_dt_tm = datetimeadd(request->historical_dt_tm, dMINUTE)
+endif
+
+if (nHistRequestInd = 1 and dHistoryCd > 0.0)
+	SELECT into "nl:"
+	FROM code_value_extension cve
+	WHERE cve.code_value = dHistoryCd
+	  AND cve.field_name = "OPTION"
+	  AND cve.code_set = lHISTORYCODESET
+	DETAIL 
+		if (trim(cve.field_value,3) = "1")
+			nHistLoadInd = 1
+		endif
+	WITH nocounter
+endif
+
+/*********************************************************************
+/* Get current patient data
+***********************************************************************/
+SELECT into "nl:"
+		p.person_id
+	FROM person p
+	PLAN p WHERE p.person_id = request->person_id
+	         AND p.active_ind = 1 
+	         AND p.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3) 
+	             AND p.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3) 
+	DETAIL
+		call ReplyTextField("NAME", p.name_full_formatted, 1)
+		call ReplyCodeField("SEX", p.sex_cd, 1)
+		call ReplyCodeField("RACE", p.race_cd, 1)
+		call ReplyDateField("DOB", p.birth_dt_tm, 1) 
+		call ReplyTimeField("BIRTHTIME", p.birth_dt_tm, 1)
+		reply->birth_tz=p.birth_tz
+		sAge = FormatAge(p.birth_dt_tm,p.deceased_dt_tm,"CHRONOAGE")
+		call ReplyTextField("AGE", sAge, 1)
+		if (nHistRequestInd = 1) 
+			if (request->ap_case_id > 0.0)
+				if ((p.deceased_dt_tm != NULL) and (p.deceased_dt_tm < case_collect_dt_tm))
+					sAge = FormatAge(p.birth_dt_tm,p.deceased_dt_tm,"CHRONOAGE")
+				else
+					sAge = FormatAge(p.birth_dt_tm,case_collect_dt_tm,"CHRONOAGE")
+				endif
+		    else
+			    if ((p.deceased_dt_tm != NULL) and (p.deceased_dt_tm < request->historical_dt_tm))
+					sAge = FormatAge(p.birth_dt_tm,p.deceased_dt_tm,"CHRONOAGE")
+				else
+					sAge = FormatAge(p.birth_dt_tm,request->historical_dt_tm,"CHRONOAGE")
+				endif
+			endif
+		    call ReplyTextField("HXAGE", sAge, 0)
+		endif
+		call ReplyCodeField("AUTOPSYIND", p.autopsy_cd, 1)
+		call ReplyCodeField("DECEASEDIND", p.deceased_cd, 1)
+		call ReplyDateTimeField("DECEASEDDTTM", p.deceased_dt_tm, 1)
+		call ReplyCodeField("LANGUAGE", p.language_cd, 1)
+		call ReplyCodeField("SPECIES", p.species_cd, 1)
+		call ReplyCodeField("MILITARYSTAT", p.vet_military_status_cd, 0)
+	WITH nocounter
+
+ 
+SELECT into "nl:"
+		pa.alias
+	FROM person_alias pa
+	PLAN pa WHERE pa.person_id = request->person_id
+		      AND pa.active_ind = 1
+ 		      AND pa.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3) 
+              AND pa.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3) 
+              AND pa.person_alias_type_cd IN (dMrnAliasTypeCd, dSsnAliasTypeCd, dNhsAliasTypeCd, dCmrnAliasTypeCd,
+                                              dMilitaryAliasTypeCd, dOutreachAliasTypeCd, dHicrAliasTypeCd, dINTldAliasTypeCd,
+                                              dNmdpdAliasTypeCd, dNmdprAliasTypeCd, dOpodAliasTypeCd, dOporAliasTypeCd,
+                                              dUnosdAliasTypeCd, dPhnAliasTypeCd)
+    ORDER BY pa.person_alias_type_cd, pa.beg_effective_dt_tm DESC
+    HEAD pa.person_alias_type_cd
+        sAliasList = ""
+    DETAIL 
+        if (sAliasList != "")
+            sAliasList = build2(trim(sAliasList), "||")
+        endif
+        sAliasList = concat(trim(sAliasList), cnvtalias(pa.alias, pa.alias_pool_cd))
+    FOOT pa.person_alias_type_cd
+    	case (pa.person_alias_type_cd)
+	    	of dMrnAliasTypeCd:
+	    		call ReplyTextField("PMRN", sAliasList, 1)
+	    	of dCmrnAliasTypeCd:
+	    		call Re

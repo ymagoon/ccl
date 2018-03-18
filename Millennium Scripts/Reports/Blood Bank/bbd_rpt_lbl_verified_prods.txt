@@ -1,0 +1,835 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/bbd_rpt_lbl_verified_prods/bbd_rpt_lbl_verified_prods.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2006 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbd_rpt_lbl_verified_prods.prg
+        Object name:            bbd_rpt_lbl_verified_prods
+        Request #:              225682
+
+        Product:                Blood Bank
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            Rev 8.0
+
+        Program purpose:        Generates a list of label verified products donated 
+                                for a specific time range.
+
+        Tables read:            PRODUCT_EVENT
+                                BLOOD_PRODUCT
+                                PRODUCT
+
+        Tables updated:         NONE
+        
+        Executing from:         Report Selection
+
+        Special Notes:          NONE
+
+;~DB~****************************************************************************************
+;*                      GENERATED MODIFICATION CONTROL LOG                                  *
+;********************************************************************************************
+;*                                                                                          *
+;*Mod Date     Engineer             ITN     Feature      Comment                            *
+;*--- -------- -------------------- ------- ------------ -----------------------------------*
+;*000 1/26/05  Tom Brecht            0120161 65948        Initial Release                   *
+;*001 1/09/09  Amy Gum               0135050 186158       Add Pooled ABO/RHs to report      *
+;*002 4/29/10  Archita S	     0144446 251384	  Add code to print the pooled ABORH*
+;							  to report without truncation      *	
+;*003 11/18/11 Gayatri Samala        0152661 311895       Added code to generate the report *
+;                                                         successfully when the product     *
+;                                                         names are unique till 25 characters *		 		
+;~DE~****************************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ***********************************/
+
+drop program bbd_rpt_lbl_verified_prods:dba go
+create program bbd_rpt_lbl_verified_prods:dba
+
+
+/*****************************************************************************/
+/* Request record                                                            */
+/*****************************************************************************/
+/*
+record request
+(
+  1 beg_dt_tm = dq8
+  1 end_dt_tm = dq8
+  1 batch_selection = c100
+  1 output_dist = c100
+  1 ops_date = dq8
+  1 cur_owner_area_cd = f8
+  1 cur_inv_area_cd = f8
+  1 address_location_cd = f8
+  1 null_ind = i2
+)
+*/
+
+
+/*****************************************************************************/
+/* Reply record                                                              */
+/*****************************************************************************/
+record reply
+(
+  1 rpt_list[*]
+    2 rpt_filename  = vc     
+%i cclsource:status_block.inc
+)
+
+%i cclsource:pcs_subevent.inc
+%i cclsource:bbt_ops_parm_passed.inc
+
+/*****************************************************************************/
+/* Temporary Record Structure                                                */
+/*****************************************************************************/
+free set aborh
+record aborh
+(
+  1 qual[*]
+    2 aborh_cd   = f8
+    2 abo_cd     = f8
+    2 rh_cd      = f8
+    2 aborh_disp = c10
+    2 count      = i4
+    2 abo_disp   = c10
+    2 rh_disp    = c10
+    2 pooled_ind = i2
+)
+
+free set products
+record products
+(
+  1 qual[*]
+    2 name       = c25
+    2 product_cd = f8
+    2 tot_reg_count  = i4
+    2 tot_pool_count = i4
+    2 prods[*]
+      3 count    = i4
+      3 pooled_ind = i2
+)
+
+/*****************************************************************************/
+/* Variable declarations                                                     */
+/*****************************************************************************/
+set modify predeclare
+
+declare i18nHandle          = i4   with protect, noconstant(0)
+declare count               = i4   with protect, noconstant(0)
+declare index               = i4   with protect, noconstant(0)
+declare errmsg              = c132 with protect, noconstant(fillstring(132," "))
+declare error_check         = i2   with protect, noconstant(error(errmsg,1))
+declare stat                = i4   with protect, noconstant(0)
+declare pooled_prods_day      = i2   with protect, noconstant(0)
+declare reg_headers_printed = i2  with protect, noconstant(0)
+
+declare SCRIPT_NAME         = c26  with protect, constant("bbd_rpt_lbl_verified_prods")
+declare VERIFIED_CD         = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1610, "23"))
+declare A_POS_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "APOS"))
+declare O_POS_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "OPOS"))
+declare B_POS_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "BPOS"))
+declare AB_POS_CD           = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "ABPOS"))
+declare A_NEG_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "ANEG"))
+declare O_NEG_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "ONEG"))
+declare B_NEG_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "BNEG"))
+declare AB_NEG_CD           = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "ABNEG"))
+
+declare A_POOL_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "APOOLRH"))
+declare O_POOL_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "OPOOLRH"))
+declare B_POOL_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "BPOOLRH"))
+declare AB_POOL_CD           = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "ABPOOLRH"))
+declare POOL_NEG_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "POOLABONEG"))
+declare POOL_POS_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "POOLABOPOS"))
+declare POOL_POOL_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "POOLABOPLRH"))
+declare POOL_ABO_CD           = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "POOLABO"))
+
+declare LINE8               = c8   with protect, constant(fillstring(8,"-"))
+declare LINE25              = c25  with protect, constant(fillstring(25,"-"))
+declare LINE131             = c131 with protect, constant(fillstring(131,"-"))
+
+/*****************************************************************************/
+/* Internationalization                                                      */
+/*****************************************************************************/
+%i cclsource:i18n_uar.inc
+
+set stat = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+
+record captions
+(
+  1 as_of_date          = vc
+  1 beg_date            = vc
+  1 end_date            = vc
+  1 rpt_owner           = vc
+  1 rpt_all             = vc
+  1 rpt_inv_area        = vc
+  1 rpt_prod_sum        = vc
+  1 rpt_date            = vc
+  1 rpt_total           = vc
+  1 rpt_title           = vc
+  1 rpt_page            = vc
+  1 rpt_time            = vc
+  1 head_products       = vc
+  1 end_of_report       = vc
+)
+
+set captions->as_of_date = uar_i18ngetmessage(i18nHandle,
+  "as_of_date", "As Of Date:")
+set captions->rpt_title = uar_i18ngetmessage(i18nHandle,
+  "rpt_title", "SUMMARY OF LABEL-VERIFIED PRODUCTS")
+set captions->rpt_page = uar_i18ngetmessage(i18nHandle,
+  "rpt_page", "Page:")
+set captions->rpt_time = uar_i18ngetmessage(i18nHandle,
+  "rpt_time", "Time:")
+set captions->beg_date = uar_i18ngetmessage(i18nHandle,
+  "beg_date", "Beginning Date:")
+set captions->end_date = uar_i18ngetmessage(i18nHandle,
+  "end_date", "Ending Date:")  
+set captions->rpt_owner = uar_i18ngetmessage(i18nHandle,
+  "rpt_owner", "Blood Bank Owner:")
+set captions->rpt_inv_area = uar_i18ngetmessage(i18nHandle,
+  "rpt_inv_area", "Inventory Area:")
+set captions->rpt_prod_sum = uar_i18ngetmessage(i18nHandle,
+  "rpt_prod_sum", "Products Summary")
+set captions->rpt_total = uar_i18ngetmessage(i18nHandle,
+  "rpt_total", "Total")
+set captions->rpt_date = uar_i18ngetmessage(i18nHandle,
+  "rpt_date", "Label Verified Date")
+set captions->rpt_all = uar_i18ngetmessage(i18nHandle,
+  "rpt_all", "(All)") 
+set captions->head_products = uar_i18ngetmessage(i18nHandle,
+  "head_products", "Product")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "*** End of Report ***")
+  
+  
+/*****************************************************************************/
+/* Script                                                                    */
+/*****************************************************************************/
+
+if( VERIFIED_CD = 0.0 )
+    set reply->status_data.status = "F"
+    call subevent_add ("bbd_rpt_lbl_verified_prods.prg", "F", "uar_get_code_by",
+        "Unable to retrieve the code_value for the cdf_meaning in code_set 1610.")
+    set reply->status = "F"
+    go to EXIT_SCRIPT
+endif
+
+set reply->status_data->status = "Z"
+set modify nopredeclare
+; Check for batch selection parameters
+if (size(trim(request->batch_selection)) > 0)
+    set begday = request->ops_date
+    set endday = request->ops_date
+    set temp_string = cnvtupper(trim(request->batch_selection))
+    CALL CHECK_OPT_DATE_PASSED(SCRIPT_NAME)
+    if (reply->status_data->status != "F")
+        set request->beg_dt_tm = begday
+        set request->end_dt_tm = endday
+    endif    
+    call CHECK_OWNER_CD (SCRIPT_NAME)
+    call CHECK_INVENTORY_CD (SCRIPT_NAME)
+    call CHECK_LOCATION_CD (SCRIPT_NAME)
+    call CHECK_NULL_REPORT(SCRIPT_NAME)
+endif
+
+%i cclsource:bbt_get_location_info.inc
+
+set modify predeclare
+
+set reply->status_data->status = "F"; Status set here to allow batch parameters to be checked
+set count = size(aborh->qual, 5)
+if(A_POS_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = A_POS_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(A_POS_CD) )
+    set aborh->qual[count].pooled_ind = 0
+endif
+set count = size(aborh->qual, 5)
+if(O_POS_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = O_POS_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(O_POS_CD) )
+    set aborh->qual[count].pooled_ind = 0
+endif
+set count = size(aborh->qual, 5)
+if(B_POS_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = B_POS_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(B_POS_CD) )
+    set aborh->qual[count].pooled_ind = 0
+endif
+set count = size(aborh->qual, 5)
+if(AB_POS_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = AB_POS_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(AB_POS_CD) )
+    set aborh->qual[count].pooled_ind = 0
+endif
+set count = size(aborh->qual, 5)
+if(A_NEG_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = A_NEG_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(A_NEG_CD) )
+    set aborh->qual[count].pooled_ind = 0
+endif
+if(O_NEG_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = O_NEG_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(O_NEG_CD) )
+    set aborh->qual[count].pooled_ind = 0
+endif
+if(B_NEG_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = B_NEG_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(B_NEG_CD) )
+    set aborh->qual[count].pooled_ind = 0
+endif
+if(AB_NEG_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = AB_NEG_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(AB_NEG_CD) )
+    set aborh->qual[count].pooled_ind = 0
+endif
+
+if(A_POOL_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = A_POOL_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(A_POOL_CD) )
+    set aborh->qual[count].pooled_ind = 1
+endif
+if(O_POOL_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = O_POOL_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(O_POOL_CD) )
+    set aborh->qual[count].pooled_ind = 1
+endif
+if(B_POOL_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = B_POOL_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(B_POOL_CD) )
+    set aborh->qual[count].pooled_ind = 1
+endif
+if(AB_POOL_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = AB_POOL_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(AB_POOL_CD) )
+    set aborh->qual[count].pooled_ind = 1
+endif
+if(POOL_NEG_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = POOL_NEG_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(POOL_NEG_CD) )
+    set aborh->qual[count].pooled_ind = 1
+endif
+if(POOL_POS_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = POOL_POS_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(POOL_POS_CD) )
+    set aborh->qual[count].pooled_ind = 1
+endif
+if(POOL_POOL_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = POOL_POOL_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(POOL_POOL_CD) )
+    set aborh->qual[count].pooled_ind = 1
+endif
+if(POOL_ABO_CD != 0.0)
+    set count = count + 1
+    set stat = alterlist(aborh->qual, count)
+    set aborh->qual[count].aborh_cd = POOL_ABO_CD
+    set aborh->qual[count].aborh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(POOL_ABO_CD) )
+    set aborh->qual[count].pooled_ind = 1
+endif
+
+select c.code_value
+from code_value_extension c
+where expand(index, 1, size(aborh->qual, 5), c.code_value, aborh->qual[index].aborh_cd)
+  and c.field_name in ("ABOOnly_cd", "RhOnly_cd")
+detail
+    pos = locateval(index, 1, size(aborh->qual, 5), c.code_value, aborh->qual[index].aborh_cd)
+    if( c.field_name = "ABOOnly_cd" )
+        aborh->qual[pos].abo_cd = cnvtreal(c.field_value)
+    else
+        aborh->qual[pos].rh_cd = cnvtreal(c.field_value)
+    endif
+with  nocounter
+
+for (i = 1 to size(aborh->qual, 5))
+    set aborh->qual[i].abo_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(aborh->qual[i].abo_cd) )
+    set aborh->qual[i].rh_disp = substring( 1, 10, UAR_GET_CODE_DISPLAY(aborh->qual[i].rh_cd) )
+endfor
+
+if( curqual = 0 )
+    set reply->status_data.status = "F"
+    call subevent_add ("bbd_rpt_lbl_verified_prods.prg", "F", "uar_get_code_by",
+        "Unable to retrieve the code_values for the abo and rh codes.")
+    set reply->status = "F"
+    go to EXIT_SCRIPT
+endif
+
+; generate a unique filename for the report
+execute cpm_create_file_name_logical "bbd_lbl_vrfd_prods", "txt", "x"
+
+select 
+    if (request->null_ind = 1)
+        with nullreport, compress, nolandscape
+    else
+        with nocounter, compress, nolandscape
+    endif
+
+into cpm_cfn_info->file_name_logical
+    verfd_date = cnvtdate(pe.event_dt_tm),
+    p_product_disp = cnvtalphanum(uar_get_code_display( p.product_cd )),
+    p_product_disp_show = substring(1, 25, uar_get_code_display( p.product_cd )),
+    p_owner_area = uar_get_code_display( p.cur_owner_area_cd ),
+    p_inv_area = uar_get_code_display( p.cur_inv_area_cd )
+
+from
+    product_event  pe,
+    blood_product  bp,
+    product  p
+
+plan pe where  pe.event_type_cd = VERIFIED_CD
+          and  pe.event_dt_tm between  cnvtdatetime( request->beg_dt_tm ) 
+                                  and  cnvtdatetime( request->end_dt_tm )
+join bp where  bp.product_id = pe.product_id
+join p where  p.product_id = bp.product_id
+         and  (( request->cur_inv_area_cd != 0.0 and p.cur_inv_area_cd = request->cur_inv_area_cd )
+           or  ( request->cur_inv_area_cd = 0.0 ))
+         and  (( request->cur_owner_area_cd != 0.0 and p.cur_owner_area_cd = request->cur_owner_area_cd )
+           or  ( request->cur_owner_area_cd = 0.0 ))
+
+order by
+    p_owner_area,
+    p_inv_area,
+    verfd_date,
+    p_product_disp
+        
+head report
+    first_page = 1
+    NEW_SUM_PAGE = 0
+    pooled_prods_summary = 0
+    
+head page   
+    row 0
+    rpt_row = 0
+    call center(captions->rpt_title, 0, 125)
+    col 110, captions->rpt_time
+    col 122, curtime
+    row + 1
+    col 110, captions->as_of_date
+    col 122, curdate "@DATECONDENSED;;d"
+    SAVE_ROW = row
+%i cclsource:bbt_print_location_info.inc 
+    if( SAVE_ROW > row )
+        row SAVE_ROW
+    endif
+    row + 1
+    col 30, captions->beg_date
+    col 46, request->beg_dt_tm "@DATETIMECONDENSED;;d"
+    col 72, captions->end_date
+    col 85, request->end_dt_tm "@DATETIMECONDENSED;;d"
+    row + 2
+    if( NEW_SUM_PAGE = 0 )
+        col 0, captions->rpt_owner
+        col 18, p_owner_area
+        row + 1
+        col 0, captions->rpt_inv_area
+        col 18, p_inv_area
+        row + 2
+        col 0, captions->rpt_date
+        row + 1
+        col 0, captions->head_products
+        if(pooled_prods_day = 0)
+            column = 27
+            for( i = 1 to size(aborh->qual, 5) ) 
+                if(aborh->qual[i].pooled_ind = 0)
+                    col column, aborh->qual[i].aborh_disp
+                    column = column + 10
+                endif
+            endfor
+            col column, captions->rpt_total
+            row + 1
+            col 0, LINE25
+            column = 27
+            for( i = 1 to size(aborh->qual, 5) ) 
+                if(aborh->qual[i].pooled_ind = 0)
+                    col column, LINE8
+                    column = column + 10
+                endif
+            endfor
+            col column, LINE8
+            row + 1
+            reg_headers_printed = 1
+        endif
+    endif
+
+head p_owner_area
+    if( first_page != 1 )
+        first_page = 1
+        break
+    endif
+    
+head p_inv_area
+    if( first_page = 1 )
+        first_page = 0
+    else
+        break
+    endif
+    
+head verfd_date  
+    if( row > 55 )
+        break
+    endif
+    col 0, verfd_date "@SHORTDATE;;d"    
+    if(pooled_prods_day = 1 and reg_headers_printed = 0)
+        column = 27
+        for( i = 1 to size(aborh->qual, 5) ) 
+            if(aborh->qual[i].pooled_ind = 0)
+                col column, aborh->qual[i].aborh_disp
+                column = column + 10
+            endif
+        endfor
+        col column, captions->rpt_total
+        row + 1
+        column = 27
+        for( i = 1 to size(aborh->qual, 5) ) 
+            if(aborh->qual[i].pooled_ind = 0)
+                col column, LINE8
+                column = column + 10
+            endif
+        endfor
+        col column, LINE8
+        row + 1
+    else
+        reg_headers_printed = 0
+    endif
+    pooled_prods_day = 0
+    row + 1
+
+head p_product_disp   
+    num_recs = size(products->qual, 5) 
+    pos = locateval(index, 1, num_recs, p.product_cd, products->qual[index].product_cd) 
+                                                                                        
+    if( pos = 0 ) 
+        num_recs = num_recs + 1
+        stat = alterlist(products->qual, num_recs) 
+        products->qual[num_recs].name = p_product_disp_show
+        products->qual[num_recs].product_cd = p.product_cd
+        p_size = size(aborh->qual, 5)
+        stat = alterlist(products->qual[num_recs].prods, p_size)
+    endif
+    for( i = 1 to size(aborh->qual, 5) ) 
+        aborh->qual[i].count = 0
+    endfor
+    
+detail
+    num_recs = size(aborh->qual, 5) 
+    a_pos = locateval(index, 1, num_recs, bp.cur_abo_cd, aborh->qual[index].abo_cd) 
+    if(a_pos > 0)
+        while((aborh->qual[a_pos].rh_cd != bp.cur_rh_cd ) AND (aborh->qual[a_pos].abo_cd = bp.cur_abo_cd )
+            AND (a_pos < num_recs) AND (a_pos > 0))
+            start_pos = a_pos + 1
+            a_pos = locateval(index, start_pos, num_recs, bp.cur_abo_cd, aborh->qual[index].abo_cd)        
+        endwhile      
+        if(aborh->qual[a_pos].rh_cd = bp.cur_rh_cd ) 
+            aborh->qual[a_pos].count = aborh->qual[a_pos].count + 1 
+        endif
+    endif
+
+foot p_product_disp  
+    if( row > 56 )
+        break
+    endif
+    num_recs = size(products->qual, 5)
+    p_pos = locateval(index, 1, num_recs, p.product_cd, products->qual[index].product_cd)
+    num_recs = size(aborh->qual, 5)
+    
+    p_tot = count(p.product_id)
+    ptot_str = cnvtstring( p_tot )
+    p_section_cnt = 0 
+    col 0, p_product_disp_show ";r"
+    column = 30
+    for( i = 1 to size(aborh->qual, 5) )
+        if( aborh->qual[i].pooled_ind = 0 ) 
+            if( aborh->qual[i].count > 0 )
+                products->qual[p_pos].prods[i].count = products->qual[p_pos].prods[i].count + aborh->qual[i].count
+                products->qual[p_pos].tot_reg_count = products->qual[p_pos].tot_reg_count + aborh->qual[i].count
+                p_section_cnt = p_section_cnt + aborh->qual[i].count
+                products->qual[p_pos].prods[i].pooled_ind = 0
+                out_str = cnvtstring(aborh->qual[i].count)
+                col column, out_str
+            endif
+            column = column + 10  
+        else         
+            products->qual[p_pos].prods[i].count = products->qual[p_pos].prods[i].count + aborh->qual[i].count
+            products->qual[p_pos].tot_pool_count = products->qual[p_pos].tot_pool_count + aborh->qual[i].count
+            products->qual[p_pos].prods[i].pooled_ind = 1
+            if(aborh->qual[i].count > 0)
+                pooled_prods_day = 1
+                pooled_prods_summary = 1
+            endif
+        endif
+    endfor
+    ptot_str = trim(cnvtstring(p_section_cnt))
+    col column, ptot_str
+    row + 1
+
+foot verfd_date
+    row + 1
+    if(pooled_prods_day = 1)
+        if(row + size(products->qual, 5) > 56)
+            break
+        endif
+        column = 27 
+        for( j = 1 to size(aborh->qual, 5) )
+            if(aborh->qual[j].pooled_ind = 1) 
+                col column, aborh->qual[j].abo_disp
+                column = column + 11
+            endif
+        endfor
+        row + 1
+        column = 27
+        for( j = 1 to size(aborh->qual, 5) )
+            if(aborh->qual[j].pooled_ind = 1) 
+                col column, aborh->qual[j].rh_disp
+                column = column + 11
+            endif
+        endfor
+        col column, captions->rpt_total
+        row + 1
+        column = 27
+        for( j = 1 to size(aborh->qual, 5) )
+            if(aborh->qual[j].pooled_ind = 1) 
+                col column, LINE8
+                column = column + 11
+            endif
+        endfor
+        col column, LINE8
+        row + 1 
+        
+       
+        for (i=1 to size(products->qual, 5))
+            if(products->qual[i].tot_pool_count > 0)
+                col 0, products->qual[i].name ";r"
+                column = 30            
+                for(j=1 to size(products->qual[i].prods, 5))
+                    if(products->qual[i].prods[j].pooled_ind = 1)
+                        if( products->qual[i].prods[j].count > 0 )
+                            out_str = cnvtstring(products->qual[i].prods[j].count)
+                            col column, out_str
+                        endif
+                        column = column + 11
+                    endif
+                endfor
+                out_str = cnvtstring(products->qual[i].tot_pool_count)
+                col column, out_str
+                row+1
+            endif
+        endfor
+        row + 2
+        
+    endif
+   
+foot p_inv_area
+    row + 0
+    
+foot p_owner_area
+    row + 0
+    
+foot page
+    rpt_row = row
+    row 57
+    col 0, LINE131
+    row + 1
+    col 0, cpm_cfn_info->file_name_logical
+    col 113, captions->rpt_page
+    col 120, curpage ";l"
+    row + 1
+
+foot report
+    if( size(products->qual, 5) > 0 )        
+        NEW_SUM_PAGE = 1
+        break
+        for( i = 1 to size(products->qual, 5) )
+            if( row > 56 )
+                NEW_SUM_PAGE = 1
+                break
+            endif
+            if( NEW_SUM_PAGE = 1 )
+                col 0, captions->rpt_prod_sum
+                column = 27
+                for( j = 1 to size(aborh->qual, 5) )
+                    if(aborh->qual[j].pooled_ind = 0) 
+                        col column, aborh->qual[j].aborh_disp
+                        column = column + 10
+                    endif
+                endfor
+                col column, captions->rpt_total
+                row + 1
+                col 0, LINE25
+                column = 27
+                for( j = 1 to size(aborh->qual, 5) )
+                    if(aborh->qual[j].pooled_ind = 0) 
+                        col column, LINE8
+                        column = column + 10
+                    endif
+                endfor
+                col column, LINE8
+                row + 1
+                NEW_SUM_PAGE = 0
+            endif
+
+            col 0, products->qual[i].name ";r"
+            column = 30
+
+            for( j = 1 to size(aborh->qual, 5))
+                if(products->qual[i].prods[j].pooled_ind = 0)
+                    if( products->qual[i].prods[j].count > 0 )
+                        out_str = cnvtstring(products->qual[i].prods[j].count)
+                        col column, out_str
+                    endif
+                    column = column + 10
+                endif
+            endfor
+            out_str = cnvtstring(products->qual[i].tot_reg_count)
+            col column, out_str 
+            row + 1
+        endfor
+    
+        if(pooled_prods_summary = 1)
+            PRINT_POOLED_HEADERS = 1
+            for( i = 1 to size(products->qual, 5) )
+                if(products->qual[i].tot_pool_count > 0)
+                    if( row > 56 )
+                        PRINT_POOLED_HEADERS = 1
+                        break
+                    endif 
+                    if(PRINT_POOLED_HEADERS = 1)
+                        column = 27
+                        for( j = 1 to size(aborh->qual, 5) )
+                            if(aborh->qual[j].pooled_ind = 1) 
+                                col column, aborh->qual[j].abo_disp
+                                column = column + 11
+                            endif
+                        endfor
+                        row + 1
+                        column = 27
+                        for( j = 1 to size(aborh->qual, 5) )
+                            if(aborh->qual[j].pooled_ind = 1) 
+                                col column, aborh->qual[j].rh_disp
+                                column = column + 11
+                            endif
+                        endfor
+                        col column, captions->rpt_total
+                        row + 1
+                        column = 27
+                        for( j = 1 to size(aborh->qual, 5) )
+                            if(aborh->qual[j].pooled_ind = 1) 
+                                col column, LINE8
+                                column = column + 11
+                            endif
+                        endfor
+                        col column, LINE8
+                        PRINT_POOLED_HEADERS = 0
+                        row + 1
+                    endif              
+                    col 0, products->qual[i].name ";r"
+                    column = 30
+                    for( j = 1 to size(products->qual[i].prods, 5) )
+                        if(products->qual[i].prods[j].pooled_ind = 1)
+                            if( products->qual[i].prods[j].count > 0 )
+                                out_str = cnvtstring(products->qual[i].prods[j].count)
+                                col column, out_str
+                            endif
+                            column = column + 11
+                        endif                
+                    endfor
+                    out_str = cnvtstring(products->qual[i].tot_pool_count)
+                    col column, out_str 
+               endif
+                    row + 1
+            endfor        
+        endif
+    endif
+    row 57
+    col 0, LINE131
+    row + 1
+    col 0, cpm_cfn_info->file_name
+    col 113, captions->rpt_page
+    col 120, curpage ";l"
+    row + 1
+    call center(captions->end_of_report, 1, 125)
+
+;* Check for CCL errors.
+set error_check = error(errmsg,0)
+if (error_check != 0)
+    set reply->status_data.status = "F"
+    call subevent_add ("Select Label Verified Products", "F", "bbd_rpt_lbl_verified_prods.prg", errmsg)
+    go to EXIT_SCRIPT
+endif
+/*****************************************************************************/
+/* Status set and exit script                                                */
+/*****************************************************************************/
+#SET_STATUS
+if ( curqual = 0)
+   set reply->status_data->status = "Z"
+else
+   set reply->status_data->status = "S"
+endif
+
+if( request->null_ind = 1 or reply->status_data->status = "S" )
+    set stat = alterlist(reply->rpt_list, 1)
+    set reply->rpt_list[1].rpt_filename = cpm_cfn_info->file_name_path
+    if(size(request->batch_selection, 1) > 0)
+        call echo(request->output_dist)
+        if(CHECKQUEUE(request->output_dist) = 1)
+            set spool value(reply->rpt_list[1].rpt_filename) value(request->output_dist)
+        endif
+    endif
+endif
+
+#EXIT_SCRIPT
+
+free set aborh
+free set products
+free set captions
+
+set modify nopredeclare
+
+end
+go
+
+
+
+;Generated by GNU enscript 1.6.4.

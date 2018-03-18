@@ -1,0 +1,556 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_wklst_ref/glb_get_wklst_ref.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2000 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       glb_get_wklst_ref.prg
+        Object name:            glb_get_wklst_ref
+        Request #:              250183
+ 
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Load worklist reference records.
+ 
+        Tables read:            worklist_ref
+                                worklist
+                                worklist_ref_pos
+                                accession
+                                resource_accession_r
+                                control_material
+ 
+        Tables updated:         None
+        Executing from:
+ 
+        Special Notes:          A request->worklist_ref_id = 0.0 will load
+                                all worklist reference records.
+                                A request->worklist_ref_id > 0.0 or
+                                a request->service_resource_cd & display_key
+                                filled out will load a specific worklist
+                                reference record.
+                                An request->include_inactive_ind = 1 will
+                                both active and inactive rows.
+                                Otherwise active rows will be loaded.
+ 
+                                Also, check for existing worklists.
+******************************************************************************/
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 03/31/99 Hal Patchen          Initial Release                     *
+;    *001 08/23/02 Mark Brooks          Added service resource security     *
+;    *002 04/19/06 Shawn Clark          Added fields to the reply struct,   *
+;                                       Modified the select statements      *
+;    *003 01/15/07 Paul Lessin          Fixed serv. resource security defect*
+;    *004 02/05/07 Paul Lessin          Conditionalized return of positions *
+;    *005 02/23/07 Abraham Areguy       Added fields to the reply struct,   *
+;    *                                  Modified the select statements.     *
+;    *006 04/23/07 Paul Lessin          Move req/reply to inc file          *
+;    *                                  Populate cust_download_script_cd    *
+;    *007 02/18/08 Subramanya           Replaced dummtyt with outerjoins to *
+;                                       improve the performance
+;    *008 04/17/08 Oliver Barbara       Added retrieval of client_alias     *
+;    *009 07/28/08 Rahul Deshmukh       Added retrieval of interp_text_ind  *
+;    *010 12/02/08 Oliver Barbara       Added retrieval of serv_res_sort_ind*
+;    *011 07/23/10 Ryan Manuel          Added automatic worklist parameters *
+;    *012 11/11/10 Steve Hendrick       Retrieval of all worklist ref id's  *
+;                                       associated with a service resource  *
+;~DE~************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+             drop program GLB_GET_WKLST_REF:dba go
+             create program GLB_GET_WKLST_REF:dba
+ 
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+%i cclsource:glb_get_wklst_ref_req.inc
+			)
+      */
+ 
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      if (validate(reply->qual_cnt, -1) = -1)
+         record reply
+         (
+%i cclsource:glb_get_wklst_ref_rep.inc
+         )
+      endif
+ 
+%i cclsource:pcs_resource_security.inc                                         ;001
+ 
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         declare q_cnt                = i4
+         declare pos_cnt              = i4
+         declare cv_cnt               = i4
+         declare sr_cnt               = i4
+         declare display_key          = vc
+         declare dServiceResourceCd   = f8 with protect, noconstant(0.0)     ;001
+         declare bSubSection          = i2 with protect, noconstant(0)
+         declare iIndex               = i4	with protect, noconstant(0)
+         declare SERV_RES_SUBSECTION_CDF  = vc with protect, constant("SUBSECTION")
+ 
+         /***********************************************************************
+         * Internal service resource(s) record                                  *
+         ***********************************************************************/
+         free set serv_res
+         record serv_res
+         (
+           1  qual_cnt              = i4
+           1  qual[*]
+             2  service_resource_cd = f8
+         )
+ 
+         set display_key = cnvtupper(cnvtalphanum(request->display_key))
+         set reply->status_data.status = "F"
+ 
+         /* Initialize service resource security */
+         call InitResourceSecurity(1)                                          ;001
+ 
+         /**************************************************************
+         ; SELECT
+         **************************************************************/
+         select into "nl:"
+            wr.service_resource_cd
+         from
+            worklist_ref wr
+         where
+            wr.worklist_ref_id = request->worklist_ref_id
+         detail
+            dServiceResourceCd = wr.service_resource_cd
+         with
+            nocounter
+ 
+         if (uar_get_code_meaning(dServiceResourceCd) = SERV_RES_SUBSECTION_CDF)
+            set bSubSection = 1
+         else
+            set bSubSection = 0
+         endif
+ 
+         if (bSubSection = 1)
+            select into "nl:"
+               rg.child_service_resource_cd
+            from
+               resource_group rg
+            where rg.parent_service_resource_cd = dServiceResourceCd
+              and rg.child_service_resource_cd > 0.0
+              and rg.root_service_resource_cd + 0 = 0.0
+            detail
+              dServiceResourceCd = rg.child_service_resource_cd
+              if (IsResourceViewable(dServiceResourceCd) = TRUE)
+                sr_cnt = sr_cnt + 1
+                stat = alterlist(serv_res->qual, sr_cnt)
+                serv_res->qual[sr_cnt].service_resource_cd = rg.child_service_resource_cd
+              endif
+            with
+               nocounter
+         else
+            set sr_cnt = 1
+            set stat = alterlist(serv_res->qual, sr_cnt)
+            set serv_res->qual[sr_cnt].service_resource_cd = dServiceResourceCd
+         endif
+ 
+       /***********************************************************************
+      * Select worklist ref records                                          *
+      ***********************************************************************/
+      if (request->suppress_worklist_ref_pos_ind = 1)
+         select
+         if (request->worklist_ref_id > 0.0)
+            plan wr where
+              wr.worklist_ref_id = request->worklist_ref_id and
+              (wr.active_ind = 1 or request->include_inactive_ind = 1)
+            join w
+              where w.worklist_ref_id = outerjoin(wr.worklist_ref_id)
+         elseif (request->service_resource_cd >= 0.0
+         and     request->display_key > " ")
+            plan wr
+              where wr.service_resource_cd =
+                                  request->service_resource_cd
+                and wr.display_key = display_key
+                and (wr.active_ind = 1
+                  or request->include_inactive_ind = 1)
+            join w
+              where w.worklist_ref_id = outerjoin(wr.worklist_ref_id)
+         elseif (request->service_resource_cd > 0.0
+         and     trim(request->display_key,3) = "")
+            plan wr
+              where wr.service_resource_cd =
+                                  request->service_resource_cd
+                and (wr.active_ind = 1
+                  or request->include_inactive_ind = 1)
+            join w
+              where w.worklist_ref_id = outerjoin(wr.worklist_ref_id)
+         else
+            plan wr
+              where wr.worklist_ref_id > 0.0
+                and (wr.active_ind = 1
+                  or request->include_inactive_ind = 1)
+            join w
+              where w.worklist_ref_id = outerjoin(wr.worklist_ref_id)
+         endif
+ 
+         into "nl:"
+         	w_exists_yn = evaluate(nullind(w.worklist_id), 0, 1, 0)
+         	, hd_worklist_ref_id = wr.worklist_ref_id
+         	, FILE_DEF_DISP = uar_get_code_display(wr.file_def_cd)
+         from
+            worklist_ref wr
+           ,worklist w
+ 
+         order hd_worklist_ref_id
+ 
+         head report
+            q_cnt = 0
+ 
+         head hd_worklist_ref_id
+            bPass = 0
+            pos_cnt = 0
+            dServiceResourceCd = wr.service_resource_cd
+            if (IsResourceViewable(dServiceResourceCd) = True)
+                bPass = 1
+                q_cnt = q_cnt + 1
+                stat = alterlist(reply->qual, q_cnt)
+                reply->qual_cnt = q_cnt
+                reply->qual[q_cnt].worklist_ref_id = wr.worklist_ref_id
+                reply->qual[q_cnt].display_key = wr.display_key
+                reply->qual[q_cnt].display = wr.display
+                reply->qual[q_cnt].service_resource_cd = wr.service_resource_cd
+                reply->qual[q_cnt].parent_ind = wr.parent_ind
+                reply->qual[q_cnt].procedure_inc_flag = wr.procedure_inc_flag
+                reply->qual[q_cnt].include_flag = wr.include_flag
+                reply->qual[q_cnt].report_format_ind = wr.report_format_ind
+                reply->qual[q_cnt].cumulative_ind = wr.cumulative_ind
+                reply->qual[q_cnt].in_lab_ind = wr.in_lab_ind
+                reply->qual[q_cnt].person_comments_ind = wr.person_comments_ind
+                reply->qual[q_cnt].order_comments_ind = wr.order_comments_ind
+                reply->qual[q_cnt].result_comments_ind = wr.result_comments_ind
+                reply->qual[q_cnt].result_space_ind = wr.result_space_ind
+                reply->qual[q_cnt].previous_result_ind = wr.previous_result_ind
+                reply->qual[q_cnt].visit_reason_ind = wr.visit_reason_ind
+                reply->qual[q_cnt].order_status_ind = wr.order_status_ind
+                reply->qual[q_cnt].reporting_priority_ind = wr.reporting_priority_ind
+                reply->qual[q_cnt].facility_ind = wr.facility_ind
+                reply->qual[q_cnt].nurse_unit_ind = wr.nurse_unit_ind
+                reply->qual[q_cnt].cross_resource_ind = wr.cross_resource_ind
+                reply->qual[q_cnt].look_ahead_hours = wr.look_ahead_hours
+                reply->qual[q_cnt].priority_ind = wr.priority_ind
+                reply->qual[q_cnt].printer = wr.printer
+                reply->qual[q_cnt].copies = wr.copies
+                reply->qual[q_cnt].spacing_ind = wr.spacing_ind
+                reply->qual[q_cnt].landscape_ind = wr.landscape_ind
+                reply->qual[q_cnt].blank_lines = wr.blank_lines
+                reply->qual[q_cnt].active_ind = wr.active_ind
+                reply->qual[q_cnt].active_status_cd = wr.active_status_cd
+                reply->qual[q_cnt].active_status_dt_tm = wr.active_status_dt_tm
+                reply->qual[q_cnt].active_status_prsnl_id = wr.active_status_prsnl_id
+                reply->qual[q_cnt].updt_dt_tm = wr.updt_dt_tm
+                reply->qual[q_cnt].updt_id = wr.updt_id
+                reply->qual[q_cnt].updt_task = wr.updt_task
+                reply->qual[q_cnt].updt_cnt = wr.updt_cnt
+                reply->qual[q_cnt].updt_applctx = wr.updt_applctx
+                reply->qual[q_cnt].auto_assign_ind = wr.auto_assign_ind
+                reply->qual[q_cnt].fin_ind = wr.fin_ind
+                reply->qual[q_cnt].mrn_ind = wr.mrn_ind
+                reply->qual[q_cnt].age_ind = wr.age_ind
+                reply->qual[q_cnt].sex_ind = wr.sex_ind
+                reply->qual[q_cnt].race_ind = wr.race_ind
+                reply->qual[q_cnt].specimen_type_ind = wr.specimen_type_ind
+                reply->qual[q_cnt].text_freetext_ind = wr.text_freetext_ind
+                reply->qual[q_cnt].room_bed_ind = wr.room_bed_ind
+                reply->qual[q_cnt].collect_dt_tm_ind = wr.collect_dt_tm_ind
+                reply->qual[q_cnt].ordering_physician_ind = wr.ordering_physician_ind
+                reply->qual[q_cnt].manual_download_ind = wr.manual_download_ind
+                reply->qual[q_cnt].file_def_cd = wr.file_def_cd
+                reply->qual[q_cnt].file_def_disp = FILE_DEF_DISP
+                reply->qual[q_cnt].output_dest_cd = wr.output_dest_cd
+                reply->qual[q_cnt].cust_download_script_cd = wr.cust_download_script_cd
+                reply->qual[q_cnt].template_ind = wr.template_ind
+                reply->qual[q_cnt].max_cols = wr.max_cols_cnt
+                reply->qual[q_cnt].max_rows = wr.max_rows_cnt
+                reply->qual[q_cnt].row_alpha_ind = wr.row_alpha_ind
+                reply->qual[q_cnt].col_alpha_ind = wr.col_alpha_ind
+                reply->qual[q_cnt].fill_first_flag = wr.fill_first_flag
+                reply->qual[q_cnt].left_right_flag = wr.left_right_flag
+                reply->qual[q_cnt].back_front_flag = wr.back_front_flag
+                reply->qual[q_cnt].zig_zag_ind = wr.zig_zag_ind
+                reply->qual[q_cnt].positions_per_specimen = wr.positions_per_specimen_nbr
+                reply->qual[q_cnt].accn_seq_ind = wr.accn_seq_ind
+                reply->qual[q_cnt].print_seq_left_ind = wr.print_seq_left_ind
+                reply->qual[q_cnt].client_alias_ind = wr.client_alias_ind
+                reply->qual[q_cnt].interp_text_ind = wr.interp_text_ind
+                reply->qual[q_cnt].serv_res_sort_ind = wr.serv_res_sort_ind
+                reply->qual[q_cnt].qc_ranges_ind = wr.qc_ranges_ind
+                reply->qual[q_cnt].filter_qc_assays_ind = wr.filter_qc_assays_ind
+                reply->qual[q_cnt].automatic_worklist_ind = wr.automatic_worklist_ind
+                reply->qual[q_cnt].automatic_worklist_type_cd = wr.automatic_worklist_type_cd
+                reply->qual[q_cnt].automatic_max_accn_cnt = wr.automatic_max_accn_cnt
+                if (w_exists_yn = 1)
+                   reply->qual[q_cnt].worklist_exists_ind = 1
+                else
+                   reply->qual[q_cnt].worklist_exists_ind = 0
+                endif
+              endif
+         with nocounter
+ 
+       else
+         select
+         if (request->worklist_ref_id > 0.0)
+            plan wr where
+              wr.worklist_ref_id = request->worklist_ref_id and
+              (wr.active_ind = 1 or request->include_inactive_ind = 1)
+            join w
+              where w.worklist_ref_id = outerjoin(wr.worklist_ref_id)
+            join wrp
+              where wrp.worklist_ref_id = outerjoin(wr.worklist_ref_id)
+            join ac
+              where ac.accession_id = outerjoin(wrp.accession_id)
+            join rar
+              where  rar.accession_id = outerjoin(ac.accession_id)
+            join cm
+              where cm.control_id = outerjoin(rar.control_id)
+         elseif (request->service_resource_cd >= 0.0
+         and     request->display_key > " ")
+            plan wr
+              where wr.service_resource_cd =
+                                  request->service_resource_cd
+                and wr.display_key = display_key
+                and (wr.active_ind = 1
+                  or request->include_inactive_ind = 1)
+            join w
+              where w.worklist_ref_id = outerjoin(wr.worklist_ref_id)
+            join wrp
+              where wrp.worklist_ref_id = outerjoin(wr.worklist_ref_id)
+            join ac
+              where ac.accession_id = outerjoin(wrp.accession_id)
+            join rar
+              where  rar.accession_id = outerjoin(ac.accession_id)
+            join cm
+              where cm.control_id = outerjoin(rar.control_id)
+         elseif (request->service_resource_cd > 0.0
+         and     trim(request->display_key,3) = "")
+            plan wr
+              where wr.service_resource_cd =
+                                  request->service_resource_cd
+                 and (wr.active_ind = 1
+                  or request->include_inactive_ind = 1)
+            join w
+              where w.worklist_ref_id = outerjoin(wr.worklist_ref_id)
+            join wrp
+              where wrp.worklist_ref_id = outerjoin(wr.worklist_ref_id)
+            join ac
+              where ac.accession_id = outerjoin(wrp.accession_id)
+            join rar
+              where  rar.accession_id = outerjoin(ac.accession_id)
+            join cm
+              where cm.control_id = outerjoin(rar.control_id)
+         else
+            plan wr
+              where wr.worklist_ref_id > 0.0
+                and (wr.active_ind = 1
+                  or request->include_inactive_ind = 1)
+            join w
+              where w.worklist_ref_id = outerjoin(wr.worklist_ref_id)
+            join wrp
+              where wrp.worklist_ref_id = outerjoin(wr.worklist_ref_id)
+            join ac
+              where ac.accession_id = outerjoin(wrp.accession_id)
+            join rar
+              where   rar.accession_id = outerjoin(ac.accession_id)
+            join cm
+              where cm.control_id = outerjoin(rar.control_id)
+         endif
+ 
+         into "nl:"
+         	w_exists_yn = evaluate(nullind(w.worklist_id), 0, 1, 0)
+         	, worklist_pos_exists = evaluate(nullind(wrp.worklist_ref_pos_id), 0, 1, 0)
+         	, hd_worklist_ref_id = wr.worklist_ref_id
+         	, hd_wklst_ref_pos = wrp.worklist_ref_pos_id
+         	, ac_exists = evaluate(nullind(ac.accession_id), 0, 1, 0)
+         	, cm_exists = evaluate(nullind(cm.control_id), 0, 1, 0)
+         	, FILE_DEF_DISP = uar_get_code_display(wr.file_def_cd)
+         from
+            worklist_ref wr
+           ,worklist w
+           ,worklist_ref_pos wrp
+           ,accession ac
+           ,resource_accession_r rar
+           ,control_material cm
+ 
+         order hd_worklist_ref_id, hd_wklst_ref_pos
+ 
+         head report
+            q_cnt = 0
+ 
+         head hd_worklist_ref_id
+            bPass = 0
+            pos_cnt = 0
+            dServiceResourceCd = wr.service_resource_cd
+            if (IsResourceViewable(dServiceResourceCd) = True)
+                bPass = 1
+                q_cnt = q_cnt + 1
+                stat = alterlist(reply->qual, q_cnt)
+                reply->qual_cnt = q_cnt
+                reply->qual[q_cnt].worklist_ref_id = wr.worklist_ref_id
+                reply->qual[q_cnt].display_key = wr.display_key
+                reply->qual[q_cnt].display = wr.display
+                reply->qual[q_cnt].service_resource_cd = wr.service_resource_cd
+                reply->qual[q_cnt].parent_ind = wr.parent_ind
+                reply->qual[q_cnt].procedure_inc_flag = wr.procedure_inc_flag
+                reply->qual[q_cnt].include_flag = wr.include_flag
+                reply->qual[q_cnt].report_format_ind = wr.report_format_ind
+                reply->qual[q_cnt].cumulative_ind = wr.cumulative_ind
+                reply->qual[q_cnt].in_lab_ind = wr.in_lab_ind
+                reply->qual[q_cnt].person_comments_ind = wr.person_comments_ind
+                reply->qual[q_cnt].order_comments_ind = wr.order_comments_ind
+                reply->qual[q_cnt].result_comments_ind = wr.result_comments_ind
+                reply->qual[q_cnt].result_space_ind = wr.result_space_ind
+                reply->qual[q_cnt].previous_result_ind = wr.previous_result_ind
+                reply->qual[q_cnt].visit_reason_ind = wr.visit_reason_ind
+                reply->qual[q_cnt].order_status_ind = wr.order_status_ind
+                reply->qual[q_cnt].reporting_priority_ind = wr.reporting_priority_ind
+                reply->qual[q_cnt].facility_ind = wr.facility_ind
+                reply->qual[q_cnt].nurse_unit_ind = wr.nurse_unit_ind
+                reply->qual[q_cnt].cross_resource_ind = wr.cross_resource_ind
+                reply->qual[q_cnt].look_ahead_hours = wr.look_ahead_hours
+                reply->qual[q_cnt].priority_ind = wr.priority_ind
+                reply->qual[q_cnt].printer = wr.printer
+                reply->qual[q_cnt].copies = wr.copies
+                reply->qual[q_cnt].spacing_ind = wr.spacing_ind
+                reply->qual[q_cnt].landscape_ind = wr.landscape_ind
+                reply->qual[q_cnt].blank_lines = wr.blank_lines
+                reply->qual[q_cnt].active_ind = wr.active_ind
+                reply->qual[q_cnt].active_status_cd = wr.active_status_cd
+                reply->qual[q_cnt].active_status_dt_tm = wr.active_status_dt_tm
+                reply->qual[q_cnt].active_status_prsnl_id = wr.active_status_prsnl_id
+                reply->qual[q_cnt].updt_dt_tm = wr.updt_dt_tm
+                reply->qual[q_cnt].updt_id = wr.updt_id
+                reply->qual[q_cnt].updt_task = wr.updt_task
+                reply->qual[q_cnt].updt_cnt = wr.updt_cnt
+                reply->qual[q_cnt].updt_applctx = wr.updt_applctx
+                reply->qual[q_cnt].auto_assign_ind = wr.auto_assign_ind
+                reply->qual[q_cnt].fin_ind = wr.fin_ind
+                reply->qual[q_cnt].mrn_ind = wr.mrn_ind
+                reply->qual[q_cnt].age_ind = wr.age_ind
+                reply->qual[q_cnt].sex_ind = wr.sex_ind
+                reply->qual[q_cnt].race_ind = wr.race_ind
+                reply->qual[q_cnt].specimen_type_ind = wr.specimen_type_ind
+                reply->qual[q_cnt].text_freetext_ind = wr.text_freetext_ind
+                reply->qual[q_cnt].room_bed_ind = wr.room_bed_ind
+                reply->qual[q_cnt].collect_dt_tm_ind = wr.collect_dt_tm_ind
+                reply->qual[q_cnt].ordering_physician_ind = wr.ordering_physician_ind
+                reply->qual[q_cnt].manual_download_ind = wr.manual_download_ind
+                reply->qual[q_cnt].file_def_cd = wr.file_def_cd
+                reply->qual[q_cnt].file_def_disp = FILE_DEF_DISP
+                reply->qual[q_cnt].output_dest_cd = wr.output_dest_cd
+                reply->qual[q_cnt].cust_download_script_cd = wr.cust_download_script_cd
+                reply->qual[q_cnt].template_ind = wr.template_ind
+                reply->qual[q_cnt].max_cols = wr.max_cols_cnt
+                reply->qual[q_cnt].max_rows = wr.max_rows_cnt
+                reply->qual[q_cnt].row_alpha_ind = wr.row_alpha_ind
+                reply->qual[q_cnt].col_alpha_ind = wr.col_alpha_ind
+                reply->qual[q_cnt].fill_first_flag = wr.fill_first_flag
+                reply->qual[q_cnt].left_right_flag = wr.left_right_flag
+                reply->qual[q_cnt].back_front_flag = wr.back_front_flag
+                reply->qual[q_cnt].zig_zag_ind = wr.zig_zag_ind
+                reply->qual[q_cnt].positions_per_specimen = wr.positions_per_specimen_nbr
+                reply->qual[q_cnt].accn_seq_ind = wr.accn_seq_ind
+                reply->qual[q_cnt].print_seq_left_ind = wr.print_seq_left_ind
+                reply->qual[q_cnt].client_alias_ind = wr.client_alias_ind
+                reply->qual[q_cnt].interp_text_ind = wr.interp_text_ind
+                reply->qual[q_cnt].serv_res_sort_ind = wr.serv_res_sort_ind
+                reply->qual[q_cnt].qc_ranges_ind = wr.qc_ranges_ind
+                reply->qual[q_cnt].filter_qc_assays_ind = wr.filter_qc_assays_ind
+                reply->qual[q_cnt].automatic_worklist_ind = wr.automatic_worklist_ind
+                reply->qual[q_cnt].automatic_worklist_type_cd = wr.automatic_worklist_type_cd
+                reply->qual[q_cnt].automatic_max_accn_cnt = wr.automatic_max_accn_cnt
+                if (w_exists_yn = 1)
+                   reply->qual[q_cnt].worklist_exists_ind = 1
+                else
+                   reply->qual[q_cnt].worklist_exists_ind = 0
+                endif
+            endif
+         head hd_wklst_ref_pos
+            if (bPass = 1)
+               if (worklist_pos_exists = 1 or ac_exists = 1 or cm_exists = 1)
+                  pos_cnt = pos_cnt + 1
+                  if (pos_cnt > size(reply->qual[q_cnt]->position_qual, 5))
+                     stat = alterlist(reply->qual[q_cnt]->position_qual, pos_cnt + 9)
+                  endif
+               endif
+               if (worklist_pos_exists = 1)
+                  reply->qual[q_cnt].position_qual[pos_cnt].position_id      = wrp.worklist_ref_pos_id
+                  reply->qual[q_cnt].position_qual[pos_cnt].dilution_cd      = wrp.dilution_cd
+                  reply->qual[q_cnt].position_qual[pos_cnt].sequence_nbr     = wrp.position_nbr
+                  reply->qual[q_cnt].position_qual[pos_cnt].position_disp    = wrp.position_display_txt
+                  reply->qual[q_cnt].position_qual[pos_cnt].numeric_position = wrp.numeric_position_txt
+               endif
+               if(ac_exists = 1)
+                  reply->qual[q_cnt].position_qual[pos_cnt].accession_id = ac.accession_id
+                  reply->qual[q_cnt].position_qual[pos_cnt].accession    = ac.accession
+               endif
+               if(cm_exists = 1)
+                  reply->qual[q_cnt].position_qual[pos_cnt].short_description = cm.short_description
+               endif
+            endif
+ 
+         foot hd_wklst_ref_pos
+            if (bPass = 1)
+               reply->qual[q_cnt].pos_cnt = pos_cnt
+               stat = alterlist(reply->qual[q_cnt]->position_qual, pos_cnt)
+            endif
+         with nocounter
+       endif
+ 
+      /***********************************************************************
+      * Exit Script                                                          *
+      ***********************************************************************/
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+         endif
+ 
+         if (GetResourceSecurityStatus(0) != "S")                            ;001
+            call PopulateResSecStatusBlock(0)                                ;001
+            set reply->status_data->status = GetResourceSecurityStatus(0)    ;001
+         endif
+      #Exit_Script
+         free record serv_res
+ 
+         end
+         go
+
+;Generated by GNU enscript 1.6.4.

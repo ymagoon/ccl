@@ -1,0 +1,434 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_gl_to_expedite_old/pfmt_gl_to_expedite_old.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       pfmt_gl_to_expedite_old.prg
+        Object name:            pfmt_gl_to_expedite_old
+        Request #:              n/a
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Send an expedite to the chart server
+        
+                                This is the old version of pfmt_gl_to_expedite
+                                that was used before the result recovery logic
+                                was introduced.  This script is called from the
+                                new pfmt_gl_to_expedite script when the pn_results
+                                structure does not exist, meaning that the result
+                                recovery logic is not being used.  This keeps the 
+                                passivity for this script.
+
+        Tables read:            encounter
+
+        Tables updated:         none
+
+        Executing from:         Process Server
+
+        Special Notes:          Triggered from Request 250074.
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 11/11/96 Kevin Brunner        Initial Release                     *
+;    *001 12/16/96 Rob Wilmot           Organization override               *
+;    *002 01/29/97 Christine Mayne      added dist_initiator_ind and        *
+;                                       reader_group                        *
+;    *003 04/12/7  Yvonne Klipfel       use for blood bank  process > 1 accn*
+;    *004 09/05/97 Kevin Brunner        Add autoverify logic.               *
+;    *005 10/06/97 Kevin Brunner        Restructure for new expedite logic  *
+;                                          (Rewrite)                        *
+;    *006 04/29/98 Kevin Brunner        Pass nomenclature id for expedite   *
+;    *007 08/24/99 Gary Runde           Add error logging to msgview        *
+;    *008 01/29/01 SD4221               Improve error logging               *
+;                                       Feature :- 15673                    *
+;    *009 08/16/01 Mike Gabrick         Add checking for twice-verified     *
+;                                       result                              *
+;    *010 09/25/01 Gary Runde           Rename to pfmt_gl_to_expedite_old   *
+;    *011 12/18/01 Gary Runde           Add validate to fail_reason_flag    *
+;    *012 03/20/02 Gary Runde           Result Recovery Logic               *
+;    *013 04/02/03 Amy Henry		Check complete_ind for an order     *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program pfmt_gl_to_expedite_old:dba go            ;010
+create program pfmt_gl_to_expedite_old:dba             ;010
+
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC                                  ;007    
+SET LOG_PROGRAM_NAME = "pfmt_gl_to_expedite_old"                         ;007   ;010
+
+/**** Declare CV section for finding order complete_ind 013****/
+
+set ORDER_STATUS_CODESET    = 6004
+set ORDERED_CD              = 0.0
+set IN_PROCESS_CD           = 0.0
+                                
+set cur_order_status_cd     = 0.0
+
+/*****End of declare CV section for order complete_ind 013****/
+
+ /***********************************************************************
+ *   Print date and time to log file.                                  *
+ ***********************************************************************/
+  select into "nl:"                                                ;007
+    currentdate = cnvtdatetime(curdate,curtime3)                   ;007
+  detail                                                           ;007
+    sText = fillstring(254, " ")                                   ;007
+    sText = CONCAT("{{Script::PFMT_GL_TO_EXPENDITE}} Started at ",         ;007
+                   format(currentdate, "dd-mmm-yyyy-hhmm;;d"))     ;007
+    call uar_SysEvent(hSys, 4, "ScriptBegin", NULLTERM(sText))     ;007
+  with nocounter                                                   ;007
+
+call LOG_MESSAGE ("Starting GL to Expedite", LOG_LEVEL_DEBUG)      ;007
+call LOG_MESSAGE (build ("Starting accession: ", requestin->request->orders[1]->accession), LOG_LEVEL_DEBUG)    ;007
+
+if ( requestin->reply->status_data->status = "F" )
+     set reqinfo->commit_ind = 0
+;008    call LOG_MESSAGE ("Requestin failure", LOG_LEVEL_ERROR)       ;007
+     call LOG_MESSAGE ("Requestin failure", LOG_LEVEL_INFO)       ;008
+     go to EXIT_SCRIPT
+endif
+
+%i cclsource:expedite_request.inc
+
+declare holdaccn = c20
+
+set assaycnt = 0
+set ordercnt = 0
+set accncnt = 0
+set accnidx = 0
+set holdaccn = " "
+set accncnt = size( requestin->request->orders, 5 )
+
+; expedite processing is assuming that like accessions are grouped together.
+; check for expedite for each accession
+
+call LOG_MESSAGE(build("patient_order_ind-->: ", 
+      validate(requestin->request->orders[accnidx]->patient_order_ind, -1)), LOG_LEVEL_DEBUG)
+      
+for (accnidx = 1 to accncnt)
+   if ((holdaccn != requestin->request->orders[accnidx]->accession) and
+       (validate(requestin->request->orders[accnidx]->patient_order_ind, -1) != 0))
+
+      call LOG_MESSAGE (build("currrent accession:", requestin->request->orders[accnidx]->accession), LOG_LEVEL_DEBUG)       ;007
+      set holdaccn = requestin->request->orders[accnidx]->accession
+      set assaycnt = 0
+      set ordercnt = 0
+      set expedite_ind = 0
+
+      set ordercnt = size( requestin->request->orders, 5 )
+      set oidx = accnidx
+      while (oidx <= ordercnt and expedite_ind = 0)
+        if (holdaccn = requestin->request->orders[oidx]->accession)
+           call LOG_MESSAGE(build("order id: ", requestin->request->orders[oidx]->order_id), LOG_LEVEL_DEBUG)      ;007
+           set assaycnt = size( requestin->request->orders[oidx]->assays, 5 )
+           set aidx = 1
+           while (aidx <= assaycnt and expedite_ind = 0)
+              if (requestin->reply->orders[oidx]->assays[aidx]->result_status_cd = CD->verify_status_cd
+              or requestin->reply->orders[oidx]->assays[aidx]->result_status_cd = CD->auto_verify_status_cd
+              or requestin->reply->orders[oidx]->assays[aidx]->result_status_cd = CD->correct_status_cd)
+                set expedite_ind = 1
+              endif
+              if (expedite_ind = 0)
+                set aidx = aidx + 1
+              endif
+           endwhile
+           if (expedite_ind = 0)
+             set oidx = oidx + 1
+           endif
+        else
+           set oidx = ordercnt + 1
+        endif
+      endwhile
+      if (expedite_ind = 1)
+          call process_expedite_request ( accnidx )
+          execute pfmt_expedite_processing
+          CALL ERROR_MESSAGE(0)                                            ;007
+      else
+          call LOG_MESSAGE("No expedite created", LOG_LEVEL_DEBUG)              ;007
+      endif
+   else
+      call LOG_MESSAGE("same accession", LOG_LEVEL_DEBUG)                        ;007
+   endif
+endfor
+#EXIT_SCRIPT
+call LOG_MESSAGE ("GL TO EXPEDITE processing complete", LOG_LEVEL_DEBUG)         ;007
+
+/* Subroutines */
+
+subroutine process_expedite_request ( sub_accnidx )
+  set sub_assaycnt = 0
+  set sub_ordercnt = 0
+  set exp_ordercnt = 0
+  set exp_assaycnt = 0
+  set exp_report_priority_cd = 0.0
+  set sub_holdaccn = requestin->request->orders[sub_accnidx]->accession
+
+  set request->status = requestin->reply->status_data->status
+  set request->calling_program = "pfmt_gl_to_expedite"
+  set request->event_dt_tm = requestin->reply->event_dt_tm
+
+  set sub_ordercnt = size( requestin->request->orders, 5 )
+  set sub_oidx = sub_accnidx
+  while (sub_oidx <= sub_ordercnt)
+    if (sub_holdaccn = requestin->request->orders[sub_oidx]->accession)
+       call LOG_MESSAGE(build("order id to expedite: ", requestin->request->orders[sub_oidx]->order_id), LOG_LEVEL_DEBUG)   ;007
+
+/*Check the order complete_ind - 013 */
+  
+;******  Behind the scenes check to see if order is complete! *******
+  if (requestin->reply->orders[sub_oidx]->complete_ind = 0)  
+    set stat = uar_get_meaning_by_codeset (ORDER_STATUS_CODESET, "ORDERED", 1, ORDERED_CD)	
+    set stat = uar_get_meaning_by_codeset (ORDER_STATUS_CODESET, "INPROCESS", 1, IN_PROCESS_CD)
+    	
+    
+	
+	select into "nl:"
+      	       o.order_id
+    	from orders o
+     		where o.order_id = requestin->request->orders[sub_oidx]->order_id
+      		detail
+        	cur_order_status_cd = o.order_status_cd                                                     
+   	with nocounter
+
+   CALL ERROR_MESSAGE(0)                                                               
+
+                            
+      call LOG_MESSAGE("--> Order Not Marked As Complete", LOG_LEVEL_DEBUG)            
+      call LOG_MESSAGE("  --> Checking Status Of Pending Procedures", LOG_LEVEL_DEBUG) 
+      if (cur_order_status_cd in (ORDERED_CD, IN_PROCESS_CD))             
+	
+         call LOG_MESSAGE("    --> Order Status Qualifies", LOG_LEVEL_DEBUG)           
+         
+         set o_qual = 1                                                                                                       
+           select into "nl:"   						
+           ptr.pending_ind,                                            
+           d_r.seq,                                                     
+           r_exists = decode(r.result_id, "Y", "N"),                    
+           r.result_status_cd                                                                                             
+         from                                                          
+           profile_task_r ptr,                                         
+           (dummyt d_r with seq = 1),                                   
+           result r                                                                                                   
+         plan ptr                                                       
+           where ptr.catalog_cd =                                       
+                requestin->request->orders[sub_oidx]->catalog_cd                                              
+         join d_r                                                       
+           where d_r.seq = 1                                            
+         join r                                                         
+           where r.order_id =                                           
+                requestin->request->orders[sub_oidx]->order_id              
+           and r.task_assay_cd = ptr.task_assay_cd                      
+           and r.result_status_cd in                                    
+               (CD->verify_status_cd, CD->auto_verify_status_cd, CD->correct_status_cd)             
+                         
+         head report                                                   
+            found_pending_test_ind = 0                                  
+            pending_w_noresult_ind = 0                                  
+            nonpending_w_result_ind = 0                                 
+         detail                                                         
+                                        
+           if (ptr.pending_ind = 1)                                     
+              found_pending_test_ind = 1                                
+           endif                                                        
+           ;* Check for pending test with no verified result.          
+           if (ptr.pending_ind = 1                                      
+           and r_exists = "N")                                         
+              pending_w_noresult_ind = 1                                
+           endif                                                        
+           ;* Check for non-pending test with a verified result.        
+           if (ptr.pending_ind = 0                                      
+           and r_exists = "Y")                                          
+              nonpending_w_result_ind = 1                               
+           endif                                                        
+        foot report                                                     
+           ;* If pending tests exist and a pending test was found       
+           ;* with no verified results, the order can not be completed. 
+           if (found_pending_test_ind = 1                               
+           and pending_w_noresult_ind = 1)                              
+              o_qual = 0                                                
+           endif                                                        
+           ;* If all tests are non-pending and no verified results      
+           ;* were found, the order can not be set to complete.         
+           if (found_pending_test_ind = 0                               
+           and nonpending_w_result_ind = 0)                             
+              o_qual = 0                                                
+           endif                                                        
+         with dontcare = r                               
+         CALL ERROR_MESSAGE(0)                                          
+
+         if (curqual > 0)                                               
+            if (o_qual = 1)                                             
+               call LOG_MESSAGE("    --> Marking Order For Completion", LOG_LEVEL_DEBUG)  
+               set requestin->request->orders[sub_oidx]->complete_ind = 1     
+            else                                                        
+               call LOG_MESSAGE("    --> Order Not Complete", LOG_LEVEL_DEBUG)           
+            endif                                                       
+         else                                                          
+            call LOG_MESSAGE("    --> No Assays Qualified", LOG_LEVEL_DEBUG)              
+         endif                                                          
+      endif                                                             
+   endif                                                               
+;**************************************************************************
+
+/*End of check for the order complete_ind - 013*/
+
+       set request->person_id = requestin->request->orders[sub_oidx]->person_id
+       set request->encntr_id = requestin->request->orders[sub_oidx]->encntr_id
+       set request->accession = requestin->request->orders[sub_oidx]->accession
+       set exp_ordercnt = exp_ordercnt + 1
+       set stat = alterlist(request->orders, exp_ordercnt)
+       set request->orders[exp_ordercnt]->order_id = requestin->request->orders[sub_oidx]->order_id
+       set request->orders[exp_ordercnt]->order_complete_ind = requestin->request->orders[sub_oidx]->complete_ind
+       set request->orders[exp_ordercnt]->catalog_type_cd = requestin->request->orders[sub_oidx]->catalog_type_cd
+       set request->orders[exp_ordercnt]->activity_type_cd =
+           process_activity_type_cd ( (requestin->request->orders[sub_oidx]->catalog_cd) )
+       set request->orders[exp_ordercnt]->catalog_cd = requestin->request->orders[sub_oidx]->catalog_cd
+       set exp_report_priority_cd = process_report_priority_cd ( (requestin->request->orders[sub_oidx]->order_id) )
+ 
+       set sub_assaycnt = size( requestin->request->orders[sub_oidx]->assays, 5 )
+       set sub_aidx = 1
+       while (sub_aidx <= sub_assaycnt)
+          if ((requestin->reply->orders[sub_oidx]->assays[sub_aidx]->result_status_cd = CD->verify_status_cd      ;008
+          or requestin->reply->orders[sub_oidx]->assays[sub_aidx]->result_status_cd = CD->auto_verify_status_cd
+          or requestin->reply->orders[sub_oidx]->assays[sub_aidx]->result_status_cd = CD->correct_status_cd)
+             and (validate(requestin->reply->orders[sub_oidx]->assays[sub_aidx]->fail_reason_flag, 0) != 4))                                                                           ;011
+
+             set exp_assaycnt = exp_assaycnt + 1
+             set stat = alterlist(request->orders[exp_ordercnt]->assays, exp_assaycnt)
+             set request->orders[exp_ordercnt]->assays[exp_assaycnt]->task_assay_cd =
+                        requestin->request->orders[sub_oidx]->assays[sub_aidx]->task_assay_cd
+             set request->orders[exp_ordercnt]->assays[exp_assaycnt]->report_priority_cd = 
+                   exp_report_priority_cd
+             set request->orders[exp_ordercnt]->assays[exp_assaycnt]->result_range_cd =
+                 process_result_range_cd ( (requestin->request->orders[sub_oidx]->assays[sub_aidx]->normal_cd),
+                                           (requestin->request->orders[sub_oidx]->assays[sub_aidx]->critical_cd) )
+             set request->orders[exp_ordercnt]->assays[exp_assaycnt]->result_status_cd =
+                 process_result_status_cd ( (requestin->request->orders[sub_oidx]->assays[sub_aidx]->result_status_cd) )
+             set request->orders[exp_ordercnt]->assays[exp_assaycnt]->result_cd = 0 ;Micro only
+             set request->orders[exp_ordercnt]->assays[exp_assaycnt]->result_nbr = 0 ;Micro only
+             set request->orders[exp_ordercnt]->assays[exp_assaycnt]->report_processing_cd = 0 ;Micro/RadNet only
+             set request->orders[exp_ordercnt]->assays[exp_assaycnt]->report_processing_nbr = 0 ;Micro/RadNet only
+             set request->orders[exp_ordercnt]->assays[exp_assaycnt]->service_resource_cd =
+                        requestin->request->orders[sub_oidx]->assays[sub_aidx]->service_resource_cd
+             if (requestin->request->orders[sub_oidx]->assays[sub_aidx]->nomenclature_id > 0.0)
+               set stat = alterlist(request->orders[exp_ordercnt]->assays[exp_assaycnt]->coded_resp, 1)
+               set request->orders[exp_ordercnt]->assays[exp_assaycnt]->coded_resp[1]->nomenclature_id =
+                        requestin->request->orders[sub_oidx]->assays[sub_aidx]->nomenclature_id
+             endif
+          endif
+          set sub_aidx = sub_aidx + 1
+       endwhile
+       set sub_oidx = sub_oidx + 1
+    else
+       set sub_oidx = sub_ordercnt + 1
+    endif
+  endwhile
+  CALL ERROR_MESSAGE(0)                                            ;007
+end
+
+declare process_activity_type_cd ( sub_catalog_cd ) = f8
+subroutine process_activity_type_cd ( sub_catalog_cd )
+  set sel_activity_type_cd = 0.0
+  select into "nl:"
+    oc.activity_type_cd
+  from order_catalog oc
+  plan oc
+   where oc.catalog_cd = sub_catalog_cd
+  detail
+   sel_activity_type_cd = oc.activity_type_cd
+  with
+   nocounter
+  CALL ERROR_MESSAGE(0)                                            ;007
+  return(sel_activity_type_cd)
+end
+
+declare process_report_priority_cd ( sub_order_id ) = f8
+subroutine process_report_priority_cd ( sub_order_id )
+  set sel_report_priority_cd = 0.0
+  select into "nl:"
+    ol.report_priority_cd
+  from order_laboratory ol
+  plan ol
+   where ol.order_id = sub_order_id
+  detail
+   sel_report_priority_cd = ol.report_priority_cd
+  with
+   nocounter
+  CALL ERROR_MESSAGE(0)                                            ;007
+  return(sel_report_priority_cd)
+end
+
+declare process_result_range_cd ( sub_norm_cd, sub_crit_cd ) = f8
+subroutine process_result_range_cd ( sub_norm_cd, sub_crit_cd )
+  set sel_result_range_cd = 0.0
+
+  if ((sub_crit_cd = CD->num_critical_cd) or
+      (sub_crit_cd = CD->alp_critical_cd))
+    set sel_result_range_cd = CD->exp_crit_cd
+  else
+    if (sub_norm_cd = CD->alp_abnormal_cd)
+      set sel_result_range_cd = CD->exp_abn_cd
+    else
+      if (sub_norm_cd = CD->num_low_cd)
+        set sel_result_range_cd = CD->exp_low_cd
+      else
+        if (sub_norm_cd = CD->num_high_cd)
+          set sel_result_range_cd = CD->exp_high_cd
+        endif
+      endif
+    endif
+  endif
+  CALL ERROR_MESSAGE(0)                                            ;007
+  return(sel_result_range_cd)
+end
+
+declare process_result_status_cd ( sub_result_status_cd ) = f8
+subroutine process_result_status_cd ( sub_result_status_cd )
+  set sel_result_status_cd = 0.0
+
+  if ((sub_result_status_cd = CD->verify_status_cd) or
+      (sub_result_status_cd = CD->auto_verify_status_cd))
+    set sel_result_status_cd = CD->exp_verf_cd
+  else
+    if (sub_result_status_cd = CD->correct_status_cd)
+      set sel_result_status_cd = CD->exp_corr_cd
+    endif
+  endif
+  CALL ERROR_MESSAGE(0)                                            ;007
+
+  return(sel_result_status_cd)
+end
+
+call uar_SysDestroyHandle(hSys)   ;007
+
+end go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,829 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_valid_worklist_results/glb_get_valid_worklist_results.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_VALID_RESULTS.PRG
+        Object name:            GLB_GET_VALID_RESULTS
+        Request #:              257596
+
+        Product:                General Lab - Quality Control
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve all of the results that are valid
+                                in terms of the QC that is associated with
+                                them via their automatic worklists
+
+        Executing from:         General Lab Result Entry
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 11/21/10 Ryan Manuel          Initial Release                     *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program GLB_GET_VALID_WORKLIST_RESULTS:dba go
+create program GLB_GET_VALID_WORKLIST_RESULTS:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+record request
+(
+  1 worklist_id = f8
+  1 results[*]
+    2 perform_result_id = f8
+) 
+*/
+
+record reply
+(
+  1 results[*]
+    2 perform_result_id = f8
+    2 result_status_flag = i2
+    2 task_assay_cd = f8
+    2 task_assay_disp = c40
+    2 enforced_qc_assay_cd = f8
+    2 enforced_qc_assay_disp = c40
+%i cclsource:status_block.inc
+)
+
+record unknown_results
+(
+  1 results[*]
+    2 result_status_flag = i2
+    2 invalid_qc_assay_cd = f8
+    2 control_found_ind = i2
+    2 qc_result_found_ind = i2 
+    2 result_id = f8
+    2 perform_result_id = f8
+    2 worklist_id = f8
+    2 perform_dt_tm = dq8
+    2 service_resource_cd = f8
+    2 most_recent_qc_result_id = f8
+    2 equivalent_assays[*]
+      3 task_assay_cd = f8
+      3 qc_result_found_ind = i2
+      3 control_found_ind = i2
+      3 controls[*]
+        4 control_id = f8
+        4 qc_result_found_ind = i2
+)
+
+record results_to_select
+(
+  1 results[*]
+    2 result_idx = i4
+    2 equivalent_assay_idx = i4
+    2 control_idx = i4
+    2 perform_dt_tm = dq8
+    2 service_resource_cd = f8
+    2 worklist_id = f8
+    2 task_assay_cd = f8
+    2 control_id = f8
+    2 qc_result_id = f8
+)
+ 
+; Constants
+declare nBATCH_SIZE = i2 with protect, constant(20)
+declare dOUT_OF_CONTROL_CD = f8 with protect, constant(uar_get_code_by("MEANING", 1902, "OUT_CONTROL"))
+declare dIN_CONTROL_CD = f8 with protect, constant(uar_get_code_by("MEANING", 1902, "IN_CONTROL"))
+declare dPERFORMED_CD = f8 with protect, constant(uar_get_code_by("MEANING", 1901, "PERFORMED"))
+declare dALPHA_RESULT_TYPE_CD = f8 with protec, constant(uar_get_code_by("MEANING", 289, "2"))
+declare nMAX_LOOKBACK_DAYS = i2 with protect, constant(45)
+declare nRESULT_STATUS_PASSED = i2 with protect, constant(0)
+declare nRESULT_STATUS_FAILED_NOT_VERIFIED = i2 with protect, constant(1)
+declare nRESULT_STATUS_FAILED_OUT_OF_CONTROL = i2 with protect, constant(2)
+declare nPREACTIVE_LOT = i2 with protect, noconstant(2)
+
+; Variables
+declare lLoopCnt = i4 with protect, noconstant(0)
+declare lStart = i4 with protect, noconstant(0)
+declare lIndex = i4 with protect, noconstant(0)
+declare lRequestResultCnt = i4 with protect, noconstant(0)
+declare lResultCnt = i4 with protect, noconstant(0)
+declare nContineProcessingInd = i2 with protect, noconstant(0)
+declare lLookBackDays = i4 with protect, noconstant(0)
+declare lLookAheadDays = i4 with protect, noconstant(0)
+declare lResultIdx = i4 with protect, noconstant(0)
+declare lEquivalentAssayIdx = i4 with protect, noconstant(0)
+declare lEquivalentAssayCnt = i4 with protect, noconstant(0)
+declare lControlIdx = i4 with protect, noconstant(0)
+declare lControlCnt = i4 with protect, noconstant(0)
+declare lResultsToSelectCnt = i4 with protect, noconstant(0)
+declare lMaxAssayCnt = i4 with protect, noconstant(1) ; Default to 1 because there will always be at least 1 assay
+declare lMaxControlCnt = i4 with protect, noconstant(0)
+declare nTimeOut = i2 with protect, noconstant(0)
+declare sErrorMsg = vc with protect, noconstant("")
+
+set reply->status_data->status = "F"
+
+if (request->worklist_id > 0.0)
+  select into "nl:"
+  from worklist_order_r wor,
+       perform_result pr,
+       result r
+  plan wor where wor.worklist_id = request->worklist_id
+  join r   where r.order_id = wor.order_id
+             and r.result_status_cd = dPERFORMED_CD
+  join pr  where pr.result_id = r.result_id+0.0
+             and pr.worklist_id+0.0 > 0.0
+  head report
+    lResultCnt = 0
+  detail
+    lResultCnt = lResultCnt + 1
+    if (mod(lResultCnt, 10) = 1)
+      stat = alterlist(unknown_results->results, lResultCnt + 9)
+    endif
+    unknown_results->results[lResultCnt].result_id = r.result_id
+    unknown_results->results[lResultCnt].perform_result_id = pr.perform_result_id
+    unknown_results->results[lResultCnt].worklist_id = pr.worklist_id
+    unknown_results->results[lResultCnt].perform_dt_tm = cnvtdatetime(pr.perform_dt_tm)
+    unknown_results->results[lResultCnt].service_resource_cd = pr.service_resource_cd
+    stat = alterlist(unknown_results->results[lResultCnt].equivalent_assays, 1)
+    unknown_results->results[lResultCnt].equivalent_assays[1].task_assay_cd = r.task_assay_cd
+  foot report
+    stat = alterlist(unknown_results->results, lResultCnt)
+  with nocounter
+else
+  set lRequestResultCnt = size(request->results, 5)  
+  set lLoopCnt = ceil(cnvtreal(lRequestResultCnt) / nBATCH_SIZE)
+  set lStart = 1
+  
+  select into "nl:"
+  from (dummyt d1 with seq = value(lLoopCnt)), 
+       perform_result pr,
+       result r
+  plan d1  where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+  join pr  where expand(lIndex, lStart, minval(lRequestResultCnt, lStart + (nBATCH_SIZE-1)),
+                                pr.perform_result_id, request->results[lIndex].perform_result_id)
+  join r   where r.result_id = pr.result_id
+  head report
+    lResultCnt = 0
+  detail
+    lResultCnt = lResultCnt + 1
+    if (mod(lResultCnt, 10) = 1)
+      stat = alterlist(unknown_results->results, lResultCnt + 9)
+    endif
+    unknown_results->results[lResultCnt].result_id = r.result_id
+    unknown_results->results[lResultCnt].perform_result_id = pr.perform_result_id
+    unknown_results->results[lResultCnt].worklist_id = pr.worklist_id
+    unknown_results->results[lResultCnt].perform_dt_tm = cnvtdatetime(pr.perform_dt_tm)
+    unknown_results->results[lResultCnt].service_resource_cd = pr.service_resource_cd
+    stat = alterlist(unknown_results->results[lResultCnt].equivalent_assays, 1)
+    unknown_results->results[lResultCnt].equivalent_assays[1].task_assay_cd = r.task_assay_cd
+  foot report
+    stat = alterlist(unknown_results->results, lResultCnt)
+  with nocounter
+endif
+
+if (lResultCnt > 0)
+  ;Figure out equivalent assays
+  ;Any related assays should also be considered valid for the same service 
+  ;resource as the primary assay
+  set stat = initrec(results_to_select)
+  set lResultsToSelectCnt = lResultCnt
+  set stat = alterlist(results_to_select->results, lResultsToSelectCnt)
+  for (lResultIdx = 1 to lResultCnt)
+    set results_to_select->results[lResultIdx].task_assay_cd = 
+                           unknown_results->results[lResultIdx].equivalent_assays[1].task_assay_cd
+  endfor
+  set lStart = 1
+  set lLoopCnt = ceil(cnvtreal(lResultsToSelectCnt) / nBATCH_SIZE)
+  
+  select into "nl:"
+    lLocateStart = lStart
+  from (dummyt d1 with seq = value(lLoopCnt)), 
+       related_assay ra1,
+       related_assay ra2
+  plan d1  where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+  join ra1 where expand(lIndex, lStart, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                ra1.task_assay_cd, results_to_select->results[lIndex].task_assay_cd)
+  join ra2 where ra2.related_entity_id = ra1.related_entity_id
+             and ra2.task_assay_cd != ra1.task_assay_cd
+  order by d1.seq, ra1.task_assay_cd
+  head d1.seq
+    row + 0
+  head ra1.task_assay_cd
+    lRelatedAssayCnt = 1
+    lResultIdx = locateval(lIndex, lLocateStart, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                   ra1.task_assay_cd, results_to_select->results[lIndex].task_assay_cd)
+    while (lResultIdx > 0)
+      stat = alterlist(unknown_results->results[lResultIdx].equivalent_assays, lRelatedAssayCnt + 9)
+      lResultIdx = locateval(lIndex, lResultIdx + 1, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                     ra1.task_assay_cd, results_to_select->results[lIndex].task_assay_cd)
+    endwhile
+  detail
+    lRelatedAssayCnt = lRelatedAssayCnt + 1
+    lResultIdx = locateval(lIndex, lLocateStart, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                   ra1.task_assay_cd, results_to_select->results[lIndex].task_assay_cd)
+    while (lResultIdx > 0)
+      if (mod(lRelatedAssayCnt, 10) = 1)
+        stat = alterlist(unknown_results->results[lResultIdx].equivalent_assays, lRelatedAssayCnt + 9)
+      endif
+      unknown_results->results[lResultIdx].equivalent_assays[lRelatedAssayCnt].task_assay_cd = ra2.task_assay_cd
+      lResultIdx = locateval(lIndex, lResultIdx + 1, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                     ra1.task_assay_cd, results_to_select->results[lIndex].task_assay_cd)
+    endwhile
+  foot ra1.task_assay_cd
+    lResultIdx = locateval(lIndex, lLocateStart, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                   ra1.task_assay_cd, results_to_select->results[lIndex].task_assay_cd)
+    while (lResultIdx > 0)
+      stat = alterlist(unknown_results->results[lResultIdx].equivalent_assays, lRelatedAssayCnt)
+      lResultIdx = locateval(lIndex, lResultIdx + 1, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                     ra1.task_assay_cd, results_to_select->results[lIndex].task_assay_cd)
+    endwhile 
+    if (lRelatedAssayCnt > lMaxAssayCnt)
+      lMaxAssayCnt = lRelatedAssayCnt
+    endif 
+  with nocounter
+  
+  ; Determine which assays have controls
+  set stat = initrec(results_to_select)
+  set lResultsToSelectCnt = 0
+  for (lResultIdx = 1 to lResultCnt)
+    set lEquivalentAssayCnt = size(unknown_results->results[lResultIdx].equivalent_assays, 5)
+    for (lEquivalentAssayIdx = 1 to lEquivalentAssayCnt)
+      set lResultsToSelectCnt = lResultsToSelectCnt + 1
+      if (mod(lResultsToSelectCnt, 10) = 1)
+        set stat = alterlist(results_to_select->results, lResultsToSelectCnt + 9)
+      endif
+      set results_to_select->results[lResultsToSelectCnt].result_idx = lResultIdx
+      set results_to_select->results[lResultsToSelectCnt].equivalent_assay_idx = lEquivalentAssayIdx
+      set results_to_select->results[lResultsToSelectCnt].task_assay_cd = 
+                             unknown_results->results[lResultIdx].equivalent_assays[lEquivalentAssayIdx].task_assay_cd
+      set results_to_select->results[lResultsToSelectCnt].service_resource_cd = 
+                             unknown_results->results[lResultIdx].service_resource_cd
+    endfor
+  endfor
+  set stat = alterlist(results_to_select->results, lResultsToSelectCnt)
+  set lStart = 1
+  set lLoopCnt = ceil(cnvtreal(lResultsToSelectCnt) / nBATCH_SIZE)
+  
+  select into "nl:"
+    lLocateStart = lStart
+  from (dummyt d1 with seq = value(lLoopCnt)), 
+       assay_resource_lot arl,
+       control_lot cl
+  plan d1  where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+  join arl where expand(lIndex, lStart, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                arl.service_resource_cd, results_to_select->results[lIndex].service_resource_cd,
+                                arl.task_assay_cd, results_to_select->results[lIndex].task_assay_cd)
+             and arl.active_ind = 1
+  join cl  where cl.lot_id = arl.lot_id+0.0
+             and cl.lot_flag != nPREACTIVE_LOT
+  order by d1.seq, arl.service_resource_cd, arl.task_assay_cd, cl.control_id
+  head d1.seq
+    row + 0
+  head arl.service_resource_cd
+    row + 0
+  head arl.task_assay_cd
+    lControlCnt = 0
+  head cl.control_id
+    lControlCnt = lControlCnt + 1
+    
+    lLocateIdx = locateval(lIndex, lLocateStart, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                   arl.service_resource_cd, results_to_select->results[lIndex].service_resource_cd,
+                                   arl.task_assay_cd, results_to_select->results[lIndex].task_assay_cd)
+    while (lLocateIdx > 0)
+      lResultIdx = results_to_select->results[lLocateIdx].result_idx
+      lEquivalentAssayIdx = results_to_select->results[lLocateIdx].equivalent_assay_idx
+      unknown_results->results[lResultIdx].control_found_ind = 1
+      unknown_results->results[lResultIdx].equivalent_assays[lEquivalentAssayIdx].control_found_ind = 1
+      if (mod(lControlCnt, 10) = 1)
+        stat = alterlist(unknown_results->results[lResultIdx].equivalent_assays[lEquivalentAssayIdx].controls, lControlCnt + 9)
+      endif
+      unknown_results->results[lResultIdx].equivalent_assays[lEquivalentAssayIdx].controls[lControlCnt].control_id = 
+                                                                                                        cl.control_id
+      lLocateIdx = locateval(lIndex, lLocateIdx + 1, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                     arl.service_resource_cd, results_to_select->results[lIndex].service_resource_cd,
+                                     arl.task_assay_cd, results_to_select->results[lIndex].task_assay_cd)
+    endwhile
+  foot arl.task_assay_cd
+    lLocateIdx = locateval(lIndex, lLocateStart, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                   arl.service_resource_cd, results_to_select->results[lIndex].service_resource_cd,
+                                   arl.task_assay_cd, results_to_select->results[lIndex].task_assay_cd)
+    while (lLocateIdx > 0)
+      lResultIdx = results_to_select->results[lLocateIdx].result_idx
+      lEquivalentAssayIdx = results_to_select->results[lLocateIdx].equivalent_assay_idx
+      stat = alterlist(unknown_results->results[lResultIdx].equivalent_assays[lEquivalentAssayIdx].controls, lControlCnt)
+      lLocateIdx = locateval(lIndex, lLocateIdx + 1, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                     arl.service_resource_cd, results_to_select->results[lIndex].service_resource_cd,
+                                     arl.task_assay_cd, results_to_select->results[lIndex].task_assay_cd)
+    endwhile
+    if (lControlCnt > lMaxControlCnt)
+      lMaxControlCnt = lControlCnt
+    endif
+  with nocounter
+  
+  ; Figure out if there is an associated result within the past 45 days
+  select distinct into "nl"
+  from (dummyt d1 with seq = value(lResultCnt)), 
+       (dummyt d2 with seq = value(lMaxAssayCnt)),
+       (dummyt d3 with seq = value(lMaxControlCnt)),
+       qc_result qr,
+       control_lot cl
+  plan d1 where maxrec(d2, size(unknown_results->results[d1.seq].equivalent_assays, 5))
+            and unknown_results->results[d1.seq].result_status_flag = nRESULT_STATUS_PASSED
+  join d2 where maxrec(d3, size(unknown_results->results[d1.seq].equivalent_assays[d2.seq].controls, 5))
+  join d3 
+  join qr where qr.task_assay_cd = unknown_results->results[d1.seq].equivalent_assays[d2.seq].task_assay_cd
+            and qr.control_id = unknown_results->results[d1.seq].equivalent_assays[d2.seq].controls[d3.seq].control_id
+            and qr.service_resource_cd = unknown_results->results[d1.seq].service_resource_cd
+            and qr.perform_dt_tm > cnvtdatetime(datetimeadd(unknown_results->results[d1.seq].perform_dt_tm, 
+                                                            -1 * nMAX_LOOKBACK_DAYS))
+  join cl where cl.lot_id = qr.lot_id
+            and cl.lot_flag != nPREACTIVE_LOT
+  order by d1.seq, d2.seq, d3.seq
+  head d1.seq
+    row + 0
+  head d2.seq
+    row + 0
+  head d3.seq
+    unknown_results->results[d1.seq].qc_result_found_ind = 1
+    unknown_results->results[d1.seq].equivalent_assays[d2.seq].qc_result_found_ind = 1
+    unknown_results->results[d1.seq].equivalent_assays[d2.seq].controls[d3.seq].qc_result_found_ind = 1
+  with nocounter
+  
+  set lResultsToSelectCnt = 0
+  set stat = initrec(results_to_select)
+  ; Determine out of control within run results
+  for (lResultIdx = 1 to lResultCnt)
+    set lEquivalentAssayCnt = size(unknown_results->results[lResultIdx].equivalent_assays, 5)
+    if (unknown_results->results[lResultIdx].control_found_ind = 1 and 
+        unknown_results->results[lResultIdx].qc_result_found_ind = 1)
+      for (lEquivalentAssayIdx = 1 to lEquivalentAssayCnt)
+        if (unknown_results->results[lResultIdx].equivalent_assays[lEquivalentAssayIdx].qc_result_found_ind = 1)
+          set lResultsToSelectCnt = lResultsToSelectCnt + 1
+          if (mod(lResultsToSelectCnt, 10) = 1)
+            set stat = alterlist(results_to_select->results, lResultsToSelectCnt + 9)
+          endif
+          
+          set results_to_select->results[lResultsToSelectCnt].worklist_id = unknown_results->results[lResultIdx].worklist_id
+          set results_to_select->results[lResultsToSelectCnt].service_resource_cd = 
+                                 unknown_results->results[lResultIdx].service_resource_cd
+          set results_to_select->results[lResultsToSelectCnt].task_assay_cd = 
+                                 unknown_results->results[lResultIdx].equivalent_assays[lEquivalentAssayIdx].task_assay_cd
+          set results_to_select->results[lResultsToSelectCnt].result_idx = lResultIdx
+        endif
+      endfor
+    endif
+  endfor
+    
+  if (lResultsToSelectCnt > 0)
+    set stat = alterlist(results_to_select->results, lResultsToSelectCnt)
+    set lStart = 1
+    set lLoopCnt = ceil(cnvtreal(lResultsToSelectCnt) / nBATCH_SIZE)
+    
+    select into "nl:"
+      lLocateStart = lStart
+    from (dummyt d1 with seq = value(lLoopCnt)),
+         qc_result q,
+         qc_result_rule_r qrr,
+         qc_rule qr,
+         control_lot cl
+    plan d1  where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+    join q   where expand(lIndex, lStart, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                  q.task_assay_cd+0.0, results_to_select->results[lIndex].task_assay_cd,
+                                  q.worklist_id, results_to_select->results[lIndex].worklist_id,
+                                  q.service_resource_cd+0.0, results_to_select->results[lIndex].service_resource_cd)
+               and q.result_control_cd = dOUT_OF_CONTROL_CD
+    join cl  where cl.lot_id = q.lot_id
+               and cl.lot_flag != nPREACTIVE_LOT
+    join qrr where qrr.qc_result_id = q.qc_result_id+0.0
+               and qrr.rule_id = q.rule_id
+    join qr  where qr.rule_id = qrr.rule_id
+               and qr.rule_id+0.0 > 0.0
+               and qr.sequence = qrr.sequence
+               and qr.across_run_ind = 0
+    order by d1.seq, q.task_assay_cd, q.worklist_id, q.service_resource_cd, q.perform_dt_tm
+    head d1.seq
+      row + 0
+    head q.task_assay_cd
+      row + 0
+    head q.worklist_id
+      row + 0
+    head q.service_resource_cd
+      lLocateIdx = locateval(lIndex, lLocateStart, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                     q.task_assay_cd, results_to_select->results[lIndex].task_assay_cd,
+                                     q.worklist_id, results_to_select->results[lIndex].worklist_id,
+                                     q.service_resource_cd, results_to_select->results[lIndex].service_resource_cd)
+      while (lLocateIdx > 0)
+        lLocateResultIdx = results_to_select->results[lLocateIdx].result_idx
+        unknown_results->results[lLocateResultIdx].result_status_flag = nRESULT_STATUS_FAILED_OUT_OF_CONTROL
+        unknown_results->results[lLocateResultIdx].invalid_qc_assay_cd = q.task_assay_cd
+        lLocateIdx = locateval(lIndex, lLocateIdx + 1, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                       q.task_assay_cd+0.0, results_to_select->results[lIndex].task_assay_cd,
+                                       q.worklist_id, results_to_select->results[lIndex].worklist_id,
+                                       q.service_resource_cd+0.0, results_to_select->results[lIndex].service_resource_cd)
+      endwhile
+    with nocounter
+    
+    set lStart = 1
+    select into "nl:"
+      lLocateStart = lStart
+    from (dummyt d1 with seq = value(lLoopCnt)),
+         qc_result q,
+         qc_result_rule_r qrr,
+         qc_rule qr,
+         control_lot cl
+    plan d1  where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+    join q   where expand(lIndex, lStart, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                  q.task_assay_cd+0.0, results_to_select->results[lIndex].task_assay_cd,
+                                  q.copy_forward_worklist_id, results_to_select->results[lIndex].worklist_id,
+                                  q.service_resource_cd+0.0, results_to_select->results[lIndex].service_resource_cd)
+               and q.result_control_cd = dOUT_OF_CONTROL_CD
+    join cl  where cl.lot_id = q.lot_id
+               and cl.lot_flag != nPREACTIVE_LOT
+    join qrr where qrr.qc_result_id = q.qc_result_id
+               and qrr.rule_id = q.rule_id
+    join qr  where qr.rule_id = qrr.rule_id
+               and qr.rule_id+0.0 > 0.0
+               and qr.sequence = qrr.sequence
+               and qr.across_run_ind = 0
+    order by d1.seq, q.task_assay_cd, q.worklist_id, q.service_resource_cd, q.perform_dt_tm
+    head d1.seq
+      row + 0
+    head q.task_assay_cd
+      row + 0
+    head q.worklist_id
+      row + 0
+    head q.service_resource_cd
+      lLocateIdx = locateval(lIndex, lLocateStart, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                     q.task_assay_cd, results_to_select->results[lIndex].task_assay_cd,
+                                     q.copy_forward_worklist_id, results_to_select->results[lIndex].worklist_id,
+                                     q.service_resource_cd, results_to_select->results[lIndex].service_resource_cd)
+      while (lLocateIdx > 0)
+        lLocateResultIdx = results_to_select->results[lLocateIdx].result_idx
+        unknown_results->results[lLocateResultIdx].result_status_flag = nRESULT_STATUS_FAILED_OUT_OF_CONTROL
+        unknown_results->results[lLocateResultIdx].invalid_qc_assay_cd = q.task_assay_cd
+        lLocateIdx = locateval(lIndex, lLocateIdx + 1, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                       q.task_assay_cd, results_to_select->results[lIndex].task_assay_cd,
+                                       q.copy_forward_worklist_id, results_to_select->results[lIndex].worklist_id,
+                                       q.service_resource_cd, results_to_select->results[lIndex].service_resource_cd)
+      endwhile
+    with nocounter
+  endif
+  
+  set lResultsToSelectCnt = 0
+  set stat = initrec(results_to_select)
+  ; Determine performed within run results
+  for (lResultIdx = 1 to lResultCnt)
+    set lEquivalentAssayCnt = size(unknown_results->results[lResultIdx].equivalent_assays, 5)
+    if (unknown_results->results[lResultIdx].control_found_ind = 1 and 
+        unknown_results->results[lResultIdx].qc_result_found_ind = 1 and
+        unknown_results->results[lResultIdx].result_status_flag = nRESULT_STATUS_PASSED)
+      for (lEquivalentAssayIdx = 1 to lEquivalentAssayCnt)
+        if (unknown_results->results[lResultIdx].equivalent_assays[lEquivalentAssayIdx].qc_result_found_ind = 1)
+          set lResultsToSelectCnt = lResultsToSelectCnt + 1
+          if (mod(lResultsToSelectCnt, 10) = 1)
+            set stat = alterlist(results_to_select->results, lResultsToSelectCnt + 9)
+          endif
+          
+          set results_to_select->results[lResultsToSelectCnt].worklist_id = unknown_results->results[lResultIdx].worklist_id
+          set results_to_select->results[lResultsToSelectCnt].service_resource_cd = 
+                                 unknown_results->results[lResultIdx].service_resource_cd
+          set results_to_select->results[lResultsToSelectCnt].task_assay_cd = 
+                                 unknown_results->results[lResultIdx].equivalent_assays[lEquivalentAssayIdx].task_assay_cd
+          set results_to_select->results[lResultsToSelectCnt].result_idx = lResultIdx
+        endif
+      endfor
+    endif
+  endfor
+    
+  if (lResultsToSelectCnt > 0)
+    set stat = alterlist(results_to_select->results, lResultsToSelectCnt)
+    set lStart = 1
+    set lLoopCnt = ceil(cnvtreal(lResultsToSelectCnt) / nBATCH_SIZE)
+    
+    select into "nl:"
+      lLocateStart = lStart
+    from (dummyt d1 with seq = value(lLoopCnt)),
+         qc_result q,
+         qc_rule qr,
+         control_lot cl
+    plan d1  where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+    join q   where expand(lIndex, lStart, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                  q.task_assay_cd+0.0, results_to_select->results[lIndex].task_assay_cd,
+                                  q.worklist_id, results_to_select->results[lIndex].worklist_id,
+                                  q.service_resource_cd+0.0, results_to_select->results[lIndex].service_resource_cd)
+               and q.result_status_cd+0.0 = dPERFORMED_CD
+    join cl  where cl.lot_id = q.lot_id
+               and cl.lot_flag != nPREACTIVE_LOT
+    join qr  where qr.rule_id = q.rule_id
+               and qr.rule_id+0.0 > 0.0
+               and qr.across_run_ind = 0
+    order by d1.seq, q.task_assay_cd, q.worklist_id, q.service_resource_cd, q.perform_dt_tm
+    head d1.seq
+      row + 0
+    head q.task_assay_cd
+      row + 0
+    head q.worklist_id
+      row + 0
+    head q.service_resource_cd
+      lLocateIdx = locateval(lIndex, lLocateStart, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                     q.task_assay_cd, results_to_select->results[lIndex].task_assay_cd,
+                                     q.worklist_id, results_to_select->results[lIndex].worklist_id,
+                                     q.service_resource_cd, results_to_select->results[lIndex].service_resource_cd)
+      while (lLocateIdx > 0)
+        lLocateResultIdx = results_to_select->results[lLocateIdx].result_idx
+        unknown_results->results[lLocateResultIdx].result_status_flag = nRESULT_STATUS_FAILED_NOT_VERIFIED
+        unknown_results->results[lLocateResultIdx].invalid_qc_assay_cd = q.task_assay_cd
+        lLocateIdx = locateval(lIndex, lLocateIdx + 1, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                       q.task_assay_cd, results_to_select->results[lIndex].task_assay_cd,
+                                       q.worklist_id, results_to_select->results[lIndex].worklist_id,
+                                       q.service_resource_cd, results_to_select->results[lIndex].service_resource_cd)
+      endwhile
+    with nocounter
+    
+    set lStart = 1
+    select into "nl:"
+      lLocateStart = lStart
+    from (dummyt d1 with seq = value(lLoopCnt)),
+         qc_result q,
+         qc_rule qr,
+         control_lot cl
+    plan d1  where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+    join q   where expand(lIndex, lStart, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                  q.task_assay_cd+0.0, results_to_select->results[lIndex].task_assay_cd,
+                                  q.copy_forward_worklist_id, results_to_select->results[lIndex].worklist_id,
+                                  q.service_resource_cd+0.0, results_to_select->results[lIndex].service_resource_cd)
+               and q.result_status_cd+0.0 = dPERFORMED_CD
+    join cl  where cl.lot_id = q.lot_id
+               and cl.lot_flag != nPREACTIVE_LOT
+    join qr  where qr.rule_id = q.rule_id
+               and qr.rule_id+0.0 > 0.0
+               and qr.across_run_ind = 0
+    order by d1.seq, q.task_assay_cd, q.worklist_id, q.service_resource_cd, q.perform_dt_tm
+    head d1.seq
+      row + 0
+    head q.task_assay_cd
+      row + 0
+    head q.worklist_id
+      row + 0
+    head q.service_resource_cd
+      lLocateIdx = locateval(lIndex, lLocateStart, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                     q.task_assay_cd, results_to_select->results[lIndex].task_assay_cd,
+                                     q.copy_forward_worklist_id, results_to_select->results[lIndex].worklist_id,
+                                     q.service_resource_cd, results_to_select->results[lIndex].service_resource_cd)
+      while (lLocateIdx > 0)
+        lLocateResultIdx = results_to_select->results[lLocateIdx].result_idx
+        unknown_results->results[lLocateResultIdx].result_status_flag = nRESULT_STATUS_FAILED_NOT_VERIFIED
+        unknown_results->results[lLocateResultIdx].invalid_qc_assay_cd = q.task_assay_cd
+        lLocateIdx = locateval(lIndex, lLocateIdx + 1, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                       q.task_assay_cd, results_to_select->results[lIndex].task_assay_cd,
+                                       q.copy_forward_worklist_id, results_to_select->results[lIndex].worklist_id,
+                                       q.service_resource_cd, results_to_select->results[lIndex].service_resource_cd)
+      endwhile
+    with nocounter
+  endif
+  
+  set nContineProcessingInd = 1
+  set lLookBackDays = 0
+  set lLookAheadDays = 1
+  set nTimeOut = 0
+  
+  while (nContineProcessingInd = 1 and nTimeOut < nMAX_LOOKBACK_DAYS)
+    set lLookBackDays = lLookBackDays - 1
+    set lLookAheadDays = lLookAheadDays - 1
+    set nTimeOut = nTimeOut + 1
+    
+    if (lLookAheadDays != 0)    
+      ; Find the most recent qc_result that matches one of the equivalent assays
+      select into "nl:"
+      from (dummyt d1 with seq = value(lResultCnt)),
+           (dummyt d2 with seq = value(lMaxAssayCnt)),
+           (dummyt d3 with seq = value(lMaxControlCnt)),
+           qc_result q,
+           control_lot cl
+      plan d1  where maxrec(d2, size(unknown_results->results[d1.seq].equivalent_assays, 5))
+                 and unknown_results->results[d1.seq].control_found_ind = 1  
+                 and unknown_results->results[d1.seq].qc_result_found_ind = 1 
+                 and unknown_results->results[d1.seq].most_recent_qc_result_id = 0.0 
+                 and unknown_results->results[d1.seq].result_status_flag = nRESULT_STATUS_PASSED
+      join d2  where maxrec(d3, size(unknown_results->results[d1.seq].equivalent_assays[d2.seq].controls, 5))
+                 and unknown_results->results[d1.seq].equivalent_assays[d2.seq].qc_result_found_ind = 1
+      join d3  where unknown_results->results[d1.seq].equivalent_assays[d2.seq].controls[d3.seq].qc_result_found_ind = 1
+      join q   where q.task_assay_cd = unknown_results->results[d1.seq].equivalent_assays[d2.seq].task_assay_cd
+                 and q.control_id = unknown_results->results[d1.seq].equivalent_assays[d2.seq].controls[d3.seq].control_id
+                 and q.service_resource_cd = unknown_results->results[d1.seq].service_resource_cd
+                 and q.perform_dt_tm <
+                               cnvtdatetime(datetimeadd(unknown_results->results[d1.seq].perform_dt_tm, lLookAheadDays))
+                 and q.perform_dt_tm >
+                               cnvtdatetime(datetimeadd(unknown_results->results[d1.seq].perform_dt_tm, lLookBackDays))
+      join cl  where cl.lot_id = q.lot_id
+                 and cl.lot_flag != nPREACTIVE_LOT
+      order by d1.seq, q.perform_dt_tm desc
+      head d1.seq
+        unknown_results->results[d1.seq].most_recent_qc_result_id = q.qc_result_id
+        if (q.result_type_cd = dALPHA_RESULT_TYPE_CD)
+          if (q.result_control_cd = dOUT_OF_CONTROL_CD)
+            unknown_results->results[d1.seq].result_status_flag = nRESULT_STATUS_FAILED_OUT_OF_CONTROL
+            unknown_results->results[d1.seq].invalid_qc_assay_cd = q.task_assay_cd
+          elseif (q.result_status_cd = dPERFORMED_CD)
+            unknown_results->results[d1.seq].result_status_flag = nRESULT_STATUS_FAILED_NOT_VERIFIED
+            unknown_results->results[d1.seq].invalid_qc_assay_cd = q.task_assay_cd
+          endif
+        endif
+      with nocounter
+    else    
+      ; Find the most recent qc_result that matches one of the equivalent assays
+      select into "nl:"
+      from (dummyt d1 with seq = value(lResultCnt)),
+           (dummyt d2 with seq = value(lMaxAssayCnt)),
+           (dummyt d3 with seq = value(lMaxControlCnt)),
+           qc_result q,
+           control_lot cl
+      plan d1  where maxrec(d2, size(unknown_results->results[d1.seq].equivalent_assays, 5))
+                 and unknown_results->results[d1.seq].control_found_ind = 1  
+                 and unknown_results->results[d1.seq].qc_result_found_ind = 1 
+                 and unknown_results->results[d1.seq].most_recent_qc_result_id = 0.0 
+                 and unknown_results->results[d1.seq].result_status_flag = nRESULT_STATUS_PASSED
+      join d2  where maxrec(d3, size(unknown_results->results[d1.seq].equivalent_assays[d2.seq].controls, 5))
+                 and unknown_results->results[d1.seq].equivalent_assays[d2.seq].qc_result_found_ind = 1
+      join d3  where unknown_results->results[d1.seq].equivalent_assays[d2.seq].controls[d3.seq].qc_result_found_ind = 1
+      join q   where q.task_assay_cd = unknown_results->results[d1.seq].equivalent_assays[d2.seq].task_assay_cd
+                 and q.control_id = unknown_results->results[d1.seq].equivalent_assays[d2.seq].controls[d3.seq].control_id
+                 and q.service_resource_cd = unknown_results->results[d1.seq].service_resource_cd
+                 and q.perform_dt_tm >
+                               cnvtdatetime(datetimeadd(unknown_results->results[d1.seq].perform_dt_tm, lLookBackDays))
+      join cl  where cl.lot_id = q.lot_id
+                 and cl.lot_flag != nPREACTIVE_LOT
+      order by d1.seq, q.perform_dt_tm desc
+      head d1.seq
+        unknown_results->results[d1.seq].most_recent_qc_result_id = q.qc_result_id
+        if (q.result_type_cd = dALPHA_RESULT_TYPE_CD)
+          if (q.result_control_cd = dOUT_OF_CONTROL_CD)
+            unknown_results->results[d1.seq].result_status_flag = nRESULT_STATUS_FAILED_OUT_OF_CONTROL
+            unknown_results->results[d1.seq].invalid_qc_assay_cd = q.task_assay_cd
+          elseif (q.result_status_cd = dPERFORMED_CD)
+            unknown_results->results[d1.seq].result_status_flag = nRESULT_STATUS_FAILED_NOT_VERIFIED
+            unknown_results->results[d1.seq].invalid_qc_assay_cd = q.task_assay_cd
+          endif
+        endif
+      with nocounter
+    endif
+    
+    ; Determine whether the most recent result is performed and across run
+    set lResultsToSelectCnt = 0
+    set stat = initrec(results_to_select)
+    for (lResultIdx = 1 to lResultCnt)
+      if (unknown_results->results[lResultIdx].qc_result_found_ind = 1 and
+          unknown_results->results[lResultIdx].result_status_flag = nRESULT_STATUS_PASSED and
+          unknown_results->results[lResultIdx].most_recent_qc_result_id > 0.0)
+        set lResultsToSelectCnt = lResultsToSelectCnt + 1
+        if (mod(lResultsToSelectCnt, 10) = 1)
+          set stat = alterlist(results_to_select->results, lResultsToSelectCnt + 9)
+        endif
+        
+        set results_to_select->results[lResultsToSelectCnt].qc_result_id = 
+                               unknown_results->results[lResultIdx].most_recent_qc_result_id
+        set results_to_select->results[lResultsToSelectCnt].result_idx = lResultIdx
+      endif
+    endfor
+    
+    if (lResultsToSelectCnt > 0)
+      set stat = alterlist(results_to_select->results, lResultsToSelectCnt)
+      set lStart = 1
+      set lLoopCnt = ceil(cnvtreal(lResultsToSelectCnt) / nBATCH_SIZE)
+      
+      select into "nl:"
+        lLocateStart = lStart
+      from (dummyt d1 with seq = value(lLoopCnt)),
+           qc_result q,
+           qc_result_rule_r qrr,
+           qc_rule qr
+      plan d1 where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+      join q  where expand(lIndex, lStart, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                   q.qc_result_id, results_to_select->results[lIndex].qc_result_id)
+                 and q.result_control_cd = dOUT_OF_CONTROL_CD
+      join qrr where qrr.qc_result_id = q.qc_result_id
+                 and qrr.rule_id = q.rule_id
+      join qr  where qr.rule_id = qrr.rule_id
+                 and qr.rule_id+0.0 > 0.0
+                 and qr.sequence = qrr.sequence
+                 and qr.across_run_ind = 1
+      order by d1.seq, q.qc_result_id
+      head d1.seq
+        row + 0
+      head q.qc_result_id
+        lLocateIndex = locateval(lIndex, lLocateStart, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                         q.qc_result_id, results_to_select->results[lIndex].qc_result_id)
+        while (lLocateIndex > 0)
+          unknown_results->results[results_to_select->results[lLocateIndex].result_idx].
+                           result_status_flag = nRESULT_STATUS_FAILED_OUT_OF_CONTROL
+          unknown_results->results[results_to_select->results[lLocateIndex].result_idx].invalid_qc_assay_cd = q.task_assay_cd
+          lLocateIndex = locateval(lIndex, lLocateIndex + 1, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                           q.qc_result_id, results_to_select->results[lIndex].qc_result_id)
+        endwhile
+      with nocounter
+    endif
+    
+    ; Determine whether the most recent result is out of control and across run
+    set lResultsToSelectCnt = 0
+    set stat = initrec(results_to_select)
+    for (lResultIdx = 1 to lResultCnt)
+      if (unknown_results->results[lResultIdx].qc_result_found_ind = 1 and
+          unknown_results->results[lResultIdx].result_status_flag = nRESULT_STATUS_PASSED and
+          unknown_results->results[lResultIdx].most_recent_qc_result_id > 0.0)
+        set lResultsToSelectCnt = lResultsToSelectCnt + 1
+        if (mod(lResultsToSelectCnt, 10) = 1)
+          set stat = alterlist(results_to_select->results, lResultsToSelectCnt + 9)
+        endif
+        
+        set results_to_select->results[lResultsToSelectCnt].qc_result_id = 
+                               unknown_results->results[lResultIdx].most_recent_qc_result_id
+        set results_to_select->results[lResultsToSelectCnt].result_idx = lResultIdx
+      endif
+    endfor
+    
+    if (lResultsToSelectCnt > 0)
+      set stat = alterlist(results_to_select->results, lResultsToSelectCnt)
+      set lStart = 1
+      set lLoopCnt = ceil(cnvtreal(lResultsToSelectCnt) / nBATCH_SIZE)
+    
+      select into "nl:"
+        lLocateStart = lStart
+      from (dummyt d1 with seq = value(lLoopCnt)),
+           qc_result q,
+           qc_rule qr
+      plan d1 where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+      join q  where expand(lIndex, lStart, minval(lResultsToSelectCnt, lStart + (nBATCH_SIZE-1)),
+                                   q.qc_result_id, results_to_select->results[lIndex].qc_result_id)
+                and q.result_status_cd = dPERFORMED_CD
+      join qr where qr.rule_id = q.rule_id
+                and qr.rule_id+0.0 > 0.0
+                and qr.across_run_ind = 1
+      order by d1.seq, q.qc_result_id
+      head d1.seq
+        row + 0
+      head q.qc_result_id
+        lLocateIndex = locateval(lIndex, lLocateStart, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                         q.qc_result_id, results_to_select->results[lIndex].qc_result_id)
+        while (lLocateIndex > 0)
+          unknown_results->results[results_to_select->results[lLocateIndex].result_idx].
+                           result_status_flag = nRESULT_STATUS_FAILED_NOT_VERIFIED
+          unknown_results->results[results_to_select->results[lLocateIndex].result_idx].invalid_qc_assay_cd = q.task_assay_cd
+          lLocateIndex = locateval(lIndex, lLocateIndex + 1, minval(lResultsToSelectCnt, lLocateStart + (nBATCH_SIZE-1)),
+                                           q.qc_result_id, results_to_select->results[lIndex].qc_result_id)
+        endwhile
+      with nocounter
+    endif
+    
+    set nContineProcessingInd = 0
+    
+    for (lResultIdx = 1 to lResultCnt)
+      if (unknown_results->results[lResultIdx].most_recent_qc_result_id = 0.0 and 
+          unknown_results->results[lResultIdx].result_status_flag = nRESULT_STATUS_PASSED and
+          unknown_results->results[lResultIdx].qc_result_found_ind = 1)
+        set nContineProcessingInd = 1
+      endif
+    endfor
+  endwhile
+  
+  set stat = alterlist(reply->results, lResultCnt)
+  for (lResultIdx = 1 to lResultCnt)
+    set reply->results[lResultIdx].enforced_qc_assay_cd = unknown_results->results[lResultIdx].invalid_qc_assay_cd
+    set reply->results[lResultIdx].result_status_flag = unknown_results->results[lResultIdx].result_status_flag
+    set reply->results[lResultIdx].perform_result_id = unknown_results->results[lResultIdx].perform_result_id
+    set reply->results[lResultIdx].task_assay_cd = unknown_results->results[lResultIdx].equivalent_assays[1].task_assay_cd
+  endfor
+endif
+
+if (error(sErrorMsg,0) != 0)
+  set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+  go to exit_script
+endif
+
+set reply->status_data.status = "S"
+
+#exit_script
+
+end go
+
+;Generated by GNU enscript 1.6.4.

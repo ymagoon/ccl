@@ -1,0 +1,448 @@
+/************************************************************************
+          Date Written:       09/03/10
+          Source file name:   mayo_mn_new_admissions.prg
+          Object name:        mayo_mn_new_admissions
+          Request #:
+ 
+          Product:            ExploreMenu
+          Product Team:
+          HNA Version:        V500
+          CCL Version:
+ 
+          Program purpose:    show all new admissions along with insurance information for
+          							inpatient and observation encntr_types
+ 
+          Tables read:
+ 
+          Tables updated:     None
+ 
+          Executing from:     Explorer Menu
+ 
+ ***********************************************************************
+ *                  GENERATED MODIFICATION CONTROL LOG                 *
+ ***********************************************************************
+ *                                                                     *
+ *Mod Date     Engineer             Comment                            *
+ *--- -------- -------------------- -----------------------------------*
+ *000 09/03/10 Akcia      initial release                              *
+ *001 01/18/11 Akcia      Added logic for dates entered in ops         *
+ *002 03/01/11 Akcia	  fix to get observation patients registered through er day before
+ 						  add printed date and run date range to header
+ 						  fix name running into next field
+ 						  add prompt for sort order to meet needs of nurses and business office
+ *003 07/09/12 Akcia	  Added expand for efficiency
+
+ ***********************************************************************
+ 
+  ******************  END OF ALL MODCONTROL BLOCKS  ********************/
+ 
+drop program MAYO_MN_NEW_ADMISSIONS:dba go
+create program MAYO_MN_NEW_ADMISSIONS:dba
+ 
+prompt
+	"Output to File/Printer/MINE" = "MINE"
+	, "Start Date" = CURDATE
+	, "End Date" = CURDATE
+	, "Facility Group" = ""
+	, "Choose Sort Order" = 0
+ 
+with OUTDEV, start_date, end_date, FACILITY_GRP, sort_order
+ 
+call echo($start_date)
+call echo($end_date)
+call echo (curdate)
+ 
+;001 block
+;copied the following code in to support curdate as a date Parameter
+; assumes date passed in is in mmddyyyy format or curdate format
+subroutine ValidateDateParms(strParm)
+  set minus = 0
+  set plus = 0
+  set signpos = 0
+  set nodays = 0
+  set lastchar = "         "
+  set parmater = 0
+  if (isnumeric(strParm) = 1 )
+    set parameter = cnvtint(strParm)
+  else
+    set minus = findstring("-",strParm)
+    set signpos = minus
+    if (minus <= 0)
+       set plus = findstring("+",strParm)
+       set minus = signpos
+    endif
+    if( minus <= 0 and plus <= 0)
+       if(cnvtupper( substring (1,7,strParm)) = "CURDATE")
+          set parameter = curdate
+       else
+            go to exit_script
+       endif
+    else
+      set lastchar = substring (signpos+1,size(trim(strParm))-signpos,strParm)
+      if (isnumeric(lastchar) = 1 )
+        set nodays = cnvtint(trim(lastchar))
+        set dtparm = cnvtupper(substring(1,7,strParm))
+        if( dtparm = "CURDATE")
+          if( plus > 0)
+            set parameter = curdate + nodays
+          elseif(minus > 0)
+             set parameter = curdate - nodays
+          else
+             go to exit_script
+          endif
+        else
+            go to exit_script
+        endif
+    else
+        go to exit_script
+     endif
+  endif
+endif
+  return(parameter)
+End
+ 
+ 
+set parm_2 = 0
+set parm_3 = 0
+set parm_2 = ValidateDateParms($2)
+set parm_3 = ValidateDateParms($3)
+call echo(build("start date: ", parm_2))
+call echo(build("end date: ", parm_3))
+ 
+;END 004 MODS ***************
+ 
+ 
+if(parm_3 >= 1000000 )
+    set edtstr = cnvtstring(parm_3)
+    if(size(trim(edtstr,3),1) = 7 )
+         set edtstr = concat("0", edtstr)
+    endif
+    set sysedt = cnvtdate2(edtstr, "MMDDYYYY")
+    set enddt = format(sysedt, "MM/DD/YYYY;;D")
+else
+    set enddt = format(parm_3, "MM/DD/YYYY;;D")
+endif
+ 
+if(parm_2 >= 1000000)
+    set sdtstr = cnvtstring(parm_2)
+    if(size(trim(sdtstr,3),1) = 7)
+        set sdtstr = concat("0", sdtstr)
+    endif
+    set syssdt = cnvtdate2(sdtstr, "MMDDYYYY")
+    set startdt = format(syssdt, "MM/DD/YYYY;;D")
+else
+    set startdt = format(parm_2, "MM/DD/YYYY;;D")
+endif
+ 
+call echo(startdt)
+call echo(enddt)
+ 
+;001 end copied curdate block
+ 
+ 
+declare inpatient_cd = f8 with constant(uar_get_code_by("DISPLAYKEY",71,"INPATIENT"))
+declare observation_cd = f8 with constant(uar_get_code_by("DISPLAYKEY",71,"OBSERVATION"))
+declare outpatient_cd = f8 with constant(uar_get_code_by("DISPLAYKEY",71,"HOSPITALOUTPATIENT"))
+declare fin_cd = f8 with public, constant(uar_get_code_by("MEANING",319,"FIN NBR"))
+declare mrn_cd = f8 with public, constant(uar_get_code_by("MEANING",319,"MRN"))
+declare attending_cd = f8 with public, constant(uar_get_code_by("MEANING",333,"ATTENDDOC"))
+declare rfv_cd = f8 with public, constant(uar_get_code_by("MEANING",17,"RFV"))
+ 
+record encounters
+( 1 qual[*]
+	2 encntr_id = f8
+)
+ 
+ 
+;get facilities list
+record facilities
+( 1 qual[*]
+	2 facility_cd = f8
+)
+ 
+select into "nl:"
+cv.* from code_value cv
+plan cv where cv.code_set = 220 and cv.cdf_meaning = "FACILITY"
+and cv.display_key = value(concat(trim($facility_grp,3),"*"))
+ 
+head report
+	f_cnt = 0
+detail
+	f_cnt = f_cnt + 1
+	stat = alterlist(facilities->qual,f_cnt)
+	facilities->qual[f_cnt].facility_cd = cv.code_value
+ 
+with nocounter
+declare num = i2 ;003
+
+ 
+;get encounters
+select into "nl:"
+encounter_id = decode(e.seq,e.encntr_id,e1.seq,e1.encntr_id,e2.seq,e2.encntr_id)
+from
+(dummyt d with seq = 1), ;pel size(facilities->qual,5)),
+encounter e,
+encounter e1,
+encounter e2
+ 
+plan d
+ 
+join (e
+;001 where e.reg_dt_tm between cnvtdatetime(cnvtdate($start_date)-1,0) and cnvtdatetime(cnvtdate($end_date),235959)
+;001   and e.inpatient_admit_dt_tm between cnvtdatetime(cnvtdate($start_date),0) and cnvtdatetime(cnvtdate($end_date),235959)
+ 
+where e.reg_dt_tm between cnvtdatetime(CNVTDATE2 ( STARTDT ,"MM/DD/YYYY" )-1,0)    ;001
+  and cnvtdatetime(CNVTDATE2 ( ENDDT , "MM/DD/YYYY" ),235959)                      ;001
+  and e.inpatient_admit_dt_tm between cnvtdatetime(CNVTDATE2 ( STARTDT ,"MM/DD/YYYY" ),0) ;001
+   and cnvtdatetime(CNVTDATE2 ( ENDDT , "MM/DD/YYYY" ),235959)    ;001
+ 
+  and e.encntr_type_cd  = inpatient_cd
+;003  and e.loc_facility_cd = facilities->qual[d.seq].facility_cd
+   and (expand(num, 1, size(facilities->qual,5), e.loc_facility_cd, ;003
+   facilities->qual[num].facility_cd)) ;003
+  and e.active_ind = 1
+  and e.end_effective_dt_tm > sysdate)
+ 
+ 
+ORJOIN
+ 
+;join
+(e1
+;001 where e1.reg_dt_tm between cnvtdatetime(cnvtdate($start_date),0) and cnvtdatetime(cnvtdate($end_date),235959)
+;002 where e1.reg_dt_tm between cnvtdatetime(CNVTDATE2 ( STARTDT ,"MM/DD/YYYY" ),0)    ;001
+where e1.reg_dt_tm between cnvtdatetime(CNVTDATE2 ( STARTDT ,"MM/DD/YYYY" )-1,0)    ;002
+              and cnvtdatetime(CNVTDATE2 ( ENDDT , "MM/DD/YYYY" ),235959)         ;001
+  and e1.assign_to_loc_dt_tm between cnvtdatetime(CNVTDATE2 ( STARTDT ,"MM/DD/YYYY" ),0) ;002
+   and cnvtdatetime(CNVTDATE2 ( ENDDT , "MM/DD/YYYY" ),235959)    ;002
+  and e1.encntr_type_cd  = observation_cd
+;;003  and e1.loc_facility_cd = facilities->qual[d.seq].facility_cd
+   and (expand(num, 1, size(facilities->qual,5), e1.loc_facility_cd, ;003
+   facilities->qual[num].facility_cd))  ;003
+  and e1.active_ind = 1
+  and e1.end_effective_dt_tm > sysdate)
+ 
+ORJOIN
+ 
+;join
+(e2
+;001 where e2.reg_dt_tm between cnvtdatetime(cnvtdate($start_date),0) and cnvtdatetime(cnvtdate($end_date),235959)
+where e2.reg_dt_tm between cnvtdatetime(CNVTDATE2 ( STARTDT ,"MM/DD/YYYY" ),0)     ;001
+                and cnvtdatetime(CNVTDATE2 ( ENDDT , "MM/DD/YYYY" ),235959)        ;001
+  and e2.encntr_type_cd  = outpatient_cd
+;;003  and e2.loc_facility_cd = facilities->qual[d.seq].facility_cd
+   and (expand(num, 1, size(facilities->qual,5), e2.loc_facility_cd, ; 003
+   facilities->qual[num].facility_cd))  ;003
+  and e2.loc_bed_cd > 0
+  and e2.active_ind = 1
+  and e2.end_effective_dt_tm > sysdate)
+ 
+head report
+ecnt = 0
+ 
+detail
+ecnt = ecnt + 1
+stat = alterlist(encounters->qual,ecnt)
+encounters->qual[ecnt]->encntr_id = encounter_id
+ 
+with nocounter
+call echorecord(encounters)
+ 
+;main select
+select
+if ($sort_order = "B")																;002
+  order facility, p.name_full_formatted, diag.beg_effective_dt_tm, e.encntr_id		;002
+else																				;002
+  order facility, room_bed, p.name_full_formatted 									;002
+endif																				;002
+ 
+into $outdev
+facility_grp = concat("Facility:  ",trim($facility_grp,3)),
+facility = uar_get_code_display(e.loc_facility_cd),
+date_range = concat("Date Range: ",startdt," - ",enddt),					;002
+print_date = concat("Printed:  ",format(sysdate,"mm/dd/yy hh:mm;;d")),		;002
+e.encntr_id,
+pat_name = substring(1,30,p.name_full_formatted),
+room_bed = concat(trim(uar_get_code_display(e.loc_room_cd),3)," - ",uar_get_code_display(e.loc_bed_cd)),
+age = concat("{B}Age:{ENDB}  ",cnvtage(p.birth_dt_tm)),
+;002 service = uar_get_code_display(e.med_service_cd),
+service = substring(1,20,uar_get_code_display(e.med_service_cd)),				;002
+fin = cnvtalias(ea.alias,ea.alias_pool_cd),
+mrn = cnvtalias(ea1.alias,ea1.alias_pool_cd),
+pat_type = uar_get_code_display(e.encntr_type_cd),
+admit_date = concat(format(e.reg_dt_tm,"mm/dd/yy;;d")," / ",format(e.inpatient_admit_dt_tm,"mm/dd/yy;;d")),
+fin_class = concat("{B}Fin Class:{ENDB}  ",uar_get_code_display(e.financial_class_cd)),
+attending = concat("{B}Attending:{ENDB}  ",substring(1,30,pl.name_full_formatted)),
+insurance1 = concat("{B}Insurance #1:{ENDB}  ",substring(1,35,hp.plan_name)),
+insurance2 = concat("{B}Insurance #2:{ENDB}  ",substring(1,35,hp1.plan_name)),
+admit_diag = concat("{B}Admit Diagnosis:{ENDB}  ",trim(n.source_string,3))
+from
+;(dummyt d with seq = size(facilities->qual,5)),
+(dummyt d with seq = size(encounters->qual,5)),
+encounter e,
+person p,
+encntr_alias ea,
+encntr_alias ea1,
+encntr_prsnl_reltn epr,
+prsnl pl,
+diagnosis diag,
+nomenclature n,
+encntr_plan_reltn eplan,
+health_plan hp,
+encntr_plan_reltn eplan1,
+health_plan hp1
+ 
+plan d
+ 
+join e
+where e.encntr_id = encounters->qual[d.seq]->encntr_id
+ 
+join p
+where p.person_id = e.person_id
+ 
+join ea
+where ea.encntr_id = e.encntr_id
+  and ea.encntr_alias_type_cd = fin_cd
+  and ea.active_ind = 1
+  and ea.end_effective_dt_tm > sysdate
+ 
+join ea1
+where ea1.encntr_id = e.encntr_id
+  and ea1.encntr_alias_type_cd = mrn_cd
+  and ea1.active_ind = 1
+  and ea1.end_effective_dt_tm > sysdate
+ 
+join epr
+where epr.encntr_id = outerjoin(e.encntr_id)
+  and epr.encntr_prsnl_r_cd = outerjoin(attending_cd)
+  and epr.active_ind = outerjoin(1)
+  and epr.end_effective_dt_tm > outerjoin(sysdate)
+ 
+join pl
+where pl.person_id = epr.prsnl_person_id
+ 
+join diag
+where diag.encntr_id = outerjoin(e.encntr_id)
+  and diag.diag_type_cd = outerjoin(rfv_cd)
+  ;and diag.diag_priority = outerjoin(1)
+  and diag.active_ind = outerjoin(1)
+  and diag.end_effective_dt_tm > outerjoin(sysdate)
+ 
+join n
+where n.nomenclature_id = outerjoin(diag.nomenclature_id)
+ 
+join eplan
+where eplan.encntr_id = outerjoin(e.encntr_id)
+  and eplan.active_ind = outerjoin(1)
+  and eplan.priority_seq = outerjoin(1)
+  and eplan.end_effective_dt_tm > outerjoin(sysdate)
+ 
+join hp
+where hp.health_plan_id = outerjoin(eplan.health_plan_id)
+ 
+join eplan1
+where eplan1.encntr_id = outerjoin(e.encntr_id)
+  and eplan1.active_ind = outerjoin(1)
+  and eplan1.priority_seq = outerjoin(2)
+  and eplan1.end_effective_dt_tm > outerjoin(sysdate)
+ 
+join hp1
+where hp1.health_plan_id = outerjoin(eplan1.health_plan_id)
+ 
+;002 order facility, p.name_full_formatted, diag.beg_effective_dt_tm, e.encntr_id
+ 
+head report
+  ypos = 0
+;  ypos_inc = 0
+;	x_margin = 70
+; 	x_label = 50
+; 	x_data	= 100
+; 	x_mom = 305
+;002  line1 = fillstring(115,"_")
+  line1 = fillstring(118,"_")				;002
+  line2 = fillstring(50,"-")
+ 
+head page
+  ypos = 20
+  row + 1
+  "{f/8}{cpi/16}{lpi/10}", row + 1
+  call print(calcpos(30, ypos)), print_date, row + 1					;002
+ 
+  call print(calcpos(220, ypos)),"{cpi/10}{B}New Admissions Report{ENDB}{cpi/14}", row + 1
+  call print(calcpos(508, ypos)), "Page:", row + 1
+  call print(calcpos(534, ypos)), curpage "##", row + 1
+;002  ypos = ypos + 17
+  ypos = ypos + 12													;002
+  call print(calcpos(215, ypos)),date_range, row + 1				;002
+  ypos = ypos + 12													;002
+ 
+  call print(calcpos(260, ypos)), facility_grp, row + 1
+  ypos = ypos + 25
+ call print(calcpos(500, ypos)),"Admit Date /", row + 1
+  ypos = ypos + 10
+ call print(calcpos(20, ypos)),"Name", row + 1
+;002 call print(calcpos(30, ypos)),"Name", row + 1
+;002  call print(calcpos(160, ypos)),"Room/Bed", row + 1
+;002  call print(calcpos(210, ypos)),"Service", row + 1
+ call print(calcpos(180, ypos)),"Room/Bed", row + 1			;002
+ call print(calcpos(225, ypos)),"Service", row + 1			;002
+ call print(calcpos(310, ypos)),"FIN", row + 1
+ call print(calcpos(370, ypos)),"MRN", row + 1
+ call print(calcpos(420, ypos)),"Type", row + 1
+ call print(calcpos(500, ypos)),"Inpat Admit Date", row + 1
+ ;call print(calcpos(540, ypos)),"Fin Class", row + 1
+ ;call print(calcpos(570, ypos)),"Attending", row + 1
+ 
+  ypos = ypos + 6
+ call print(calcpos(20, ypos)),line1, row + 1								;002
+;002 call print(calcpos(30, ypos)),line1, row + 1
+  ypos = ypos + 12
+ 
+head facility																		;002
+ disp = concat("{B}{U}",trim(facility,3),"{ENDU}{ENDB}")							;002
+ call print(calcpos(20, ypos)),disp, row + 1										;002
+  ypos = ypos + 12																	;002
+ 
+ 
+;detail
+head e.encntr_id
+if (ypos+50 > 710)
+  break
+endif
+ call print(calcpos(20, ypos)),pat_name, row + 1
+;002 call print(calcpos(30, ypos)),pat_name, row + 1
+;002 call print(calcpos(160, ypos)),room_bed, row + 1
+;002 call print(calcpos(210, ypos)),service, row + 1
+ call print(calcpos(180, ypos)),room_bed, row + 1				;002
+ call print(calcpos(225, ypos)),service, row + 1				;002
+ call print(calcpos(310, ypos)),fin, row + 1
+ call print(calcpos(370, ypos)),mrn, row + 1
+ call print(calcpos(420, ypos)),pat_type, row + 1
+ call print(calcpos(500, ypos)),admit_date, row + 1
+ ;call print(calcpos(540, ypos)),fin_class, row + 1
+ ;call print(calcpos(570, ypos)),attending, row + 1
+ 
+  ypos = ypos + 12
+ call print(calcpos(20, ypos)),fin_class, row + 1					;002
+;002 call print(calcpos(30, ypos)),fin_class, row + 1
+ call print(calcpos(160, ypos)),insurance1, row + 1
+ call print(calcpos(360, ypos)),attending, row + 1
+  ypos = ypos + 12
+ call print(calcpos(20, ypos)),age, row + 1							;002
+;002 call print(calcpos(30, ypos)),age, row + 1
+ call print(calcpos(160, ypos)),insurance2, row + 1
+ call print(calcpos(360, ypos)),admit_diag, row + 1
+  ypos = ypos + 12
+ call print(calcpos(200, ypos)),line2, row + 1
+  ypos = ypos + 12
+ 
+foot facility																							;002
+ disp = concat("{B}Total Patients for ",trim(facility,3),":{ENDB}   ",cnvtstring(count(e.encntr_id)))	;002												;002
+ call print(calcpos(20, ypos)),disp, row + 1										;002
+  ypos = ypos + 17																	;002
+ 
+ 
+ 
+ with nocounter, dio=postscript, maxcol = 1000, maxrow = 3000
+ 
+#exit_script
+end go

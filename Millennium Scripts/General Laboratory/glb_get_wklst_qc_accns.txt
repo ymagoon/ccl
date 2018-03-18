@@ -1,0 +1,560 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_wklst_qc_accns/glb_get_wklst_qc_accns.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2000 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_QC_ACCNS.PRG
+        Object name:            GLB_GET_QC_ACCNS
+        Request #:              250102
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Get all QC accessions for a given
+                                worklist_ref_id.
+
+        Tables read:            accession
+                                code_value
+                                control_lot
+                                control_material
+                                resource_accession_r
+                                resource_group
+                                resource_lot_r
+                                worklist_ref_qc
+
+        Tables updated:         n/a
+
+        Executing from:         General Lab worklist request application
+
+        Special Notes:          Set request->worklist_ref_id as follows for
+                                the desired query:
+                                -1 = Load valid QC accessions for service
+                                     resource(s).
+                                 0 = Load QC accessions for an adhoc worklist.
+                                >0 = Load QC accessions for a given worklist
+                                     ref id.
+
+
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 05/23/96 Newton Hughes        Initial Release                     *
+;     ### 08/08/97 John Mitchell        Added worklist_ref_id = -1 logic    *
+;     001 03/27/98 Kurt Gugler          add check of preactive_ind          *
+;    *### 01/20/99 Hal Patchen          Rewrite to improve performance      *
+;    *002 06/10/99 Hal Patchen          Changes for Worklist Rewrite        *
+;    *003 08/23/02 Mark Brooks          Added service resource security     *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_WKLST_QC_ACCNS:dba go
+             create program GLB_GET_WKLST_QC_ACCNS:dba
+
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  worklist_ref_id              = f8
+         1  service_resource_cd          = f8
+         1  qc_accns[*]
+            2  accession_id              = f8
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      if (validate(reply->qual[1].accession_id, -1) = -1)
+      record reply
+      (
+         1  qual[*]
+            2  accession                 = c20
+            2  unformat_accn             = c20
+            2  accession_id              = f8
+            2  pos                       = i4
+            2  begin_ind                 = i2
+            2  end_ind                   = i2
+            2  interval_ind              = i2
+            2  interval                  = i4
+            2  service_resource_cd       = f8
+            2  service_resource_disp     = vc
+            2  control_id                = f8
+            2  control_name              = c20
+            2  lot_id                    = f8
+            2  lot_number                = vc
+%i cclsource:status_block.inc
+      )
+      endif
+
+
+%i cclsource:pcs_resource_security.inc                                 ;003
+
+      /***********************************************************************
+      * Internal service resource(s) record                                  *
+      ***********************************************************************/
+      record serv_res
+      (
+         1  qual[*]
+            2  service_resource_cd       = f8
+      )
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set reply->status_data.status  = "F"
+         set CV_REQUIRED_RECS            = 1
+         declare cv_cnt                  = i4
+         set SERVICE_RESOURCE_TYPE_CODESET = 223
+         set SERV_RES_SUBSECTION_CDF     = "SUBSECTION"
+         declare serv_res_subsection_cd  = f8
+         declare sr_cnt                  = i4
+         declare q_cnt                   = i4
+         declare a_cnt                   = i4
+         declare max_a_cnt               = i4
+         declare dServiceResourceCd      = f8 with protect, noconstant(0.0)
+
+         if (request->worklist_ref_id = 0)
+            if (validate(request->qc_accns[1].accession_id, -1) = - 1)
+               set max_a_cnt = 0
+            else
+               set max_a_cnt = size(request->qc_accns, 5)
+            endif
+         endif
+
+         /* Initialize service resource security */
+         call InitResourceSecurity(1)                                  
+
+      /***********************************************************************
+      * Load required code values                                            *
+      ***********************************************************************/
+         set cv_cnt = 0
+
+         select into "nl:"
+            cv.code_set,
+            cv.code_value
+         from
+            code_value cv
+         where cv.code_set = SERVICE_RESOURCE_TYPE_CODESET
+           and cv.cdf_meaning = SERV_RES_SUBSECTION_CDF
+           and cv.active_ind = 1
+           and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+           and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+         detail
+            if (cv.code_set = SERVICE_RESOURCE_TYPE_CODESET)
+               case (cv.cdf_meaning)
+                 of SERV_RES_SUBSECTION_CDF:
+                    serv_res_subsection_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+         with nocounter
+
+         ;* Verify that all required code value records were read.
+         if (cv_cnt != CV_REQUIRED_RECS)
+            set reply->status_data.subeventstatus[1].OperationName =
+               "SELECT"
+            set reply->status_data.subeventstatus[1].OperationStatus =
+               "F"
+            set reply->status_data.subeventstatus[1].TargetObjectName =
+               "CODE_VALUE TABLE"
+            set reply->status_data.subeventstatus[1].TargetObjectValue =
+               "Unable to read all required code values for script execution"
+            go to Exit_Script
+         endif
+
+      /***********************************************************************
+      * Load service resource(s)                                             *
+      ***********************************************************************/
+         set sr_cnt = 0
+
+         select into "nl:"
+            cv.cdf_meaning
+         from
+            code_value cv
+         where 
+           cv.code_value = request->service_resource_cd
+         detail
+           if (cv.cdf_meaning = SERV_RES_SUBSECTION_CDF)
+           ;* Subsection level
+             sr_cnt = 0
+           else            
+           ;* Testing site level            
+             if (IsResourceViewable(request->service_resource_cd) = TRUE)
+               sr_cnt = 1
+               stat = alterlist(serv_res->qual, 1)
+               serv_res->qual[1].service_resource_cd =
+                   request->service_resource_cd
+             endif
+           endif 
+         with
+           nocounter
+
+         ;* If test site level resource and user does not have access or if 
+         ;* no test sites were found exit script. 
+         if ( ((sr_cnt = 1) and size(serv_res->qual, 5) = 0) or (curqual = 0) )            
+            go to Exit_Script
+         endif
+
+         ;* If subsection level service resource, load children
+         if (sr_cnt = 0)
+            select into "nl:"
+               rg.child_service_resource_cd
+            from
+               resource_group rg
+            where rg.parent_service_resource_cd =
+                                  request->service_resource_cd
+              and rg.child_service_resource_cd > 0.0
+              and rg.resource_group_type_cd = serv_res_subsection_cd
+              and rg.root_service_resource_cd + 0 = 0.0
+            detail
+              dServiceResourceCd = rg.child_service_resource_cd
+              if (IsResourceViewable(dServiceResourceCd) = TRUE) 
+                sr_cnt = sr_cnt + 1
+                stat = alterlist(serv_res->qual, sr_cnt)
+                serv_res->qual[sr_cnt].service_resource_cd =
+                    rg.child_service_resource_cd
+              endif 
+            with
+               nocounter
+
+            if (size(serv_res->qual, 5) = 0)
+              go to Exit_Script
+            endif
+         endif
+
+      /***********************************************************************
+      * Load QC accessions                                                   *
+      ***********************************************************************/
+         set q_cnt = 0
+         if (request->worklist_ref_id > 0)
+            ;* Load QC accessions for a worklist reference id.
+            select into "nl:"
+               wrq.pos
+              ,a.accession
+              ,rar.seq
+              ,d_sr.seq
+              ,cm.seq
+              ,lot_nbr = substring(1, 20, cl.lot_number)
+              ,rlr.seq
+               /* Selection fields:
+               wrq.worklist_ref_id
+              ,wrq.accession_id
+              ,a.accession
+              ,a.preactive_ind
+              ,rar.service_resource_cd
+              ,rar.accession_id
+              ,d_sr.seq
+              ,cm.control_id
+              ,cm.short_description
+              ,cl.lot_id
+              ,lot_nbr = substring(1, 20, cl.lot_number)
+              ,cl.receive_dt_tm
+              ,cl.expiration_dt_tm
+              ,rlr.defined_active_dt_tm
+              ,rlr.defined_inactive_dt_tm
+               */
+
+            from
+               worklist_ref_qc wrq
+              ,accession a
+              ,resource_accession_r rar
+              ,(dummyt d_sr with seq = value(sr_cnt))
+              ,control_material cm
+              ,control_lot cl
+              ,resource_lot_r rlr
+
+            plan wrq
+               where wrq.worklist_ref_id = request->worklist_ref_id
+                 and wrq.active_ind = 1
+            join a
+               where a.accession_id = wrq.accession_id
+            join d_sr
+               where d_sr.seq <= sr_cnt
+            join rar
+               where rar.service_resource_cd =
+                        serv_res->qual[d_sr.seq].service_resource_cd
+                 and rar.accession_id = wrq.accession_id
+            join cm
+               where cm.control_id = rar.control_id
+            join cl
+               where cl.control_id = rar.control_id
+                 and (cnvtdatetime(curdate,curtime3)
+                        between cl.receive_dt_tm
+                            and cl.expiration_dt_tm)
+            join rlr
+               where rlr.lot_id = cl.lot_id
+                 and rlr.service_resource_cd = rar.service_resource_cd
+                 and ((a.preactive_ind = 0
+                     and (cnvtdatetime(curdate,curtime3)
+                        between rlr.defined_active_dt_tm
+                            and rlr.defined_inactive_dt_tm))
+                   or (a.preactive_ind = 1
+                     and (cnvtdatetime(curdate,curtime3) <=
+                                rlr.defined_active_dt_tm))
+                      )
+
+            order
+               wrq.pos
+              ,a.accession
+
+            head report
+               q_cnt = 0
+
+            head wrq.pos
+               row+0
+
+            head a.accession
+               q_cnt = q_cnt + 1
+               if (mod(q_cnt, 10) = 1)
+                  stat = alterlist(reply->qual, q_cnt + 10)
+               endif
+               reply->qual[q_cnt].accession = a.accession
+               reply->qual[q_cnt].unformat_accn = a.accession
+               reply->qual[q_cnt].accession_id = a.accession_id
+               reply->qual[q_cnt].pos = wrq.pos
+               reply->qual[q_cnt].begin_ind = wrq.begin_ind
+               reply->qual[q_cnt].end_ind = wrq.end_ind
+               reply->qual[q_cnt].interval = wrq.interval
+               reply->qual[q_cnt].interval_ind = wrq.interval_ind
+               reply->qual[q_cnt].service_resource_cd =
+                 rar.service_resource_cd
+               reply->qual[q_cnt].control_id = cm.control_id
+               reply->qual[q_cnt].control_name =
+                 cm.short_description
+               reply->qual[q_cnt].lot_id = cl.lot_id
+               reply->qual[q_cnt].lot_number = lot_nbr
+
+            detail
+               row+0
+
+            foot report
+               stat = alterlist(reply->qual, q_cnt)
+
+            with
+               nocounter
+
+         elseif (request->worklist_ref_id = 0)
+            ;* Load QC accessions for an adhoc worklist.
+            select into "nl:"
+               d_sr.seq
+              ,d_a.seq
+              ,rar.seq
+              ,a.accession
+              ,cm.seq
+              ,lot_nbr = substring(1, 20, cl.lot_number)
+              ,rlr.seq
+               /* Selection fields:
+               d_sr.seq
+              ,d_a.seq
+              ,rar.service_resource_cd
+              ,rar.accession_id
+              ,a.accession
+              ,a.preactive_ind
+              ,cm.control_id
+              ,cm.short_description
+              ,cl.lot_id
+              ,lot_nbr = substring(1, 20, cl.lot_number)
+              ,cl.receive_dt_tm
+              ,cl.expiration_dt_tm
+              ,rlr.defined_active_dt_tm
+              ,rlr.defined_inactive_dt_tm
+              */
+
+            from
+               (dummyt d_sr with seq = value(sr_cnt))
+              ,(dummyt d_a with seq = value(max_a_cnt))
+              ,resource_accession_r rar
+              ,accession a
+              ,control_material cm
+              ,control_lot cl
+              ,resource_lot_r rlr
+
+            plan d_sr
+               where d_sr.seq <= sr_cnt
+            join d_a
+               where d_a.seq <= max_a_cnt
+            join rar
+               where rar.service_resource_cd =
+                        serv_res->qual[d_sr.seq].service_resource_cd
+                 and rar.accession_id =
+                        request->qc_accns[d_a.seq].accession_id
+            join a
+               where a.accession_id = rar.accession_id
+            join cm
+               where cm.control_id = rar.control_id
+            join cl
+               where cl.control_id = rar.control_id
+                 and (cnvtdatetime(curdate,curtime3)
+                        between cl.receive_dt_tm
+                            and cl.expiration_dt_tm)
+            join rlr
+               where rlr.lot_id = cl.lot_id
+                 and rlr.service_resource_cd = rar.service_resource_cd
+                 and ((a.preactive_ind = 0
+                     and (cnvtdatetime(curdate,curtime3)
+                        between rlr.defined_active_dt_tm
+                            and rlr.defined_inactive_dt_tm))
+                   or (a.preactive_ind = 1
+                     and (cnvtdatetime(curdate,curtime3) <=
+                                rlr.defined_active_dt_tm))
+                      )
+
+            order
+               a.accession
+
+            head report
+               q_cnt = 0
+
+            head a.accession
+               if (trim(a.accession) > " ")
+                  q_cnt = q_cnt + 1
+                  if (mod(q_cnt, 10) = 1)
+                     stat = alterlist(reply->qual, q_cnt + 10)
+                  endif
+                  reply->qual[q_cnt].accession =
+                    uar_fmt_accession(a.accession, size(a.accession, 1))
+                  reply->qual[q_cnt].unformat_accn = a.accession
+                  reply->qual[q_cnt].accession_id = a.accession_id
+                  reply->qual[q_cnt].pos = 0
+                  reply->qual[q_cnt].begin_ind = 0
+                  reply->qual[q_cnt].end_ind = 0
+                  reply->qual[q_cnt].interval_ind = 0
+                  reply->qual[q_cnt].interval = 0
+                  reply->qual[q_cnt].service_resource_cd =
+                    rar.service_resource_cd
+                  reply->qual[q_cnt].control_id = cm.control_id
+                  reply->qual[q_cnt].control_name =
+                    cm.short_description
+                  reply->qual[q_cnt].lot_id = cl.lot_id
+                  reply->qual[q_cnt].lot_number = lot_nbr
+               endif
+
+            detail
+               row+0
+
+            foot report
+               stat = alterlist(reply->qual, q_cnt)
+
+            with
+               nocounter
+
+         else
+            ;* worklist_ref_id = -1
+            ;* Load valid QC accessions for service_resource(s)
+            select into "nl:"
+               d_sr.seq
+              ,rar.seq
+              ,a.accession
+               /* Selection fields:
+               d_sr.seq
+              ,rar.service_resource_cd
+              ,rar.accession_id
+              ,a.accession
+              ,a.preactive_ind
+;002               ,cm.control_id
+;002               ,cm.short_description
+;002               ,cl.lot_id
+;002               ,lot_nbr = substring(1, 20, cl.lot_number)
+;002               ,cl.receive_dt_tm
+;002               ,cl.expiration_dt_tm
+;002               ,rlr.defined_active_dt_tm
+;002               ,rlr.defined_inactive_dt_tm
+              */
+
+            from
+               (dummyt d_sr with seq = value(sr_cnt))
+              ,resource_accession_r rar
+              ,accession a
+              ,control_material cm
+
+            plan d_sr
+               where d_sr.seq <= sr_cnt
+            join rar
+               where rar.service_resource_cd =
+                        serv_res->qual[d_sr.seq].service_resource_cd
+            join cm
+               where cm.control_id = rar.control_id
+            join a
+               where a.accession_id = rar.accession_id
+            order
+               a.accession
+
+            head report
+               q_cnt = 0
+
+            head a.accession
+               if (trim(a.accession) > " ")
+                  q_cnt = q_cnt + 1
+                  if (mod(q_cnt, 10) = 1)
+                     stat = alterlist(reply->qual, q_cnt + 10)
+                  endif
+                  reply->qual[q_cnt].accession =
+                    uar_fmt_accession(a.accession, size(a.accession, 1))
+                  reply->qual[q_cnt].unformat_accn = a.accession
+                  reply->qual[q_cnt].accession_id = a.accession_id
+                  reply->qual[q_cnt].service_resource_cd =
+                    rar.service_resource_cd
+                  reply->qual[q_cnt].pos = 0
+                  reply->qual[q_cnt].begin_ind = 0
+                  reply->qual[q_cnt].end_ind = 0
+                  reply->qual[q_cnt].interval_ind = 0
+                  reply->qual[q_cnt].interval = 0
+                  reply->qual[q_cnt].control_id = 0.0
+                  reply->qual[q_cnt].control_name = cm.short_description
+                  reply->qual[q_cnt].lot_id = 0.0
+                  reply->qual[q_cnt].lot_number = " "
+               endif
+
+            detail
+               row+0
+
+            foot report
+               stat = alterlist(reply->qual, q_cnt)
+
+            with
+               nocounter
+         endif
+
+      #Exit_Script
+         if (curqual = 0)
+            set reply->status_data.status = "Z"
+         else
+            set reply->status_data.status = "S"
+         endif
+
+         if (GetResourceSecurityStatus(0) != "S")                            ;003
+            call PopulateResSecStatusBlock(0)                                ;003
+            set reply->status_data->status = GetResourceSecurityStatus(0)    ;003
+         endif
+
+
+         end go
+
+;Generated by GNU enscript 1.6.4.

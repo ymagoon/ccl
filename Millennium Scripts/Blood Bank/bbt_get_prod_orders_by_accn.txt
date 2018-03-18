@@ -1,0 +1,408 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/bbt_get_prod_orders_by_accn/bbt_get_prod_orders_by_accn.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *       Revision      (c) 1984-2007 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+ 
+        Source file name:       bbt_get_prod_orders_by_accn.prg
+        Object name:            bbt_get_prod_orders_by_accn
+        Request #:              225970
+ 
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        This script will retrieve blood bank product
+                                orders for a given accession. It will also retrieve
+                                valid product types for each returned product order.
+ 
+        Tables read:            ACCESSION_ORDER_R,
+                                ORDER_SERV_RES_CONTAINER,
+                                ORDERS,   
+                                PROD_ORD_PROD_IDX_R,
+                                PRSNL,
+                                SERVICE_DIRECTORY 
+        Tables updated:         none
+ 
+        Executing from:         BBProductOrders.dll
+ 
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    * Mod Date     Engineer             Comment                            *
+;    * --- -------- -------------------- ---------------------------------- *
+;    * 001 01/20/14  Fitsum Abebe         Initial Release                   *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program   bbt_get_prod_orders_by_accn:dba go
+create program bbt_get_prod_orders_by_accn:dba 
+;**************
+;includes
+;**************
+%i cclsource:pcs_resource_security.inc
+%i cclsource:bbt_get_code_value_by_cdf.inc
+;**************
+;record structures
+;**************
+;
+;record request
+;(
+;  1 accession_nbr = vc
+;)
+ 
+record reply
+(
+  1 accession_id                = f8
+  1 accession_formatted         = c20
+  1 person_id                   = f8
+  1 person_name_full_formatted  = vc
+  1 order_list[*]
+    2 order_id                  = f8
+    2 encntr_id                 = f8
+    2 order_mnemonic            = vc
+    2 order_dt_tm               = dq8
+    2 order_tz                  = i4
+    2 provider_id               = f8    
+    2 provider_name             = vc
+    2 product_list[*]
+        3 product_cd            = f8
+        3 product_disp          = vc
+%i cclsource:status_block.inc
+)
+ 
+;Set script to fail status until it has completed execution.
+set reply->status_data.status = "F"
+
+;Declare subroutines
+declare GetProcessingCodeValues(dummy=i2) = i2
+declare AddReplyStatusEvent (sub_ScriptStatus = vc, sub_OperationName = vc, sub_OperationStatus = vc, 
+                                sub_TargetObjectName = vc, sub_TargetObjectValue = vc) = i2
+;**************
+;Declare constants and variables
+;**************
+declare ACTIVITY_TYPE_CODESET           = i4 with constant(106)
+declare BB_ORDERABLE_PROC_CS            = i4 with constant(1635);Blood bank orderable processing code set
+declare ORDER_STATUS_CODESET            = i4 with constant(6004)
+
+declare ACTIVITY_TYPE_BB_CDF            = vc with constant("BB")
+declare ORDER_STATUS_ORDERED_CDF        = vc with constant("ORDERED")         
+declare ORDER_STATUS_INPROCESS_CDF      = vc with constant("INPROCESS")
+declare ORDER_STATUS_COMPLETED_CDF      = vc with constant("COMPLETED")
+declare PROD_REQ_ORDER_MEAN             = vc with constant("PRODUCT ORDR")
+
+declare order_status_ordered_cd         = f8 with noconstant(0.0)                
+declare order_status_inprocess_cd       = f8 with noconstant(0.0)
+declare order_status_completed_cd       = f8 with noconstant(0.0)
+declare bb_activity_cd                  = f8 with noconstant(0.0)
+declare prod_req_order_cd               = f8 with noconstant(0.0)
+declare order_found                     = i2 with noconstant(FALSE)
+declare service_resource_cd             = f8 with noconstant(0.0)
+declare prodCnt                         = i4 with noconstant(0); Products
+declare iServiceResAccess               = i2 with noconstant(-1)
+declare lSize                           = i4 with noconstant(0); Orders
+;**
+;* Declare/Initialize CCL error handling variables
+;**
+declare sErrorMsg                       = c255
+set nErrorStatus                        = ERROR(sErrorMsg,1)
+ 
+declare count1                          = i4 with noconstant(0)
+
+set reply->status_data.status           = "F"
+
+;Initialize service resource security
+call InitResourceSecurity(TRUE)
+
+;**
+;* Retrieve Processing Code Values
+;** 
+set sErrorMsg = ""
+set nErrorStatus = ERROR(sErrorMsg, 1);clear the error stack
+ 
+if (GetProcessingCodeValues(0) = 0)
+    go to EXIT_SCRIPT
+endif
+ 
+set nErrorStatus = ERROR(sErrorMsg,0)
+if (nErrorStatus > 0)
+    call AddReplyStatusEvent
+        (
+         /* ScriptStatus        */ "F"
+         /* OperationName       */ , "Get processing Code Values"
+         /* OperationStatus     */ , "F"
+         /* TargetObjectName    */ , "_cd fields"
+         /* TargetObjectValue   */ , "CCL Error retrieving processing code values"
+        )
+    go to EXIT_SCRIPT
+endif
+
+select into "nl:"
+     formatted_accn = cnvtacc(aor.accession) 
+from
+      accession_order_r aor
+    , orders o
+    , service_directory sd
+    , order_serv_res_container osrc
+    , prsnl pnl 
+    , person p
+plan    aor     where   aor.accession = request->accession_nbr and 
+                        aor.primary_flag = 0
+join    o       where   o.order_id = aor.order_id
+                        and o.order_id > 0
+                        and o.order_status_cd in (order_status_ordered_cd,
+                                                  order_status_inprocess_cd,
+                                                  order_status_completed_cd)
+                        and o.activity_type_cd = bb_activity_cd
+join    p       where   p.person_id = o.person_id                        
+join    osrc    where   osrc.order_id = o.order_id
+join    sd      where   sd.catalog_cd = o.catalog_cd                          
+                        and sd.bb_processing_cd = prod_req_order_cd ;filter out product request orders only.
+join    pnl     where   pnl.person_id = o.last_update_provider_id
+order by o.order_id, osrc.service_resource_cd
+ 
+head report 
+    reply->person_id = o.person_id
+    reply->person_name_full_formatted = p.name_full_formatted
+    reply->accession_id = aor.accession_id
+    reply->accession_formatted = substring(1, 20, formatted_accn)
+    lSize = 0
+head o.order_id
+  ;Reset the flag indicating that access is not granted to any of the service
+  ;resources related to this order. The check to determine whether the user 
+  ;has access to at least one service resource related to this order is done 
+  ;below in the "head osrc.service_resource_cd" block.
+  iServiceResAccess = 0
+  ; Set the order_found boolean to TRUE so the script will know which error
+  ; message to return if the user has no security to view any orderables.
+  order_found = TRUE     
+head osrc.service_resource_cd
+  ;The user does not have access to any of the services resources currently
+  ;found for this order. If this is set to 1, then the order has already been
+  ;added to the reply structure and does not need to be checked again.
+  if(iServiceResAccess = 0)
+    ;Make sure user has access to the service resource before adding the order
+    ;info to the reply structure.
+    if(IsResourceViewable(osrc.service_resource_cd) = TRUE)    
+      iServiceResAccess = 1
+
+      lSize = lSize + 1
+      stat = alterlist(reply->order_list, lSize)
+      reply->order_list[lSize].order_id                 = o.order_id
+      reply->order_list[lSize].encntr_id                = o.encntr_id
+      reply->order_list[lSize].order_mnemonic           = o.order_mnemonic
+      reply->order_list[lSize].order_dt_tm              = o.current_start_dt_tm
+      reply->order_list[lSize].order_tz                 = o.current_start_tz 
+      reply->order_list[lSize].provider_id              = pnl.person_id
+      reply->order_list[lSize].provider_name            = pnl.name_full_formatted
+    endif
+  endif
+with nocounter
+ 
+set nErrorStatus = ERROR(sErrorMsg, 0)
+if (nErrorStatus > 0)
+    call AddReplyStatusEvent
+        (
+         /* ScriptStatus        */ "F"
+         /* OperationName       */ , "Select Orders"
+         /* OperationStatus     */ , "F"
+         /* TargetObjectName    */ , "reply->order_list"
+         /* TargetObjectValue   */ , "CCL Error retrieving product orders associated with reqeust Accession #"
+        )
+ 
+    go to EXIT_SCRIPT
+endif
+ 
+; Check the status of the service resource security UAR
+if (GetResourceSecurityStatus(0) = "F")
+   call PopulateResSecStatusBlock(0)
+   go to EXIT_SCRIPT
+endif
+
+if(lSize > 0)
+    set sErrorMsg = ""
+    set nErrorStatus = ERROR(sErrorMsg, 1);clear the error stack
+    
+    ;populate valid product types for each product order.
+    select into "nl:"
+    from (dummyt do with seq = value(lSize)),
+          orders o,
+          prod_ord_prod_idx_r po
+    plan do
+    join o  where reply->order_list[do.seq].order_id = o.order_id
+    join po where po.catalog_cd = o.catalog_cd and 
+                  po.active_ind = 1;only return active associations!
+    order by o.order_id
+    head o.order_id
+        prodCnt = 0
+    detail       
+        prodCnt = prodCnt + 1
+        if(prodCnt > size(reply->order_list[do.seq].product_list, 5)) 
+            ;Resize the product list by increments of ten.
+            lStatus = alterlist(reply->order_list[do.seq].product_list, prodCnt + 9)        
+        endif
+        reply->order_list[do.seq].product_list[prodCnt].product_cd = po.product_cd
+        reply->order_list[do.seq].product_list[prodCnt].product_disp = uar_get_code_display(po.product_cd)
+    foot o.order_id
+        ;Resize the product list to remove any empty/unused elements.
+        stat = alterlist(reply->order_list[do.seq].product_list, prodCnt)     
+    with nocounter
+    
+    set nErrorStatus = ERROR(sErrorMsg,0)
+    if (nErrorStatus > 0)
+        call AddReplyStatusEvent
+            (
+             /* ScriptStatus        */   "F"
+             /* OperationName       */ , "Select prod_ord_prod_idx_r"
+             /* OperationStatus     */ , "F"
+             /* TargetObjectName    */ , "reply->order_list->product_list"
+             /* TargetObjectValue   */ , "CCL Error retrieving product types associated with product order(s)"
+            ) 
+        go to EXIT_SCRIPT
+    endif
+    
+    set reply->status_data.status = "S"    ;Successful        
+else ;No orders were found, determine if it was because the user had no service resource security.
+   set reply->accession_formatted = cnvtacc(request->accession_nbr) 
+   if (order_found = TRUE)
+      ;NOTE: the reply->status_data.subeventstatus[].OperationName field value may be parsed on the client
+      ;side inorder to determine resource security failure status.  
+      set operation_name = "RESOURCE SECURITY FAILED";
+   else ; No orders found for request Accession Number
+      set operation_name = "No orders found."
+   endif
+ 
+   call AddReplyStatusEvent
+        (
+         /* ScriptStatus        */   "Z"
+         /* OperationName       */ , operation_name
+         /* OperationStatus     */ , "Z"
+         /* TargetObjectName    */ , "ORDERS"
+         /* TargetObjectValue   */ , "No orders returned."
+        )
+endif
+
+#EXIT_SCRIPT ;Used only for failed termination of script.
+
+;**
+;* Subroutines
+;**
+subroutine GetProcessingCodeValues(sub_dummy)
+    
+     ;* Retrieve BB Activity Type Code Value 
+    set bb_activity_cd = GET_CODE_VALUE(ACTIVITY_TYPE_CODESET, ACTIVITY_TYPE_BB_CDF)
+    if(bb_activity_cd < 1)
+        call AddReplyStatusEvent
+        (
+         /* ScriptStatus        */ "F"
+         /* OperationName       */ , "uar_get_meaning_by_codeset"
+         /* OperationStatus     */ , "F"
+         /* TargetObjectName    */ , "bb_activity_cd"
+         /* TargetObjectValue   */ , "Unable to retrieve Blood Bank (BB) Activity Type code value"
+        )
+        return (0)
+    endif
+    
+    ;* Retrieve Product order procedure type  
+    set prod_req_order_cd = GET_CODE_VALUE(BB_ORDERABLE_PROC_CS, PROD_REQ_ORDER_MEAN) 
+    if(prod_req_order_cd < 1)
+        call AddReplyStatusEvent
+        (
+         /* ScriptStatus        */ "F"
+         /* OperationName       */ , "uar_get_meaning_by_codeset"
+         /* OperationStatus     */ , "F"
+         /* TargetObjectName    */ , "prod_req_order_cd"
+         /* TargetObjectValue   */ , "Unable to retrieve Product order procedure type code value"
+        )
+        return (0)
+    endif
+    
+    ;* Retrieve Order Status Code Values
+    set order_status_ordered_cd = GET_CODE_VALUE(ORDER_STATUS_CODESET, ORDER_STATUS_ORDERED_CDF)
+    if(order_status_ordered_cd < 1)
+        call AddReplyStatusEvent
+        (
+         /* ScriptStatus        */ "F"
+         /* OperationName       */ , "uar_get_meaning_by_codeset"
+         /* OperationStatus     */ , "F"
+         /* TargetObjectName    */ , "order_status_ordered_cd"
+         /* TargetObjectValue   */ , "Unable to retrieve Ordered Order Status code value"
+        )
+        return (0)
+    endif
+    
+    set order_status_inprocess_cd = GET_CODE_VALUE(ORDER_STATUS_CODESET, ORDER_STATUS_INPROCESS_CDF)
+    if(order_status_inprocess_cd < 1)
+        call AddReplyStatusEvent
+        (
+         /* ScriptStatus        */ "F"
+         /* OperationName       */ , "uar_get_meaning_by_codeset"
+         /* OperationStatus     */ , "F"
+         /* TargetObjectName    */ , "order_status_inprocess_cd"
+         /* TargetObjectValue   */ , "Unable to retrieve InProcess Order Status code value"
+        )
+        return (0)
+    endif 
+    
+    set order_status_completed_cd = GET_CODE_VALUE(ORDER_STATUS_CODESET, ORDER_STATUS_COMPLETED_CDF)
+    if(order_status_completed_cd < 1)
+        call AddReplyStatusEvent
+        (
+         /* ScriptStatus        */ "F"
+         /* OperationName       */ , "uar_get_meaning_by_codeset"
+         /* OperationStatus     */ , "F"
+         /* TargetObjectName    */ , "order_status_completed_cd"
+         /* TargetObjectValue   */ , "Unable to retrieve Completed Order Status code value"
+        )
+        return (0)
+    endif 
+    return(1)
+END     
+
+
+subroutine AddReplyStatusEvent
+    (
+     sub_ScriptStatus
+     , sub_OperationName
+     , sub_OperationStatus
+     , sub_TargetObjectName
+     , sub_TargetObjectValue
+    )
+ 
+ 
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alter(reply->status_data.subeventstatus, count1)
+    endif
+ 
+    set reply->status_data.status                                   = sub_ScriptStatus
+    set reply->status_data.subeventstatus[count1].OperationName     = sub_OperationName
+    set reply->status_data.subeventstatus[count1].OperationStatus   = sub_OperationStatus
+    set reply->status_data.subeventstatus[count1].TargetObjectName  = sub_TargetObjectName
+    set reply->status_data.subeventstatus[count1].TargetObjectValue = sub_TargetObjectValue
+ 
+    return
+END;end subroutine AddReplyStatusEvent
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

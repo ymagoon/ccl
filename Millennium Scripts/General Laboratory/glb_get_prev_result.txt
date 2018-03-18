@@ -1,0 +1,485 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_prev_result/glb_get_prev_result.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1998 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_prev_result.prg
+        Object name:            glb_get_prev_result
+        Request #:              250003
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            
+
+        Program purpose:        Load General Lab previous results. 
+
+        Tables read:            advanced_delta
+                                code_value
+                                container
+                                discrete_task_assay
+                                long_text
+                                perform_result
+                                prsnl
+                                reference_range_factor
+                                related_assay
+                                result
+
+        Tables updated:         None
+        Executing from:         
+
+        Special Notes:          
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 01/19/98 Hal Patchen          Initial Release                     *
+;    *001 07/17/06 Ryan Manuel          Added notify_cd to the reply        *
+;    *002 05/28/08 Matt Schile          Moved the reply to an include file  *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_PREV_RESULT:dba go
+             create program GLB_GET_PREV_RESULT:dba
+     
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  qual[*]
+            2  accession_id              = f8    ;Optional, used by calling app
+            2  order_id                  = f8    ;Optional, used by calling app
+            2  person_id                 = f8
+            2  task_assay_cd             = f8
+            2  drawn_dt_tm               = dq8   ;current result drawn dt/tm
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      if(not validate(reply, 0))
+        record reply
+        (
+%i cclsource:glb_get_prev_result_reply.inc
+        )
+      endif
+      
+      /***********************************************************************
+      * Internal Record                                                      *
+      ***********************************************************************/
+      record Internal
+      ( 
+         1  assays[*]
+            2  task_assay_cd             = f8
+            2  rel_assay_ind             = i2
+            2  rel_assays_cnt            = i4
+            2  rel_assays[*]
+               3  task_assay_cd          = f8
+      ) with protect
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set CV_REQUIRED_RECS            = 3
+         declare cv_cnt                  = i4
+         set RESULT_STATUS_CODESET       = 1901
+         set RESULT_STATUS_VERIFIED_CDF  = "VERIFIED"
+         set RESULT_STATUS_AUTOVERIFIED_CDF  = "AUTOVERIFIED"
+         set RESULT_STATUS_CORRECTED_CDF = "CORRECTED"
+         declare result_status_verified_cd  = f8
+         declare result_status_autoverified_cd  = f8
+         declare result_status_corrected_cd = f8
+         declare nbr_of_assays           = i4
+         declare a_cnt                   = i4
+         declare ra_cnt                  = i4
+         declare q_cnt                   = i4
+         declare max_ra_cnt              = i4
+         set reply->status_data.status = "F"
+
+      /***********************************************************************
+      * Load required code values                                            *
+      ***********************************************************************/
+         set cv_cnt = 0
+
+         select into "nl:"
+            cv.code_set,
+            cv.code_value
+         from
+            code_value cv
+         where cv.code_set = RESULT_STATUS_CODESET
+           and cv.cdf_meaning in ( RESULT_STATUS_VERIFIED_CDF,
+                                     RESULT_STATUS_AUTOVERIFIED_CDF,
+                                     RESULT_STATUS_CORRECTED_CDF )
+           and cv.active_ind = 1
+           and (cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+             and  cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+         detail
+            if (cv.code_set = RESULT_STATUS_CODESET)
+               case (cv.cdf_meaning)
+                 of RESULT_STATUS_VERIFIED_CDF:
+                    result_status_verified_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_STATUS_AUTOVERIFIED_CDF:
+                    result_status_autoverified_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_STATUS_CORRECTED_CDF:
+                    result_status_corrected_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+         with nocounter
+
+         ;* Verify that all required code value records were read.
+         if (cv_cnt != CV_REQUIRED_RECS)
+            set reply->status_data.subeventstatus[1].OperationName =
+               "SELECT"
+            set reply->status_data.subeventstatus[1].OperationStatus =
+               "F"
+            set reply->status_data.subeventstatus[1].TargetObjectName =
+               "CODE_VALUE TABLE"
+            set reply->status_data.subeventstatus[1].TargetObjectValue =
+               "Unable to load all required code values for script execution"
+            go to Exit_Script
+         endif
+
+      /***********************************************************************
+      * Load related assays                                                  *
+      ***********************************************************************/
+         set nbr_of_assays = size(request->qual, 5)
+         if (nbr_of_assays = 0)
+            set reply->status_data.status = "Z"
+            go to Exit_Script
+         endif
+
+         set max_ra_cnt = 0
+
+         select into "nl:"
+            d.seq,
+            dta.seq,
+            d_ra.seq,
+            ra1.seq,
+            ra2_exists = decode(ra2.seq, "Y", "N"),
+            ra2.seq
+            /* selection fields:
+            d.seq,
+            dta.rel_assay_ind,
+            d_ra.seq,
+            ra1.task_assay_cd,
+            ra1.related_entity_id,
+            ra2_exists = decode(ra2.seq, "Y", "N"),
+            ra2.related_entity_id
+            */
+
+         from
+            (dummyt d with seq = value(nbr_of_assays)),
+            discrete_task_assay dta,
+            (dummyt d_ra with seq = 1),
+            related_assay ra1,
+            related_assay ra2
+
+         plan d
+         join dta  where dta.task_assay_cd =
+                                  request->qual[d.seq].task_assay_cd
+         join d_ra where d_ra.seq = 1
+         join ra1  where dta.rel_assay_ind = 1
+                     and ra1.task_assay_cd = dta.task_assay_cd
+         join ra2  where ra2.related_entity_id = ra1.related_entity_id
+         
+         head report
+            a_cnt = 0
+            ra_cnt = 0
+
+         head d.seq
+            a_cnt = a_cnt + 1
+            if (mod(a_cnt,10) = 1)
+               stat = alterlist(internal->assays, a_cnt + 10)
+            endif
+            internal->assays[a_cnt].task_assay_cd = 
+              dta.task_assay_cd
+            internal->assays[a_cnt].rel_assay_ind = 
+              dta.rel_assay_ind
+            if (ra2_exists = "N")
+               internal->assays[a_cnt].rel_assays_cnt = 1
+               ra_cnt = 1
+               stat = alterlist(internal->assays[a_cnt].rel_assays, ra_cnt)
+               internal->assays[a_cnt].rel_assays[ra_cnt]
+                 .task_assay_cd = request->qual[a_cnt].task_assay_cd
+            else
+               ra_cnt = 0
+            endif
+
+         detail
+            if (ra2_exists = "Y")
+               ra_cnt = ra_cnt + 1
+               stat = alterlist(internal->assays[a_cnt].rel_assays, ra_cnt)
+               internal->assays[a_cnt].rel_assays_cnt = ra_cnt
+               internal->assays[a_cnt].rel_assays[ra_cnt]
+                 .task_assay_cd = ra2.task_assay_cd
+            endif
+
+         foot d.seq
+            if (ra_cnt > max_ra_cnt)
+               max_ra_cnt = ra_cnt
+            endif
+
+         foot report
+            stat = alterlist(internal->assays, a_cnt)
+
+         with
+            nocounter,
+            outerjoin = d_ra
+/***DEBUG
+for (x = 1 to a_cnt)
+   call echo(build("assays[", x, "].task_assay_cd =",
+     internal->assays[x].task_assay_cd))
+   call echo(build("assays[", x, "].rel_assay_ind =",
+     internal->assays[x].rel_assay_ind))
+   for (y = 1 to internal->assays[x].rel_assays_cnt)
+      call echo(build("   rel_assays[", y, "].task_assay_cd =",
+        internal->assays[x].rel_assays[y].task_assay_cd))
+   endfor
+endfor
+***DEBUG*/
+
+      /***********************************************************************
+      * Load previous results                                                *
+      ***********************************************************************/
+         select into "nl:"
+            d1.seq,
+            d2.seq,
+            r.seq,
+            pr.seq,
+            lt.seq,
+            c.seq,
+            rrf.seq,
+            ad.seq
+            /* selection fields:
+            d1.seq,
+            d2.seq,
+            r.result_id,
+            r.order_id,
+            r.task_assay_cd,
+            r.result_status_cd,
+            pr.perform_result_id,
+            pr.result_id,
+            pr.result_status_cd,
+            pr.result_type_cd,
+            pr.normal_cd,
+            pr.critical_cd,
+            pr.review_cd,
+            pr.linear_cd,
+            pr.feasible_cd,
+            pr.dilution_factor,
+            pr.delta_cd,
+            pr.nomenclature_id,
+            pr.equation_id,
+            pr.result_value_numeric,
+            pr.numeric_raw_value,
+            pr.less_great_flag,
+            pr.result_value_alpha,
+            pr.result_value_dt_tm,
+            pr.long_text_id,
+            pr.ascii_text,
+            pr.container_id,
+            lt.long_text_id,
+            lt.long_text,
+            c.drawn_dt_tm
+            */
+
+         from
+            (dummyt d1 with seq = value(a_cnt)),
+            (dummyt d2 with seq = value(max_ra_cnt)),
+            result r,
+            perform_result pr,
+            long_text lt,
+            container c,
+            reference_range_factor rrf,
+            advanced_delta ad
+
+         plan d1
+         join d2  where d2.seq <= internal->assays[d1.seq].rel_assays_cnt
+         join r   where r.person_id = request->qual[d1.seq].person_id
+                    and r.task_assay_cd = internal->assays[d1.seq]
+                          .rel_assays[d2.seq].task_assay_cd
+                    and r.result_status_cd 
+                                  in (result_status_verified_cd,
+                                      result_status_autoverified_cd,
+                                      result_status_corrected_cd)
+         join pr  where pr.result_id = r.result_id
+                    and pr.result_status_cd = r.result_status_cd
+         join lt  where lt.long_text_id = pr.long_text_id
+         join c   where c.container_id = pr.container_id
+         join rrf where rrf.reference_range_factor_id =
+                                  pr.reference_range_factor_id
+         join ad  where ad.advanced_delta_id = pr.advanced_delta_id
+                    
+         head report
+            q_cnt = 0
+              
+         head d1.seq
+            cnt = d1.seq
+            q_cnt = q_cnt + 1
+            if (mod(q_cnt,10) = 1)
+               stat = alterlist(reply->qual, q_cnt + 10)
+            endif
+            reply->qual[q_cnt].accession_id =
+              request->qual[cnt].accession_id
+            reply->qual[q_cnt].order_id =
+              request->qual[cnt].order_id
+            reply->qual[q_cnt].person_id =
+              request->qual[cnt].person_id
+            reply->qual[q_cnt].task_assay_cd =
+              internal->assays[cnt].task_assay_cd
+            reply->qual[q_cnt].rel_assay_ind = 
+              internal->assays[cnt].rel_assay_ind
+
+         detail
+            ;* Previous result
+            ;* Find the previous results drawn date/time which is before
+            ;* and closest to the current results drawn date/time. 
+            if (cnvtdatetime(c.drawn_dt_tm) < 
+                cnvtdatetime(request->qual[cnt].drawn_dt_tm))
+               if ((reply->qual[q_cnt].result_id <= 0.0)
+               or (reply->qual[q_cnt].result_id > 0.0
+                 and cnvtdatetime(c.drawn_dt_tm) > 
+                     cnvtdatetime(reply->qual[q_cnt].drawn_dt_tm)))
+                  reply->qual[q_cnt].used_task_assay_cd =
+                    r.task_assay_cd
+                  reply->qual[q_cnt].used_order_id =
+                    r.order_id
+                  reply->qual[q_cnt].result_id = 
+                    r.result_id
+                  reply->qual[q_cnt].perform_result_id = 
+                    pr.perform_result_id
+                  reply->qual[q_cnt].result_status_cd =
+                    r.result_status_cd
+                  reply->qual[q_cnt].repeat_nbr =
+                    pr.repeat_nbr
+                  reply->qual[q_cnt].reference_range_factor_id =
+                    pr.reference_range_factor_id
+                  reply->qual[q_cnt].delta_chk_flag =
+                    rrf.delta_chk_flag
+                  reply->qual[q_cnt].advanced_delta_id =
+                    pr.advanced_delta_id
+                  if (ad.advanced_delta_id > 0)
+                     reply->qual[q_cnt].delta_low = 
+                       ad.delta_low
+                     reply->qual[q_cnt].delta_high =
+                       ad.delta_high
+                     reply->qual[q_cnt].delta_check_type_cd =
+                       ad.delta_check_type_cd
+                     reply->qual[q_cnt].delta_minutes =
+                       ad.delta_minutes
+                     reply->qual[q_cnt].delta_value =
+                       ad.delta_value
+                  elseif (rrf.delta_chk_flag > 0)
+                     reply->qual[q_cnt].delta_low = 0.0
+                     reply->qual[q_cnt].delta_high = 0.0
+                     reply->qual[q_cnt].delta_check_type_cd =
+                       rrf.delta_check_type_cd
+                     reply->qual[q_cnt].delta_minutes =
+                       rrf.delta_minutes
+                     reply->qual[q_cnt].delta_value =
+                       rrf.delta_value
+                  endif
+                  reply->qual[q_cnt].normal_cd = 
+                    pr.normal_cd
+                  reply->qual[q_cnt].critical_cd = 
+                    pr.critical_cd
+                  reply->qual[q_cnt].review_cd = 
+                    pr.review_cd
+                  reply->qual[q_cnt].linear_cd =
+                    pr.linear_cd
+                  reply->qual[q_cnt].feasible_cd =
+                    pr.feasible_cd
+                  reply->qual[q_cnt].dilution_factor =
+                    pr.dilution_factor
+                  reply->qual[q_cnt].delta_cd = 
+                    pr.delta_cd
+                  reply->qual[q_cnt].units_cd = 
+                    pr.units_cd
+                  reply->qual[q_cnt].result_type_cd = 
+                    pr.result_type_cd
+                  reply->qual[q_cnt].equation_id = 
+                    pr.equation_id
+                  reply->qual[q_cnt].nomenclature_id = 
+                    pr.nomenclature_id
+                  reply->qual[q_cnt].result_value_numeric = 
+                    pr.result_value_numeric
+                  reply->qual[q_cnt].numeric_raw_value = 
+                    pr.numeric_raw_value
+                  reply->qual[q_cnt].less_great_flag = 
+                    pr.less_great_flag
+                  reply->qual[q_cnt].result_value_alpha = 
+                    pr.result_value_alpha
+                  reply->qual[q_cnt].result_value_dt_tm = 
+                    pr.result_value_dt_tm
+                  reply->qual[q_cnt].long_text_id = 
+                    pr.long_text_id
+                  if (lt.long_text_id > 0.0)
+                     reply->qual[q_cnt].rtf_text = lt.long_text
+                  endif
+                  reply->qual[q_cnt].ascii_text = 
+                    pr.ascii_text
+                  reply->qual[q_cnt].drawn_dt_tm = 
+                    c.drawn_dt_tm
+                  reply->qual[q_cnt].qc_override_cd = 
+                    pr.qc_override_cd
+                  reply->qual[q_cnt].notify_cd =
+                    pr.notify_cd
+               endif
+            endif
+  
+         foot d1.seq
+            row+0
+
+         foot report
+            stat = alterlist(reply->qual, q_cnt)
+
+         with 
+            nocounter
+
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/
+      #Resize_Reply
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+         endif
+
+      #Exit_Script
+         end
+         go      
+
+;Generated by GNU enscript 1.6.4.

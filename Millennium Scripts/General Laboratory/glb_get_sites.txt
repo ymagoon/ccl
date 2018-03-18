@@ -1,0 +1,2184 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_sites/glb_get_sites.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       GLB_GET_SITES.PRG
+        Object name:            GLB_GET_SITES
+        Request #:              250090
+ 
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Load a range of service resources.
+                                Service resources for specific accessions
+                                and/or orderable procedures can be queried
+                                by completing the optional accession and
+                                catalog_cd fields of the request record.
+                                The records are returned beginning with
+                                the "beginstring" passed in the request record.
+                                The context_more_data will be "T" if there is at
+                                least one more resource than the user requested.
+ 
+        Tables read:            order_serv_res_container
+                                accession_order_r
+                                code_value
+                                orders
+                                service_resource
+                                order_catalog
+                                orc_resource_list
+                                assay_resource_list
+                                profile_task_r
+                                assay_processing_r
+                                rr_assay_r
+                                rr_accession_r
+ 
+ 
+        Tables updated:         none
+        Executing from:         TestSiteLookup.dll
+ 
+        Special Notes:          number_to_return         - indicates how many resources to return
+                                catalog_cd               - filter resources by this catalog_cd is routed to
+                                active_flag              - override resources active ind 1 = retrieve all
+                                                              0 = only active
+                                display                  - used to check if this is a valid resource
+                                accession                - retrieve resources under this accession
+                                location_cd              - filter by service_resource's location_cd
+                                beginstring              - Start string to retrieve resources with
+                                levelflag                - 0 - bench, instr
+                                                           1 - bench, instr, subsection
+                                                           2 - section
+                                                           3 - bench, instr, subsection, section
+                                                           4 - instr
+                                                           5 - instr, subsection
+                                organizations[*]         - filter by service_resources organization_id
+                                    organization_id
+                                act_type_means[*]        - filter by service_resources activity_type_cd
+                                    activity_type_mean
+                                act_sub_means[*]         - filter by service_resources activity_subtype_cd
+                                    activity_subtype_mean
+                                catalog_cds[*]           - retrieve resources that can be performed at all catalog_cds
+	                                cat_cd
+                                task_assay_cds[*]        - retrieve resources that can be performed at all catalog_cds
+                                    assay_cd
+ 
+******************************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 01/09/01 Gary Runde           Rewrite of script                   *
+;    *             David Tjiptogarsono                                      *
+;    *001 07/27/01 Gary Runde           Use binary search for               *
+;    *                                  filtering organizations, add +0 to  *
+;    *                                  service_resource_type_cd            *
+;    *002 08/14/02 Chuck Figas          Added service resource security     *
+;    *003 09/28/10 Steve Hendrick       Allow partial lookup to find unique *
+;    *                                  service resource                    *
+;    *004 06/13/11 Oliver Barbara       Resolving issue around partial name *
+;    *                                  search.                             *
+;    *005 10/10/13 MK019358             CR# 1-759381532 PTL.CI Transfer     *
+;~DE~************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+ 
+drop program glb_get_sites:dba go
+create program glb_get_sites:dba
+ 
+%i cclsource:pcs_resource_security.inc
+%i cclsource:glb_script_logging.inc
+set log_program_name = "glb_get_sites"
+ 
+set currentdate = cnvtdatetime(curdate, curtime3)
+set sText = fillstring(254, " ")
+set sText = CONCAT("{{Script::GLB_GET_SITES}} Started at ",
+                 format(currentdate, "dd-mmm-yyyy-hhmm;;d"))
+call log_message (NULLTERM(sText), log_level_debug)
+ 
+ 
+      /***********************************************************************
+      *   request                                                            *
+      ***********************************************************************/
+/*
+record request
+(
+        1 number_to_return        = i4
+        1 catalog_cd              = f8
+        1 active_flag             = i2  1 = retrieve all   0 = only active
+        1 display                 = vc
+        1 accession               = vc
+        1 location_cd             = f8
+        1 beginstring             = vc
+        1 levelflag               = i4  0 - bench, instr
+                                        1 - bench, instr, subsection
+                                        2 - section
+                                        3 - bench, instr, subsection, section
+                                        4 - instr
+                                        5 - instr, subsection
+        1 organizations[*]
+          2 organization_id       = f8
+        1 act_type_means[*]
+          2 activity_type_mean    = vc
+        1 act_sub_means[*]
+          2 activity_subtype_mean = vc
+        1 catalog_cds[*]
+          2 cat_cd                = f8
+        1 task_assay_cds[*]
+          2 assay_cd              = f8
+        1 resource_security_ind   = i2
+)
+ 
+*/
+      /***********************************************************************
+      *  reply record                                                        *
+      ***********************************************************************/
+ 
+      record reply
+      (
+        1 level                        = vc       ;not currently used...
+        1 qual[*]
+          2 service_resource_cd        = f8
+          2 service_resource_disp      = vc
+          2 cdf_meaning                = vc
+          2 service_resource_type_cd   = f8
+          2 active_ind                 = i2
+          2 cs_login_loc_cd            = f8
+        1 context_more_data            = c1
+%i cclsource:status_block.inc
+      )
+ 
+      /***********************************************************************
+      *   temporary record structure to store service resource type codes    *
+      ***********************************************************************/
+      record resourcetypes
+      (
+        1 types[*]
+          2 resource_type_cd = f8
+      )
+ 
+      /***********************************************************************
+      *   temporary record structure to store Order catalog details          *
+      ***********************************************************************/
+        record catalog_data
+        (
+            1 catalog_cds[*]
+               2 catalog_cd = f8
+               2 activity_type_cd = f8
+        )
+ 
+      /***********************************************************************
+      *   declare variables                                                  *
+      ***********************************************************************/
+ 
+      ;declare / initialize vars to store the service resource type codes
+      declare bench_type_cd   = f8
+      declare instr_type_cd   = f8
+      declare sect_type_cd    = f8
+      declare subsect_type_cd = f8
+ 
+      ;flag to tell whether the select statement executed was sucessful or not
+      ;if not, failed = "T" which tells the code in exit_script
+      ;to set the status_flag to "F" for failure
+      declare failed = vc
+ 
+      ;flag to tell whether we want to call the validate subs or the select subs
+      declare ValidateResource = i2
+ 
+      ;var to hold the value of the beginstring passed in...take out
+      ;all spec chars, spaces and convert to upper case
+      declare gcbeginstring = vc
+ 
+      ;var to be used to filter resources
+      declare resource_parser = c500
+ 
+      ;var to the number of organizations passed in to filter out orgs
+      declare num_orgs = i2
+ 
+      ;var used to be used when building the parser
+      declare p_cnt = i2
+ 
+      ;var to be the counter to fill the resourcetypes record structure
+      ;with the service_resource_type_cd's needed
+      declare restype_cnt = i2
+ 
+      ;var to be equal to the service resource type codeset
+      declare resource_type_codeset = i4
+ 
+      declare dServResCd = f8 with protect, noconstant(0.0)
+ 
+      declare dDeptTypeCd = f8 with protect, noconstant(0.0)
+ 
+      set stat = uar_get_meaning_by_codeset(223, "DEPARTMENT", 1, dDeptTypeCd)
+ 
+      if (dDeptTypeCd = 0)
+         go to EXIT_SCRIPT
+      endif
+ 
+      ;var to be equal to the protocol & CI activity type code value
+      declare  dPTLActivityTypeCd = f8 with protect, noconstant(0.0)
+      declare  dCIActivityTypeCd = f8 with protect, noconstant(0.0)
+ 
+      declare dActivityTypeCS = i4 with protect, constant(106)
+ 
+      set dPTLActivityTypeCd = uar_get_code_by(nullterm("MEANING"), dActivityTypeCS, nullterm("PTL"))
+      set dCIActivityTypeCd = uar_get_code_by(nullterm("MEANING"), dActivityTypeCS, nullterm("CI"))
+ 
+      declare numidx = i4 with protect,noconstant(0)
+
+      declare IsSrvResPopulated = i4 with protect, noconstant(0)
+ 
+      /***********************************************************************
+      *   initialize variables                                               *
+      ***********************************************************************/
+ 
+      ;flag to tell whether the select statement executed was sucessful or not
+      ;if not, failed = "T" which tells the code in exit_script
+      ;to set the status_flag to "F" for failure
+      set failed = "F"
+ 
+      ;flag to tell whether we want to call the validate subs or the select subs
+      set ValidateResource = 0
+ 
+      ;not used currently?????  left here...
+      set reply->level = "none"
+ 
+      ;flag to tell TestSiteLookup that more data exists
+      set reply->context_more_data = "F"
+ 
+      ;script status
+      set reply->status_data->status = "F"
+ 
+      ;set var to the CDF meaning of the beginstring passed in...take out
+      ;all spec chars, spaces and convert to upper case
+      set gcbeginstring = trim(cnvtupper(cnvtalphanum(request->beginstring)))
+ 
+      ;initialize the parser var to be used to filter resources
+      set resource_parser = fillstring(500," ")
+ 
+      ;set var to the number of organizations passed in to filter out orgs
+      set num_orgs = value(size(request->organizations, 5))
+ 
+      ;var used to be used when building the parser
+      set p_cnt = 0
+ 
+      ;initialize the counter to fill the resourcetypes record structure
+      ;with the service_resource_type_cd's needed
+      set restype_cnt = 0
+ 
+      ;set var to be equal to the service resource type codeset
+      set resource_type_codeset = 223
+ 
+      ;initialize resource security
+      call InitResourceSecurity(request->resource_security_ind)
+ 
+      /************************************************************************
+      *     Subroutine to find whether org_id in request structure is in      *
+      *     service_resource table.                                           *
+      *     Parameter: servres_org_id                                         *
+      *                This is the organization_id found in service_resource  *
+      *     Return values: 1 = org_id is found	                             *
+      *                    0 = org_id is not found                            *
+      *************************************************************************/
+      subroutine find_org(servres_org_id)
+ 
+        /*********************001 Begin new code********************************/
+ 
+        ;value to send back to caller to indicate whether we found the
+        ;resource's organization_id or not
+        declare found_org_ind   = i2 with private, noconstant(0)
+ 
+        ;the next three values are used as indexes in the list of organizations
+        declare lFirst          = i4 with private, noconstant(1)
+        declare lLast           = i4 with private, noconstant(value(size(request->organizations, 5)))
+        declare lMiddle         = i4 with private, noconstant(0)
+ 
+        declare lFirstValue     = f8 with private, noconstant(0.0)
+        declare lLastValue      = f8 with private, noconstant(0.0)
+ 
+ 
+        ;if no orgs were passed in or the service_resource's org_id is zero
+        ;then this service resource passes
+        if ((num_orgs = 0) or (servres_org_id = 0.0))
+          set found_org_ind = 1
+          set lFirst = lLast + 1
+        else
+          ;check to see if the service resources organization id is equal to the list(max) or List(min) value
+          if (((request->organizations[lFirst]->organization_id = servres_org_id) or
+              (request->organizations[lLast]->organization_id = servres_org_id))  and
+              (found_org_ind = 0))
+            set found_org_ind = 1
+            set lFirst = lLast + 1
+          endif
+        endif
+ 
+        set cnt = 0
+ 
+        while (lFirst <= lLast)
+          set lFirstValue = request->organizations[lFirst]->organization_id
+          set lLastValue = request->organizations[lLast]->organization_id
+ 
+          set lMiddle = ((lFirst + lLast) / 2)
+          set cnt = cnt + 1
+          ;check to see if we found the organization id in middle of remainder of list
+          if ( servres_org_id = request->organizations[lMiddle]->organization_id)
+            ;organization id found, stop search
+            set lFirst = lLast + 1
+            set found_org_ind = 1
+          elseif ( servres_org_id < request->organizations[lMiddle]->organization_id)
+            ;search the first half of the list.
+            set lLast = lMiddle - 1
+          elseif ( servres_org_id > request->organizations[lMiddle]->organization_id)
+            ;search the second half of the list.
+            set lFirst = lMiddle + 1
+          endif
+        endwhile
+ 
+        /*********************001 End new code********************************/
+        return(found_org_ind)
+      end
+ 
+      /***********************************************************************
+      *      Default select to just retrieve Order Catalog details           *
+      ***********************************************************************/
+      subroutine GetCatalogData(null)
+        call log_message("called into GetCatalogData",LOG_LEVEL_DEBUG)
+ 
+        if (dPTLActivityTypeCd <= 0.0 or dCIActivityTypeCd <= 0.0)
+            call log_message("Unable to get code values ",LOG_LEVEL_DEBUG)
+            return
+        endif
+ 
+        set numidx = 0	
+        select into "nl:"
+            oc.catalog_cd,
+            oc.activity_type_cd
+        from
+            order_catalog oc
+        plan oc
+        where expand(numidx,1,req_cat_cnt,oc.catalog_cd,request->catalog_cds[numidx]->cat_cd)
+        and oc.active_ind = 1
+        and oc.catalog_cd > 0.0
+        and oc.activity_type_cd in (dPTLActivityTypeCd,dCIActivityTypeCd)
+ 
+        head report
+        	idx = 0
+        detail
+        	idx = idx + 1
+        	if (mod(idx, 10) = 1)
+        		 stat = alterlist(catalog_data->catalog_cds, idx + 10)
+        	endif
+        	catalog_data->catalog_cds[idx]->activity_type_cd = oc.activity_type_cd
+			catalog_data->catalog_cds[idx]->catalog_cd = oc.catalog_cd
+		foot report
+            stat = alterlist(catalog_data->catalog_cds, idx)
+        with nocounter
+ 
+        call log_message("Done with GetCatalogData",LOG_LEVEL_DEBUG)
+      end
+ 
+ 
+      /***********************************************************************
+      *      Default select to just retrieve base set of resources           *
+      ***********************************************************************/
+      subroutine select_resources(none1)
+         call log_message ("called into select_resources", log_level_debug)
+ 
+          ;plan off of service_resource using the parser in order of
+          ;service_resource_type_cd, activity_type_cd, activity_subtype_cd to limit as much as
+          ;possible
+          ;join to code_value table to qualify out on beginstring passed in
+          ;join to dummy table to qualify out on orgs passed in
+          select into "nl:"
+            s.service_resource_type_cd,
+            s.service_resource_cd,
+            c.code_value,
+            c.display_key,
+            c.cdf_meaning
+          from
+            service_resource s,
+            code_value c
+ 
+          plan s
+            where parser(resource_parser)
+              and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+              and (request->active_flag = 1 or (s.active_ind = 1
+              and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+          join c
+            where c.code_value = s.service_resource_cd
+              and trim(c.display_key) >= value(gcbeginstring)
+              and (request->active_flag = 1 or (c.active_ind = 1
+              and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+ 
+          order by c.display_key, s.service_resource_cd
+ 
+          head report
+            q_cnt = 0
+            org_is_found = 0
+ 
+          head s.service_resource_cd
+            ;check to see if the number_to_return has been reached, if so         ;001
+            ;do not process this service_resource_cd                              ;001
+            if (reply->context_more_data = "F")                                   ;001
+              ;var to tell whether this resource belongs to one of orgs passed in
+              org_is_found = 0
+ 
+              ;call sub to return 1/0 to indicate this resource belongs to one of the
+              ;orgs passed in
+              org_is_found = find_org(s.organization_id)
+ 
+              ;check the number_to_return value to make sure only returning the
+              ;number of resources indicated, and check the org_is_found indicator
+              ;to make sure this resource is valid for orgs passed in
+              dServResCd = s.service_resource_cd
+              if (((q_cnt <= request->number_to_return) or (request->number_to_return = 0)) and (org_is_found = 1)
+                  and (IsResourceViewable(dServResCd) = TRUE) )
+                q_cnt = q_cnt + 1
+                if (mod(q_cnt, 10) = 1)
+                   stat = alterlist(reply->qual, q_cnt + 10)
+                endif
+                ;return the service resource information
+                reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+                reply->qual[q_cnt]->service_resource_disp = c.display
+                reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+                reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+                reply->qual[q_cnt]->active_ind = c.active_ind
+                reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+              elseif ((q_cnt = value(request->number_to_return  + 1)) and (request->number_to_return > 0))
+                reply->context_more_data = "T"
+              endif
+            endif
+          foot report
+            stat = alterlist(reply->qual, q_cnt)
+          with nocounter, maxread(c, value(request->number_to_return + 1)) ;DEBUG
+ 
+          ;call sub to check to make sure the select did not have any errors
+          if (ERROR_MESSAGE(1) = 1)
+            set failed = "T"
+          endif
+          call log_message ("done with select_resources", log_level_debug)
+      end
+ 
+      /***********************************************************************
+      * select for patient accessions                                        *
+      * get the resources that are assigned                                  *
+      * to this accessions' containers                                       *
+      * by checking the order_serv_res_container                             *
+      * with the accessions order_ids                                        *
+      ***********************************************************************/
+      subroutine select_patient_accession(none2)
+          call log_message ("called into select_patient_accession", log_level_debug)
+          select into "nl:"
+            aor.accession,
+            osrc.order_id,
+            o.order_id,
+            c.active_ind,
+            s.service_resource_cd,
+            c.display,
+            c.cdf_meaning,
+            c.display_key,
+            c.active_ind
+ 
+          from
+            accession_order_r aor,
+            orders o,
+            order_serv_res_container osrc,
+            service_resource s,
+            code_value c
+ 
+          plan aor
+            where aor.accession = trim(request->accession)
+ 
+          join o
+            where o.order_id = aor.order_id
+              and (request->catalog_cd = 0.0 or o.catalog_cd = request->catalog_cd)
+          join osrc
+            where osrc.order_id = o.order_id
+ 
+          join s
+            where s.service_resource_cd = osrc.service_resource_cd
+              and parser(resource_parser)
+              and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+              and (request->active_flag = 1 or (s.active_ind = 1
+              and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+          join c
+            where c.code_value = s.service_resource_cd
+              and trim(c.display_key) >= gcbeginstring
+              and (request->active_flag = 1 or (c.active_ind = 1
+              and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+ 
+          order by c.display_key, s.service_resource_cd
+ 
+          head report
+            q_cnt = 0
+            org_is_found = 0
+ 
+          head s.service_resource_cd
+            ;check to see if the number_to_return has been reached, if so         ;001
+            ;do not process this service_resource_cd                              ;001
+            if (reply->context_more_data = "F")                                   ;001
+              ;var to tell whether this resource belongs to one of orgs passed in
+              org_is_found = 0
+              ;call sub to return 1/0 to indicate this resource belongs to one of the
+              ;orgs passed in
+              org_is_found = find_org(s.organization_id)
+ 
+              ;check the number_to_return value to make sure only returning the
+              ;number of resources indicated, and check the org_is_found indicator
+              ;to make sure this resource is valid for orgs passed in
+              dServResCd = s.service_resource_cd
+              if (((q_cnt < request->number_to_return) or (request->number_to_return = 0)) and (org_is_found = 1)
+                  and (IsResourceViewable(dServResCd) = TRUE) )
+                q_cnt = q_cnt + 1
+                if (mod(q_cnt, 10) = 1)
+                  stat = alterlist(reply->qual, q_cnt + 10)
+                endif
+                ;return the service resource information
+                reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+                reply->qual[q_cnt]->service_resource_disp = c.display
+                reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+                reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+                reply->qual[q_cnt]->active_ind = c.active_ind
+                reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+              elseif ((q_cnt = request->number_to_return) and (request->number_to_return > 0))
+                reply->context_more_data = "T"
+              endif
+            endif                                                                 ;001
+          foot report
+            stat = alterlist(reply->qual, q_cnt)
+          with nocounter
+ 
+          ;call sub to check to make sure the select did not have any errors
+          if (ERROR_MESSAGE(1) = 1)
+            set failed = "T"
+          endif
+          call log_message ("done with select_patient_accession", log_level_debug)
+      end
+ 
+      /***********************************************************************
+      * select for round robin accessions this select will                   *
+      * retrieve the resources that are assigned to the                      *
+      * template that this round robin accession belongs to                  *
+      ***********************************************************************/
+      subroutine select_rr_accession(none3)
+          call log_message ("called into select_rr_accession", log_level_debug)
+          select into "nl:"
+            s.service_resource_cd,
+            c.display,
+            c.cdf_meaning,
+            c.display_key,
+            s.service_resource_type_cd,
+            c.active_ind
+          from
+            accession acc,
+            rr_accession_r rar,
+            rr_assay_r rrr,
+            service_resource s,
+            code_value c
+          plan acc
+            where acc.accession = trim(request->accession)
+          join rar
+            where rar.accession_id = acc.accession_id
+          join rrr
+            where rrr.round_robin_ref_id = rar.round_robin_ref_id
+          join s
+            where s.service_resource_cd = rrr.service_resource_cd
+              and parser(resource_parser)
+              and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+              and (request->active_flag = 1 or (s.active_ind = 1
+              and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+          join c
+            where c.code_value = s.service_resource_cd
+              and trim(c.display_key) >= gcbeginstring
+              and (request->active_flag = 1 or (c.active_ind = 1
+              and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+ 
+          order by c.display_key, s.service_resource_cd
+ 
+          head report
+            q_cnt = 0
+            org_is_found = 0
+ 
+          head s.service_resource_cd
+            ;check to see if the number_to_return has been reached, if so         ;001
+            ;do not process this service_resource_cd                              ;001
+            if (reply->context_more_data = "F")                                   ;001
+              ;var to tell whether this resource belongs to one of orgs passed in
+              org_is_found = 0
+ 
+              ;call sub to return 1/0 to indicate this resource belongs to one of the
+              ;orgs passed in
+              org_is_found = find_org(s.organization_id)
+ 
+              ;check the number_to_return value to make sure only returning the
+              ;number of resources indicated, and check the org_is_found indicator
+              ;to make sure this resource is valid for orgs passed in
+              dServResCd = s.service_resource_cd
+              if (((q_cnt < request->number_to_return) or (request->number_to_return = 0)) and (org_is_found = 1)
+                  and (IsResourceViewable(dServResCd) = TRUE) )
+                q_cnt = q_cnt + 1
+                if (mod(q_cnt, 10) = 1)
+                  stat = alterlist(reply->qual, q_cnt + 10)
+                endif
+                ;return the service resource information
+                reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+                reply->qual[q_cnt]->service_resource_disp = c.display
+                reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+                reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+                reply->qual[q_cnt]->active_ind = c.active_ind
+                reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+              elseif ((q_cnt = request->number_to_return) and (request->number_to_return > 0))
+                reply->context_more_data = "T"
+              endif
+            endif                                                                 ;001
+          foot report
+            stat = alterlist(reply->qual, q_cnt)
+          with nocounter
+ 
+          ;call sub to check to make sure the select did not have any errors
+          if (ERROR_MESSAGE(1) = 1)
+            set failed = "T"
+          endif
+          call log_message ("done with select_rr_accession", log_level_debug)
+      end
+ 
+      /***********************************************************************
+      * Route level 1, get catalogs' routed resources from orc_resource_list *
+      ***********************************************************************/
+      subroutine select_route_lvl_one(none4)
+          call log_message ("called into select_route_lvl_one", log_level_debug)
+          select into "nl:"
+            orl.catalog_cd,
+            orl.service_resource_cd,
+            s.service_resource_type_cd,
+            s.service_resource_cd,
+            c.code_value,
+            c.display_key,
+            c.cdf_meaning
+ 
+          from
+            orc_resource_list orl,
+            service_resource s,
+            code_value c
+ 
+          plan orl
+            where orl.catalog_cd = request->catalog_cd
+          join s
+            where orl.service_resource_cd = s.service_resource_cd
+              and parser(resource_parser)
+              and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+              and (request->active_flag = 1 or (s.active_ind = 1
+              and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+          join c
+            where c.code_value = s.service_resource_cd
+              and trim(c.display_key) >= gcbeginstring
+              and (request->active_flag = 1 or (c.active_ind = 1
+              and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+ 
+          order by c.display_key, s.service_resource_cd
+ 
+          head report
+            q_cnt = 0
+            org_is_found = 0
+ 
+          head s.service_resource_cd
+            ;check to see if the number_to_return has been reached, if so         ;001
+            ;do not process this service_resource_cd                              ;001
+            if (reply->context_more_data = "F")                                   ;001
+              ;var to tell whether this resource belongs to one of orgs passed in
+              org_is_found = 0
+ 
+              ;call sub to return 1/0 to indicate this resource belongs to one of the
+              ;orgs passed in
+              org_is_found = find_org(s.organization_id)
+ 
+              ;check the number_to_return value to make sure only returning the
+              ;number of resources indicated, and check the org_is_found indicator
+              ;to make sure this resource is valid for orgs passed in
+              dServResCd = s.service_resource_cd
+              if (((q_cnt < request->number_to_return) or (request->number_to_return = 0)) and (org_is_found = 1)
+                  and (IsResourceViewable(dServResCd) = TRUE) )
+                q_cnt = q_cnt + 1
+                if (mod(q_cnt, 10) = 1)
+                   stat = alterlist(reply->qual, q_cnt + 10)
+                endif
+                ;return the service resource information
+                reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+                reply->qual[q_cnt]->service_resource_disp = c.display
+                reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+                reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+                reply->qual[q_cnt]->active_ind = c.active_ind
+                reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+              elseif ((q_cnt = request->number_to_return) and (request->number_to_return > 0))
+                reply->context_more_data = "T"
+              endif
+            endif                                                                  ;001
+          foot report
+            stat = alterlist(reply->qual, q_cnt)
+          with nocounter
+ 
+          ;call sub to check to make sure the select did not have any errors
+          if (ERROR_MESSAGE(1) = 1)
+            set failed = "T"
+          endif
+          call log_message ("done with select_route_lvl_one", log_level_debug)
+      end
+ 
+      /*************************************************************************
+      * Route level 2, first retrieve the assays under this catalog_cd         *
+      * then, check the assay_resource_list for the routed resources           *
+      *************************************************************************/
+      subroutine select_route_lvl_two(none5)
+          call log_message ("called into select_route_lvl_two", log_level_debug)
+ 
+          select into "nl:"
+            ptr.catalog_cd,
+            ptr.task_assay_cd,
+            arl.task_assay_cd,
+            arl.service_resource_cd,
+            s.service_resource_type_cd,
+            s.service_resource_cd,
+            c.code_value,
+            c.display_key,
+            c.cdf_meaning
+ 
+          from
+            profile_task_r ptr,
+            assay_resource_list arl,
+            service_resource s,
+            code_value c
+ 
+          plan ptr
+            where ptr.catalog_cd = request->catalog_cd
+          join arl
+            where arl.task_assay_cd = ptr.task_assay_cd
+          join s
+            where arl.service_resource_cd = s.service_resource_cd
+              and parser(resource_parser)
+              and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+              and (request->active_flag = 1 or (s.active_ind = 1
+              and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+          join c
+            where c.code_value = s.service_resource_cd
+              and trim(c.display_key) >= gcbeginstring
+              and (request->active_flag = 1 or (c.active_ind = 1
+              and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+ 
+          order by c.display_key, s.service_resource_cd
+ 
+          head report
+            q_cnt = 0
+            org_is_found = 0
+ 
+          head s.service_resource_cd
+            ;check to see if the number_to_return has been reached, if so         ;001
+            ;do not process this service_resource_cd                              ;001
+            if (reply->context_more_data = "F")                                   ;001
+              ;var to tell whether this resource belongs to one of orgs passed in
+              org_is_found = 0
+ 
+              ;call sub to return 1/0 to indicate this resource belongs to one of the
+              ;orgs passed in
+              org_is_found = find_org(s.organization_id)
+ 
+              ;check the number_to_return value to make sure only returning the
+              ;number of resources indicated, and check the org_is_found indicator
+              ;to make sure this resource is valid for orgs passed in
+              dServResCd = s.service_resource_cd
+              if (((q_cnt < request->number_to_return) or (request->number_to_return = 0)) and (org_is_found = 1)
+                  and (IsResourceViewable(dServResCd) = TRUE) )
+                q_cnt = q_cnt + 1
+                if (mod(q_cnt, 10) = 1)
+                   stat = alterlist(reply->qual, q_cnt + 10)
+                endif
+                ;return the service resource information
+                reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+                reply->qual[q_cnt]->service_resource_disp = c.display
+                reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+                reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+                reply->qual[q_cnt]->active_ind = c.active_ind
+                reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+              elseif ((q_cnt = request->number_to_return) and (request->number_to_return > 0))
+                reply->context_more_data = "T"
+              endif
+            endif                                                                ;001
+          foot report
+            stat = alterlist(reply->qual, q_cnt)
+          with nocounter
+ 
+          ;call sub to check to make sure the select did not have any errors
+          if (ERROR_MESSAGE(1) = 1)
+            set failed = "T"
+          endif
+          call log_message ("done with select_route_lvl_two", log_level_debug)
+      end
+ 
+      /***********************************************************************
+      * select resources that are filtered by the catalog_cds / assay_cs     *
+      * passed in; resources will be returned that are performed at all of   *
+      * the assays passed in or assays under catalog_cd passed in            *
+      ***********************************************************************/
+      subroutine select_mult_cds(none6)
+ 
+          call log_message ("called into select_mult_cds", log_level_debug)
+          /***********************************************************************
+          * temporary record structure to store task assay codes                 *
+          * to be used to retrieve the performing resouces                       *
+          ***********************************************************************/
+          record task
+          (
+            1 assays[*]
+              2 task_assay_cd = f8
+          )
+ 
+          set assay_cnt = 0      ;counter for task->assays structure above
+ 
+          ;set req_assay_cnt to number of assays passed in
+          set req_assay_cnt = value(size(request->task_assay_cds, 5))
+ 
+          ;set req_cat_cnt to number of catalog_cd's passed in
+          set req_cat_cnt = value(size(request->catalog_cds, 5))
+ 
+          /***********************************************************************
+          * fill task->assays list with task_assay_cd's passed in from request   *
+          ***********************************************************************/
+ 
+          if (req_assay_cnt > 0)
+            call log_message ("select_mult_cds-found multiple task_assay_cds", log_level_debug)
+            call log_message ("copy assays into task->assays array struct", log_level_debug)
+            set stat = alterlist(task->assays, value(req_assay_cnt))
+            while (assay_cnt < req_assay_cnt)
+              set assay_cnt = assay_cnt + 1
+              set task->assays[assay_cnt].task_assay_cd =
+                       request->task_assay_cds[assay_cnt]->assay_cd
+            endwhile
+          endif
+ 
+          /***********************************************************************
+          * fill task->assays list with task_assay_cds under the catalog_cds     *
+          * passed in; take catalog_cds to profile_task_r table to get assays    *
+          ***********************************************************************/
+          if (req_cat_cnt > 0)
+            call log_message ("select_mult_cds-found multiple catalog_cds", log_level_debug)
+            call log_message ("copy catalog_cds assays into task->assays array struct", log_level_debug)
+            select into "nl:"
+              ptr.catalog_cd,
+              ptr.task_assay_cd
+            from
+              (dummyt d6 with seq = value(req_cat_cnt)),
+              profile_task_r ptr,
+              code_value cv
+            plan d6
+            join ptr
+              where ptr.catalog_cd = request->catalog_cds[d6.seq]->cat_cd
+              	and ptr.active_ind = 1
+            join cv
+              where cv.code_value = ptr.task_assay_cd
+                and cv.active_ind = 1
+                and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+ 
+            head report
+              a_cnt = 0
+              found_ind = 0
+ 
+            detail
+              ;value to tell whether this task_assay_cd is found in the struct already
+              found_ind = 0
+              ;check to see whether this task_assay_cd's has been added to the
+              ;task->assays list or not
+              for (a_cnt = 1 to assay_cnt)
+                if (ptr.task_assay_cd = task->assays[a_cnt].task_assay_cd)
+                  found_ind = 1
+                  a_cnt = assay_cnt + 1
+                endif
+              endfor
+              ;if this assay is not found in the list, add it
+              if (found_ind = 0)
+                assay_cnt = assay_cnt + 1
+                stat = alterlist(task->assays, assay_cnt)
+                task->assays[assay_cnt].task_assay_cd = ptr.task_assay_cd
+              endif
+            with nocounter
+ 
+            ;call sub to check to make sure the select did not have any errors
+            if (ERROR_MESSAGE(1) = 1)
+              set failed = "T"
+              ;exit the script so the next select does not perform
+              go to exit_script
+            endif
+          endif
+          ;if assays were found for the catalog_cd(s) passed in
+          ;or task_assay_cd(s) passed in
+          ;retrieve the assays' performing resources from the assay_processing_r table
+          if (assay_cnt > 0)
+            call log_message ("select_mult_cds-found assays in task->assays array struct", log_level_debug)
+            call log_message ("call select to get resources", log_level_debug)
+            select into "nl:"
+              apr.task_assay_cd,
+              apr.service_resource_cd,
+              s.service_resource_type_cd,
+              s.service_resource_cd,
+              c.code_value,
+              c.display_key,
+              c.cdf_meaning,
+              d7.seq
+ 
+            from
+              (dummyt d7 with seq = value(assay_cnt)),
+              assay_processing_r apr,
+              service_resource s,
+              code_value c
+ 
+            plan d7
+            join apr
+              where apr.task_assay_cd = task->assays[d7.seq].task_assay_cd
+                and apr.active_ind = 1
+            join s
+              where apr.service_resource_cd = s.service_resource_cd
+                and parser(resource_parser)
+                and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+                and (request->active_flag = 1 or (s.active_ind = 1
+                and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+            join c
+              where c.code_value = s.service_resource_cd
+                and trim(c.display_key) >= gcbeginstring
+                and (request->active_flag = 1 or (c.active_ind = 1
+                and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+ 
+            order by c.display_key, s.service_resource_cd
+ 
+            head report
+              ;reset counter to use to fill out reply structure
+              q_cnt = 0
+              perf_cnt = 0
+              org_is_found = 0
+ 
+            head s.service_resource_cd
+              ;reset counter to count how many assays are under this
+              ;service_resource_cd
+              perf_cnt = 0
+            detail
+              perf_cnt = perf_cnt + 1
+            foot s.service_resource_cd
+              ;check to see if the number_to_return has been reached, if so         ;001
+              ;do not process this service_resource_cd                              ;001
+              if (reply->context_more_data = "F")                                   ;001
+                ;if the same number of assays found under this resource match the number of
+                ;assays in the task->assays structure it means that this resource is a
+                ;performing resource for all of the assays in the task->assays struct so
+                ;pass this resource info back in the reply
+                if (perf_cnt = assay_cnt)
+                  ;var to tell whether this resource belongs to one of orgs passed in
+                  org_is_found = 0
+ 
+                  ;call sub to return 1/0 to indicate this resource belongs to one of the
+                  ;orgs passed in
+                  org_is_found = find_org(s.organization_id)
+ 
+                  ;check the number_to_return value to make sure only returning the
+                  ;number of resources indicated, and check the org_is_found indicator
+                  ;to make sure this resource is valid for orgs passed in
+                  dServResCd = s.service_resource_cd
+                  if (((q_cnt < request->number_to_return) or (request->number_to_return = 0)) and (org_is_found = 1)
+                       and (IsResourceViewable(dServResCd) = TRUE) )
+                    q_cnt = q_cnt + 1
+                    if (mod(q_cnt, 10) = 1)
+                       stat = alterlist(reply->qual, q_cnt + 10)
+                    endif
+                    ;return the service resource information
+                    reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+                    reply->qual[q_cnt]->service_resource_disp = c.display
+                    reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+                    reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+                    reply->qual[q_cnt]->active_ind = c.active_ind
+                    reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+                  elseif ((q_cnt = request->number_to_return) and (request->number_to_return > 0))
+                    reply->context_more_data = "T"
+                  endif
+                endif
+              endif                                                             ;001
+            foot report
+              stat = alterlist(reply->qual, q_cnt)
+            with nocounter
+            ;call sub to check to make sure the select did not have any errors
+            if (ERROR_MESSAGE(1) = 1)
+              set failed = "T"
+            endif
+          endif
+ 
+          ;Support Protocol/CI Transfer
+          call select_helix_srvres(0)
+ 
+          ;clear out the task record structure
+          free set task
+          call log_message ("done with select_mult_cds", LOG_LEVEL_DEBUG)
+      end
+ 
+      declare select_helix_srvres(validation_ind = i2) = null
+ 
+      /************************************************************************
+      *     Subroutine Get service resource list for Protocol/CI orderable    *
+      *     Parameter: validation_ind                                         *
+      *                This is the flag passed from request to validate srvres*
+      *     input values:  1 = run validation query                           *
+      *                    0 = run select query                               *
+      *     return values:  none                                              *      
+      *************************************************************************/      
+      subroutine select_helix_srvres(validation_ind)
+ 
+        call log_message ("Called into select_helix_srvres", LOG_LEVEL_DEBUG)
+ 
+        ;Filter Catalog data from request
+        ;catalog_data contains PTL and CI orderable(s) catalog_Cd
+        call GetCatalogData(null)
+
+        declare commonidx = i4 with protect, noconstant(0)
+        declare sWhereClause = vc with protect, noconstant(" ")
+        declare catalog_cnt = i4 with protect, noconstant(0)
+        
+        set catalog_cnt =size(catalog_data->catalog_cds,5)
+        set numidx = 0
+ 
+        if(catalog_cnt > 0)
+          
+          if(catalog_cnt < size(request->catalog_cds,5))
+             set IsSrvResPopulated = 1
+          endif
+ 
+          ;if validation_ind = 0 run select query (request->display = '')
+          ;else run validation query (request->display = 'srvres_name')
+          if(validation_ind = 0)
+            set sWhereClause = " trim(c.display_key) >= gcbeginstring  "
+          else
+            set sWhereClause = " trim(c.display_key) = trim(cnvtupper(cnvtalphanum(request->display))) "
+          endif
+          
+          SELECT
+          
+          ;IsSrvResPopulated indicates thats
+          ;user has selected GLB/HLX orderable
+          ;along with PTL/CI orderable
+          if(IsSrvResPopulated = 1)
+              plan  orl
+                WHERE expand(numidx,1,size(catalog_data->catalog_cds,5),
+                orl.catalog_cd,catalog_data->catalog_cds[numidx]->catalog_cd)
+                AND orl.active_ind = 1
+              join s
+                where orl.service_resource_cd = s.service_resource_cd
+                  and parser(resource_parser)
+                  and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+                  and (request->active_flag = 1 or (s.active_ind = 1
+                  and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                  and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+                  ;Below filter will get common srvres from HLX/GENLAB and PTL/CI
+                  and expand(commonidx,1,size(reply->qual,5),s.service_resource_cd,
+                      reply->qual[commonidx]->service_resource_cd)
+              join c
+                where c.code_value = s.service_resource_cd
+                  and parser(sWhereClause)
+                  and (request->active_flag = 1 or (c.active_ind = 1
+                  and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                  and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+               order by c.display_key, s.service_resource_cd          
+          else
+              plan  orl
+                WHERE expand(numidx,1,size(catalog_data->catalog_cds,5),
+                orl.catalog_cd,catalog_data->catalog_cds[numidx]->catalog_cd)
+                AND orl.active_ind = 1
+              join s
+                where orl.service_resource_cd = s.service_resource_cd
+                  and parser(resource_parser)
+                  and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+                  and (request->active_flag = 1 or (s.active_ind = 1
+                  and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                  and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+              join c
+                where c.code_value = s.service_resource_cd
+                  and parser(sWhereClause)
+                  and (request->active_flag = 1 or (c.active_ind = 1
+                  and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                  and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+               order by c.display_key, s.service_resource_cd          
+          endif
+           into "nl:"
+            orl.catalog_cd,
+            orl.service_resource_cd,
+            s.service_resource_type_cd,
+            s.service_resource_cd,
+            c.code_value,
+            c.display_key,
+            c.cdf_meaning
+          from
+            orc_resource_list orl,
+            service_resource s,
+            code_value c
+           head report
+            q_cnt = 0
+            org_is_found = 0
+            common_cnt = 0
+ 
+          head s.service_resource_cd
+            common_cnt = 0
+          detail 
+            common_cnt = common_cnt + 1
+          foot s.service_resource_cd
+            ;check to see if the number_to_return has been reached, if so         ;001
+            ;do not process this service_resource_cd                              ;001
+            if (reply->context_more_data = "F")                                   ;001
+                ;This condition will filter only common service resource
+                ;required for selected orderable's
+                if(common_cnt = catalog_cnt)
+
+                  ;var to tell whether this resource belongs to one of orgs passed in
+                  org_is_found = 0
+ 
+                  ;call sub to return 1/0 to indicate this resource belongs to one of the
+                  ;orgs passed in
+                  org_is_found = find_org(s.organization_id)
+ 
+                  ;check the number_to_return value to make sure only returning the
+                  ;number of resources indicated, and check the org_is_found indicator
+                  ;to make sure this resource is valid for orgs passed in
+                  dServResCd = s.service_resource_cd
+  
+                  ;Validate if SrvRes is already populated
+                  ;Validate if SrvRes is associated with user Organization
+                  ;Validate if SrvRes is viewable by user
+                  ;validate if number_to_return is  < qualifying rows
+                  if (((q_cnt < request->number_to_return) or (request->number_to_return = 0)) and (org_is_found = 1)
+                  and (IsResourceViewable(dServResCd) = TRUE))
+                    q_cnt = q_cnt  + 1
+                    if (mod(q_cnt, 10) = 1 or (size(reply->qual,5)<= q_cnt))
+                       stat = alterlist(reply->qual, q_cnt + 10)
+                    endif
+ 
+                    ;return the service resource information
+                    reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+                    reply->qual[q_cnt]->service_resource_disp = c.display
+                    reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+                    reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+                    reply->qual[q_cnt]->active_ind = c.active_ind
+                    reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+                  elseif ((q_cnt = request->number_to_return) and (request->number_to_return > 0))
+                    reply->context_more_data = "T"
+                endif
+              endif
+            endif                                                                  ;001
+          foot report
+            stat = alterlist(reply->qual, q_cnt)
+          with nocounter
+ 
+          ;call sub to check to make sure the select did not have any errors
+          if (ERROR_MESSAGE(1) = 1)
+            set failed = "T"
+          endif
+          free set catalog_data
+          call log_message ("done with select_helix_srvres", LOG_LEVEL_DEBUG)
+         endif
+      end
+ 
+      declare validate_resources(none7 = i2) = null
+ 
+      /***********************************************************************
+      *      Default select to just retrieve base set of resources           *
+      ***********************************************************************/
+      subroutine validate_resources(none7)
+          call log_message ("called into validate_resources", log_level_debug)
+ 
+          declare nFound = i4
+ 
+          ; try an exact match search
+          set nFound =  perform_validate_resources(trim(cnvtupper(cnvtalphanum(request->display))))
+ 
+          if(nFound < 1)
+             declare sDisplayPartial = c100
+             set sDisplayPartial = build(trim(cnvtupper(cnvtalphanum(request->display))),"*")
+ 
+             ; since the exact name didn't match, try a partial name match
+             set nFound =  perform_validate_resources(sDisplayPartial)
+ 
+          endif
+ 
+          call log_message ("done with validate_resources", log_level_debug)
+      end
+ 
+ 
+      declare perform_validate_resources(display = vc) = i4
+ 
+      /***********************************************************************
+      *      Perform the select using the given display name                 *
+      ***********************************************************************/
+      subroutine perform_validate_resources(sDisplay)
+          call log_message ("called into perform_validate_resources", log_level_debug)
+                ;plan off of service_resource using the parser in order of
+          ;service_resource_type_cd, activity_type_cd, activity_subtype_cd to limit as much as
+          ;possible
+          ;join to code_value table to qualify out on beginstring passed in
+          ;join to dummy table to qualify out on orgs passed in
+          declare nReturnCount = i4 with protect, noconstant(0)
+ 
+          select into "nl:"
+            s.service_resource_type_cd,
+            s.service_resource_cd,
+            c.code_value,
+            c.display_key,
+            c.cdf_meaning
+ 
+          from
+            service_resource s,
+            code_value c
+ 
+          plan s
+            where parser(resource_parser)
+              and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+              and (request->active_flag = 1 or (s.active_ind = 1
+              and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+          join c
+            where c.code_value = s.service_resource_cd
+              and trim(c.display_key) = patstring(sDisplay)
+              and (request->active_flag = 1 or (c.active_ind = 1
+              and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+ 
+          head report
+            org_is_found = 0
+            q_cnt = 1
+ 
+          detail
+            ;var to tell whether this resource belongs to one of orgs passed in
+            org_is_found = 0
+ 
+            ;call sub to return 1/0 to indicate this resource belongs to one of the
+            ;orgs passed in
+            org_is_found = find_org(s.organization_id)
+ 
+            ;check the org_is_found indicator
+            ;to make sure this resource is valid for orgs passed in
+            ;there will only be one resource if one has been found
+            dServResCd = s.service_resource_cd
+            if (org_is_found = 1  and (IsResourceViewable(dServResCd) = TRUE))
+              stat = alterlist(reply->qual, q_cnt)
+ 
+              ;return the service resource information
+              reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+              reply->qual[q_cnt]->service_resource_disp = c.display
+              reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+              reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+              reply->qual[q_cnt]->active_ind = c.active_ind
+              reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+              q_cnt = q_cnt + 1
+            endif
+ 
+          foot report
+            nReturnCount = q_cnt
+          with nocounter
+ 
+          if (size(reply->qual, 5) > 1)
+            set stat = alterlist(reply->qual, 0)
+          endif
+ 
+          ;call sub to check to make sure the select did not have any errors
+          if (ERROR_MESSAGE(1) = 1)
+            set failed = "T"
+          endif
+ 
+          call log_message ("done with perform_validate_resources", log_level_debug)
+ 
+          return (nReturnCount)
+      end
+ 
+      /***********************************************************************
+      * select for patient accessions                                        *
+      * get the resources that are assigned                                  *
+      * to this accessions' containers                                       *
+      * by checking the order_serv_res_container                             *
+      * with the accessions order_ids                                        *
+      ***********************************************************************/
+      subroutine validate_patient_accession(none8)
+          call log_message ("called into validate_patient_accession", log_level_debug)
+          select into "nl:"
+            aor.accession,
+            osrc.order_id,
+            o.order_id,
+            c.active_ind,
+            s.service_resource_cd,
+            c.display,
+            c.display_key,
+            c.cdf_meaning,
+            c.active_ind
+ 
+          from
+            accession_order_r aor,
+            order_serv_res_container osrc,
+            orders o,
+            service_resource s,
+            code_value c
+          plan aor
+            where aor.accession = trim(request->accession)
+ 
+          join o
+            where o.order_id = aor.order_id
+              and (request->catalog_cd = 0.0 or request->catalog_cd = o.catalog_cd)
+ 
+          join osrc
+            where osrc.order_id = o.order_id
+ 
+          join s
+            where s.service_resource_cd = osrc.service_resource_cd
+              and parser(resource_parser)
+              and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+              and (request->active_flag = 1 or (s.active_ind = 1
+              and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+          join c
+            where c.code_value = s.service_resource_cd
+              and trim(c.display_key) = trim(cnvtupper(cnvtalphanum(request->display)))
+              and (request->active_flag = 1 or (c.active_ind = 1
+              and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+ 
+          head report
+            org_is_found = 0
+            q_cnt = 1
+ 
+          detail
+            ;var to tell whether this resource belongs to one of orgs passed in
+            org_is_found = 0
+ 
+            ;call sub to return 1/0 to indicate this resource belongs to one of the
+            ;orgs passed in
+            org_is_found = find_org(s.organization_id)
+ 
+            ;check the org_is_found indicator
+            ;to make sure this resource is valid for orgs passed in
+            ;there will only be one resource if one has been found
+            dServResCd = s.service_resource_cd
+            if (org_is_found = 1 and (IsResourceViewable(dServResCd) = TRUE))
+              q_cnt = 1
+              stat = alterlist(reply->qual, q_cnt)
+              ;return the service resource information
+              reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+              reply->qual[q_cnt]->service_resource_disp = c.display
+              reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+              reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+              reply->qual[q_cnt]->active_ind = c.active_ind
+              reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+            endif
+          with nocounter
+ 
+          ;call sub to check to make sure the select did not have any errors
+          if (ERROR_MESSAGE(1) = 1)
+            set failed = "T"
+          endif
+ 
+           call log_message ("done with validate_patient_accession", log_level_debug)
+      end
+ 
+      /***********************************************************************
+      * select for round robin accessions this select will                   *
+      * retrieve the resources that are assigned to the                      *
+      * template that this round robin accession belongs to                  *
+      ***********************************************************************/
+      subroutine validate_rr_accession(none9)
+          call log_message ("called into validate_rr_accession", log_level_debug)
+          select into "nl:"
+            s.service_resource_cd,
+            c.display,
+            c.cdf_meaning,
+            s.service_resource_type_cd,
+            c.display_key,
+            c.active_ind
+          from
+            accession acc,
+            rr_accession_r rar,
+            rr_assay_r rrr,
+            service_resource s,
+            code_value c
+ 
+          plan acc
+            where acc.accession = trim(request->accession)
+          join rar
+            where rar.accession_id = acc.accession_id
+          join rrr
+            where rrr.round_robin_ref_id = rar.round_robin_ref_id
+          join s
+            where s.service_resource_cd = rrr.service_resource_cd
+              and parser(resource_parser)
+              and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+              and (request->active_flag = 1 or (s.active_ind = 1
+              and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+          join c
+            where c.code_value = s.service_resource_cd
+              and trim(c.display_key) = trim(cnvtupper(cnvtalphanum(request->display)))
+              and (request->active_flag = 1 or (c.active_ind = 1
+              and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+ 
+          head report
+            org_is_found = 0
+            q_cnt = 1
+ 
+          detail
+            ;var to tell whether this resource belongs to one of orgs passed in
+            org_is_found = 0
+ 
+            ;call sub to return 1/0 to indicate this resource belongs to one of the
+            ;orgs passed in
+            org_is_found = find_org(s.organization_id)
+ 
+            ;check the org_is_found indicator
+            ;to make sure this resource is valid for orgs passed in
+            ;there will only be one resource if one has been found
+            dServResCd = s.service_resource_cd
+            if (org_is_found = 1 and (IsResourceViewable(dServResCd) = TRUE))
+              stat = alterlist(reply->qual, q_cnt)
+              ;return the service resource information
+              reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+              reply->qual[q_cnt]->service_resource_disp = c.display
+              reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+              reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+              reply->qual[q_cnt]->active_ind = c.active_ind
+              reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+            endif
+ 
+          with nocounter
+ 
+          ;call sub to check to make sure the select did not have any errors
+          if (ERROR_MESSAGE(1) = 1)
+            set failed = "T"
+          endif
+          call log_message ("done with validate_rr_accession", log_level_debug)
+      end
+ 
+      /***********************************************************************
+      * Route level 1, get catalogs' routed resources from orc_resource_list *
+      ***********************************************************************/
+      subroutine validate_route_lvl_one(none10)
+ 
+          call log_message ("called into validate_route_lvl_one", log_level_debug)
+          select into "nl:"
+            orl.catalog_cd,
+            orl.service_resource_cd,
+            s.service_resource_type_cd,
+            s.service_resource_cd,
+            c.code_value,
+            c.display_key,
+            c.cdf_meaning
+ 
+          from
+            orc_resource_list orl,
+            service_resource s,
+            code_value c
+ 
+          plan orl
+            where orl.catalog_cd = request->catalog_cd
+          join s
+            where orl.service_resource_cd = s.service_resource_cd
+              and parser(resource_parser)
+              and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+              and (request->active_flag = 1 or (s.active_ind = 1
+              and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+          join c
+            where c.code_value = s.service_resource_cd
+              and trim(c.display_key) = trim(cnvtupper(cnvtalphanum(request->display)))
+              and (request->active_flag = 1 or (c.active_ind = 1
+              and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+ 
+          head report
+            org_is_found = 0
+            q_cnt = 1
+ 
+          detail
+            ;var to tell whether this resource belongs to one of orgs passed in
+            org_is_found = 0
+ 
+            ;call sub to return 1/0 to indicate this resource belongs to one of the
+            ;orgs passed in
+            org_is_found = find_org(s.organization_id)
+ 
+            ;check the org_is_found indicator
+            ;to make sure this resource is valid for orgs passed in
+            ;there will only be one resource if one has been found
+            dServResCd = s.service_resource_cd
+            if (org_is_found = 1 and (IsResourceViewable(dServResCd) = TRUE))
+              stat = alterlist(reply->qual, q_cnt)
+              ;return the service resource information
+              reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+              reply->qual[q_cnt]->service_resource_disp = c.display
+              reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+              reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+              reply->qual[q_cnt]->active_ind = c.active_ind
+              reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+            endif
+ 
+          with nocounter
+ 
+          ;call sub to check to make sure the select did not have any errors
+          if (ERROR_MESSAGE(1) = 1)
+            set failed = "T"
+          endif
+          call log_message ("done with validate_route_lvl_one", log_level_debug)
+      end
+ 
+      /*************************************************************************
+      * Route level 2, first retrieve the assays under this catalog_cd         *
+      * then, check the assay_resource_list for the routed resources           *
+      *************************************************************************/
+      subroutine validate_route_lvl_two(none11)
+ 
+          call log_message ("called into validate_route_lvl_two", log_level_debug)
+          select into "nl:"
+            ptr.catalog_cd,
+            ptr.task_assay_cd,
+            arl.task_assay_cd,
+            arl.service_resource_cd,
+            s.service_resource_type_cd,
+            s.service_resource_cd,
+            c.code_value,
+            c.display_key,
+            c.cdf_meaning
+ 
+          from
+            profile_task_r ptr,
+            assay_resource_list arl,
+            service_resource s,
+            code_value c
+ 
+          plan ptr
+            where ptr.catalog_cd = request->catalog_cd
+          join arl
+            where arl.task_assay_cd = ptr.task_assay_cd
+          join s
+            where arl.service_resource_cd = s.service_resource_cd
+              and parser(resource_parser)
+              and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+              and (request->active_flag = 1 or (s.active_ind = 1
+              and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+          join c
+            where c.code_value = s.service_resource_cd
+              and trim(c.display_key) = trim(cnvtupper(cnvtalphanum(request->display)))
+              and (request->active_flag = 1 or (c.active_ind = 1
+              and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+ 
+          head report
+            org_is_found = 0
+            q_cnt = 1
+ 
+          detail
+            ;var to tell whether this resource belongs to one of orgs passed in
+            org_is_found = 0
+ 
+            ;call sub to return 1/0 to indicate this resource belongs to one of the
+            ;orgs passed in
+            org_is_found = find_org(s.organization_id)
+ 
+            ;check the org_is_found indicator
+            ;to make sure this resource is valid for orgs passed in
+            ;there will only be one resource if one has been found
+            dServResCd = s.service_resource_cd
+            if (org_is_found = 1 and (IsResourceViewable(dServResCd) = TRUE))
+              stat = alterlist(reply->qual, q_cnt)
+              ;return the service resource information
+              reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+              reply->qual[q_cnt]->service_resource_disp = c.display
+              reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+              reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+              reply->qual[q_cnt]->active_ind = c.active_ind
+              reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+            endif
+ 
+          with nocounter
+ 
+          ;call sub to check to make sure the select did not have any errors
+          if (ERROR_MESSAGE(1) = 1)
+            set failed = "T"
+          endif
+          call log_message ("done with validate_route_lvl_two", log_level_debug)
+      end
+ 
+      /***********************************************************************
+      * select resources that are filtered by the catalog_cds / assay_cs     *
+      * passed in; resources will be returned that are performed at all of   *
+      * the assays passed in or assays under catalog_cd passed in            *
+      ***********************************************************************/
+      subroutine validate_mult_cds(none12)
+ 
+          call log_message ("called into validate_mult_cds", log_level_debug)
+          /***********************************************************************
+          * temporary record structure to store task assay codes                 *
+          * to be used to retrieve the performing resouces                       *
+          ***********************************************************************/
+          record task
+          (
+            1 assays[*]
+              2 task_assay_cd = f8
+          )
+ 
+          set assay_cnt = 0      ;counter for task->assays structure above
+ 
+          ;set req_assay_cnt to number of assays passed in
+          set req_assay_cnt = value(size(request->task_assay_cds, 5))
+ 
+          ;set req_cat_cnt to number of catalog_cd's passed in
+          set req_cat_cnt = value(size(request->catalog_cds, 5))
+ 
+          /***********************************************************************
+          * fill task->assays list with task_assay_cd's passed in from request   *
+          ***********************************************************************/
+ 
+          if (req_assay_cnt > 0)
+            call log_message ("validate_mult_cds-found multiple task_assay_cds", log_level_debug)
+            call log_message ("copy assays into task->assays array struct", log_level_debug)
+            set stat = alterlist(task->assays, value(req_assay_cnt))
+            while (assay_cnt < req_assay_cnt)
+              set assay_cnt = assay_cnt + 1
+              set task->assays[assay_cnt].task_assay_cd =
+                       request->task_assay_cds[assay_cnt]->assay_cd
+            endwhile
+          endif
+ 
+          /***********************************************************************
+          * fill task->assays list with task_assay_cds under the catalog_cds     *
+          * passed in; take catalog_cds to profile_task_r table to get assays    *
+          ***********************************************************************/
+          if (req_cat_cnt > 0)
+            call log_message ("validate_mult_cds-found multiple catalog_cds", log_level_debug)
+            call log_message ("copy catalog_cds assays into task->assays array struct", log_level_debug)
+            select into "nl:"
+              ptr.catalog_cd,
+              ptr.task_assay_cd
+            from
+              (dummyt d6 with seq = value(req_cat_cnt)),
+              profile_task_r ptr,
+              code_value cv
+            plan d6
+            join ptr
+              where ptr.catalog_cd = request->catalog_cds[d6.seq]->cat_cd
+              	and ptr.active_ind = 1
+            join cv
+              where cv.code_value = ptr.task_assay_cd
+                and cv.active_ind = 1
+                and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+ 
+            head report
+              a_cnt = 0
+              found_ind = 0
+ 
+            detail
+              ;value to tell whether this task_assay_cd is found in the struct already
+              found_ind = 0
+              ;check to see whether this task_assay_cd's has been added to the
+              ;task->assays list or not
+              for (a_cnt = 1 to assay_cnt)
+                if (ptr.task_assay_cd = task->assays[a_cnt].task_assay_cd)
+                  found_ind = 1
+                  a_cnt = assay_cnt + 1
+                endif
+              endfor
+              ;if this assay is not found in the list, add it
+              if (found_ind = 0)
+                assay_cnt = assay_cnt + 1
+                stat = alterlist(task->assays, assay_cnt)
+                task->assays[assay_cnt].task_assay_cd = ptr.task_assay_cd
+              endif
+            with nocounter
+ 
+            ;call sub to check to make sure the select did not have any errors
+            if (ERROR_MESSAGE(1) = 1)
+              set failed = "T"
+              go to exit_script
+            endif
+ 
+          endif
+ 
+          ;if assays were found for the catalog_cd(s) passed in
+          ;or task_assay_cd(s) passed in
+          ;retrieve the assays' performing resources from the assay_processing_r table
+          if (assay_cnt > 0)
+            call log_message ("validate_mult_cds-found assays in task->assays array struct", log_level_debug)
+            call log_message ("call select to validate resources", log_level_debug)
+            select into "nl:"
+              apr.task_assay_cd,
+              apr.service_resource_cd,
+              s.service_resource_type_cd,
+              s.service_resource_cd,
+              c.code_value,
+              c.display_key,
+              c.cdf_meaning,
+              d7.seq
+            from
+              (dummyt d7 with seq = value(assay_cnt)),
+              assay_processing_r apr,
+              service_resource s,
+              code_value c
+ 
+            plan d7
+            join apr
+              where apr.task_assay_cd = task->assays[d7.seq].task_assay_cd
+              	and apr.active_ind = 1
+            join s
+              where apr.service_resource_cd = s.service_resource_cd
+                and parser(resource_parser)
+                and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+                and (request->active_flag = 1 or (s.active_ind = 1
+                and s.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                and s.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+            join c
+              where c.code_value = s.service_resource_cd
+                and trim(c.display_key) = trim(cnvtupper(cnvtalphanum(request->display)))
+                and (request->active_flag = 1 or (c.active_ind = 1
+                and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+ 
+            order by c.display_key, s.service_resource_cd
+ 
+            head report
+              ;reset counter to use to fill out reply structure
+              q_cnt = 0
+              perf_cnt = 0
+              org_is_found = 0
+ 
+            head s.service_resource_cd
+              ;reset counter to count how many assas are under this
+              ;service_resource_cd
+              perf_cnt = 0
+ 
+            detail
+              perf_cnt = perf_cnt + 1
+ 
+            foot s.service_resource_cd
+              ;if the same number of assays found under this resource match the number of
+              ;assays in the task->assays structure it means that this resource is a
+              ;performing resource for all of the assays in the task->assays struct so
+              ;pass this resource info back in the reply
+              if (perf_cnt = assay_cnt)
+                ;var to tell whether this resource belongs to one of orgs passed in
+                org_is_found = 0
+ 
+                ;call sub to return 1/0 to indicate this resource belongs to one of the
+                ;orgs passed in
+                org_is_found = find_org(s.organization_id)
+ 
+                ;check the org_is_found indicator
+                ;to make sure this resource is valid for orgs passed in
+                ;there will only be one resource if one has been found
+                dServResCd = s.service_resource_cd
+                if (org_is_found = 1 and (IsResourceViewable(dServResCd) = TRUE))
+                  q_cnt = 1
+                  stat = alterlist(reply->qual, q_cnt)
+                  ;return the service resource information
+                  reply->qual[q_cnt]->service_resource_cd = s.service_resource_cd
+                  reply->qual[q_cnt]->service_resource_disp = c.display
+                  reply->qual[q_cnt]->service_resource_type_cd = s.service_resource_type_cd
+                  reply->qual[q_cnt]->cdf_meaning = c.cdf_meaning
+                  reply->qual[q_cnt]->active_ind = c.active_ind
+                  reply->qual[q_cnt]->cs_login_loc_cd = s.cs_login_loc_cd
+                endif
+              endif
+            with nocounter
+ 
+            ;call sub to check to make sure the select did not have any errors
+            if (ERROR_MESSAGE(1) = 1)
+              set failed = "T"
+            endif
+ 
+          endif
+ 
+          ;Support Protocol/CI Transfer
+          call select_helix_srvres(1)
+ 
+          ;clear out the task record structure
+          free set task
+          call log_message ("done with validate_mult_cds", log_level_debug)
+      end
+ 
+ 
+      /***********************************************************************
+      *   BEGIN SCRIPT                                                       *
+      ***********************************************************************/
+ 
+      set stat = uar_get_meaning_by_codeset(resource_type_codeset, "BENCH", 1, bench_type_cd)
+      if ( bench_type_cd = 0)
+        call log_message ("bench_type_cd not found", log_level_error)
+        set failed = "T"
+        go to exit_script
+      endif
+      set stat = uar_get_meaning_by_codeset(resource_type_codeset, "INSTRUMENT", 1, instr_type_cd)
+      if ( instr_type_cd = 0)
+        call log_message ("instr_type_cd not found", log_level_error)
+        set failed = "T"
+        go to exit_script
+      endif
+      set stat = uar_get_meaning_by_codeset(resource_type_codeset, "SECTION",    1, sect_type_cd)
+      if ( sect_type_cd = 0)
+        call log_message ("sect_type_cd not found", log_level_error)
+        set failed = "T"
+        go to exit_script
+      endif
+      set stat = uar_get_meaning_by_codeset(resource_type_codeset, "SUBSECTION", 1, subsect_type_cd)
+      if ( subsect_type_cd = 0)
+        call log_message ("subsect_type_cd not found", log_level_error)
+        set failed = "T"
+        go to exit_script
+      endif
+ 
+      ;check the level flag and fill out the resource_type_cd's needed based
+      ;on what the user passed in as the level flag
+      case (request->levelflag)
+        of 0:  ;bench, instrument
+          set restype_cnt = 2
+          set stat = alterlist(resourcetypes->types, restype_cnt)
+          set resourcetypes->types[1]->resource_type_cd = bench_type_cd
+          set resourcetypes->types[2]->resource_type_cd = instr_type_cd
+ 
+        of 1:  ;bench, instr, subsection
+          set restype_cnt = 3
+          set stat = alterlist(resourcetypes->types, restype_cnt)
+          set resourcetypes->types[1]->resource_type_cd = bench_type_cd
+          set resourcetypes->types[2]->resource_type_cd = instr_type_cd
+          set resourcetypes->types[3]->resource_type_cd = subsect_type_cd
+ 
+        of 2:  ;section
+          set restype_cnt = 1
+          set stat = alterlist(resourcetypes->types, restype_cnt)
+          set resourcetypes->types[1]->resource_type_cd = sect_type_cd
+ 
+        of 3:  ;bench, instr, subsection, section
+          set restype_cnt = 4
+          set stat = alterlist(resourcetypes->types, restype_cnt)
+          set resourcetypes->types[1]->resource_type_cd = bench_type_cd
+          set resourcetypes->types[2]->resource_type_cd = instr_type_cd
+          set resourcetypes->types[3]->resource_type_cd = subsect_type_cd
+          set resourcetypes->types[4]->resource_type_cd = sect_type_cd
+ 
+        of 4:  ;instrument
+          set restype_cnt = 1
+          set stat = alterlist(resourcetypes->types, restype_cnt)
+          set resourcetypes->types[1]->resource_type_cd = instr_type_cd
+ 
+        of 5:   ;instrument, subsection
+          set restype_cnt = 2
+          set stat = alterlist(resourcetypes->types, restype_cnt)
+          set resourcetypes->types[1]->resource_type_cd = instr_type_cd
+          set resourcetypes->types[2]->resource_type_cd = subsect_type_cd
+        of 6: ;Returns all
+          set restype_cnt = 5
+          set stat = alterlist(resourcetypes->types, restype_cnt)
+          set resourcetypes->types[1]->resource_type_cd = dDeptTypeCd
+          set resourcetypes->types[2]->resource_type_cd = sect_type_cd
+          set resourcetypes->types[3]->resource_type_cd = subsect_type_cd
+          set resourcetypes->types[4]->resource_type_cd = instr_type_cd
+          set resourcetypes->types[5]->resource_type_cd = bench_type_cd
+        of 7: ;Only departments
+          set restype_cnt = 1
+          set stat = alterlist(resourcetypes->types, restype_cnt)
+          set resourcetypes->types[1]->resource_type_cd = dDeptTypeCd
+      endcase
+ 
+      ;call sub to check to make sure the select did not have any errors
+      if (ERROR_MESSAGE(1) = 1)
+        set failed = "T"
+        ;exit the script so none of the subs are called
+        go to exit_script
+      endif
+ 
+      ;if no service_resource type codes were found, then the select cannot continue
+      if (value(restype_cnt) = 0)
+        go to exit_script
+      endif
+ 
+      /*******************************************************************************
+      *   build the parser statement which will contain the resource types           *
+      *   retrieved above, the activity_type_cd's and activity_subtype_cd's passed   *
+      *   into the script.  this is done in this order because the service_resource  *
+      *   table has an index on the service_resource_type_cd                         *
+      *******************************************************************************/
+ 
+/*
+Example Parser Statement:
+s.service_resource_type_cd in (1962.000000,313.000000) and
+(s.activity_type_cd in
+        (select cv.code_value
+         from code_value cv
+         where cv.code_set = 106
+           and cv.cdf_meaning in ('GLB','HLA')
+        )
+and s.activity_subtype_cd in
+        (select cv.code_value
+         from code_value cv
+         where cv.code_set = 5801
+           and cv.cdf_meaning in ('GLB','HLA')
+        )
+)
+ 
+*/
+ 
+      ;if any of the qualifications have been passed in, add a +0 to the                      ;001
+      ;service_resource_type_cd so this index is not used but we do want to                   ;001
+      ;use this index if this is a resource select with no other qualifications.              ;001
+      if ((value(size(request->catalog_cds,    5)) > 0)                                       ;001
+       or (value(size(request->task_assay_cds, 5)) > 0)                                       ;001
+       or (request->catalog_cd > 0)                                                           ;001
+       or (size(trim(request->accession))  > 0))                                              ;001
+        set resource_parser = build(resource_parser,"s.service_resource_type_cd+0 in (")      ;001
+      else                                                                                    ;001
+        set resource_parser = build(resource_parser,"s.service_resource_type_cd in (")
+      endif                                                                                   ;001
+ 
+      for (p_cnt = 1 to restype_cnt)
+        if(p_cnt > 1)
+          set resource_parser = build(resource_parser, ",", resourcetypes->types[p_cnt]->resource_type_cd)
+        else
+          set resource_parser = build(resource_parser, resourcetypes->types[p_cnt]->resource_type_cd)
+        endif
+      endfor
+      set resource_parser = build(resource_parser,")")
+ 
+      ;add the activity_type_cd's to the parser if any were passed in
+      set act_cnt = value(size(request->act_type_means, 5))
+      if (act_cnt > 0)
+        set resource_parser = build(resource_parser,"and (")
+        set resource_parser = build(resource_parser,"s.activity_type_cd in (select cv.code_value")
+        set resource_parser = build(resource_parser," from code_value cv where cv.code_set")
+        set resource_parser = build(resource_parser," = 106 and cv.active_ind = 1 and cv.cdf_meaning in ('")
+        for (p_cnt = 1 to act_cnt)
+          if (p_cnt > 1)
+            set resource_parser = build(resource_parser,"','",request->act_type_means[p_cnt]->activity_type_mean)
+          else
+            set resource_parser = build(resource_parser,request->act_type_means[p_cnt]->activity_type_mean)
+          endif
+        endfor
+        set resource_parser = build(resource_parser,"'))")
+      endif
+ 
+      ;add the activity_subtype_cd's to the parser if any were passed in
+      set sub_cnt = value(size(request->act_sub_means, 5))
+      if (sub_cnt > 0)
+        set resource_parser = build(resource_parser," and")
+        set resource_parser = build(resource_parser," s.activity_subtype_cd in (select cv.code_value")
+        set resource_parser = build(resource_parser," from code_value cv where cv.code_set")
+        set resource_parser = build(resource_parser," = 5801 and cv.active_ind = 1 and cv.cdf_meaning in ('")
+        for (p_cnt = 1 to sub_cnt)
+          if (p_cnt > 1)
+            set resource_parser = build(resource_parser,"','",request->act_sub_means[p_cnt]->activity_subtype_mean) ;001
+          else
+            set resource_parser = build(resource_parser,request->act_sub_means[p_cnt]->activity_subtype_mean)
+          endif
+        endfor
+        set resource_parser = build(resource_parser,"'))")
+      endif
+ 
+      if (act_cnt > 0)
+        set resource_parser = build(resource_parser,")")
+      endif
+ 
+      ;clear out the resourcetypes record
+      free set resourcetypes
+ 
+      /***********************************************************************
+      *  if the display string was passed in then we know that this script   *
+      *  has been called to validate whether the display value is a valid    *
+      *  resource or not..set flag to tell whether this is a validate call   *
+      *  this will still return the resource info if display=valid resource  *
+      *  this is usually called first to determine whether to show the       *
+      *  testsitelookup form                                                 *
+      ***********************************************************************/
+ 
+      if (request->display > "")
+        ;set flag to indicate this is a validate call
+        call log_message ("script is being called to validate the display passed in", log_level_debug)
+        set ValidateResource = 1
+      endif
+ 
+      /***********************************************************************
+      *   Determine what select to perform by values passed in               *
+      ***********************************************************************/
+ 
+ 
+      /***********************************************************************
+      *  IF AN ACCESSION WAS PASSED IN, then we want to select/validate      *
+      *  the resources that are under this accessions containers             *
+      *  example of this would be AccessionResultEntry and clicking the      *
+      *  "..." button after the accession is entered                         *
+      ***********************************************************************/
+ 
+      if (trim(request->accession) != " ")
+        call log_message ("found accn", log_level_debug)
+        ;check to see if this is a patient accession
+        if (substring(10,3,trim(request->accession)) < "601")
+          call log_message ("found patient accn", log_level_debug)
+          if (ValidateResource = 0)
+            ;call sub to select resources
+            call select_patient_accession( 0 )
+          else
+            ;call sub to validate req->display
+            call validate_patient_accession( 0 )
+          endif
+        else
+          call log_message ("found RR accn", log_level_debug)
+          if (ValidateResource = 0)
+            ;call sub to select resources
+            call select_rr_accession( 0 )
+          else
+            ;call sub to validate req->display
+            call validate_rr_accession( 0 )
+          endif
+        endif
+ 
+        ;exit the script so none of the other selects are executed
+        go to exit_script
+      endif
+ 
+      /***********************************************************************
+      *  IF JUST A SINGLE CATALOG_CD IS PASSED IN, then we are               *
+      *  wanting to retrieve/validate the resources where this catalog_cd is *
+      *  routed to                                                           *
+      *  example of this would be PendingInquiry to see only the             *
+      *  routed resources for a particular catalog_cd                        *
+      ***********************************************************************/
+ 
+      if (request->catalog_cd > 0)
+        call log_message ("found single catalog cd", log_level_debug)
+        ;select to retrieve the resource_route_lvl value
+        set route_lvl = 0
+ 
+        select into "nl:"
+          oc.resource_route_lvl
+        from
+          order_catalog oc
+        plan oc
+          where oc.catalog_cd = request->catalog_cd
+        detail
+          route_lvl = oc.resource_route_lvl
+        with nocounter
+ 
+        ;call sub to check to make sure the select did not have any errors
+        if (ERROR_MESSAGE(1) = 1)
+          set failed = "T"
+          go to exit_script
+        endif
+ 
+        ;go the appropriate sub based on whether this
+        ;catalog_cd is a route level one or two
+        case(route_lvl)
+        of 1:
+          call log_message ("found level one catalog cd", log_level_debug)
+          if (ValidateResource = 0)
+            call select_route_lvl_one( 0 )
+          else
+            call validate_route_lvl_one( 0 )
+          endif
+          ;exit the script so none of the other selects are executed
+          go to exit_script
+        of 2:
+          call log_message ("found level two catalog cd", log_level_debug)
+          if (ValidateResource = 0)
+            call select_route_lvl_two( 0 )
+          else
+            call validate_route_lvl_two( 0 )
+          endif
+ 
+          ;exit the script so none of the other selects are executed
+          go to exit_script
+        else
+          call log_message ("CATALOG_CD IS NOT LEVEL ONE OR TWO----ERROR!!", log_level_error)
+          set failed = "T"
+          go to EXIT_SCRIPT
+        endcase
+      endif
+ 
+      /***********************************************************************
+      *  IF CATALOG_CDS OR TASK_ASSAY_CD'S WERE PASSED IN the requests array *
+      *  structure we are wanting to retrieve/validate the performing        *
+      *  resources of the assays passed in or the assays that exist under    *
+      *  these catalog_cd's                                                  *
+      *  example of this is glbTransferOrders.dll where you want to see      *
+      *  all of the resources that the select catalog_cd, or task_assay_cd's *
+      *  can be performed at.                                                *
+      ***********************************************************************/
+      if ((value(size(request->catalog_cds,    5)) > 0)
+       or (value(size(request->task_assay_cds, 5)) > 0))
+          call log_message ("found mult catalogcds or mult taskAssayCds", log_level_debug)
+          if (ValidateResource = 0)
+            call select_mult_cds( 0 )
+          else
+            call validate_mult_cds( 0 )
+          endif
+ 
+          ;exit the script so none of the other selects are executed
+          go to exit_script
+      endif
+ 
+      /***********************************************************************
+      *  if none of the above was passed in, call default select/validate sub*
+      ***********************************************************************/
+      call log_message ("just call the default select/validate", log_level_debug)
+      if (ValidateResource = 0)
+        call select_resources( 0 )
+      else
+        call validate_resources( 0 )
+      endif
+ 
+#EXIT_SCRIPT
+      if (failed = "T")
+         set reply->status_data->status = "F"
+         call log_message ("script not completed successfully", log_level_debug)
+      elseif (GetResourceSecurityStatus(0) != "S")
+           call PopulateResSecStatusBlock(0)
+           set reply->status_data->status = GetResourceSecurityStatus(0)
+      else
+         set reply->status_data->status = "S"
+         call log_message ("script completed successfully", log_level_debug)
+      endif
+ 
+call uar_sysdestroyhandle(hSys)
+ 
+end
+go
+
+;Generated by GNU enscript 1.6.4.

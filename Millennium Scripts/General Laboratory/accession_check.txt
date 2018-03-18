@@ -1,0 +1,219 @@
+ ;;Solution_Test/script/PathNet -- Common Services/ACCESSION_CHECK/ACCESSION_CHECK.PRG Turn on black mode
+
+;;
+;; File: accession_check.prg
+;; Description: Accession validation and insert/update routines.
+;; Request Nbr: n/a
+;; 
+;; *** Notes ***
+;; The calling program must include ACCESSION_COMMON.INC
+;;
+;; Date                  Feature    Description
+;; -------- -----------  ---------- -------------------------------------------
+;; 07/01/99 CERGYL             6255 File creation.
+;; 07/11/03 JN9001            35089 Added a check for a new option "2" on 
+;;                                  check_disp_ind to check against only the 
+;;                                  accession and not accession_nbr_check
+;; 11/14/03 CERGYL            ##### Fix pre-assigned numbers qualifying on zero row.
+;; 09/09/08 RS013848          179834 Fix to return the duplicate status for preassigned
+;;                                   accession numbers when action_ind is 0
+
+drop program accession_check:dba go
+create program accession_check:dba
+
+;*
+;* Initialize the global variables.
+;*
+
+declare accession_id = f8 with public, noconstant(0.0)
+declare accession_dup_id = f8 with public, noconstant(0.0)
+set accession_updt_cnt = 0
+set accession_assignment_ind = 0
+
+;*
+;* Validate that the accession_nbr_chk is not on the accession table.
+;*
+
+if (accession_chk->check_disp_ind != 2) 
+  select into "nl:" a.accession_id, a.accession, a.accession_nbr_check
+  from accession a
+  plan a
+    where a.accession_nbr_check = accession_chk->accession_nbr_check
+
+  detail
+    accession_dup_id = a.accession_id
+    accession_updt_cnt = a.updt_cnt
+    accession_assignment_ind = a.assignment_ind
+  with nocounter
+endif
+
+;*
+;* Validate that the accession is not on the accession table.
+;*
+
+if (accession_chk->check_disp_ind in (1,2) and accession_dup_id = 0)
+
+  select into "nl:" a.accession_id, a.accession, a.accession_nbr_check
+  from accession a
+  plan a
+    where a.accession = accession_chk->accession
+
+  detail
+    accession_dup_id = a.accession_id
+    accession_updt_cnt = a.updt_cnt
+    accession_assignment_ind = a.assignment_ind
+  with nocounter
+endif
+
+if (accession_chk->action_ind = 1)
+  if (accession_dup_id > 0)
+    set accession_status = ACC_DUPLICATE
+    if (accession_assignment_ind = 1)
+      set accession_meaning = "Accession exists on the accession table (Pre-Assigned)"
+    else
+      set accession_meaning = "Accession exists on the accession table"
+    endif
+  else
+    set accession_status = ACC_SUCCESS
+    set accession_meaning = "Accession does not exist on the accession table"
+  endif
+  go to EXIT_SCRIPT
+endif
+
+if (accession_dup_id > 0)
+
+  ;*
+  ;* The accession is a duplicate and it is not preassigned.
+  ;*
+
+  if (accession_assignment_ind = 0 and accession_chk->action_ind = 0)
+    set accession_status = ACC_DUPLICATE
+    set accession_meaning = "Accession exists on the accession table"
+    go to EXIT_SCRIPT
+  endif
+  ;*
+  ;* The accession is a duplicate and it is preassigned.
+  ;*
+  if (accession_assignment_ind = 1 and accession_chk->action_ind = 0)
+    set accession_status = ACC_DUPLICATE
+    set accession_id = accession_dup_id
+    set accession_meaning = "Accession exists on the accession table (Pre-Assigned)"
+    go to EXIT_SCRIPT
+  endif
+
+  set accession_status = ACC_MODIFY
+
+  set accession_id = accession_dup_id
+  if (accession_chk->action_ind = 2 and accession_chk->accession_updt_cnt != accession_updt_cnt)
+    set accession_meaning = "Update count conflict"
+    go to EXIT_SCRIPT
+  endif
+
+  ;*
+  ;* Update the existing the accession
+  ;*
+
+  if (accession_chk->accession_id > 0)
+
+    select into "nl:" a.accession_id
+    from accession a
+    plan a
+      where a.accession_id = accession_chk->accession_id
+    with nocounter, forupdate (a)
+
+    if (curqual > 0)
+      update into accession a
+        set 
+            a.accession = accession_chk->accession,
+            a.accession_nbr_check = trim(accession_chk->accession_nbr_check),
+            a.site_prefix_cd = accession_chk->site_prefix_cd,
+            a.accession_year = accession_chk->accession_year,
+            a.accession_day = accession_chk->accession_day,
+            a.accession_format_cd = accession_chk->accession_format_cd,
+            a.alpha_prefix = accession_chk->alpha_prefix,
+            a.accession_sequence_nbr = accession_chk->accession_seq_nbr,
+            a.accession_class_cd = accession_chk->accession_class_cd,
+            a.accession_pool_id = accession_chk->accession_pool_id,
+            a.preactive_ind = accession_chk->preactive_ind,
+            a.assignment_ind = accession_chk->assignment_ind,
+            a.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+            a.updt_id = reqinfo->updt_id,
+            a.updt_task = reqinfo->updt_task,
+            a.updt_applctx = reqinfo->updt_applctx,
+            a.updt_cnt = a.updt_cnt + 1
+      plan a
+      where a.accession_id = accession_dup_id
+        and a.updt_cnt = accession_updt_cnt
+      with nocounter
+
+      if (curqual > 0)
+        set accession_updt_cnt = accession_updt_cnt + 1
+        set accession_status = ACC_SUCCESS
+        set accession_meaning = "Accession modified on the accession table"
+      endif
+    endif
+  else
+    set accession_status = ACC_SUCCESS
+    set accession_meaning = "Accession exists on the table but was not updated"
+  endif
+
+  if (accession_status != ACC_SUCCESS)
+    set accession_meaning = "Update failed on the Accession table"
+  endif
+
+else
+
+  ;*
+  ;* Insert the Accession
+  ;*
+
+  set accession_id = 0.0
+  select into "nl:" nextsequence = seq(accession_seq, nextval)
+  from dual
+  detail
+    accession_id = nextsequence
+  with format, counter
+
+  if (accession_id = 0)
+    set accession_status = ACC_SEQUENCE_ID
+    set accession_meaning = "Unable to get the next accession sequence number"
+    go to EXIT_SCRIPT
+  endif
+
+  insert into accession a
+  set
+      a.accession_id = accession_id,
+      a.accession = accession_chk->accession,
+      a.accession_nbr_check = trim(accession_chk->accession_nbr_check),
+      a.site_prefix_cd = accession_chk->site_prefix_cd,
+      a.accession_year = accession_chk->accession_year,
+      a.accession_day = accession_chk->accession_day,
+      a.accession_format_cd = accession_chk->accession_format_cd,
+      a.alpha_prefix = accession_chk->alpha_prefix,
+      a.accession_sequence_nbr = accession_chk->accession_seq_nbr,
+      a.accession_class_cd = accession_chk->accession_class_cd,
+      a.accession_pool_id = accession_chk->accession_pool_id,
+      a.preactive_ind = accession_chk->preactive_ind,
+      a.assignment_ind = accession_chk->assignment_ind,
+      a.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+      a.updt_id = reqinfo->updt_id,
+      a.updt_task = reqinfo->updt_task,
+      a.updt_applctx = reqinfo->updt_applctx,
+      a.updt_cnt = 0
+  with nocounter
+
+  set accession_updt_cnt = 0
+  if (curqual = 0)
+    set accession_status = ACC_INSERT
+    set accession_meaning = "Accession not inserted on the accession table"
+  else
+    set accession_status = ACC_SUCCESS
+    set accession_meaning = "Accession inserted on the accession table"
+  endif
+endif
+
+#EXIT_SCRIPT
+
+end go
+
+;Generated by GNU enscript 1.6.4.

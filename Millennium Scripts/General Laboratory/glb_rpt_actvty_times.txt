@@ -1,0 +1,1484 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_rpt_actvty_times/glb_rpt_actvty_times.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1997 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_RPT_ACTVTY_TIMES.PRG
+        Object name:            GLB_RPT_ACTVTY_TIMES
+        Request #:              250117
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Produce a daily activity report showing
+                                General Lab verified/corrected activity in
+                                a flat file format that can be downloaded
+                                and used for turn-around times.
+
+        Tables read:            code_value
+                                container
+                                container_accession
+                                discrete_task_assay
+                                encntr_prsnl_reltn
+                                encounter
+                                orders
+                                order_action
+                                order_laboratory
+                                organization_alias
+                                perform_result
+                                person
+                                person_alias
+                                profile_task_r
+                                prsnl
+                                resource_group
+                                result
+                                result_event
+
+        Tables updated:         none
+
+        Executing from:         General Lab operations.
+
+        Special Notes:          n/a
+
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 01/02/97 Hal Patchen          Initial Release                     *
+;    *001 09/19/97 Hal Patchen          Add Autoverification logic          *
+;    *003 04/23/99 Chad Moats           Removed joins to code_value table   *
+;    *004 08/30/99 Chris Heil           Format aliases using cnvtalias      *
+;    *005 06/25/99 Laura Pott           Internationalization                *
+; 	    12/09/99 Jack Moore		    Merged I18n code from mod above into*
+;							production code.			    *
+;    *006 04/25/00 Gary Runde           Display perf dt/tm                  *
+;    *007 08/07/03 Craig Sumrall		Update select table (person-prsnl)  *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+;CCLSECLOGIN GO                                                          ;003
+
+             drop program GLB_RPT_ACTVTY_TIMES:dba go
+             create program GLB_RPT_ACTVTY_TIMES:dba
+/***************************************************************************Begin 005 Mod Block ********/
+;include i18n function declarations
+%i cclsource:i18n_uar.inc
+%i cclsource:pcs_format_age.inc
+
+;initialize variable that will keep the handle to i18n data
+set i18nHandle = 0
+;call uar_i18nlocalizationinit
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+
+record captions
+(
+1 serv_res = vc
+1 inst = vc
+1 dept = vc
+1 sect = vc
+1 sub_sect = vc
+1 tst_ste = vc
+1 nbr_prs = vc
+1 act_frm = vc
+1 to_ = vc
+1 end_tm = vc
+1 beg_tm = vc
+1 req = vc
+)
+
+Set captions->req = uar_i18ngetmessage(i18nHandle,"req", "request->service_resource_cd = ")
+Set captions->end_tm = uar_i18ngetmessage(i18nHandle,"end_tm",":59.99")
+Set captions->beg_tm = uar_i18ngetmessage(i18nHandle,"beg_tm",":00.00")
+Set captions->serv_res = uar_i18ngetmessage(i18nHandle,"serv_res","serv_res_level_flag = ")
+Set captions->inst = uar_i18ngetmessage(i18nHandle,"inst","   Institution = ")
+Set captions->dept = uar_i18ngetmessage(i18nHandle,"dept","   Department = ")
+Set captions->sect = uar_i18ngetmessage(i18nHandle,"sect","   Section = ")
+Set captions->sub_sect = uar_i18ngetmessage(i18nHandle,"sub_sect","   Sub Sect = ")
+Set captions->tst_ste = uar_i18ngetmessage(i18nHandle,"tst_ste","   Test Site = ")
+Set captions->nbr_prs = uar_i18ngetmessage(i18nHandle,"nbr_prs","nbr_prs = ")
+Set captions->act_frm = uar_i18ngetmessage(i18nHandle,"act_frm","Activity from ")
+Set captions->to_ = uar_i18ngetmessage(i18nHandle,"to_"," to ")
+/*************************************************************************************End 005 Mod Block ********/
+
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  dt_tm_begin                  = dq8
+         1  dt_tm_end                    = dq8
+         1  service_resource_cd          = f8
+         1  printer_name                 = vc
+         1  batch_selection              = vc
+         1  output_dist                  = vc
+         1  ops_date                     = dq8
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      (
+%i cclsource:status_block.inc
+      )
+
+      /***********************************************************************
+      * Internal Record Structures                                           *
+      ***********************************************************************/
+      record test_site
+      (
+         1  qual[*]
+            2  service_resource_cd       = f8
+            2  inst_cd                   = f8
+            2  inst_disp                 = vc
+            2  dept_cd                   = f8
+            2  dept_disp                 = vc
+            2  sect_cd                   = f8
+            2  sect_disp                 = vc
+            2  subsect_cd                = f8
+            2  subsect_disp              = vc
+            2  ts_cd                     = f8
+            2  ts_disp                   = vc
+            2  serv_res_hier_seq         = i4
+      )
+
+      record ts_sort
+      (
+         1  key1                      = vc
+         1  key2                      = vc
+         1  service_resource_cd       = f8
+         1  inst_cd                   = f8
+         1  inst_disp                 = vc
+         1  dept_cd                   = f8
+         1  dept_disp                 = vc
+         1  sect_cd                   = f8
+         1  sect_disp                 = vc
+         1  subsect_cd                = f8
+         1  subsect_disp              = vc
+         1  ts_cd                     = f8
+         1  ts_disp                   = vc
+      )
+
+      record actvty_type
+      (
+         1  qual[*]
+            2  glb_activity_type_cd      = f8
+      )
+
+      record ops_params
+      (
+         1  qual[3]
+            2  param                     = c100
+      )
+
+      ;* Array of results that fall within the specified time frame and
+      ;* which are verified, autoverified, or corrected.
+      record perf_results
+      (
+         1  qual[*]
+            2  result_id                 = f8
+            2  perform_result_id         = f8
+            2  service_resource_cd       = f8
+            2  task_assay_cd             = f8
+            2  detail_mnemonic           = vc
+            2  accession                 = vc
+            2  order_id                  = f8
+            2  catalog_cd                = f8
+            2  order_provider_id         = f8
+            2  order_locn_cd             = f8
+            2  order_dt_tm               = c14
+            2  order_prsnl_id            = f8
+            2  sched_dt_tm               = c14
+            2  drawn_dt_tm               = c14
+            2  drawn_id                  = f8
+            2  received_dt_tm            = c14
+            2  received_id               = f8
+            2  inst_cd                   = f8
+            2  inst_disp                 = vc
+            2  dept_cd                   = f8
+            2  dept_disp                 = vc
+            2  sect_cd                   = f8
+            2  sect_disp                 = vc
+            2  subsect_cd                = f8
+            2  subsect_disp              = vc
+            2  ts_cd                     = f8
+            2  ts_disp                   = vc
+            2  serv_res_hier_seq         = i4
+      )
+
+      ;* Report display fields used to determine page breaks.
+      record rpt
+      (
+         1  inst_disp                    = c30
+         1  dept_disp                    = c30
+         1  sect_disp                    = c30
+         1  subsect_disp                 = c30
+         1  ts_disp                      = c30
+      )
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set reply->status_data.status = "F"
+
+         ;* Code Sets
+;001         set CV_REQUIRED_RECS            = 12
+         set CV_REQUIRED_RECS            = 13                          ;001
+         declare cv_cnt                  = i4
+         set ALIAS_TYPE_CODESET          = 4
+         set ALIAS_TYPE_MRN_CDF          = "MRN"
+         declare alias_type_mrn_cd       = f8
+         set ACTIVITY_TYPE_CODESET       = 106
+         set ACTIVITY_TYPE_GLB_CDF       = "GLB"
+         set RESULT_STATUS_CODESET       = 1901
+         set RESULT_STATUS_PERFORMED_CDF = "PERFORMED"
+         set RESULT_STATUS_VERIFIED_CDF  = "VERIFIED"
+         set RESULT_STATUS_AUTOVERIFIED_CDF  = "AUTOVERIFIED"          ;001
+         set RESULT_STATUS_CORRECTED_CDF = "CORRECTED"
+         declare performed_cd            = f8
+         declare verified_cd             = f8
+         declare autoverified_cd         = f8                          ;001
+         declare corrected_cd            = f8
+         set SERVICE_RESOURCE_TYPE_CODESET = 223
+         set SERV_RES_INSTITUTION_CDF     = "INSTITUTION"
+         set SERV_RES_DEPARTMENT_CDF      = "DEPARTMENT"
+         set SERV_RES_SECTION_CDF         = "SECTION"
+         set SERV_RES_SUBSECTION_CDF      = "SUBSECTION"
+         declare serv_res_institution_cd  = f8
+         declare serv_res_department_cd   = f8
+         declare serv_res_section_cd      = f8
+         declare serv_res_subsection_cd   = f8
+         set ENC_PER_RELTN_CODESET        = 333
+         set ENC_PER_RELTN_ATTENDDOC_CDF  = "ATTENDDOC"
+         declare attending_doctr_cd       = f8
+         set ORG_ALIAS_TYPE_CODESET       = 334
+         set ORG_ALIAS_CLIENT_CDF         = "CLIENT"
+         declare org_alias_client_cd      = f8
+         set ORDER_ACTION_CODESET         = 6003
+         set ORD_ACTION_ORDER_CDF         = "ORDER"
+         declare ord_action_order_cd      = f8
+
+         ;* Operations
+         declare batch_selection_cd       = f8
+
+         set serv_res_level_flag          = 0
+         set nbr_ts                       = 0
+         set nbr_actvty_types             = 0
+         set nbr_prs                      = 0
+
+         set hyphen_line = fillstring(125, "=")
+         set dotted_line = fillstring(125, ".")
+
+      /***********************************************************************
+      * Select needed code values                                            *
+      ***********************************************************************/
+         set cv_cnt = 0
+
+         select into "nl:"
+            cv.code_value
+
+         from
+            code_value cv
+
+         where ((cv.code_set = ALIAS_TYPE_CODESET
+               and cv.cdf_meaning = ALIAS_TYPE_MRN_CDF)
+             or (cv.code_set = ACTIVITY_TYPE_CODESET
+               and cv.cdf_meaning = ACTIVITY_TYPE_GLB_CDF)
+             or (cv.code_set = RESULT_STATUS_CODESET)
+             or (cv.code_set = SERVICE_RESOURCE_TYPE_CODESET)
+             or (cv.code_set = ENC_PER_RELTN_CODESET
+               and cv.cdf_meaning = ENC_PER_RELTN_ATTENDDOC_CDF)
+             or (cv.code_set = ORG_ALIAS_TYPE_CODESET
+               and cv.cdf_meaning = ORG_ALIAS_CLIENT_CDF)
+             or (cv.code_set = ORDER_ACTION_CODESET
+               and cv.cdf_meaning = ORD_ACTION_ORDER_CDF)
+             )
+           and cv.active_ind = 1
+           and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+           and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+
+         detail
+            if (cv.code_set = ALIAS_TYPE_CODESET)
+               case (cv.cdf_meaning)
+                 of ALIAS_TYPE_MRN_CDF:
+                    alias_type_mrn_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+            if (cv.code_set = ACTIVITY_TYPE_CODESET)
+               case (cv.cdf_meaning)
+                 of ACTIVITY_TYPE_GLB_CDF:
+                    nbr_actvty_types = nbr_actvty_types + 1
+                    stat = alterlist(actvty_type->qual, nbr_actvty_types)
+                    actvty_type->qual[nbr_actvty_types].glb_activity_type_cd =
+                      cv.code_value
+                    ;* Make sure at least 1 GLB activity type exists.
+                    if (nbr_actvty_types = 1)
+                       cv_cnt = cv_cnt + 1
+                    endif
+               endcase
+            endif
+            if (cv.code_set = RESULT_STATUS_CODESET)
+               case (cv.cdf_meaning)
+                 of RESULT_STATUS_PERFORMED_CDF:
+                    performed_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_STATUS_VERIFIED_CDF:
+                    verified_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of RESULT_STATUS_AUTOVERIFIED_CDF:                    ;001
+                    autoverified_cd = cv.code_value                    ;001
+                    cv_cnt = cv_cnt + 1                                ;001
+                 of RESULT_STATUS_CORRECTED_CDF:
+                    corrected_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+            if (cv.code_set = SERVICE_RESOURCE_TYPE_CODESET)
+               case (cv.cdf_meaning)
+                 of SERV_RES_INSTITUTION_CDF:
+                    serv_res_institution_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of SERV_RES_DEPARTMENT_CDF:
+                    serv_res_department_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of SERV_RES_SECTION_CDF:
+                    serv_res_section_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of SERV_RES_SUBSECTION_CDF:
+                    serv_res_subsection_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+            if (cv.code_set = ENC_PER_RELTN_CODESET)
+               case (cv.cdf_meaning)
+                 of ENC_PER_RELTN_ATTENDDOC_CDF:
+                    attending_doctr_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+            if (cv.code_set = ORG_ALIAS_TYPE_CODESET)
+               case (cv.cdf_meaning)
+                 of ORG_ALIAS_CLIENT_CDF:
+                    org_alias_client_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+            if (cv.code_set = ORDER_ACTION_CODESET)
+               case (cv.cdf_meaning)
+                 of ORD_ACTION_ORDER_CDF:
+                    ord_action_order_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+
+         with
+            nocounter
+         ;* Verify that all required code value records were read.
+         if (cv_cnt != CV_REQUIRED_RECS)
+            go to Exit_Script
+         endif
+
+/***Debug***
+         call echo("actvty_type array dump", 1)
+         for (x = 1 to nbr_actvty_types)
+            call echo(actvty_type->qual[x].glb_activity_type_cd, 1)
+         endfor
+         call echo(" ", 1)
+***Debug***/
+
+      /***********************************************************************
+      * Load operations parameter list                                       *
+      ***********************************************************************/
+         if (trim(request->batch_selection) > " ")
+            set batch_selection_cd = cnvtreal(trim(request->batch_selection))
+            set parm_string = fillstring(100, " ")
+
+            select into "nl:"
+              cv.code_value
+            from
+              code_value cv
+            where cv.code_value = batch_selection_cd
+            detail
+               parm_string = trim(cv.definition)
+            with
+               nocounter
+
+            if (curqual = 0)
+               set reply->status_data->status = "Z"
+               go to Exit_Script
+            endif
+
+            ;* Locate the individual parameters in parm_string
+            ;* and put them in the ops_params array.
+            set ptr = 1
+            set start_ptr = 1
+            set param_idx = 1
+            for (param_idx = 1 TO 3)
+               set ptr = findstring(",", parm_string, start_ptr)
+               if (ptr < 1)
+                  set ptr = 100
+               endif
+               set parm_len = ptr - start_ptr
+               set ops_params->qual[param_idx].param =
+                 trim(substring(start_ptr, value(parm_len), parm_string), 3)
+               set start_ptr = ptr + 1
+            endfor
+
+            ;* Use array of ops parameters to set request fields.
+            set request->service_resource_cd =
+              cnvtreal(ops_params->qual[1].param)
+            set request->printer_name = request->output_dist
+            ;005set todays_date = format(request->ops_date, "dd-mmm-yyyy;;d")
+            set todays-date = format(request->ops_date, "@SHORTDATE4YR;;Q") 					;005
+		;005 set date_begin_string = concat(todays_date, " ",
+            ;005 						trim(ops_params->qual[2].param, 3), ":00.00")
+            set date_begin_string = concat(todays_date, " ",							;005
+	              trim(ops_params->qual[2].param, 3), captions->beg_tm)					;005
+		;005 set date_end_string = concat(todays_date, " ",
+            ;005 						trim(ops_params->qual[3].param, 3), ":59.99")
+		set date_end_string = concat(todays_date, " ",								;005
+	              trim(ops_params->qual[3].param, 3), captions->end_tm)					;005
+            set request->dt_tm_begin = cnvtdatetime(date_begin_string)
+            if (request->dt_tm_begin > request->ops_date)
+               set request->dt_tm_begin = datetimeadd(request->dt_tm_begin, -1)
+            endif
+            set request->dt_tm_end = cnvtdatetime(date_end_string)
+            if (request->dt_tm_end > request->ops_date)
+               set request->dt_tm_end = datetimeadd(request->dt_tm_end, -1)
+            endif
+            if (request->dt_tm_begin > request->dt_tm_end)
+               set request->dt_tm_begin = datetimeadd(request->dt_tm_begin, -1)
+            endif
+         endif
+      /***********************************************************************
+      * Determine if the service resource passed is a section, subsection,   *
+      * or test site.  Note: Service resource of 0.0 means print activity    *
+      * for all testing sites.                                               *
+      ***********************************************************************/
+         if (request->service_resource_cd = 0.0)
+            set serv_res_level_flag = 3  ;* All Sections
+         else
+            select into "nl:"
+               cv.code_value
+            from
+               code_value cv
+            where cv.code_value = request->service_resource_cd
+            detail
+               case (cv.cdf_meaning)
+                 of "SECTION":
+                    serv_res_level_flag = 2
+                 of "SUBSECTION":
+                    serv_res_level_flag = 1
+                 else
+                    serv_res_level_flag = 0
+                    stat = alterlist(test_site->qual, 1)
+                    test_site->qual[1].service_resource_cd =
+                      request->service_resource_cd
+                    nbr_ts = 1
+               endcase
+            with
+              nocounter
+
+            if (curqual = 0)
+               set reply->status_data->status = "Z"
+               go to Exit_Script
+            endif
+         endif
+
+/***Debug***
+         ;005 call echo(build("request->service_resource_cd = ",request->service_resource_cd))
+	   call echo(build(captions->req, request->service_resource_cd))						;005
+         ;005 call echo(build("serv_res_level_flag = ", serv_res_level_flag))
+	   call echo(build(captions->serv_res, serv_res_level_flag))						;005
+***Debug***/
+
+      /***********************************************************************
+      * Load the testing sites associated with the service resource passed in*
+      * based on its resource level.                                         *
+      ***********************************************************************/
+         if (serv_res_level_flag != 0)
+            if (serv_res_level_flag = 1)  ;* Process subsection
+               select into "nl:"
+                  subsect.parent_service_resource_cd,
+                  subsect.child_service_resource_cd
+               from
+                  resource_group subsect
+               where subsect.parent_service_resource_cd =
+                                          request->service_resource_cd
+                 and subsect.resource_group_type_cd = serv_res_subsection_cd
+                 and subsect.root_service_resource_cd = 0.0
+               order by
+                  subsect.child_service_resource_cd
+               head subsect.child_service_resource_cd
+                  nbr_ts = nbr_ts + 1
+                  stat = alterlist(test_site->qual, nbr_ts)
+                  test_site->qual[nbr_ts].service_resource_cd =
+                    subsect.child_service_resource_cd
+               with
+                  nocounter
+            elseif (serv_res_level_flag = 2)  ;* Process section
+               select into "nl:"
+                  sect.parent_service_resource_cd,
+                  subsect.parent_service_resource_cd,
+                  subsect.child_service_resource_cd
+               from
+                  resource_group sect,
+                  resource_group subsect
+               plan sect    where sect.resource_group_type_cd =
+                                            serv_res_section_cd
+                              and sect.parent_service_resource_cd =
+                                            request->service_resource_cd
+                              and sect.root_service_resource_cd = 0.0
+               join subsect where subsect.parent_service_resource_cd =
+                                            sect.child_service_resource_cd
+                              and subsect.resource_group_type_cd =
+                                            serv_res_subsection_cd
+                              and subsect.root_service_resource_cd = 0.0
+               order by
+                  subsect.child_service_resource_cd
+               head subsect.child_service_resource_cd
+                  nbr_ts = nbr_ts + 1
+                  stat = alterlist(test_site->qual, nbr_ts)
+                  test_site->qual[nbr_ts].service_resource_cd =
+                    subsect.child_service_resource_cd
+               with
+                  nocounter
+            elseif (serv_res_level_flag = 3)  ;* Process all sections
+               ;* If no service resource was passed, load all test sites
+               ;* under all sections.
+               select into "nl:"
+                  sect.parent_service_resource_cd,
+                  subsect.parent_service_resource_cd,
+                  subsect.child_service_resource_cd
+               from
+                  resource_group sect,
+                  resource_group subsect
+               plan sect    where sect.resource_group_type_cd =
+                                            serv_res_section_cd
+                              and sect.root_service_resource_cd = 0.0
+               join subsect where subsect.parent_service_resource_cd =
+                                            sect.child_service_resource_cd
+                              and subsect.resource_group_type_cd =
+                                            serv_res_subsection_cd
+                              and subsect.root_service_resource_cd = 0.0
+               order by
+                  subsect.child_service_resource_cd
+               head subsect.child_service_resource_cd
+                  nbr_ts = nbr_ts + 1
+                  stat = alterlist(test_site->qual, nbr_ts)
+                  test_site->qual[nbr_ts].service_resource_cd =
+                    subsect.child_service_resource_cd
+               with
+                  nocounter
+            endif
+
+            if (nbr_ts = 0)
+               set reply->status_data->status = "Z"
+               go to Exit_Script
+            endif
+         endif
+
+      /***********************************************************************
+      * Load the institution, department, section, subsection,and test site  *
+      * names associated with each testing site.                             *
+      ***********************************************************************/
+         select into "nl:"
+            d1.seq,
+;003            cv_ts.display,
+            testsite_disp = trim(substring(1,40,UAR_GET_CODE_DISPLAY(test_site->qual[d1.seq].service_resource_cd)),3), ;003
+            d2.seq,
+            subsect_exists = decode(subsect.seq, "Y", "N"),
+            subsect.parent_service_resource_cd,
+            subsect.child_service_resource_cd,
+;003            cv_subsect.display,
+            d3.seq,
+            sect_exists = decode(sect.seq, "Y", "N"),
+            sect.parent_service_resource_cd,
+            sect.child_service_resource_cd,
+;003            cv_sect.display,
+            d4.seq,
+            dept_exists = decode(dept.seq, "Y", "N"),
+            dept.parent_service_resource_cd,
+            dept.child_service_resource_cd,
+;003            cv_dept.display,
+            d5.seq,
+            inst_exists = decode(inst.seq, "Y", "N"),
+            inst.parent_service_resource_cd,
+            inst.child_service_resource_cd
+;003            cv_inst.display
+
+         from
+            (dummyt d1 with seq = value(nbr_ts)),
+;003            code_value cv_ts,
+            (dummyt d2 with seq = 1),
+            resource_group subsect,
+;003            code_value cv_subsect,
+            (dummyt d3 with seq = 1),
+            resource_group sect,
+;003            code_value cv_sect,
+            (dummyt d4 with seq = 1),
+            resource_group dept,
+;003            code_value cv_dept,
+            (dummyt d5 with seq = 1),
+            resource_group inst
+;003            code_value cv_inst
+
+         plan d1
+;003         join cv_ts   where cv_ts.code_value =
+;003                               test_site->qual[d1.seq].service_resource_cd
+         join d2      where d2.seq = 1
+         join subsect where subsect.child_service_resource_cd =
+                               test_site->qual[d1.seq].service_resource_cd
+                        and subsect.resource_group_type_cd =
+                               serv_res_subsection_cd
+                        and subsect.root_service_resource_cd = 0.0
+;003         join cv_subsect where cv_subsect.code_value =
+;003                               subsect.parent_service_resource_cd
+         join d3      where d3.seq = 1
+         join sect    where sect.child_service_resource_cd =
+                               subsect.parent_service_resource_cd
+                        and sect.resource_group_type_cd =
+                               serv_res_section_cd
+                        and sect.root_service_resource_cd = 0.0
+;003         join cv_sect where cv_sect.code_value = sect.parent_service_resource_cd
+         join d4      where d4.seq = 1
+         join dept    where dept.child_service_resource_cd =
+                               sect.parent_service_resource_cd
+                        and dept.resource_group_type_cd =
+                               serv_res_department_cd
+                        and dept.root_service_resource_cd = 0.0
+;003         join cv_dept where cv_dept.code_value = dept.parent_service_resource_cd
+         join d5      where d5.seq = 1
+         join inst    where inst.child_service_resource_cd =
+                               dept.parent_service_resource_cd
+                        and inst.resource_group_type_cd =
+                               serv_res_institution_cd
+                        and inst.root_service_resource_cd = 0.0
+;003         join cv_inst where cv_inst.code_value = inst.parent_service_resource_cd
+
+         detail
+            test_site->qual[d1.seq].serv_res_hier_seq = d1.seq
+;003            if (cv_ts.code_value > 0.0)
+            if (test_site->qual[d1.seq].service_resource_cd > 0.0)                              ;003
+;003               test_site->qual[d1.seq].ts_cd = cv_ts.code_value
+               test_site->qual[d1.seq].ts_cd = test_site->qual[d1.seq].service_resource_cd      ;003
+               test_site->qual[d1.seq].ts_disp =
+                 trim(substring(1, 40, UAR_GET_CODE_DISPLAY(test_site->qual[d1.seq].service_resource_cd)), 3)   ;003
+;003                 trim(substring(1, 40, cv_ts.display), 3)
+            else
+               test_site->qual[d1.seq].ts_cd = 0.0
+               test_site->qual[d1.seq].ts_disp = " "
+            endif
+            if (subsect_exists = "Y"
+	    and subsect.parent_service_resource_cd > 0.0)					;003
+;003            and cv_subsect.code_value > 0.0)
+;003               test_site->qual[d1.seq].subsect_cd = cv_subsect.code_value
+               test_site->qual[d1.seq].subsect_cd = subsect.parent_service_resource_cd		;003
+               test_site->qual[d1.seq].subsect_disp =
+                 trim(substring(1, 40, UAR_GET_CODE_DISPLAY(subsect.parent_service_resource_cd)), 3)	;003
+;003                 trim(substring(1, 40, cv_subsect.display), 3)
+            else
+               test_site->qual[d1.seq].subsect_cd = 0.0
+               test_site->qual[d1.seq].subsect_disp = " "
+            endif
+            if (sect_exists = "Y"
+;003            and cv_sect.code_value > 0.0)
+            and sect.parent_service_resource_cd > 0.0)					;003
+               test_site->qual[d1.seq].sect_cd = sect.parent_service_resource_cd	;003
+;003               test_site->qual[d1.seq].sect_cd = cv_sect.code_value
+               test_site->qual[d1.seq].sect_disp =
+                 trim(substring(1, 40, UAR_GET_CODE_DISPLAY(sect.parent_service_resource_cd)), 3)	;003
+;003                 trim(substring(1, 40, cv_sect.display), 3)
+            else
+               test_site->qual[d1.seq].sect_cd = 0.0
+               test_site->qual[d1.seq].sect_disp = " "
+            endif
+            if (dept_exists = "Y"
+	    and dept.parent_service_resource_cd > 0.0)					;003
+;003            and cv_dept.code_value > 0.0)
+;003               test_site->qual[d1.seq].dept_cd = cv_dept.code_value
+               test_site->qual[d1.seq].dept_cd = dept.parent_service_resource_cd	;003
+               test_site->qual[d1.seq].dept_disp =
+                 trim(substring(1, 40, UAR_GET_CODE_DISPLAY(dept.parent_service_resource_cd)), 3) ;003
+;003                 trim(substring(1, 40, cv_dept.display), 3)
+            else
+               test_site->qual[d1.seq].dept_cd = 0.0
+               test_site->qual[d1.seq].dept_disp = " "
+            endif
+            if (inst_exists = "Y"
+;003            and cv_inst.code_value > 0.0)
+            and inst.parent_service_resource_cd > 0.0)					;003
+;003               test_site->qual[d1.seq].inst_cd = cv_inst.code_value
+               test_site->qual[d1.seq].inst_cd = inst.parent_service_resource_cd	;003
+               test_site->qual[d1.seq].inst_disp =
+;                 trim(substring(1, 40, UAR_GET_CODE_DISPLAY(inst.parent_service_resource_cd)), 3)
+                 UAR_GET_CODE_DISPLAY(inst.parent_service_resource_cd)
+;003                 trim(substring(1, 40, cv_inst.display), 3)
+            else
+               test_site->qual[d1.seq].inst_cd = 0.0
+               test_site->qual[d1.seq].inst_disp = " "
+            endif
+
+         with
+            nocounter,
+            outerjoin = d2,
+            maxread(subsect, 1),
+            outerjoin = d3,
+            maxread(sect, 1),
+            outerjoin = d4,
+            maxread(dept, 1),
+            outerjoin = d5,
+            maxread(inst, 1)
+
+/***Debug***
+         ;005 call echo("test_site array dump", 1)
+         call echo(uar_i18ngetmessage(i18nHandle,"dump",("test_site array dump")), 1) 				;005
+	   for (x = 1 to nbr_ts)
+            call echo(test_site->qual[x].service_resource_cd, 1)
+            ;005 call echo(build("   Institution = ", test_site->qual[x].inst_disp))
+            call echo(build(captions->inst, test_site->qual[x].inst_disp)) 						;005
+		;005call echo(build("   Department = ", test_site->qual[x].dept_disp))
+		call echo(build(captions->dept, test_site->qual[x].dept_disp))						;005
+            ;005 call echo(build("   Section = ", test_site->qual[x].sect_disp))
+  		call echo(build(captions->sect, test_site->qual[x].sect_disp))          				;005
+		;005 call echo(build("   Sub Sect = ", test_site->qual[x].subsect_disp))
+            call echo(build(captions->sub_sect, test_site->qual[x].subsect_disp))					;005
+            ;005 call echo(build("   Test Site = ", test_site->qual[x].ts_disp))
+		call echo(build(captions->tst_ste, test_site->qual[x].ts_disp))						;005
+         endfor
+         call echo(" ", 1)
+***Debug***/
+
+      /***********************************************************************
+      * Sort test_site array in alphabetical order.                          *
+      ***********************************************************************/
+         for (cnt = 1 to (nbr_ts - 1))
+            for (cnt2 = cnt to nbr_ts)
+               set ts_sort->key1 = concat(
+                substring(1, 40, cnvtupper(test_site->qual[cnt].inst_disp)),
+                format(test_site->qual[cnt].inst_cd,"###############.##;p0;f"),
+                substring(1, 40, cnvtupper(test_site->qual[cnt].dept_disp)),
+                format(test_site->qual[cnt].dept_cd,"###############.##;p0;f"),
+                substring(1, 40, cnvtupper(test_site->qual[cnt].sect_disp)),
+                format(test_site->qual[cnt].sect_cd,"###############.##;p0;f"),
+                substring(1, 40, cnvtupper(test_site->qual[cnt].subsect_disp)),
+                format(test_site->qual[cnt].subsect_cd,"###############.##;p0;f"),
+                substring(1, 40, cnvtupper(test_site->qual[cnt].ts_disp)),
+                format(test_site->qual[cnt].ts_cd,"###############.##;p0;f"))
+               set ts_sort->key2 = concat(
+                substring(1, 40, cnvtupper(test_site->qual[cnt2].inst_disp)),
+                format(test_site->qual[cnt2].inst_cd,"###############.##;p0;f"),
+                substring(1, 40, cnvtupper(test_site->qual[cnt2].dept_disp)),
+                format(test_site->qual[cnt2].dept_cd,"###############.##;p0;f"),
+                substring(1, 40, cnvtupper(test_site->qual[cnt2].sect_disp)),
+                format(test_site->qual[cnt2].sect_cd,"###############.##;p0;f"),
+                substring(1, 40, cnvtupper(test_site->qual[cnt2].subsect_disp)),
+                format(test_site->qual[cnt2].subsect_cd,"###############.##;p0;f"),
+                substring(1, 40, cnvtupper(test_site->qual[cnt2].ts_disp)),
+                format(test_site->qual[cnt2].ts_cd,"###############.##;p0;f"))
+                if (ts_sort->key1 > ts_sort->key2)
+                  set ts_sort->service_resource_cd =
+                    test_site->qual[cnt].service_resource_cd
+                  set ts_sort->inst_cd = test_site->qual[cnt].inst_cd
+                  set ts_sort->inst_disp = test_site->qual[cnt].inst_disp
+                  set ts_sort->dept_cd = test_site->qual[cnt].dept_cd
+                  set ts_sort->dept_disp = test_site->qual[cnt].dept_disp
+                  set ts_sort->sect_cd = test_site->qual[cnt].sect_cd
+                  set ts_sort->sect_disp = test_site->qual[cnt].sect_disp
+                  set ts_sort->subsect_cd = test_site->qual[cnt].subsect_cd
+                  set ts_sort->subsect_disp = test_site->qual[cnt].subsect_disp
+                  set ts_sort->ts_cd = test_site->qual[cnt].ts_cd
+                  set ts_sort->ts_disp = test_site->qual[cnt].ts_disp
+                  set test_site->qual[cnt].service_resource_cd =
+                    test_site->qual[cnt2].service_resource_cd
+                  set test_site->qual[cnt].inst_cd =
+                    test_site->qual[cnt2].inst_cd
+                  set test_site->qual[cnt].inst_disp =
+                    test_site->qual[cnt2].inst_disp
+                  set test_site->qual[cnt].dept_cd =
+                    test_site->qual[cnt2].dept_cd
+                  set test_site->qual[cnt].dept_disp =
+                    test_site->qual[cnt2].dept_disp
+                  set test_site->qual[cnt].sect_cd =
+                    test_site->qual[cnt2].sect_cd
+                  set test_site->qual[cnt].sect_disp =
+                    test_site->qual[cnt2].sect_disp
+                  set test_site->qual[cnt].subsect_cd =
+                    test_site->qual[cnt2].subsect_cd
+                  set test_site->qual[cnt].subsect_disp =
+                    test_site->qual[cnt2].subsect_disp
+                  set test_site->qual[cnt].ts_cd =
+                    test_site->qual[cnt2].ts_cd
+                  set test_site->qual[cnt].ts_disp =
+                    test_site->qual[cnt2].ts_disp
+                  set test_site->qual[cnt].serv_res_hier_seq = cnt
+                  set test_site->qual[cnt2].service_resource_cd =
+                    ts_sort->service_resource_cd
+                  set test_site->qual[cnt2].inst_cd =
+                    ts_sort->inst_cd
+                  set test_site->qual[cnt2].inst_disp =
+                    ts_sort->inst_disp
+                  set test_site->qual[cnt2].dept_cd =
+                    ts_sort->dept_cd
+                  set test_site->qual[cnt2].dept_disp =
+                    ts_sort->dept_disp
+                  set test_site->qual[cnt2].sect_cd =
+                    ts_sort->sect_cd
+                  set test_site->qual[cnt2].sect_disp =
+                    ts_sort->sect_disp
+                  set test_site->qual[cnt2].subsect_cd =
+                    ts_sort->subsect_cd
+                  set test_site->qual[cnt2].subsect_disp =
+                    ts_sort->subsect_disp
+                  set test_site->qual[cnt2].ts_cd =
+                    ts_sort->ts_cd
+                  set test_site->qual[cnt2].ts_disp =
+                    ts_sort->ts_disp
+                  set test_site->qual[cnt2].serv_res_hier_seq = cnt2
+               endif
+            endfor
+         endfor
+
+/***Debug***
+         ;005 call echo("Sorted test_site array dump", 1)
+	   call echo(uar_i18ngetmessage(i18nHandle,"arr_dump",("Sorted test_site array dump")), 1) 		;005
+
+         for (x = 1 to nbr_ts)
+            ;005 call echo(build("Sequence = ",test_site->qual[x].serv_res_hier_seq))
+		call echo(build(captions->seq,test_site->qual[x].serv_res_hier_seq)) 					;005
+            call echo(test_site->qual[x].service_resource_cd, 1)
+            ;005 call echo(build("   Institution = ", test_site->qual[x].inst_disp))
+		call echo(build(captions->inst, test_site->qual[x].inst_disp))						;005
+            ;005 call echo(build("   Institution = ", test_site->qual[x].inst_cd))
+		call echo(build(captions->inst, test_site->qual[x].inst_cd))						;005
+            ;005 call echo(build("   Department = ", test_site->qual[x].dept_disp))
+		call echo(build(captions->dept, test_site->qual[x].dept_disp)) 						;005
+            ;005 call echo(build("   Department = ", test_site->qual[x].dept_cd))
+		call echo(build(captions->dept, test_site->qual[x].dept_cd))   						;005
+            ;005 call echo(build("   Section = ", test_site->qual[x].sect_disp))
+		call echo(build(captions->sect, test_site->qual[x].sect_disp)) 						;005
+            ;005 call echo(build("   Section = ", test_site->qual[x].sect_cd))
+		call echo(build(captions->sect, test_site->qual[x].sect_cd)) 						;005
+            ;005 call echo(build("   Sub Sect = ", test_site->qual[x].subsect_disp))
+		call echo(build(captions->sub_sect, test_site->qual[x].subsect_disp))  					;005
+            ;005 call echo(build("   Sub Sect = ", test_site->qual[x].subsect_cd))
+		call echo(build(captions->sub_sect, test_site->qual[x].subsect_cd)) 					;005
+            ;005 call echo(build("   Test Site = ", test_site->qual[x].ts_disp))
+		call echo(build(captions->tst_ste, test_site->qual[x].ts_disp)) 						;005
+            ;005 call echo(build("   Test Site = ", test_site->qual[x].ts_cd))
+		call echo(build(captions->tst_ste, test_site->qual[x].ts_cd)) 						;005
+         endfor
+         call echo(" ", 1)
+***Debug***/
+
+      /***********************************************************************
+      * Load the perform_result records that qualify for the report.         *
+      ***********************************************************************/
+         select into "nl:"
+            re.event_dt_tm,
+            re.event_type_cd,
+            pr.perform_result_id,
+            pr.service_resource_cd,
+            perfresultids = build(pr.result_id, pr.perform_result_id),
+            r.result_id,
+            o.order_id,
+            o.activity_type_cd,
+            ;005 order_dttm = format(o.orig_order_dt_tm, "mm/dd/yy-hh:mm;;d"),
+            order_dttm = format(o.orig_order_dt_tm, "@SHORTDATETIMENOSEC;;Q"), 					;005
+		;005 sched_dttm = format(o.current_start_dt_tm, "mm/dd/yy-hh:mm;;d"),
+		sched_dttm = format(o.current_start_dt_tm, "@SHORTDATETIMENOSEC;;Q"), 					;005
+            d_at.seq,
+            dta.mnemonic,
+            ptr.sequence,
+            c_exists = decode(c.seq, "Y", "N"),
+            ;005 drawn_dttm = format(c.drawn_dt_tm, "mm/dd/yy-hh:mm;;d"),
+		drawn_dttm = format(c.drawn_dt_tm, "@SHORTDATETIMENOSEC;;Q"), 						;005
+            c.drawn_id,
+            ;005 received_dttm = format(c.received_dt_tm, "mm/dd/yy-hh:mm;;d"),
+		received_dttm = format(c.received_dt_tm, "@SHORTDATETIMENOSEC;;Q"), 					;005
+            c.received_id,
+            ca.accession,
+            oa_exists = decode(oa.seq, "Y", "N"),
+            oa.order_locn_cd,
+            oa.order_provider_id
+
+         from
+            result_event re,
+            perform_result pr,
+            (dummyt d_ts with seq = value(nbr_ts)),
+            result r,
+            orders o,
+            (dummyt d_at with seq = value(nbr_actvty_types)),
+            discrete_task_assay dta,
+            profile_task_r ptr,
+            (dummyt d1 with seq = 1),
+            container c,
+            container_accession ca,
+            (dummyt d2 with seq = 1),
+            order_action oa
+
+         plan re   where re.event_dt_tm between cnvtdatetime(request->dt_tm_begin)
+                                            and cnvtdatetime(request->dt_tm_end)
+                     and re.event_type_cd in (performed_cd,
+                                              verified_cd,
+                                              autoverified_cd,         ;001
+                                              corrected_cd)
+         join pr   where pr.perform_result_id = re.perform_result_id
+         join d_ts where test_site->qual[d_ts.seq].service_resource_cd =
+                            pr.service_resource_cd
+         join r    where r.result_id = pr.result_id
+         join o    where o.order_id = r.order_id
+         join d_at where actvty_type->qual[d_at.seq].glb_activity_type_cd =
+                           o.activity_type_cd
+         join dta  where dta.task_assay_cd = r.task_assay_cd
+         join ptr  where ptr.catalog_cd = o.catalog_cd
+                     and ptr.task_assay_cd = dta.task_assay_cd
+         join d1   where d1.seq = 1
+         join c    where c.container_id = pr.container_id
+         join ca   where ca.container_id = pr.container_id
+         join d2   where d2.seq = 1
+         join oa   where oa.order_id = o.order_id
+                     and oa.action_type_cd = ord_action_order_cd
+
+         order by
+            o.person_id,
+            ca.accession,
+            o.catalog_cd,
+            o.order_id,
+            ptr.sequence,
+            test_site->qual[d_ts.seq].ts_disp,
+            perfresultids,
+            re.event_sequence
+
+         head report
+            nbr_prs = 0
+
+         head perfresultids
+            nbr_prs = nbr_prs + 1
+            if (mod(nbr_prs, 50) = 1)
+               stat = alterlist(perf_results->qual, nbr_prs + 50)
+            endif
+            perf_results->qual[nbr_prs].result_id =
+              pr.result_id
+            perf_results->qual[nbr_prs].perform_result_id =
+              pr.perform_result_id
+            perf_results->qual[nbr_prs].service_resource_cd =
+              pr.service_resource_cd
+            perf_results->qual[nbr_prs].task_assay_cd =
+              r.task_assay_cd
+            perf_results->qual[nbr_prs].detail_mnemonic =
+              dta.mnemonic
+            perf_results->qual[nbr_prs].order_id =
+              r.order_id
+            perf_results->qual[nbr_prs].catalog_cd =
+              r.catalog_cd
+            perf_results->qual[nbr_prs].order_dt_tm = order_dttm
+            perf_results->qual[nbr_prs].sched_dt_tm = sched_dttm
+            if (c_exists = "Y")
+               perf_results->qual[nbr_prs].drawn_dt_tm = drawn_dttm
+               perf_results->qual[nbr_prs].drawn_id = c.drawn_id
+               perf_results->qual[nbr_prs].received_dt_tm = received_dttm
+               perf_results->qual[nbr_prs].received_id = c.received_id
+               perf_results->qual[nbr_prs].accession = ca.accession
+            else
+               perf_results->qual[nbr_prs].drawn_dt_tm = ""
+               perf_results->qual[nbr_prs].drawn_id = 0.0
+               perf_results->qual[nbr_prs].received_dt_tm = ""
+               perf_results->qual[nbr_prs].received_id = 0.0
+               perf_results->qual[nbr_prs].accession = ""
+            endif
+            perf_results->qual[nbr_prs].inst_cd =
+              test_site->qual[d_ts.seq].inst_cd
+            perf_results->qual[nbr_prs].inst_disp =
+              test_site->qual[d_ts.seq].inst_disp
+            perf_results->qual[nbr_prs].dept_cd =
+              test_site->qual[d_ts.seq].dept_cd
+            perf_results->qual[nbr_prs].dept_disp =
+              test_site->qual[d_ts.seq].dept_disp
+            perf_results->qual[nbr_prs].sect_cd =
+              test_site->qual[d_ts.seq].sect_cd
+            perf_results->qual[nbr_prs].sect_disp =
+              test_site->qual[d_ts.seq].sect_disp
+            perf_results->qual[nbr_prs].subsect_cd =
+              test_site->qual[d_ts.seq].subsect_cd
+            perf_results->qual[nbr_prs].subsect_disp =
+              test_site->qual[d_ts.seq].subsect_disp
+            perf_results->qual[nbr_prs].ts_cd =
+              test_site->qual[d_ts.seq].ts_cd
+            perf_results->qual[nbr_prs].ts_disp =
+              test_site->qual[d_ts.seq].ts_disp
+            perf_results->qual[nbr_prs].serv_res_hier_seq =
+              test_site->qual[d_ts.seq].serv_res_hier_seq
+
+         detail
+            ;* Load array with order_action information.
+            if (oa_exists = "Y")
+               perf_results->qual[nbr_prs].order_locn_cd =
+                 oa.order_locn_cd
+               perf_results->qual[nbr_prs].order_provider_id =
+                 oa.order_provider_id
+               perf_results->qual[nbr_prs].order_prsnl_id =
+                 oa.action_personnel_id
+            endif
+
+         foot report
+            stat = alterlist(perf_results->qual, nbr_prs)
+
+         with
+            nocounter,
+            outerjoin = d1,
+            dontcare = c,
+            outerjoin = d2,
+            dontcare = oa
+
+/***Debug***
+         ;005 call echo(build("nbr_prs = ", nbr_prs))
+         call echo(build(captions->nbr_prs, nbr_prs)) 									;005
+         if (nbr_prs > 0)
+            ;005 call echo("      result_id   perform_result_id     order_id    task_assay_cd", 1)
+		call echo(uar_i18ngetmessage(i18nHandle,"rslt_id",("      result_id   perform_result_id     	;005
+				order_id    task_assay_cd")), 1)  									;005
+          for (x = 1 to nbr_prs)
+               call echo(x, 0)
+               call echo("   ", 0)
+               call echo(perf_results->qual[x].result_id, 0)
+               call echo("   ", 0)
+               call echo(perf_results->qual[x].perform_result_id, 0)
+               call echo("   ", 0)
+               call echo(perf_results->qual[x].order_id, 0)
+               call echo("   ", 0)
+               call echo(perf_results->qual[x].task_assay_cd, 1)
+            endfor
+            call echo(" ", 1)
+         endif
+
+***Debug***/
+
+      /***********************************************************************
+      * Print report                                                         *
+      ***********************************************************************/
+      #Print_Report
+         ;005 set begin_date = format(request->dt_tm_begin, "ddmmmyy hh:mm;;d")
+         set begin_dat = format(request->dt_tm_begin, "@DATECONDENSED;;Q")						;005
+         ;005 set end_date = format(request->dt_tm_end, "ddmmmyy hh:mm;;d")
+         set end_dat = format(request->dt_tm_end, "@DATECONDENSED;;Q")						;005
+         ;005 set report_date_range = concat("Activity from ", begin_date, " to ", end_date)
+         set begin_tm = format(request->dt_tm_begin, "@TIMENOSECONDS;;Q")						;005
+         set end_tm = format(request->dt_tm_end, "@TIMENOSECONDS;;Q")						;005
+         set report_date_range = concat(captions->act_frm," ", begin_dat," ",						;005
+					begin_tm,captions->to_, " " , end_dat, " ",end_tm) 					;005
+
+         select into trim(request->printer_name)
+            d_pr.seq,
+            serv_res_hier = perf_results->qual[d_pr.seq].serv_res_hier_seq,
+            detail_mne = trim(substring(1, 15, perf_results->qual[d_pr.seq]
+              .detail_mnemonic)),
+            order_dttm = perf_results->qual[d_pr.seq].order_dt_tm,
+            sched_dttm = perf_results->qual[d_pr.seq].sched_dt_tm,
+            drawn_dttm = perf_results->qual[d_pr.seq].drawn_dt_tm,
+            received_dttm = perf_results->qual[d_pr.seq].received_dt_tm,
+            pr.result_id,
+            pr.perform_result_id,
+            pr.result_status_cd,
+            re.perform_result_id,
+            re.event_sequence,
+            re.event_type_cd,
+            re.event_dt_tm,
+            ;005 event_date = format(re.event_dt_tm, "mm/dd/yy-hh:mm;;d"),
+            event_date = format(re.event_dt_tm, "@SHORTDATETIME;;Q"), 							;005
+            ;005 event_date_unformat = format(re.event_dt_tm, "yyyymmdd-hhmm;;d"),
+            event_date_unformat = format(re.event_dt_tm, "@SHORTDATETIME;;Q"),					;005
+            tech_name = substring(1, 10, pl.username),
+            order_unique = build(o.catalog_cd, o.order_id),
+            order_mne = trim(substring(1, 15, o.order_mnemonic)),
+            p_name_full = trim(p.name_full_formatted),
+            pat_name = trim(substring(1, 30, p.name_full_formatted)),
+            e.encntr_id,
+            e.loc_nurse_unit_cd,
+            e.loc_room_cd,
+            e.loc_bed_cd,
+            ord_phy_name = substring(1, 35, p_ord_phy.name_full_formatted),
+            ord_tech_name = substring(1, 10, pl_ord_tech.username),
+            sched_tech_name = substring(1, 10, pl_ord_tech.username),
+            col_tech_name = substring(1, 10, pl_col_tech.username),
+            rec_tech_name = substring(1, 10, pl_rec_tech.username),
+            accn = concat(
+              substring(8,2,perf_results->qual[d_pr.seq].accession), "-",
+              substring(10,3,perf_results->qual[d_pr.seq].accession), "-",
+              substring(13,6,perf_results->qual[d_pr.seq].accession)),
+;003            pat_sex = substring(1, 10, cv_sex.display),
+            pat_sex = substring(1, 10, UAR_GET_CODE_DISPLAY(p.sex_cd)),					;003
+;003            cv_locnurse.display,
+;003            cv_locroom.display,
+;003            cv_locbed.display,
+;003            col_priority = substring(1, 20, cv_col_pri.display),
+            col_priority = substring(1, 20, UAR_GET_CODE_DISPLAY(ol.collection_priority_cd)),		;003
+;003            rep_priority = substring(1, 20, cv_rep_pri.display),
+            rep_priority = substring(1, 20, UAR_GET_CODE_DISPLAY(ol.report_priority_cd)),		;003
+;003            ord_loc = substring(1, 30, cv_ord_loc.display),
+            ord_loc = substring(1, 30, UAR_GET_CODE_DISPLAY(perf_results->qual[d_pr.seq].order_locn_cd)), ;003
+;003            cv_ts.display_key,
+            testsite_disp = trim(substring(1,40,UAR_GET_CODE_DISPLAY(pr.service_resource_cd)),3),       ;003
+            ptr.sequence,
+            d_pa.seq,
+            pa_exists = decode(pa.seq, "Y", "N"),
+;004            pat_nbr = trim(substring(1, 20, pa.alias)),
+            pat_nbr = trim(substring(1, 20, cnvtalias(pa.alias,pa.alias_pool_cd))),                ;004
+            d_epr.seq,
+            epr_exists = decode(epr.seq, "Y", "N"),
+            epr.prsnl_person_id,
+            att_phy_name = substring(1, 35, p_att_phy.name_full_formatted),
+            d_org.seq,
+            org_alias_exists = decode(org_alias.seq, "Y", "N"),
+;004            client_nbr = substring(1, 20, org_alias.alias),
+            client_nbr = substring(1, 20, cnvtalias(org_alias.alias,org_alias.alias_pool_cd)),     ;004
+;005            nowtime = format(curtime, "hh:mm;;m"),
+            nowtime = format(curtime, "@TIMENOSECONDS;;M"), 								;005
+;005            nowdate = format(curdate, "mm/dd/yyyy;;d")
+            nowdate = format(curdate, "@SHORTDATE;;Q") 									;005
+
+         from
+            (dummyt d_pr with seq = value(nbr_prs)),
+            perform_result pr,
+            result_event re,
+            prsnl pl,
+            orders o,
+            order_laboratory ol,
+            person p,
+            encounter e,
+            prsnl p_ord_phy,
+            prsnl pl_ord_tech,
+            prsnl pl_col_tech,
+            prsnl pl_rec_tech,
+;003            code_value cv_sex,
+;003            code_value cv_locnurse,
+;003            code_value cv_locroom,
+;003            code_value cv_locbed,
+;003            code_value cv_col_pri,
+;003            code_value cv_rep_pri,
+;003            code_value cv_ord_loc,
+;003            code_value cv_ts,
+            profile_task_r ptr,
+            (dummyt d_pa with seq = 1),
+            person_alias pa,
+            (dummyt d_epr with seq = 1),
+            encntr_prsnl_reltn epr,
+            prsnl p_att_phy,
+            (dummyt d_org with seq = 1),
+            organization_alias org_alias
+
+         plan d_pr
+         join pr
+           where pr.perform_result_id =
+                    perf_results->qual[d_pr.seq].perform_result_id
+         join re
+           where re.result_id = perf_results->qual[d_pr.seq].result_id
+             and re.perform_result_id = pr.perform_result_id
+         join pl
+           where pl.person_id = re.event_personnel_id
+         join o
+           where o.order_id = perf_results->qual[d_pr.seq].order_id
+         join ol
+           where ol.order_id = perf_results->qual[d_pr.seq].order_id
+         join p
+           where p.person_id = o.person_id
+         join e
+           where e.encntr_id = o.encntr_id
+         join p_ord_phy
+           where p_ord_phy.person_id =
+                    perf_results->qual[d_pr.seq].order_provider_id
+         join pl_ord_tech
+           where pl_ord_tech.person_id =
+                    perf_results->qual[d_pr.seq].order_prsnl_id
+         join pl_col_tech
+           where pl_col_tech.person_id =
+                    perf_results->qual[d_pr.seq].drawn_id
+         join pl_rec_tech
+           where pl_rec_tech.person_id =
+                    perf_results->qual[d_pr.seq].received_id
+;003         join cv_sex
+;003           where cv_sex.code_value = p.sex_cd
+;003         join cv_locnurse
+;003           where cv_locnurse.code_value = e.loc_nurse_unit_cd
+;003         join cv_locroom
+;003           where cv_locroom.code_value = e.loc_room_cd
+;003         join cv_locbed
+;003           where cv_locbed.code_value = e.loc_bed_cd
+;003         join cv_col_pri
+;003           where cv_col_pri.code_value = ol.collection_priority_cd
+;003         join cv_rep_pri
+;003           where cv_rep_pri.code_value = ol.report_priority_cd
+;003         join cv_ord_loc
+;003           where cv_ord_loc.code_value =
+;003                    perf_results->qual[d_pr.seq].order_locn_cd
+;003         join cv_ts
+;003           where cv_ts.code_value = pr.service_resource_cd
+         join ptr
+           where ptr.catalog_cd = perf_results->qual[d_pr.seq].catalog_cd
+             and ptr.task_assay_cd =
+                    perf_results->qual[d_pr.seq].task_assay_cd
+         join d_pa
+           where d_pa.seq = 1
+         join pa
+           where pa.person_id = p.person_id
+             and pa.person_alias_type_cd = alias_type_mrn_cd
+         join d_epr
+           where d_epr.seq = 1
+         join epr
+           where epr.encntr_id = e.encntr_id
+             and epr.encntr_prsnl_r_cd = attending_doctr_cd
+         join p_att_phy
+           where p_att_phy.person_id = epr.prsnl_person_id
+         join d_org
+           where d_org.seq = 1
+         join org_alias
+           where org_alias.organization_id = e.organization_id
+             and org_alias.org_alias_type_cd = org_alias_client_cd
+
+         order by
+            serv_res_hier,
+            p_name_full,
+            d_pr.seq,
+            re.event_sequence
+
+         head report
+            col 0, report_date_range
+            row + 1
+            ;* Initialize report variables
+            first_time_yn = "Y"
+            if (nbr_prs > 0)
+               rpt->inst_disp = perf_results->qual[d_pr.seq].inst_disp
+               rpt->dept_disp = perf_results->qual[d_pr.seq].dept_disp
+               rpt->sect_disp = perf_results->qual[d_pr.seq].sect_disp
+               rpt->subsect_disp = perf_results->qual[d_pr.seq].subsect_disp
+               rpt->ts_disp = perf_results->qual[d_pr.seq].ts_disp
+            else
+               rpt->inst_disp = fillstring(30, " ")
+               rpt->dept_disp = fillstring(30, " ")
+               rpt->sect_disp = fillstring(30, " ")
+               rpt->subsect_disp = fillstring(30, " ")
+               rpt->ts_disp = fillstring(30, " ")
+            endif
+
+         head serv_res_hier
+            if (first_time_yn = "N")
+               if (perf_results->qual[d_pr.seq].inst_disp != rpt->inst_disp
+               or perf_results->qual[d_pr.seq].dept_disp != rpt->dept_disp
+               or perf_results->qual[d_pr.seq].sect_disp != rpt->sect_disp
+               or perf_results->qual[d_pr.seq].subsect_disp != rpt->subsect_disp
+               or perf_results->qual[d_pr.seq].ts_disp != rpt->ts_disp)
+                  rpt->inst_disp = perf_results->qual[d_pr.seq].inst_disp
+                  rpt->dept_disp = perf_results->qual[d_pr.seq].dept_disp
+                  rpt->sect_disp = perf_results->qual[d_pr.seq].sect_disp
+                  rpt->subsect_disp = perf_results->qual[d_pr.seq].subsect_disp
+                  rpt->ts_disp = perf_results->qual[d_pr.seq].ts_disp
+               endif
+            endif
+            first_time_yn = "N"
+
+         head pr.result_id
+            lowest_perform_date = "99999999-9999"
+            highest_corrected_date = "00000000-0000"
+            perform_date = fillstring(14, " ")
+            verified_date = fillstring(14, " ")
+            corrected_date = fillstring(14, " ")
+            perform_tech = fillstring(10, " ")
+            verified_tech = fillstring(10, " ")
+            corrected_tech = fillstring(10, " ")
+
+         detail
+            ;* Print perform date, verified date, and corrected date.
+            if (re.event_type_cd = performed_cd
+            and format(pr.perform_dt_tm, "@SHORTDATETIME;;Q") < lowest_perform_date)
+               ;* In the event of multiple perform dates, use the
+               ;* first perform date.
+               lowest_perform_date = format(pr.perform_dt_tm, "@SHORTDATETIME;;Q"),                             ;006
+               perform_date = format(pr.perform_dt_tm, "@SHORTDATETIME;;Q"),   ;Perform date                    ;006
+               perform_tech = tech_name
+;001            elseif (re.event_type_cd = verified_cd)
+            elseif (re.event_type_cd = verified_cd                     ;001
+            or re.event_type_cd = autoverified_cd)                     ;001
+               verified_date = event_date   ;Verify date
+               verified_tech = tech_name
+            elseif (re.event_type_cd = corrected_cd
+               and  event_date_unformat > highest_corrected_date)
+               ;* In the event of multiple corrected dates, use the
+               ;* most recent correct date.
+               highest_corrected_date = event_date_unformat
+               corrected_date = event_date   ;Corrected date
+               corrected_tech = tech_name
+            endif
+
+         foot pr.result_id
+            ;* Service Resource Hierarchy
+            col 0, rpt->inst_disp
+            col 30, rpt->dept_disp
+            col 60, rpt->sect_disp
+            if (serv_res_level_flag in (0,1,3))
+               col 90, rpt->subsect_disp
+            endif
+            if (serv_res_level_flag in (0,3))
+               col 120, rpt->ts_disp
+            endif
+            ;* Patient Information
+            col 150, pat_name
+            ;* Patient location
+            pat_nurse = fillstring(20, " ")
+;003            if (cv_locnurse.code_value > 0.0)
+            if (e.loc_nurse_unit_cd > 0.0)							;003
+;003               pat_nurse = substring(1, 20, trim(cv_locnurse.display))
+               pat_nurse = substring(1, 20, trim(UAR_GET_CODE_DISPLAY(e.loc_nurse_unit_cd)))	;003
+            endif
+            col 180, pat_nurse
+            pat_room = fillstring(10, " ")
+;003            if (cv_locroom.code_value > 0.0)
+            if (e.loc_room_cd > 0.0)							;003
+;003               pat_room = substring(1, 10, trim(cv_locroom.display))
+               pat_room = substring(1, 10, trim(UAR_GET_CODE_DISPLAY(e.loc_room_cd)))	;003
+            endif
+            col 200, pat_room
+            pat_bed = fillstring(10, " ")
+;003            if (cv_locbed.code_value > 0.0)
+            if (e.loc_bed_cd > 0.0)							;003
+               pat_bed = substring(1, 10, trim(UAR_GET_CODE_DISPLAY(e.loc_bed_cd)))	;003
+;003               pat_bed = substring(1, 10, trim(cv_locbed.display))
+            endif
+            col 210, pat_bed
+            if (pa_exists = "Y")
+               col 220, pat_nbr
+            endif
+;003            if (cv_sex.code_value > 0.0)
+            if (p.sex_cd > 0.0)								;003
+               col 240, pat_sex
+            endif
+            ;* Calculate and print age.
+           
+            age_abbrev = FormatAge(p.birth_dt_tm, p.deceased_dt_tm, "LABRPTAGE")
+     
+            col 250, age_abbrev
+            ;* Order Level Information
+            ;* Print order mnemonic and accession.
+            col 265, order_mne
+            col 280, accn
+            ;* Print collection/reporting priority.
+            col_pri = fillstring(15, " ")
+            if (ol.collection_priority_cd > 0.0)
+               col_pri = substring(1, 15, trim(UAR_GET_CODE_DISPLAY(ol.collection_priority_cd)))	;003
+;003               col_pri = substring(1, 15, trim(cv_col_pri.display))
+            endif
+            col 295, col_pri
+            rep_pri = fillstring(15, " ")
+            if (ol.report_priority_cd > 0.0)
+;003               rep_pri = substring(1, 15, trim(cv_rep_pri.display))
+               rep_pri = substring(1, 15, trim(UAR_GET_CODE_DISPLAY(ol.report_priority_cd)))		;003
+            endif
+            col 310, rep_pri
+            ;* Print client number
+            if (org_alias_exists = "Y")
+               col 325, client_nbr
+            endif
+            ;* Print attending physician.
+            if (epr_exists = "Y")
+               col 345, att_phy_name
+            endif
+            ;* Print ordering physician.
+            if (p_ord_phy.person_id > 0.0)
+               col 380, ord_phy_name
+            endif
+            ;* Print order location.
+;003            if (cv_ord_loc.code_value > 0.0)
+            if (perf_results->qual[d_pr.seq].order_locn_cd > 0.0)				;003
+               col 415, ord_loc
+            endif
+            ;* Print order date, time, and personnel id
+            if (size(trim(order_dttm), 3) > 0)
+               col 445, order_dttm
+            endif
+            if (pl_ord_tech.person_id > 0.0)
+               col 459, ord_tech_name
+            endif
+            ;* Print scheduled date, time, and personnel id
+            if (size(trim(sched_dttm), 3) > 0)
+               col 469, sched_dttm
+            endif
+            if (pl_ord_tech.person_id > 0.0)
+               col 483, sched_tech_name
+            endif
+            ;* Print collected date, time, and personnel id
+            if (size(trim(drawn_dttm), 3) > 0)
+               col 493, drawn_dttm
+            endif
+            if (pl_col_tech.person_id > 0.0)
+               col 507, col_tech_name
+            endif
+            ;* Print received date, time, and personnel id
+            if (size(trim(received_dttm), 3) > 0)
+               col 517, received_dttm
+            endif
+            if (pl_rec_tech.person_id > 0.0)
+               col 531, rec_tech_name
+            endif
+            ;* Print Detail Information.
+            col 541, detail_mne
+            ;* Print perform date, verified date, and corrected date.
+            col 556, perform_date
+            col 570, perform_tech
+            col 580, verified_date
+            col 594, verified_tech
+            col 604, corrected_date
+            col 618, corrected_tech
+            row + 1
+
+         with
+            nocounter,
+            outerjoin = d_pa,
+            dontcare = pa,
+            maxread(pa, 1),
+            outerjoin = d_epr,
+            dontcare = epr,
+            dontcare = p_att_phy,
+            outerjoin = d_org,
+            dontcare = org_alias,
+            maxcol = 629,
+            formfeed = none,
+            format = fixed,
+            nullreport
+
+
+         if (nbr_prs = 0)
+            set reply->status_data->status = "Z"
+         else
+            set reply->status_data->status = "S"
+         endif
+
+      #Exit_Script
+         end
+         go
+
+;Generated by GNU enscript 1.6.4.

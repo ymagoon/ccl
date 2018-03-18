@@ -1,0 +1,728 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_chg_xfer_details/glb_chg_xfer_details.prg Turn on black mode
+
+/*****************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+      *************************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_CHG_XFER_DETAILS.PRG
+        Object name:            GLB_CHG_XFER_DETAILS
+        Request #:              250107
+
+        Product:                General Lab           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Transfers detail procedures from one
+                                test site to another.
+
+        Tables read:            order_procedure_exception
+                                order_serv_res_container
+                                service_resource
+
+        Tables updated:         order_procedure_exception
+                                order_serv_res_container
+                                order_laboratory
+
+        Executing from:         General Lab transfer test application
+
+        Special Notes:          Creates order_procedure_exception record for
+                                each detail of each order that is having a
+                                detail transferred, if the detail doesn't have
+                                an exception record already.
+                                Sets status_flag on new order_serv_res_container
+                                rows to 1 if any osrc for that order has been 1 or 2.
+
+**********************************************************************************/
+;****************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 08/01/96 Newton Hughes        Initial Release                     *
+;     001 12/19/97 Jeff Fry             Update OSRC.LOCATION_CD with the    *
+;                                       correct login_location for the new  *
+;                                       service resource.                   *
+;     002 02/04/02 Jay Ferstl           Update to mic_ang_automated         *
+;     003 07/20/09 Oliver Barbara       Added logic to update default micro *
+;                                       media.                              *
+;     004 08/26/10 Sharada K            Fix for CR# 1-3945362303            *
+;****************************************************************************
+;************************  END OF ALL MODCONTROL BLOCKS  ********************
+  
+      DROP PROGRAM glb_chg_xfer_details:dba GO
+      CREATE PROGRAM glb_chg_xfer_details:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      RECORD request
+      (
+        1 service_resource_From = f8
+        1 service_resource_To = f8
+        1 qual[x]
+          2 order_id = f8
+          2 catalog_cd = f8
+          2 task_assay_cd = f8
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      RECORD reply
+      (
+%i cclsource:status_block.inc
+      )
+
+      RECORD opx_temp
+      (
+        1 qual[10]
+          2 order_id = f8
+          2 task_assay_cd = f8
+          2 service_resource_cd = f8
+      )
+
+      RECORD osrc_temp
+      (
+        1 qual[10]
+          2 order_id = f8
+          2 container_id = f8
+          2 location_cd = f8
+          2 status_flag = i2
+          2 ignoreme = i2
+          2 current_location_cd = f8
+          2 in_lab_dt_tm = dq8
+          2 pending_assay_ind = i2
+          2 nonpending_assay_ind = i2
+      )
+	  
+      RECORD micro_temp
+      (
+        1 qual[*]
+          2 catalog_cd = f8
+      )
+
+#script
+      SET reply->status_data->status = "F"
+      SET req_ords = size(request->qual, 5)
+      SET nbr_osrcs = 0
+      SET nbr_opxs = 0
+      SET no_op = 0
+      declare cs_login_loc_cd = f8 with protect, noconstant(0.0)
+	  
+      declare code_cnt        = i4 with protect,noconstant(1)
+      declare idx             = i4 with protect,noconstant(0)
+      declare mic_idx         = i4 with protect,noconstant(0)
+      declare pos             = i4 with protect,noconstant(0)
+      declare code_set        = i4 with protect,noconstant(0)
+      declare cdf_meaning     = vc with protect,noconstant("")
+      declare code_value      = f8 with protect,noconstant(0.0)
+      declare dMicroActCd     = f8 with protect,noconstant(0.0)
+
+      declare VERIFIED_CD     = f8 with protect,noconstant(0.0)
+      declare AUTOVERIFIED_CD = f8 with protect,noconstant(0.0)
+      declare CORRECTED_CD    = f8 with protect,noconstant(0.0)
+      declare INREVIEW_CD     = f8 with protect,noconstant(0.0)
+      declare CORRINREV_CD    = f8 with protect,noconstant(0.0)
+ 
+      set VERIFIED_CD = uar_get_code_by("MEANING",1901,"VERIFIED")
+      set AUTOVERIFIED_CD = uar_get_code_by("MEANING",1901,"AUTOVERIFIED")
+      set CORRECTED_CD = uar_get_code_by("MEANING",1901,"CORRECTED")
+      set INREVIEW_CD = uar_get_code_by("MEANING",1901,"INREVIEW")
+      set CORRINREV_CD = uar_get_code_by("MEANING",1901,"CORRINREV")
+ 
+      set code_set = 106
+      set cdf_meaning = NULLTERM("MICROBIOLOGY")
+      set stat = uar_get_meaning_by_codeset(code_set, cdf_meaning, code_cnt, code_value)
+      set dMicroActCd = code_value
+
+; Double-check that user isn't doing something stupid that the client app
+; didn't catch
+
+      IF (request->service_resource_From = request->service_resource_To)
+        SET reply->status_data->status = "Z"
+        GO TO exit_script
+      ENDIF
+
+; Fill opx_temp with a list of details that do not have order_procedure_
+; exception records.  For each order which is having at least one detail
+; transferred, insert an entry in the opx_temp array for each detail 
+; (transferred or not) that doesn't have an exception record.  This
+; select lists the details in each order so that new exception records
+; can be written for each detail that doesn't have one yet.
+
+      SELECT INTO "nl:"
+        opx.order_id
+        , opx.task_assay_cd
+        , opx_exists = decode(opx.seq, "Y", "N")
+        , ptr.catalog_cd
+        , dta.task_assay_cd
+        , osrc.order_id
+        , osrc.service_resource_cd
+      FROM
+        (dummyt d1 with seq = value(req_ords))
+        , (dummyt d2 with seq = 1)
+        , order_procedure_exception opx
+        , profile_task_r ptr
+        , discrete_task_assay dta
+        , order_serv_res_container osrc
+
+      PLAN d1
+      JOIN ptr
+        WHERE ptr.catalog_cd = request->qual[d1.seq]->catalog_cd
+      JOIN dta
+        WHERE dta.task_assay_cd = ptr.task_assay_cd
+      JOIN osrc
+        WHERE osrc.order_id = request->qual[d1.seq]->order_id
+      JOIN d2
+        WHERE d2.seq = 1
+      JOIN opx
+        WHERE opx.order_id = request->qual[d1.seq]->order_id
+        AND opx.task_assay_cd = request->qual[d1.seq]->task_assay_cd
+
+      ORDER osrc.order_id, dta.task_assay_cd
+
+      HEAD dta.task_assay_cd
+        IF (opx_exists = "N")        
+          nbr_opxs = nbr_opxs + 1
+          IF (mod(nbr_opxs, 10) = 1 AND nbr_opxs > 10)
+            stat = alter(opx_temp->qual, nbr_opxs + 10)
+          ENDIF
+          opx_temp->qual[nbr_opxs]->order_id = request->qual[d1.seq]->order_id
+          opx_temp->qual[nbr_opxs]->task_assay_cd = dta.task_assay_cd       
+          opx_temp->qual[nbr_opxs]->service_resource_cd = osrc.service_resource_cd
+        ENDIF
+
+      DETAIL
+        no_op = 0
+               
+      WITH
+        COUNTER
+        , OUTERJOIN = d2
+
+; Create exception records where none exist for all details of each
+; order which is having at least one detail transferred
+      IF (nbr_opxs != 0)
+        INSERT INTO
+          order_procedure_exception opx
+          , (dummyt d1 with seq = value(nbr_opxs))
+        SET
+          opx.order_id = opx_temp->qual[d1.seq]->order_id
+          , opx.task_assay_cd = opx_temp->qual[d1.seq]->task_assay_cd
+          , opx.service_resource_cd = opx_temp->qual[d1.seq]->service_resource_cd
+          , opx.exception_type_flag = 0
+          , opx.updt_dt_tm = cnvtdatetime(curdate, curtime)
+          , opx.updt_id = reqinfo->updt_id
+          , opx.updt_task = reqinfo->updt_task
+          , opx.updt_cnt = 0
+          , opx.updt_applctx = reqinfo->updt_applctx
+
+        PLAN d1
+        JOIN opx
+          WHERE opx.order_id = opx_temp->qual[d1.seq]->order_id
+          AND opx.task_assay_cd = opx_temp->qual[d1.seq]->task_assay_cd
+        WITH
+          COUNTER
+      ENDIF
+
+; Update opx rows that match request array entries
+
+      UPDATE INTO
+        order_procedure_exception opx
+        , (dummyt d1 with seq = value(req_ords))
+      SET
+        opx.service_resource_cd = request->service_resource_To
+        , opx.exception_type_flag = 1
+        , opx.updt_dt_tm = cnvtdatetime(curdate, curtime)
+        , opx.updt_id = reqinfo->updt_id
+        , opx.updt_task = reqinfo->updt_task
+        , opx.updt_cnt = opx.updt_cnt + 1
+        , opx.updt_applctx = reqinfo->updt_applctx
+
+      PLAN d1
+      JOIN opx
+        WHERE opx.order_id = request->qual[d1.seq]->order_id
+        AND opx.task_assay_cd = request->qual[d1.seq]->task_assay_cd
+        AND opx.service_resource_cd = request->service_resource_From
+
+      WITH
+        COUNTER
+
+; Get the location of the testsite being transferred to
+
+      SELECT INTO "nl:"                                                 ;001
+        sr.cs_login_loc_cd                                              ;001
+      FROM                                                              ;001
+        service_resource sr                                             ;001
+      WHERE                                                             ;001
+        sr.service_resource_cd = request->service_resource_to           ;001
+      DETAIL                                                            ;001
+        cs_login_loc_cd = sr.cs_login_loc_cd                            ;001
+      WITH                                                              ;001
+        NOCOUNTER                                                       ;001
+
+      IF (curqual = 0)                                                  ;001
+        GO TO exit_script                                               ;001
+      ENDIF                                                             ;001
+
+; Copy the order_service_resource rows with the old test site, then
+; insert new rows with the new test site.
+; Uses select distinct in order to avoid getting one copy of the same
+; osrc record for each detail.
+
+      SELECT DISTINCT
+      INTO "nl:"
+        osrc.order_id
+        , osrc.service_resource_cd
+        , osrc.container_id
+        , osrc.location_cd
+        , osrc.status_flag
+      FROM
+        order_serv_res_container osrc
+        , (dummyt d1 with seq = value(req_ords))
+
+      PLAN d1
+      JOIN osrc
+        WHERE osrc.order_id = request->qual[d1.seq]->order_id
+        AND osrc.service_resource_cd = request->service_resource_From
+
+      ORDER osrc.order_id, osrc.location_cd, osrc.container_id, osrc.status_flag
+
+      DETAIL
+        nbr_osrcs = nbr_osrcs + 1
+        IF (mod(nbr_osrcs, 10) = 1 and nbr_osrcs > 10)
+          stat = alter(osrc_temp->qual, nbr_osrcs + 10)
+        ENDIF
+        osrc_temp->qual[nbr_osrcs]->order_id = osrc.order_id
+        osrc_temp->qual[nbr_osrcs]->container_id = osrc.container_id
+        osrc_temp->qual[nbr_osrcs]->status_flag = osrc.status_flag
+        osrc_temp->qual[nbr_osrcs]->ignoreme = 0
+        osrc_temp->qual[nbr_osrcs]->current_location_cd = 
+           osrc.current_location_cd
+        osrc_temp->qual[nbr_osrcs]->location_cd = cs_login_loc_cd       
+        osrc_temp->qual[nbr_osrcs]->in_lab_dt_tm = osrc.in_lab_dt_tm
+      WITH
+        COUNTER 
+        
+; prevent entering duplicates into order_serv_res_container
+
+      SELECT INTO "nl:"
+        osrc.order_id
+        , osrc.container_id
+        , osrc.location_cd
+        , osrc.service_resource_cd
+      FROM
+        order_serv_res_container osrc 
+        , (dummyt d1 with seq = value(nbr_osrcs))
+
+      PLAN d1
+      JOIN osrc
+        WHERE osrc.order_id = osrc_temp->qual[d1.seq]->order_id
+        AND osrc.container_id = osrc_temp->qual[d1.seq]->container_id
+        AND osrc.location_cd = osrc_temp->qual[d1.seq]->location_cd
+        AND osrc.service_resource_cd = request->service_resource_To
+      
+      DETAIL
+        osrc_temp->qual[d1.seq]->ignoreme = 1
+      
+      WITH
+        COUNTER
+        
+; Set status_flag for each osrc to 1 if ANY osrc for that order is
+; 1 or 2 (want to know whether the order has ever been in lab)
+
+      SELECT INTO "nl:"
+        osrc.status_flag
+      FROM
+        order_serv_res_container osrc
+         , (dummyt d1 with seq = value(nbr_osrcs))
+      PLAN d1
+      JOIN osrc
+        WHERE (osrc.order_id = osrc_temp->qual[d1.seq]->order_id)
+;CAPEP00118060        AND ((osrc.status_flag = 1) OR (osrc.status_flag = 2))
+        AND osrc.status_flag +0 in (1,2) 				;CAPEP00118060
+
+      DETAIL
+        osrc_temp->qual[d1.seq]->status_flag = 1
+       
+      WITH
+        COUNTER
+
+; Insert new order_serv_res_container rows for new test site
+
+     INSERT INTO
+        order_serv_res_container osrc
+        , (dummyt d1 with seq = value(nbr_osrcs))
+     SET
+       osrc.order_id = osrc_temp->qual[d1.seq]->order_id
+        , osrc.service_resource_cd = request->service_resource_To
+        , osrc.container_id = osrc_temp->qual[d1.seq]->container_id 
+        , osrc.location_cd = osrc_temp->qual[d1.seq]->location_cd
+        , osrc.status_flag = osrc_temp->qual[d1.seq]->status_flag
+        , osrc.updt_task = reqinfo->updt_task
+        , osrc.updt_applctx = reqinfo->updt_applctx
+        , osrc.updt_dt_tm = cnvtdatetime(curdate, curtime)
+        , osrc.updt_id = reqinfo->updt_id
+        , osrc.updt_cnt = 0
+        , osrc.current_location_cd = osrc_temp->qual[d1.seq]->current_location_cd
+        , osrc.in_lab_dt_tm = cnvtdatetime(osrc_temp->qual[d1.seq]->in_lab_dt_tm)
+
+      PLAN d1
+        WHERE osrc_temp->qual[d1.seq]->ignoreme = 0
+      JOIN osrc
+        WHERE osrc.order_id = osrc_temp->qual[d1.seq]->order_id
+        AND osrc.container_id = osrc_temp->qual[d1.seq]->container_id
+        AND osrc.location_cd = osrc_temp->qual[d1.seq]->location_cd
+        AND osrc.service_resource_cd = request->service_resource_To
+
+      WITH
+        COUNTER
+
+; to identify the assay(s) being transferred,to check whether its already been resulted or not
+; and identify whether its an optional or required assay
+      SELECT INTO "nl:"
+          osrc.order_id,
+          ptr.pending_ind,
+          r.result_status_cd,
+          r_exists = decode(r.result_id, "Y", "N")
+ 
+      FROM
+        (dummyt d1 with seq = value(req_ords))
+        ,(dummyt d2 with seq = value(nbr_osrcs))
+        ,order_serv_res_container osrc
+        ,order_procedure_exception opx
+        ,profile_task_r ptr
+        ,(dummyt d_r with seq = 1)
+        ,result r
+ 
+      PLAN d1
+      JOIN d2
+        WHERE osrc_temp->qual[d2.seq]->order_id = request->qual[d1.seq]->order_id
+ 
+      JOIN osrc
+        WHERE osrc.order_id = osrc_temp->qual[d2.seq]->order_id
+        AND   osrc.service_resource_cd = request->service_resource_To
+ 
+      JOIN opx
+        WHERE opx.order_id = osrc.order_id
+        AND opx.service_resource_cd = osrc.service_resource_cd
+ 
+      JOIN ptr
+        WHERE ptr.task_assay_cd = opx.task_assay_cd
+        AND ptr.active_ind = 1
+        AND ptr.catalog_cd = request->qual[d1.seq]->catalog_cd
+ 
+      JOIN d_r
+        WHERE d_r.seq = 1
+      JOIN r
+        WHERE r.order_id = opx.order_id
+        AND r.task_assay_cd = ptr.task_assay_cd
+        AND r.result_status_cd in
+               (VERIFIED_CD,AUTOVERIFIED_CD,CORRECTED_CD,INREVIEW_CD,CORRINREV_CD)
+ 
+      DETAIL
+        if(ptr.pending_ind = 1 and r_exists = "N")
+           osrc_temp->qual[d2.seq]->pending_assay_ind = 1
+        endif
+ 
+      WITH nocounter,
+           outerjoin = d_r
+ 
+; to update a row in the osrc table with a status_ flag of 1,if the order's assay is transferred back
+; to  a service resource for which the row already exists in this table
+      UPDATE INTO
+        order_serv_res_container osrc
+        ,(dummyt d1 with seq = value(req_ords))
+        ,(dummyt d2 with seq = value(nbr_osrcs))
+      SET osrc.status_flag = 1
+      PLAN d1
+      JOIN d2
+        WHERE osrc_temp->qual[d2.seq]->order_id = request->qual[d1.seq]->order_id
+        AND osrc_temp->qual[d2.seq]->pending_assay_ind = 1
+        AND osrc_temp->qual[d2.seq]->ignoreme = 1
+      JOIN osrc
+        WHERE osrc.order_id = osrc_temp->qual[d2.seq]->order_id
+        AND osrc.service_resource_cd = request->service_resource_To
+      WITH nocounter
+ 
+; to identify the assay(s)of the order that are still route to service_resource_from
+; to check which of these assays are optional or required and whether they have been resulted
+      SELECT INTO "nl:"
+          osrc.order_id,
+          ptr.pending_ind,
+          r.result_status_cd,
+          r_exists = decode(r.result_id, "Y", "N")
+ 
+      FROM
+        (dummyt d1 with seq = value(req_ords))
+        ,(dummyt d2 with seq = value(nbr_osrcs))
+        ,order_serv_res_container osrc
+        ,order_procedure_exception opx
+        ,profile_task_r ptr
+        ,(dummyt d_r with seq = 1)
+        ,result r
+ 
+      PLAN d1
+      JOIN d2
+        WHERE osrc_temp->qual[d2.seq]->order_id = request->qual[d1.seq]->order_id
+ 
+      JOIN osrc
+        WHERE osrc.order_id = osrc_temp->qual[d2.seq]->order_id
+        AND   osrc.service_resource_cd = request->service_resource_From
+ 
+      JOIN opx
+        WHERE opx.order_id = osrc.order_id
+        AND opx.service_resource_cd = osrc.service_resource_cd
+ 
+      JOIN ptr
+        WHERE ptr.task_assay_cd =opx.task_assay_cd
+        AND ptr.active_ind = 1
+        AND ptr.catalog_cd = request->qual[d1.seq]->catalog_cd
+ 
+      JOIN d_r
+        WHERE d_r.seq = 1
+      JOIN r
+        WHERE r.order_id = opx.order_id
+        AND r.task_assay_cd = ptr.task_assay_cd
+        AND r.result_status_cd in
+             (VERIFIED_CD,AUTOVERIFIED_CD,CORRECTED_CD,INREVIEW_CD,CORRINREV_CD)
+      
+      ORDER BY osrc.order_id
+ 
+      HEAD osrc.order_id
+ 
+        nonpending_w_result_ind = 0
+ 
+      DETAIL
+      	
+        osrc_temp->qual[d2.seq]->pending_assay_ind = 0
+        if(ptr.pending_ind = 1 and r_exists = "N" and osrc_temp->qual[d2.seq]->pending_assay_ind = 0)
+           osrc_temp->qual[d2.seq]->pending_assay_ind = 1
+        elseif(ptr.pending_ind = 0 and r_exists ="Y" and nonpending_w_result_ind = 0)
+           nonpending_w_result_ind = 1
+        endif
+ 
+       if(osrc_temp->qual[d2.seq]->pending_assay_ind = 0 and nonpending_w_result_ind = 0)
+           osrc_temp->qual[d2.seq]->nonpending_assay_ind = 1
+        endif
+ 
+      WITH nocounter,
+           outerjoin = d_r
+ 
+; to update a row in the osrc table with a status_ flag of 2,if the order has no pending assays
+; for the service_resource_from location
+      UPDATE INTO
+        order_serv_res_container osrc
+        ,(dummyt d1 with seq = value(req_ords))
+        ,(dummyt d2 with seq = value(nbr_osrcs))
+      SET osrc.status_flag = 2
+
+      PLAN d1
+      JOIN d2
+        WHERE osrc_temp->qual[d2.seq]->order_id = request->qual[d1.seq]->order_id
+        AND osrc_temp->qual[d2.seq]->pending_assay_ind = 0
+        AND osrc_temp->qual[d2.seq]->nonpending_assay_ind = 0
+ 
+      JOIN osrc
+        WHERE osrc.order_id = osrc_temp->qual[d2.seq]->order_id
+        AND osrc.service_resource_cd = request->service_resource_From
+      WITH nocounter
+ 
+; Turn the osrc_temp array into a list of records to delete from the osrc table (because
+; all of the details have opx records pointing to a different testsite)
+; In this select those entries in osrc_temp that DO match opx records are
+; flagged.
+
+; re-initialize flag; now 0 = delete, 1 = keep.  All the osrcs are initialized to delete,
+; then the records to be kept are marked, then the others are deleted.
+
+      FOR (x = 1 to nbr_osrcs)
+        SET osrc_temp->qual[x]->ignoreme = 0
+      ENDFOR
+
+; See which osrc_temp entries match some opx record, and mark
+; them in order to avoid deleting them
+; (at this point all the orders in osrc_temp will have exception
+; records for their details)
+
+      SELECT INTO "nl:"
+        opx.task_assay_cd             
+      FROM
+        order_procedure_exception opx
+        , (dummyt d1 with seq = value(nbr_osrcs))
+      PLAN d1
+      JOIN opx
+        WHERE opx.order_id = osrc_temp->qual[d1.seq]->order_id
+        AND opx.service_resource_cd = request->service_resource_From
+
+      DETAIL
+        osrc_temp->qual[d1.seq]->ignoreme = 1
+
+      WITH
+        COUNTER  
+
+; Scrag all the osrc records that no longer relate to any of the details.
+; If the status_flag > 0 then the osrc tells where the container is, so
+; it has to be kept around, and somebody else has to worry about deleting it.
+
+      DELETE FROM
+        order_serv_res_container osrc
+        , (dummyt d1 with seq = value(nbr_osrcs))
+      SET osrc.seq = 1
+      PLAN d1
+      JOIN osrc
+        WHERE osrc_temp->qual[d1.seq]->ignoreme = 0
+        AND osrc.service_resource_cd = request->service_resource_From
+        AND osrc.order_id = osrc_temp->qual[d1.seq]->order_id
+        AND osrc.status_flag = 0
+
+      WITH
+        COUNTER
+
+
+      ;UPDATE INTO
+      delete from
+        order_serv_res_container osrc
+        , (dummyt d1 with seq = value(nbr_osrcs))
+      ;SET osrc.status_flag = 2
+      set osrc.seq=1
+      PLAN d1
+      JOIN osrc
+        WHERE osrc_temp->qual[d1.seq]->ignoreme = 0
+        AND osrc.service_resource_cd = request->service_resource_From
+        AND osrc.order_id = osrc_temp->qual[d1.seq]->order_id
+        ;AND osrc.status_flag = 0
+
+      WITH
+        COUNTER
+
+record jpm_ara
+(
+1 qual[*]
+        2 order_id = f8
+)
+set jpm_cnt = 0
+
+select into "nl:"
+opx.order_id
+from    order_procedure_exception opx,
+        (dummyt d1 with seq = value(req_ords))
+plan    d1
+join    opx where opx.order_id = request->qual[d1.seq]->order_id
+order   opx.order_id
+head    opx.order_id
+        jpm_cnt = jpm_cnt + 1
+        stat = alterlist(jpm_ara->qual,jpm_cnt)
+        jpm_ara->qual[jpm_cnt]->order_id = opx.order_id
+with    nocounter
+
+      UPDATE INTO
+        (dummyt d1 with seq = value(size(jpm_ara->qual,5)))
+        , order_laboratory ol
+      SET
+        ol.resource_route_level_flag = 2
+        , ol.updt_dt_tm = cnvtdatetime(curdate, curtime)
+        , ol.updt_id = reqinfo->updt_id
+        , ol.updt_task = reqinfo->updt_task
+        , ol.updt_cnt = ol.updt_cnt + 1
+        , ol.updt_applctx = reqinfo->updt_applctx
+
+      PLAN d1
+      JOIN ol
+        WHERE ol.order_id = jpm_ara->qual[d1.seq]->order_id
+        ;and osrc_temp->qual[d1.seq]->ignoreme = 1
+      WITH
+        NOCOUNTER                                                    
+        , OUTERJOIN = d1
+        
+      SET reply->status_data->status = "S"
+      
+      ;Need to update mic_ang_automated when the service resource is changed (transfered)
+      ;and micro is installed 
+      SELECT into "nl:"
+      FROM dprotect 
+      WHERE object_name = "MIC_CHG_ANG_SERVICE_RESOURCE" 
+            and object = "P" 
+      WITH nocounter
+      
+      IF (curqual > 0)      
+        EXECUTE mic_chg_ang_service_resource 
+      ENDIF
+	  
+	  
+      if(request->status_flag = 3)
+          execute mic_reeval_order_routing
+    
+          select into "nl:"
+    
+          from order_catalog oc
+
+          where expand(idx, 1, size(request->qual,5), oc.catalog_cd, request->qual[idx].catalog_cd)
+            and oc.activity_type_cd = dMicroActCd
+          
+          order by oc.catalog_cd
+		  
+          head report
+             rec_cnt = 0
+    
+          head oc.catalog_cd
+              rec_cnt = rec_cnt + 1
+              if (rec_cnt > size(micro_temp->qual, 5))
+                  stat = alterlist(micro_temp->qual, rec_cnt + 9)
+              endif
+    
+              micro_temp->qual[rec_cnt].catalog_cd = oc.catalog_cd
+			  
+          foot oc.catalog_cd
+             row+0
+          
+          foot report
+             stat = alterlist(micro_temp->qual, rec_cnt)
+    
+          with nocounter 
+		  
+          for(idx = 1 to size(request->qual, 5))
+             set pos = locateval(mic_idx, 1, size(micro_temp->qual, 5), request->qual[idx].catalog_cd, 
+                                 micro_temp->qual[mic_idx].catalog_cd)
+
+             if(pos > 0)
+                set stat = DoMicroResourceReeval(request->qual[idx].order_id, request->qual[idx].catalog_cd, 
+                                                 request->service_resource_To)
+             endif
+          endfor
+      endif 
+
+      free set micro_temp
+       
+      
+      IF (reply->status_data->status = "S")
+        COMMIT
+      ELSE
+        ROLLBACK
+      ENDIF   
+  
+#exit_script
+      END GO
+
+;Generated by GNU enscript 1.6.4.

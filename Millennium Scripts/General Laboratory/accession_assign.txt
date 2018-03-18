@@ -1,0 +1,930 @@
+ ;;Solution_Test/script/PathNet -- Common Services/ACCESSION_ASSIGN/ACCESSION_ASSIGN.PRG Turn on black mode
+
+;;
+;; File: accession_assign.prg
+;; Description: Accession asssignment routine.
+;; Request Nbr: n/a
+;;
+;;-----------------------------------------------------------------------------
+;; Date                  Feature    Description
+;; -------- -----------  ---------- -------------------------------------------
+;; 07/01/99 CERGYL             6255 File creation.
+;; 01/01/01 CERGYL            17518 Convert to subroutines and fix netting.
+;;
+ 
+drop program accession_assign:dba go
+create program accession_assign:dba
+
+;*
+;* Don't support versioning in this release.
+;*
+;*if (validate (ASSIGN_COMMON_VERSION, -1) = -1)
+;*
+;*;* The minimum version of accession_common.inc for the enhancements.
+;*declare ASSIGN_VERSION_040601A = i2 with constant (1)
+;*declare ASSIGN_VERSION_040601B = i2 with constant (2)
+;*
+;*;* The current version of accession_common.inc.
+;*declare ASSIGN_COMMON_VERSION  = i2 with constant (validate (ACCESSION_COMMON_VERSION, 0))
+;*
+;*endif
+;*
+
+declare MIC_CDF = c12 with constant ("MICROBIOLOGY"), protect
+declare AP_CDF = c12 with constant ("AP"), protect
+ 
+;*
+;* Used for accession assignment record.
+;*
+ 
+record accession_info
+(
+ 1 qual[*]
+   2 site_prefix_cd               = f8
+   2 site_prefix_disp             = c5
+   2 accession_dt_tm              = dq8
+   2 accession_year               = i4
+   2 accession_day                = i4
+   2 accession_format_cd          = f8
+   2 accession_format_mean        = c12
+   2 accession_class_cd           = f8
+   2 alpha_prefix                 = c2
+   2 accession_pool_id            = f8
+   2 accession_seq_nbr            = i4
+   2 accession                    = c20
+   2 accession_id                 = f8
+   2 assignment_status            = i2
+   2 assignment_meaning           = vc
+   2 assignment_date              = dq8
+
+ 1 proc_qual[*]
+   2 info_index                   = i4
+)
+
+;* Get the site prefix for the facility when the accession is assigned by catalog_cd.
+declare FacilitySitePrefix (no_param = i2 (value)) = i2
+
+;* Get the accession_class information when the accession is assigned by catalog_cd.
+declare AccessionClass (no_param = i2 (value)) = i2
+
+;* Gets the collection priority information for the collection_priority_cd in accession_fmt or accession_grp.
+declare CollectionPriorityInfo (fmt_ind = i2 (value), cp_size = i2 (value)) = i2
+
+;* Gets the activity type information for the catalog_cd in accession_fmt or accession_grp.
+declare ActivityTypeInfo (fmt_ind = i2 (value), at_sze = i2 (value)) = i2
+
+;* Get the accession pool for the site prefix and accession format.
+declare AccessionAssignXref (no_param = i2 (value)) = i2
+
+;* Get code value displays and cdf_meanings.
+declare CodeValueInfo (no_param = i2 (value)) = i2
+
+;* Accession Netting - nets orders by site prefix, accession class, accession_format, accession date/time, and accession pool.
+declare AccessionNetting (no_param = i2 (value)) = i2
+
+;* Assigns the accession numbers.
+declare AccessionAssignment (ai_max = i2 (value)) = i2
+
+;* Indicates a new accession should be assigned based on the group with other priority flags.
+declare CollectionPriorityInd (cp_cd1 = f8 (value), gwo_flag1 = i2 (value), cp_cd2 = f8 (value), gwo_flag2 = i2 (value)) = i2
+
+;*
+;* Don't allow accession numbers to be assigned based on body site/spcecimen type in this release.
+;*
+;* Indicates a new accession should be assigned when the body sites are different.
+;*declare BodySiteInd (body_site_ind = i2 (value), body_site_cd1 = f8 (value), body_site_cd2 = f8 (value)) = i2
+;*
+;*;* Indicates a new accession should be assigned when the specimen types are different.
+;*declare SpecimenTypeInd (specimen_type_ind = i2 (value), specimen_type_cd1 = f8 (value), specimen_type_cd2 = f8 (value)) = i2
+;*
+
+;* Number of accessions in the accession_fmt->qual.
+declare nbr_to_assign = i2 with noconstant (size (accession_fmt->qual, 5))
+ 
+;* Number of accessions in the accession_grp->qual.
+declare nbr_to_group = i2  with noconstant (size (accession_grp->qual, 5))
+
+if (nbr_to_assign = 0)
+  go to EXIT_SCRIPT
+endif
+ 
+set stat = alterlist (accession_info->qual, nbr_to_assign)
+ 
+;*
+;* Get the accession settings.
+;*
+ 
+execute accession_settings
+
+;* Get the site prefix information.
+if (acc_settings->site_code_length > 0)
+  set stat = FacilitySitePrefix (0)
+endif 
+
+;* Get the accession class information.
+set stat = AccessionClass (0)
+
+;* Get the collection priority information 
+if (accession_fmt->cpri_lookup = 1)
+  set stat = CollectionPriorityInfo (1, nbr_to_assign)
+endif
+ 
+if (accession_grp->cpri_lookup = 1)
+  set stat = CollectionPriorityInfo (0, nbr_to_group)
+endif
+ 
+;* Get the activity_type_cd
+set stat = ActivityTypeInfo (1, nbr_to_assign)
+set stat = ActivityTypeInfo (0, nbr_to_group)
+
+;* Get the accession pool information.
+set stat = AccessionAssignXref (0)
+
+;* Get the code value information
+if (CodeValueInfo (0) = 0)
+  go to EXIT_SCRIPT 
+endif
+
+if (AccessionNetting (0) = 1)
+  set stat = AccessionAssignment (size (accession_info->qual, 5))
+endif
+ 
+ 
+#EXIT_SCRIPT
+
+;* Get the site prefix for the facility when the accession is assigned by catalog_cd.
+subroutine FacilitySitePrefix (no_param)
+
+  select into "nl:"  d1.seq, l.facility_accn_prefix_cd
+  from (dummyt d1 with seq = value (nbr_to_assign)),
+        location l
+   
+  plan d1
+    where accession_fmt->qual[d1.seq].site_prefix_cd = 0
+      and accession_fmt->qual[d1.seq].catalog_cd > 0
+  join l
+    where l.location_cd = accession_fmt->qual[d1.seq].facility_cd
+   
+  detail
+   
+    if (l.facility_accn_prefix_cd > 0)
+      accession_fmt->qual[d1.seq].site_prefix_cd = l.facility_accn_prefix_cd
+    else
+      accession_fmt->qual[d1.seq].site_prefix_cd = acc_settings->default_site_cd
+    endif
+   
+  with nocounter, outerjoin = d1, dontcare = l
+
+  return (curqual)
+end
+
+;* Get the accession_class information when the accession is assigned by catalog_cd.
+subroutine AccessionClass (no_param)
+
+;*
+;* Don't lookup the body site, spcecimen type, or service resource in this release.
+;*
+;*
+;*  if (ASSIGN_COMMON_VERSION >= ASSIGN_VERSION_040601B)
+;*
+;*    select into "nl:" d1.seq, ps.accession_class_cd, ac.accession_format_cd
+;*    from (dummyt d1 with seq = value (nbr_to_assign)),
+;*          procedure_specimen_type ps,
+;*          accession_class ac
+;*    plan d1
+;*      where accession_fmt->qual[d1.seq].accession_format_cd = 0
+;*        and accession_fmt->qual[d1.seq].catalog_cd > 0
+;*    join ps
+;*      where accession_fmt->qual[d1.seq].specimen_type_cd = ps.specimen_type_cd
+;*        and accession_fmt->qual[d1.seq].catalog_cd = ps.catalog_cd
+;*        and accession_fmt->qual[d1.seq].service_area_cd = ps.service_area_cd
+;*    join ac
+;*      where ps.accession_class_cd = ac.accession_class_cd
+;*  
+;*    detail
+;*      accession_fmt->qual[d1.seq].accession_class_cd = ac.accession_class_cd
+;*      accession_fmt->qual[d1.seq].accession_format_cd = ac.accession_format_cd  
+;*      accession_fmt->qual[d1.seq].specimen_type_ind = ac.specimen_type_ind
+;*      accession_fmt->qual[d1.seq].body_site_ind = ac.body_site_ind  
+;*    with nocounter
+;*
+;*  elseif (ASSIGN_COMMON_VERSION = ASSIGN_VERSION_040601A)
+;*
+;*    select into "nl:" d1.seq, ps.accession_class_cd, ac.accession_format_cd
+;*    from (dummyt d1 with seq = value (nbr_to_assign)),
+;*          procedure_specimen_type ps,
+;*          accession_class ac
+;*    plan d1
+;*      where accession_fmt->qual[d1.seq].accession_format_cd = 0
+;*        and accession_fmt->qual[d1.seq].catalog_cd > 0
+;*    join ps
+;*      where accession_fmt->qual[d1.seq].specimen_type_cd = ps.specimen_type_cd
+;*        and accession_fmt->qual[d1.seq].catalog_cd = ps.catalog_cd
+;*    join ac
+;*      where ps.accession_class_cd = ac.accession_class_cd
+;*  
+;*    detail
+;*      accession_fmt->qual[d1.seq].accession_class_cd = ac.accession_class_cd
+;*      accession_fmt->qual[d1.seq].accession_format_cd = ac.accession_format_cd  
+;*      accession_fmt->qual[d1.seq].specimen_type_ind = ac.specimen_type_ind
+;*      accession_fmt->qual[d1.seq].body_site_ind = ac.body_site_ind
+;*    with nocounter
+;*  else
+;*
+    select into "nl:" d1.seq, ps.accession_class_cd, ac.accession_format_cd
+    from (dummyt d1 with seq = value (nbr_to_assign)),
+          procedure_specimen_type ps,
+          accession_class ac
+    plan d1
+      where accession_fmt->qual[d1.seq].accession_format_cd = 0
+        and accession_fmt->qual[d1.seq].catalog_cd > 0
+    join ps
+      where accession_fmt->qual[d1.seq].specimen_type_cd = ps.specimen_type_cd
+        and accession_fmt->qual[d1.seq].catalog_cd = ps.catalog_cd
+    join ac
+      where ps.accession_class_cd = ac.accession_class_cd
+  
+    detail
+      accession_fmt->qual[d1.seq].accession_class_cd = ac.accession_class_cd
+      accession_fmt->qual[d1.seq].accession_format_cd = ac.accession_format_cd
+  
+    with nocounter
+;*  endif
+
+  return (curqual)
+end
+
+;* Get the accession pool for the site prefix and accession format.
+subroutine AccessionAssignXref (no_param)
+ 
+  select into "nl:" d1.seq, aax.site_prefix_cd, accession_fmt->qual[d1.seq].accession_format_cd, aax.accession_assignment_pool_id
+  from (dummyt d1 with seq = value (nbr_to_assign)),
+        accession_assign_xref aax
+ 
+  plan d1
+    where accession_fmt->qual[d1.seq].accession_class_cd != -1
+  join aax
+    where accession_fmt->qual[d1.seq].accession_format_cd = aax.accession_format_cd
+      and accession_fmt->qual[d1.seq].site_prefix_cd = aax.site_prefix_cd
+ 
+  detail
+    accession_fmt->qual[d1.seq].accession_pool_id = aax.accession_assignment_pool_id
+
+    if (accession_fmt->qual[d1.seq].activity_type_cd = 0)
+      accession_fmt->qual[d1.seq].activity_type_cd = aax.activity_type_cd
+    endif
+  with nocounter
+
+  return (curqual)
+end
+
+;* Get code value displays and cdf_meanings.
+subroutine CodeValueInfo (no_param)
+ 
+  for (uar_idx = 1 to nbr_to_assign)
+ 
+    ;*
+    ;* Get the accession format display
+    ;*
+    
+    set an_mean = fillstring (12, " ")               
+    set an_display = fillstring (40, " ")
+    if (accession_fmt->qual[uar_idx].accession_format_cd > 0)
+      set an_display = uar_get_code_display (accession_fmt->qual[uar_idx].accession_format_cd)
+      
+      If (TEXTLEN(TRIM(an_display)) = 0)
+ 	  	select into "nl:" 
+ 	  	      c.display, c.cdf_meaning
+ 	  	from code_value c
+ 	  	plan c where c.code_value = accession_fmt->qual[uar_idx].accession_format_cd
+ 	   detail 
+ 	     an_display = c.display
+ 	     an_mean = c.cdf_meaning
+ 	   with nocounter
+ 	   
+ 	  else
+ 	  
+      set an_mean = uar_get_code_meaning (accession_fmt->qual[uar_idx].accession_format_cd)
+      
+ 	  endif
+ 	  
+ 	  set accession_fmt->qual[uar_idx].alpha_prefix = substring (1, 2, an_display)
+ 	  set accession_fmt->qual[uar_idx].accession_format_mean = trim (substring (1, 3, an_mean))
+    endif
+ 
+    ;*
+    ;* Get the site prefix display
+    ;*
+ 
+    if (accession_fmt->qual[uar_idx].site_prefix_cd > 0)
+      set acc_site_prefix_cd = accession_fmt->qual[uar_idx].site_prefix_cd
+      execute accession_site_code
+      set accession_fmt->qual[uar_idx].site_prefix_disp = acc_site_prefix
+    endif
+
+    ;*
+    ;* Remove the seconds from the time.
+    ;*
+ 
+    set t1 = cnvtdatetime (cnvtdate (accession_fmt->qual[uar_idx].accession_dt_tm),
+                           cnvttime (accession_fmt->qual[uar_idx].accession_dt_tm))
+ 
+    set accession_fmt->qual[uar_idx].accession_dt_tm = t1
+ 
+    ;*
+    ;* Don't allow accessions to be assigned ### days in the future.
+    ;*
+ 
+    set days = datetimecmp (acc_settings->assignment_dt_tm, accession_fmt->qual[uar_idx].accession_dt_tm)
+    if (days < 0)
+      set accession_status = ACC_FUTURE
+      set accession_meaning = "Invalid assignment date/time (future accession)"
+      return (0)
+    endif
+
+    ;*
+    ;* Don't allow accessions with a NULL date/time.
+    ;*
+ 
+    set d1 = cnvtdatetime (NULL)
+    set d2 = cnvtdatetime (accession_fmt->qual[uar_idx].accession_dt_tm)
+    if (d1 = d2)
+      set accession_status = ACC_NULL_DT_TM
+      set accession_meaning = "Invalid assignment date/time (null)"
+      return (0)
+    endif
+
+    set accession_fmt->qual[uar_idx].accession_year = year (accession_fmt->qual[uar_idx].accession_dt_tm)
+    set accession_fmt->qual[uar_idx].accession_day = julian (accession_fmt->qual[uar_idx].accession_dt_tm)
+ 
+  endfor
+
+  ;*
+  ;* Remove the seconds from the accession date/time.
+  ;*
+ 
+  for (uar_idx = 1 to nbr_to_group)
+    set t1 = cnvtdatetime (cnvtdate (accession_grp->qual[uar_idx].accession_dt_tm),
+                           cnvttime (accession_grp->qual[uar_idx].accession_dt_tm))
+ 
+    set accession_grp->qual[uar_idx].accession_dt_tm = t1
+  endfor
+
+  return (1)
+end
+
+;* Accession Netting - nets orders by site prefix, accession class, accession_format, accession date/time, and accession pool.
+subroutine AccessionNetting (no_param)
+
+  declare ai_idx = i2 with noconstant (0) 
+  declare gi_idx = i2 with noconstant (0)
+
+  ;* Indicates the activity type is used when assigning accession numbers.
+  declare activity_ind = i2 with noconstant (0)
+
+  ;* Net an order to an accession when it does not have a position in the accession info record.
+  for (a_idx = 1 to nbr_to_assign)
+
+    if (accession_fmt->qual[a_idx].activity_type_mean = AP_CDF)
+      set activity_ind = 0
+    else
+      set activity_ind = 1
+    endif
+
+    if (accession_fmt->qual[a_idx].accession_pool_id > 0)
+      set an_idx = 1
+      set new_acc = 1
+ 
+      set stat = alterlist (accession_fmt->qual[a_idx]->linked_qual, 0)
+ 
+      while (an_idx < a_idx)
+        if (accession_fmt->qual[a_idx].accession_class_cd > 0)
+          if (accession_fmt->qual[a_idx].site_prefix_cd = accession_fmt->qual[an_idx].site_prefix_cd
+           and accession_fmt->qual[a_idx].accession_class_cd = accession_fmt->qual[an_idx].accession_class_cd
+           and accession_fmt->qual[a_idx].accession_format_cd = accession_fmt->qual[an_idx].accession_format_cd
+           and accession_fmt->qual[a_idx].accession_dt_tm = accession_fmt->qual[an_idx].accession_dt_tm
+           and accession_fmt->qual[a_idx].accession_pool_id = accession_fmt->qual[an_idx].accession_pool_id
+           and accession_fmt->qual[a_idx].accession_flag = accession_fmt->qual[an_idx].accession_flag)
+   
+            if (accession_fmt->qual[a_idx].catalog_cd = accession_fmt->qual[an_idx].catalog_cd
+              and accession_fmt->qual[a_idx].specimen_type_cd = accession_fmt->qual[an_idx].specimen_type_cd
+              and activity_ind = 1)
+              set new_acc = 1
+            else
+              if (accession_fmt->qual[an_idx].accession_info_pos > 0)
+
+                set new_acc = CollectionPriorityInd (accession_fmt->qual[a_idx].collection_priority_cd,
+                                                     accession_fmt->qual[a_idx].group_with_other_flag,
+                                                     accession_fmt->qual[an_idx].collection_priority_cd,
+                                                     accession_fmt->qual[an_idx].group_with_other_flag)
+
+;*
+;* Don't allow accession numbers to be assigned based on body site/spcecimen type in this release.
+;*
+;*                ;* Determine if a new accession number should be assigned based on the body site or specimen type code values.
+;*                if (new_acc = 0 and ASSIGN_COMMON_VERSION >= ASSIGN_VERSION_040601A
+;*                 and accession_fmt->qual[a_idx].activity_type_mean = MIC_CDF 
+;*                 and accession_fmt->qual[an_idx].activity_type_mean = MIC_CDF)
+;*
+;*                  set new_acc = SpecimenTypeInd (accession_fmt->qual[a_idx].specimen_type_ind,
+;*                                                 accession_fmt->qual[a_idx].specimen_type_cd, 
+;*                                                 accession_fmt->qual[an_idx].specimen_type_cd)
+;*
+;*                  if (new_acc = 0)
+;*                    set new_acc = BodySiteInd (accession_fmt->qual[a_idx].body_site_ind, 
+;*                                               accession_fmt->qual[a_idx].body_site_cd, 
+;*                                               accession_fmt->qual[an_idx].body_site_cd)
+;*                  endif
+;*                endif
+;*
+                if (new_acc = 0 and activity_ind = 1)
+                  set pos = accession_fmt->qual[an_idx].accession_parent
+   
+                  if (pos > 0)
+                    if (accession_fmt->qual[a_idx].catalog_cd = accession_fmt->qual[pos].catalog_cd
+                     and accession_fmt->qual[a_idx].specimen_type_cd = accession_fmt->qual[pos].specimen_type_cd)
+                      set new_acc = 1
+                    else
+
+                      for (i = 1 to size (accession_fmt->qual[pos]->linked_qual, 5))
+                        set _pos = accession_fmt->qual[pos]->linked_qual[i].linked_pos
+
+                        if (accession_fmt->qual[a_idx].catalog_cd = accession_fmt->qual[_pos].catalog_cd
+                         and accession_fmt->qual[a_idx].specimen_type_cd = accession_fmt->qual[_pos].specimen_type_cd)
+                          set new_acc = 1
+                        endif
+                      endfor
+                    endif
+                  endif
+
+                  if (new_acc = 0 and size (accession_fmt->qual[an_idx]->linked_qual, 5) > 0)
+   
+                    for (i = 1 to size (accession_fmt->qual[an_idx]->linked_qual, 5))
+                      set _pos = accession_fmt->qual[an_idx]->linked_qual[i].linked_pos
+                      if (accession_fmt->qual[a_idx].catalog_cd = accession_fmt->qual[_pos].catalog_cd
+                       and accession_fmt->qual[a_idx].specimen_type_cd = accession_fmt->qual[_pos].specimen_type_cd)
+                        set new_acc = 1
+                      endif
+                    endfor
+                  endif
+ 
+                endif
+ 
+                if (new_acc = 0)
+                  set accession_fmt->qual[a_idx].accession_info_pos = accession_fmt->qual[an_idx].accession_info_pos
+                  set accession_fmt->qual[a_idx].accession_parent = an_idx
+ 
+                  set link = size (accession_fmt->qual[an_idx]->linked_qual, 5) + 1
+                  set stat = alterlist (accession_fmt->qual[an_idx]->linked_qual, link)
+                  set accession_fmt->qual[an_idx]->linked_qual[link].linked_pos = a_idx
+                  set an_idx = a_idx
+                else
+                  set accession_fmt->qual[a_idx].accession_info_pos = 0
+                  set accession_fmt->qual[a_idx].accession_parent = 0
+                endif
+              endif
+            endif
+          endif
+        endif
+        set an_idx = an_idx + 1
+      endwhile
+ 
+      if (new_acc = 1)
+ 
+        if (nbr_to_group > 0)
+          for (i = 1 to nbr_to_group)
+ 
+            if (accession_fmt->qual[a_idx].site_prefix_cd = accession_grp->qual[i].site_prefix_cd
+             and accession_fmt->qual[a_idx].accession_class_cd = accession_grp->qual[i].accession_class_cd
+             and accession_fmt->qual[a_idx].accession_format_cd = accession_grp->qual[i].accession_format_cd
+             and accession_fmt->qual[a_idx].accession_dt_tm = accession_grp->qual[i].accession_dt_tm
+             and accession_fmt->qual[a_idx].accession_pool_id = accession_grp->qual[i].accession_pool_id
+             and accession_fmt->qual[a_idx].accession_flag = accession_grp->qual[i].accession_flag)
+ 
+              if (accession_fmt->qual[a_idx].catalog_cd = accession_grp->qual[i].catalog_cd
+               and accession_fmt->qual[a_idx].specimen_type_cd = accession_grp->qual[i].specimen_type_cd
+               and accession_fmt->qual[a_idx].service_area_cd = accession_grp->qual[i].service_area_cd
+               and activity_ind = 1)
+
+                set new_acc = 1
+              else
+ 
+                set new_acc = CollectionPriorityInd (accession_fmt->qual[a_idx].collection_priority_cd,
+                                                     accession_fmt->qual[a_idx].group_with_other_flag,
+                                                     accession_grp->qual[i].collection_priority_cd,
+                                                     accession_grp->qual[i].group_with_other_flag)
+;*
+;* Don't allow accession numbers to be assigned based on body site/spcecimen type in this release.
+;*
+;*                if (new_acc = 0 and ASSIGN_COMMON_VERSION >= ASSIGN_VERSION_040601A
+;*                 and accession_fmt->qual[a_idx].activity_type_mean = MIC_CDF)
+;*  
+;*                  set new_acc = SpecimenTypeInd (accession_fmt->qual[a_idx].specimen_type_ind, 
+;*                                                 accession_fmt->qual[a_idx].specimen_type_cd,
+;*                                                 accession_grp->qual[i].specimen_type_cd)
+;*
+;*                  if (new_acc = 0)
+;*                    set new_acc = BodySiteInd (accession_fmt->qual[a_idx].body_site_ind,
+;*                                               accession_fmt->qual[a_idx].body_site_cd,
+;*                                               accession_grp->qual[i].body_site_cd)
+;*
+;*                  endif
+;*                endif
+;*
+                if (new_acc = 0)
+                  set accession_fmt->qual[a_idx].accession = accession_grp->qual[i].accession
+                  set accession_fmt->qual[a_idx].accession_id = accession_grp->qual[i].accession_id
+                  set accession_fmt->qual[a_idx].assignment_status = ACC_SUCCESS
+                  set accession_fmt->qual[a_idx].assignment_meaning = "Order grouped on to an existing accession"
+   
+                  set new_acc = 0
+                  set i = nbr_to_group
+                  set gi_idx = gi_idx + 1
+                endif
+              endif
+            endif
+          endfor
+        endif
+ 
+        if (new_acc = 1)
+ 
+          set ai_idx = ai_idx + 1
+
+          set accession_info->qual[ai_idx].site_prefix_cd = accession_fmt->qual[a_idx].site_prefix_cd
+          set accession_info->qual[ai_idx].site_prefix_disp = accession_fmt->qual[a_idx].site_prefix_disp
+          set accession_info->qual[ai_idx].accession_class_cd = accession_fmt->qual[a_idx].accession_class_cd
+          set accession_info->qual[ai_idx].accession_format_cd = accession_fmt->qual[a_idx].accession_format_cd
+          set accession_info->qual[ai_idx].accession_format_mean = accession_fmt->qual[a_idx].accession_format_mean
+          set accession_info->qual[ai_idx].alpha_prefix = accession_fmt->qual[a_idx].alpha_prefix
+          set accession_info->qual[ai_idx].accession_pool_id = accession_fmt->qual[a_idx].accession_pool_id
+          set accession_info->qual[ai_idx].accession_dt_tm = accession_fmt->qual[a_idx].accession_dt_tm
+          set accession_info->qual[ai_idx].accession_year = year (accession_fmt->qual[a_idx].accession_dt_tm)
+          set accession_info->qual[ai_idx].accession_day = julian (accession_fmt->qual[a_idx].accession_dt_tm)
+          set accession_info->qual[ai_idx].assignment_status = -1
+          set accession_info->qual[ai_idx].assignment_meaning = ""
+          set accession_info->qual[ai_idx].accession = ""
+ 
+          ;*
+          ;* Calculate the accession assignment date.
+          ;*
+          ;*   Julian Day:    accession date with a time of 0.
+          ;*   Alpha Prefix:  January 1 of the accession year.
+          ;*
+ 
+          if (accession_info->qual[ai_idx].accession_format_cd > 0)
+            set accession_info->qual[ai_idx].assignment_date =
+                cnvtdatetimeutc (cnvtdatetime (cnvtdate2 (concat ("0101",
+                cnvtstring (accession_info->qual[ai_idx].accession_year, 4, 0, r)), "mmddyyyy" ), 0), 2)
+          else
+            set accession_info->qual[ai_idx].assignment_date = 
+                cnvtdatetimeutc (cnvtdatetime (cnvtdate (accession_fmt->qual[a_idx].accession_dt_tm), 0), 2)
+          endif
+ 
+          set accession_fmt->qual[a_idx].accession_info_pos = ai_idx
+        endif
+      endif
+    endif
+  endfor
+
+  set stat = alterlist (accession_info->qual, ai_idx)
+ 
+  if (ai_idx = 0 and gi_idx = 0)
+    set accession_status = ACC_ERROR
+    set accession_meaning = "Error netting orders to an accession"
+    return (0)
+  endif
+
+  return (1)
+end
+
+;* Assigns the accession numbers.
+subroutine AccessionAssignment (ai_max)
+
+  declare accession_seq_nbr   = i4 with noconstant (0)
+  declare accession_increment = i2 with noconstant (0)
+
+  ;*
+  ;* Sequence the accession assignment to prevent a deadlock between two servers.
+  ;*
+
+  select into "nl:" d1.seq, pool_id = accession_info->qual[d1.seq].accession_pool_id
+  from (dummyt d1 with seq = value (ai_max))
+  plan d1
+    where accession_info->qual[d1.seq].accession_pool_id > 0
+
+  order pool_id,
+        d1.seq
+
+  head report
+    pq_cnt = 0
+    stat = alterlist (accession_info->proc_qual, ai_max)
+
+  detail
+    pq_cnt = pq_cnt + 1
+    accession_info->proc_qual[pq_cnt].info_index = d1.seq
+  with nocounter
+
+
+  for (j = 1 to ai_max)
+
+    set i = accession_info->proc_qual[j].info_index
+ 
+    set accession_seq_nbr = 0
+    set accession_increment = 0
+ 
+    ;*
+    ;* Get the accession pool for the accession date.
+    ;*
+
+    select into "nl:" aa.accession_seq_nbr, aa.increment_value
+    from accession_assignment aa
+    where aa.acc_assign_pool_id = accession_info->qual[i].accession_pool_id
+      and aa.acc_assign_date = cnvtdatetimeutc (accession_info->qual[i].assignment_date, 0)
+ 
+    detail
+      accession_seq_nbr = aa.accession_seq_nbr
+      accession_increment = aa.increment_value
+    with nocounter, forupdatewait(aa)
+ 
+    ;*
+    ;* Get the accession pool information.
+    ;*
+
+    if (curqual = 0)
+
+      select into "nl:" aap.increment_value, aap.initial_value
+      from accession_assign_pool aap
+      where aap.accession_assignment_pool_id = accession_info->qual[i].accession_pool_id
+ 
+      detail
+        accession_increment = aap.increment_value
+        accession_seq_nbr = aap.initial_value
+      with nocounter
+ 
+      if (curqual = 0)
+        set assignment_status = ACC_TEMPLATE
+        set assignment_meaning =  "Error getting accession pool information"
+        return (0)
+      endif
+ 
+      insert into accession_assignment aa
+        set aa.acc_assign_pool_id = accession_info->qual[i].accession_pool_id,
+            aa.acc_assign_date = cnvtdatetimeutc (accession_info->qual[i].assignment_date, 0),
+            aa.accession_seq_nbr = accession_seq_nbr,
+            aa.increment_value = accession_increment,
+            aa.last_increment_dt_tm = cnvtdatetime (curdate, curtime3),
+            aa.updt_dt_tm = cnvtdatetime (curdate, curtime3),
+            aa.updt_id = reqinfo->updt_id,
+            aa.updt_task = reqinfo->updt_task,
+            aa.updt_applctx = reqinfo->updt_applctx,
+            aa.updt_cnt = 0
+      with nocounter
+ 
+      if (curqual = 0)
+        set assignment_status = ACC_POOL
+        set assignment_meaning =  "Error inserting accession pool on the accession_assignment table"
+        return (0)
+      endif
+    endif
+ 
+    set acc_loop = 1
+ 
+    set accession_status = ACC_ERROR
+    while (acc_loop = 1)
+ 
+      set accession_info->qual[i].accession_seq_nbr = accession_seq_nbr
+      set accession_info->qual[i].accession = fillstring (20, " ")
+ 
+      set accession_str->site_prefix_disp = accession_info->qual[i].site_prefix_disp
+      set accession_str->accession_year = accession_info->qual[i].accession_year
+      set accession_str->accession_day = accession_info->qual[i].accession_day
+      set accession_str->alpha_prefix = accession_info->qual[i].alpha_prefix
+      set accession_str->accession_seq_nbr = accession_info->qual[i].accession_seq_nbr
+      set accession_str->accession_pool_id = accession_info->qual[i].accession_pool_id
+ 
+      execute accession_string
+ 
+      set accession_info->qual[i].accession = accession_nbr
+ 
+      set accession_chk->check_disp_ind = acc_settings->check_disp_ind
+      set accession_chk->site_prefix_cd = accession_info->qual[i].site_prefix_cd
+      set accession_chk->accession_year = accession_info->qual[i].accession_year
+      set accession_chk->accession_day = accession_info->qual[i].accession_day
+      set accession_chk->accession_pool_id = accession_info->qual[i].accession_pool_id
+      set accession_chk->accession_seq_nbr = accession_info->qual[i].accession_seq_nbr
+      set accession_chk->accession_class_cd = accession_info->qual[i].accession_class_cd
+      set accession_chk->accession_format_cd = accession_info->qual[i].accession_format_cd
+      set accession_chk->alpha_prefix = accession_info->qual[i].alpha_prefix
+      set accession_chk->accession = accession_nbr
+      set accession_chk->accession_nbr_check = accession_nbr_chk
+      set accession_chk->action_ind = 0
+      set accession_chk->preactive_ind = 0
+ 
+      execute accession_check
+ 
+      if (accession_status = ACC_SUCCESS)
+        set accession_info->qual[i].assignment_status = accession_status
+        set accession_info->qual[i].assignment_meaning = accession_meaning
+        set accession_info->qual[i].accession_id = accession_id
+        set acc_loop = 0
+      elseif (accession_status != ACC_DUPLICATE)
+        return (0)
+      endif
+
+      ;* Increment the sequence number when the accession is a duplicate.
+      set accession_seq_nbr = accession_seq_nbr  + accession_increment
+    endwhile
+
+    if (accession_status = ACC_SUCCESS)
+      update into accession_assignment aa
+        set aa.accession_seq_nbr = accession_seq_nbr,
+            aa.updt_dt_tm = cnvtdatetime (curdate, curtime3),
+            aa.updt_id = reqinfo->updt_id,
+            aa.updt_task = reqinfo->updt_task,
+            aa.updt_applctx = reqinfo->updt_applctx,
+            aa.updt_cnt = aa.updt_cnt + 1
+      plan aa
+        where aa.acc_assign_pool_id = accession_info->qual[i].accession_pool_id
+          and aa.acc_assign_date = cnvtdatetimeutc (accession_info->qual[i].assignment_date, 0)
+      with nocounter
+ 
+      if (curqual = 0)
+        set assignment_status = ACC_POOL_SEQUENCE
+        set assignment_meaning =  "Error updating the accession pool sequence number"
+        return (0)
+      endif
+    endif 
+
+  endfor
+ 
+  ;*
+  ;* Move the accessions from accession_info to accession_fmt
+  ;*
+ 
+  if (accession_status = ACC_SUCCESS) 
+    for (i = 1 to nbr_to_assign)
+      set info_pos = accession_fmt->qual[i].accession_info_pos
+ 
+      if (info_pos > 0)   
+        set accession_fmt->qual[i].accession_id = accession_info->qual[info_pos].accession_id
+        set accession_fmt->qual[i].accession_seq_nbr = accession_info->qual[info_pos].accession_seq_nbr
+        set accession_fmt->qual[i].assignment_meaning = accession_info->qual[info_pos].assignment_meaning
+        set accession_fmt->qual[i].assignment_status = accession_info->qual[info_pos].assignment_status
+        set accession_fmt->qual[i].accession = accession_info->qual[info_pos].accession
+        set accession_fmt->qual[i].accession_formatted = cnvtacc (accession_info->qual[info_pos].accession)
+      endif
+    endfor
+ 
+    if (accession_fmt->insert_aor_ind = 1)
+      insert into accession_order_r aor,
+                 (dummyt d1 with seq = value (nbr_to_assign))
+        set aor.order_id = accession_fmt->qual[d1.seq].order_id,
+            aor.accession_id = accession_fmt->qual[d1.seq].accession_id,
+            aor.accession = accession_fmt->qual[d1.seq].accession,
+            aor.activity_type_cd = accession_fmt->qual[d1.seq].activity_type_cd,
+            aor.primary_flag = 0,
+            aor.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+            aor.updt_id = reqinfo->updt_id,
+            aor.updt_task = reqinfo->updt_task,
+            aor.updt_applctx = reqinfo->updt_applctx,
+            aor.updt_cnt = 0
+      plan d1
+        where accession_fmt->qual[d1.seq].order_id > 0
+          and accession_fmt->qual[d1.seq].assignment_status = ACC_SUCCESS
+      join aor
+      with nocounter
+ 
+      if (curqual != nbr_to_assign)
+        set accession_status = ACC_ERROR
+        set accession_meaning = "Error inserting accession_order table"
+        return (0)
+      endif
+    endif
+  endif
+
+  return (1)
+end
+
+;*
+;* Don't allow accession numbers to be assigned based on body site/spcecimen type in this release.
+;*
+;*;* Indicates a new accession should be assigned when the body sites are different.
+;*;*
+;*;*   body_site_ind - The body_site_ind from the ACCESSION_CLASS table.
+;*
+;*subroutine BodySiteInd (body_site_ind, body_site_cd1, body_site_cd2)
+;*
+;*  if (body_site_ind = 1 and body_site_cd1 != body_site_cd2)
+;*    return (1)
+;*  else
+;*    return (0)
+;*  endif
+;*
+;*end
+;* 
+;*;* Indicates a new accession should be assigned when the specimen types are different.
+;*;*
+;*;*   specimen_type_ind - The specimen_type_ind from the ACCESSION_CLASS table.
+;*
+;*subroutine SpecimenTypeInd (specimen_type_ind, specimen_type_cd1, specimen_type_cd2)
+;*
+;*  if (specimen_type_ind = 1 and specimen_type_cd1 != specimen_type_cd2)
+;*    return (1)
+;*  else
+;*    return (0)
+;*  endif
+;*
+;*end
+;*
+
+;* Indicates a new accession should be assigned based on the group with other priority flags.
+subroutine CollectionPriorityInd (cp_cd1, gwo_flag1, cp_cd2, gwo_flag2)
+
+  if (cp_cd1 > 0 and cp_cd2 > 0 and cp_cd1 != cp_cd2)
+    if (gwo_flag1 > 0 and gwo_flag2 > 0)
+      return (0)
+    else
+      return (1)
+    endif
+  else
+    return (0)
+  endif
+
+end
+
+;* Gets the collection priority information for the collection_priority_cd in accession_fmt or accession_grp.
+subroutine CollectionPriorityInfo (fmt_ind, cp_size)
+
+  if (cp_size = 0)
+    return (0)
+  endif
+
+  if (fmt_ind = 1)
+
+    select into "nl:" d1.seq, cp.collection_priority_cd, cp.group_with_other_flag
+    from (dummyt d1 with seq = value (cp_size)),
+          collection_priority cp
+    plan d1
+      where accession_fmt->qual[d1.seq].collection_priority_cd > 0
+    join cp
+      where accession_fmt->qual[d1.seq].collection_priority_cd = cp.collection_priority_cd
+    detail
+      accession_fmt->qual[d1.seq].group_with_other_flag = cp.group_with_other_flag
+    with nocounter
+
+  else
+
+    select into "nl:" d1.seq, cp.collection_priority_cd, cp.group_with_other_flag
+    from (dummyt d1 with seq = value (cp_size)),
+          collection_priority cp
+    plan d1
+      where accession_grp->qual[d1.seq].collection_priority_cd > 0
+    join cp
+      where accession_grp->qual[d1.seq].collection_priority_cd = cp.collection_priority_cd
+    detail
+      accession_grp->qual[d1.seq].group_with_other_flag = cp.group_with_other_flag
+    with nocounter
+  endif
+  return (1)
+end
+
+;* Gets the activity_type_cd for the catalog_cd in accession_fmt or accession_grp.
+subroutine ActivityTypeInfo (fmt_ind, at_sze)
+
+  if (at_sze = 0)
+    return (0)
+  endif
+
+  if (fmt_ind = 1)
+    select into "nl:" d1.seq, oc.catalog_cd, oc.activity_type_cd
+    from (dummyt d1 with seq = value (at_sze)),
+          order_catalog oc
+    plan d1
+      where accession_fmt->qual[d1.seq].catalog_cd > 0
+        and accession_fmt->qual[d1.seq].activity_type_cd = 0
+    join oc
+      where oc.catalog_cd = accession_fmt->qual[d1.seq].catalog_cd
+    detail
+      accession_fmt->qual[d1.seq].activity_type_cd = oc.activity_type_cd
+    with nocounter
+
+  else
+    select into "nl:" d1.seq, oc.catalog_cd, oc.activity_type_cd
+    from (dummyt d1 with seq = value (at_sze)),
+          order_catalog oc
+    plan d1
+      where accession_grp->qual[d1.seq].catalog_cd > 0
+        and accession_grp->qual[d1.seq].activity_type_cd = 0
+    join oc
+      where oc.catalog_cd = accession_grp->qual[d1.seq].catalog_cd
+    detail
+      accession_grp->qual[d1.seq].activity_type_cd = oc.activity_type_cd
+    with nocounter
+
+  endif
+  return (1)
+end
+
+end go
+
+;Generated by GNU enscript 1.6.4.

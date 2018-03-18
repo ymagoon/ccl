@@ -1,0 +1,296 @@
+ ;;Solution_Test/script/Bedrock/bed_aud_gl_orc_dta/bed_aud_gl_orc_dta.prg Turn on black mode
+
+drop program bed_aud_gl_orc_dta:dba go
+create program bed_aud_gl_orc_dta:dba
+ 
+if (not (validate (request,0)))
+ record request
+  (
+    1 program_name = vc
+    1 skip_volume_check_ind = i2
+    1 output_filename = vc
+    1 paramlist[*]
+      2 param_type_mean = vc
+      2 pdate1 = dq8
+      2 pdate2 = dq8
+      2 vlist[*]
+        3 dbl_value = f8
+        3 string_value = vc
+  )
+endif
+ 
+if (not(validate(reply,0)))
+ record reply
+  (
+    1  collist[*]
+      2  header_text = vc
+      2  data_type = i2
+      2  hide_ind = i2
+    1  rowlist[*] 
+      2 celllist[*]
+        3 date_value = dq8
+        3 nbr_value = i4
+        3 double_value = f8
+        3 string_value = vc
+        3 display_flag = i2 ;0-regular,1-bold,2-???
+    1  high_volume_flag = i2
+    1  output_filename = vc
+    1  run_status_flag = i2
+    1  statlist[*]
+       2 statistic_meaning = vc
+       2 status_flag = i2
+       2 qualifying_items = i4
+       2 total_items = i4
+    1  status_data
+      2  status  =  C1 
+      2  SUBEVENTSTATUS [ 1 ] 
+        3  OPERATIONNAME  =  C15 
+        3  OPERATIONSTATUS  =  C1 
+        3  TARGETOBJECTNAME  =  C15 
+        3  TARGETOBJECTVALUE  =  C100 
+  )
+endif
+
+free record temp
+record temp
+( 1 ocnt = i2
+  1 oqual[*]
+    2 activity_type = vc
+    2 activity_subtype = vc
+    2 ord = vc
+    2 catalog_cd = f8
+    2 mnemonic = vc
+    2 dept_name = vc
+    2 dcnt = i2
+    2 dqual[*]
+      3 mnemonic = vc
+      3 dta_cd = f8
+      3 description = vc
+      3 pending = vc
+      3 item = vc
+      3 post_prompt = vc
+      3 restrict_display = vc
+      3 sequence = vc
+      3 result_type = vc
+)
+
+declare LAB = f8 with public, noconstant(0.0)
+declare GL = f8 with public, noconstant(0.0)
+
+select into "nl:"
+from code_value cv
+plan cv
+  where cv.code_set = 6000
+    and cv.cdf_meaning = "GENERAL LAB"
+    and cv.active_ind = 1
+detail
+  LAB = cv.code_value
+with nocounter
+
+select into "nl:"
+from code_value cv
+plan cv
+  where cv.code_set = 106
+    and cv.cdf_meaning = "GLB"
+    and cv.active_ind = 1
+detail
+  GL = cv.code_value
+with nocounter
+
+set high_volume_cnt = 0
+if (request->skip_volume_check_ind = 0)
+  select into "nl:"
+    hv_cnt = count(*)
+  from order_catalog oc
+  plan oc
+    where oc.catalog_type_cd = LAB
+      and oc.activity_type_cd = GL
+      and oc.active_ind = 1
+  detail
+    high_volume_cnt = hv_cnt
+  with nocounter
+
+  call echo(high_volume_cnt)
+ 
+  if (high_volume_cnt > 5000)
+    set reply->high_volume_flag = 2
+    go to exit_script
+  elseif (high_volume_cnt > 3000)
+    set reply->high_volume_flag = 1
+    go to exit_script
+  endif
+endif
+
+set dcnt = 0
+set ocnt = 0
+select into "nl:"
+from order_catalog oc,
+  code_value cv,
+  code_value cv2,
+  profile_task_r ptr,
+  discrete_task_assay dta,
+  code_value cv3
+plan oc
+  where oc.catalog_type_cd = LAB
+    and oc.activity_type_cd = GL
+    and oc.orderable_type_flag not in (2,6)
+    and oc.active_ind = 1
+    and oc.bill_only_ind in (0,null)
+join cv
+  where cv.code_value = oc.activity_type_cd
+    and cv.active_ind = 1
+join cv2
+  where cv2.code_value = oc.activity_subtype_cd
+join ptr
+  where ptr.catalog_cd = outerjoin(oc.catalog_cd)
+    and ptr.active_ind = outerjoin(1)
+join dta
+  where dta.task_assay_cd = outerjoin(ptr.task_assay_cd)
+    and dta.active_ind = outerjoin(1)
+join cv3
+  where cv3.code_value = outerjoin(dta.default_result_type_cd)
+     and cv3.active_ind = outerjoin(1)
+order cnvtupper(oc.primary_mnemonic),ptr.sequence
+head oc.catalog_cd
+  dcnt = 0
+  ocnt = ocnt + 1
+  temp->ocnt = ocnt
+  stat = alterlist(temp->oqual,ocnt)
+  temp->oqual[ocnt].activity_type = cv.display
+  temp->oqual[ocnt].activity_subtype = cv2.display
+  temp->oqual[ocnt].ord = oc.description
+  temp->oqual[ocnt].mnemonic = oc.primary_mnemonic
+  temp->oqual[ocnt].dept_name = oc.dept_display_name
+  temp->oqual[ocnt].catalog_cd = oc.catalog_cd
+  temp->oqual[ocnt].dcnt = 0
+detail
+  if (dta.task_assay_cd > 0)
+    dcnt = dcnt + 1
+    temp->oqual[ocnt].dcnt = dcnt
+    stat = alterlist(temp->oqual[ocnt].dqual,dcnt)
+    temp->oqual[ocnt].dqual[dcnt].mnemonic = dta.mnemonic
+    temp->oqual[ocnt].dqual[dcnt].dta_cd = dta.task_assay_cd
+    temp->oqual[ocnt].dqual[dcnt].description = dta.description
+    if (ptr.pending_ind = 1)
+      temp->oqual[ocnt].dqual[dcnt].pending = "Yes"
+    else
+      temp->oqual[ocnt].dqual[dcnt].pending = "No"
+    endif
+    if (ptr.item_type_flag = 1)
+      temp->oqual[ocnt].dqual[dcnt].item = "X"
+    endif
+    if (ptr.post_prompt_ind = 1)
+      temp->oqual[ocnt].dqual[dcnt].post_prompt = "X"
+    endif
+    if (ptr.restrict_display_ind = 1)
+      temp->oqual[ocnt].dqual[dcnt].restrict_display = "X"
+    endif
+    temp->oqual[ocnt].dqual[dcnt].result_type = cv3.description
+    temp->oqual[ocnt].dqual[dcnt].sequence = cnvtstring(ptr.sequence)
+  endif
+with nocounter
+
+set stat = alterlist(reply->collist,14)
+set reply->collist[1].header_text = "Activity Type"
+set reply->collist[1].data_type = 1 ;string
+set reply->collist[1].hide_ind = 1
+set reply->collist[2].header_text = "Primary Name"
+set reply->collist[2].data_type = 1 ;string
+set reply->collist[2].hide_ind = 0
+set reply->collist[3].header_text = "Assay Display"
+set reply->collist[3].data_type = 1 ;string
+set reply->collist[3].hide_ind = 0
+set reply->collist[4].header_text = "Assay Description"
+set reply->collist[4].data_type = 1 ;string
+set reply->collist[4].hide_ind = 0
+set reply->collist[5].header_text = "Required"
+set reply->collist[5].data_type = 1 ;string
+set reply->collist[5].hide_ind = 0
+set reply->collist[6].header_text = "Sequence"
+set reply->collist[6].data_type = 1 ;string
+set reply->collist[6].hide_ind = 0
+set reply->collist[7].header_text = "Prompt"
+set reply->collist[7].data_type = 1 ;string
+set reply->collist[7].hide_ind = 0
+set reply->collist[8].header_text = "Post Prompt"
+set reply->collist[8].data_type = 1 ;string
+set reply->collist[8].hide_ind = 0
+set reply->collist[9].header_text = "Restrict Display"
+set reply->collist[9].data_type = 1 ;string
+set reply->collist[9].hide_ind = 0
+set reply->collist[10].header_text = "Default Result Type"
+set reply->collist[10].data_type = 1 ;string
+set reply->collist[10].hide_ind = 0
+set reply->collist[11].header_text = "Department Name"
+set reply->collist[11].data_type = 1 ;string
+set reply->collist[11].hide_ind = 0
+set reply->collist[12].header_text = "Subactivity Type"
+set reply->collist[12].data_type = 1 ;string
+set reply->collist[12].hide_ind = 0
+set reply->collist[13].header_text = "catalog_cd"
+set reply->collist[13].data_type = 2 ;double
+set reply->collist[13].hide_ind = 1
+set reply->collist[14].header_text = "task_assay_cd"
+set reply->collist[14].data_type = 2 ;double
+set reply->collist[14].hide_ind = 1
+
+if (ocnt = 0)
+  go to exit_script
+endif
+
+set row_nbr = 0
+
+for (x = 1 to temp->ocnt)
+  set row_nbr = row_nbr + 1
+  set stat = alterlist(reply->rowlist,row_nbr)
+  set stat = alterlist(reply->rowlist[row_nbr].celllist,14)
+  set reply->rowlist[row_nbr].celllist[1].string_value = temp->oqual[x].activity_type
+  set reply->rowlist[row_nbr].celllist[2].string_value = temp->oqual[x].mnemonic
+  set reply->rowlist[row_nbr].celllist[11].string_value =
+                                temp->oqual[x].dept_name
+  set reply->rowlist[row_nbr].celllist[12].string_value =
+                                temp->oqual[x].activity_subtype
+  set reply->rowlist[row_nbr].celllist[13].double_value =
+                                  temp->oqual[x].catalog_cd
+  for (y = 1 to temp->oqual[x].dcnt)
+    if (y > 1)
+      set row_nbr = row_nbr + 1
+      set stat = alterlist(reply->rowlist,row_nbr)
+      set stat = alterlist(reply->rowlist[row_nbr].celllist,14)
+    endif
+    set reply->rowlist[row_nbr].celllist[1].string_value = temp->oqual[x].activity_type
+    set reply->rowlist[row_nbr].celllist[2].string_value = temp->oqual[x].mnemonic
+    set reply->rowlist[row_nbr].celllist[3].string_value = temp->oqual[x].dqual[y].mnemonic
+    set reply->rowlist[row_nbr].celllist[4].string_value = temp->oqual[x].dqual[y].description
+    set reply->rowlist[row_nbr].celllist[5].string_value = temp->oqual[x].dqual[y].pending
+    set reply->rowlist[row_nbr].celllist[6].string_value = temp->oqual[x].dqual[y].sequence
+    set reply->rowlist[row_nbr].celllist[7].string_value = temp->oqual[x].dqual[y].item
+    set reply->rowlist[row_nbr].celllist[8].string_value =
+                                  temp->oqual[x].dqual[y].post_prompt
+    set reply->rowlist[row_nbr].celllist[9].string_value =
+                                  temp->oqual[x].dqual[y].restrict_display
+    set reply->rowlist[row_nbr].celllist[10].string_value =
+                                  temp->oqual[x].dqual[y].result_type
+    set reply->rowlist[row_nbr].celllist[11].string_value =
+                                  temp->oqual[x].dept_name
+    set reply->rowlist[row_nbr].celllist[12].string_value =
+                                  temp->oqual[x].activity_subtype
+    set reply->rowlist[row_nbr].celllist[13].double_value =
+                                  temp->oqual[x].catalog_cd
+    set reply->rowlist[row_nbr].celllist[14].double_value =
+                                  temp->oqual[x].dqual[y].dta_cd
+  endfor
+endfor
+
+#exit_script
+if (reply->high_volume_flag in (1,2))
+  set reply->output_filename = build("gl_orc_dta_audit.csv")
+endif
+
+if (request->output_filename > " ")
+  execute bed_rpt_file
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

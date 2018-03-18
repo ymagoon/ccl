@@ -1,0 +1,520 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_temp_person.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2005 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_rpt_temp_person.prg
+        Object name:            bbt_rpt_temp_person
+        Request #:              225300
+
+        Product:                PathNet Transfusion
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Report all auto_directed patients not yet combined
+
+        Tables read:            auto_directed, product, person, person_alias, code_value
+        Tables updated:         none
+        Executing from:         variety
+
+        Special Notes:          ?
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 01/30/97 Jon Weekes           Initial Release                     *
+;     001 06/12/97 Doug Saus            Modified to select owner and inventory
+;                                       areas
+;     002 03/23/98 Matt Benson          Modified to retrieve Institution name *
+;       from preferences                                                      *
+;     003 12/29/98 Jose Suarez          Added logic to print the location name                                *
+;                                       and address.  Added the address_location_cd to request.               *
+;                                       Added bbt_get_location_info.inc                                       *
+;                                       Added bbt_print_location_info.inc                                     *
+;     004 05/21/99 Jose Suarez          change cer_temp to cer_print          *
+;     005 09/09/99 Badari Kopparapu     Modified to print the report from Ops
+;                                       using bbt_ops_owninvloc.inc for parsing
+;                                       Owner,Inventory and Location Codes. *
+;     006 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       removed bbt_ops_owninvloc.inc and   *
+;                                       added bbt_ops_parm_passed.inc       *
+;     007 02/27/01 Rob Peterson         Internationalize script             *
+;     008 07/26/02 Jason Osborn			Unique RPT filename project			*
+;     009 04/18/03 Ronda Zheng          UTC phase II birth dt changes       *
+;     010 02/01/04 Jim Jensen           Use UAR to get SSN meaning and      *
+;                                       remove GET_CODE_VALUE sub and use   *
+;                                       CNVTALIAS to format SSN.  Add check *
+;                                       on ENCOUNTER table to make sure the *
+;                                       person doesn't have an encounter.   *
+;     011 07/20/04 David Fifer          Rearranged the report to handle a 25*
+;                                       character eurocode product number.  *
+;     012 11/19/04 Jason Osborn         Use ssn_alias_type_cd instead of    *
+;                                       curqal after uar_get_meaning_by codeset *
+;     013 10/11/05 Jason Coy            Updated report to display the       *
+;                                       front end username.                 *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_rpt_temp_person:dba go
+create program bbt_rpt_temp_person:dba
+
+/*
+record request
+(
+ 1  ops_date            = dq8
+ 1  batch_selection     = c100
+ 1  output_dist         = c100
+ 1  cur_owner_area_cd   = f8
+ 1  cur_inv_area_cd     = f8
+ 1  address_location_cd = f8
+)
+*/
+
+record reply
+(
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+)
+
+%i cclsource:bbt_get_username.inc
+
+declare reportByUsername = vc with protect, noconstant("")
+set reportByUsername = GET_USERNAME(reqinfo->updt_id)
+
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+ 
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+record captions
+(
+  1  rpt_title                  = vc
+  1  rpt_time                   = vc
+  1  rpt_as_of_date             = vc
+  1  page_no                    = vc
+  1  blood_bank_owner           = vc
+  1  inventory_area             = vc
+  1  person_name                = vc
+  1  expected                   = vc
+  1  ssn                        = vc
+  1  birth_date                 = vc
+  1  product_number             = vc
+  1  type                       = vc
+  1  expiration                 = vc
+  1  usage                      = vc
+  1  rpt_id                     = vc
+  1  rpt_page                   = vc
+  1  printed                    = vc
+  1  printed_by                 = vc
+  1  end_of_report              = vc
+  1  all						= vc
+  1  not_on_file                = vc
+)
+ 
+set captions->rpt_title = uar_i18ngetmessage(i18nHandle,
+  "rpt_title", "AUTOLOGOUS/DIRECTED PERSONS NOT COMBINED")
+set captions->rpt_time = uar_i18ngetmessage(i18nHandle,
+  "rpt_time", "TIME:   ")
+set captions->rpt_as_of_date = uar_i18ngetmessage(i18nHandle,
+  "rpt_as_of_date", "AS OF DATE:")
+set captions->page_no = uar_i18ngetmessage(i18nHandle,
+  "page_no", "PAGE NO:        ")
+set captions->blood_bank_owner = uar_i18ngetmessage(i18nHandle,
+  "blood_bank_owner", "Blood Bank Owner: ")
+set captions->inventory_area = uar_i18ngetmessage(i18nHandle,
+  "inventory_area", "Inventory Area: ")
+set captions->person_name = uar_i18ngetmessage(i18nHandle,
+  "person_name", "PERSON NAME")
+set captions->expected = uar_i18ngetmessage(i18nHandle,
+  "expected", "EXPECTED")
+set captions->birth_date = uar_i18ngetmessage(i18nHandle,
+  "birth_date", "BIRTH DATE")
+set captions->ssn = uar_i18ngetmessage(i18nHandle,
+  "ssn", "SSN")
+set captions->product_number = uar_i18ngetmessage(i18nHandle,
+  "product_number", "PRODUCT NUMBER")
+set captions->type = uar_i18ngetmessage(i18nHandle,
+  "type", "TYPE")
+set captions->expiration = uar_i18ngetmessage(i18nHandle,
+  "expiration", "EXPIRATION")
+set captions->usage = uar_i18ngetmessage(i18nHandle,
+  "usage", "USAGE")
+set captions->rpt_id = uar_i18ngetmessage(i18nHandle,
+  "rpt_id", "Report ID: BBT_RPT_TEMP_PERSON.PRG")
+set captions->rpt_page = uar_i18ngetmessage(i18nHandle,
+  "rpt_page", "Page:")
+set captions->printed = uar_i18ngetmessage(i18nHandle,
+  "printed", "Printed:")
+set captions->printed_by = uar_i18ngetmessage(i18nHandle,
+  "printed_by", "By:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+set captions->all = uar_i18ngetmessage(i18nHandle,
+  "all", "(All)")
+set captions->not_on_file = uar_i18ngetmessage(i18nhandle,
+  "not_on_file", "<Not on File>")
+ 
+/***********************************************
+*       Script                                 *
+************************************************/
+if (trim(request->batch_selection) > " ")
+  set temp_string = cnvtupper(trim(request->batch_selection))
+  call CHECK_OWNER_CD ("bbt_rpt_temp_person")
+  call CHECK_INVENTORY_CD ("bbt_rpt_temp_person")
+  call CHECK_LOCATION_CD ("bbt_rpt_temp_person")
+endif
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+
+%i cclsource:bbt_get_location_info.inc
+ 
+declare cur_owner_area_disp = vc
+declare cur_inv_area_disp   = vc
+
+set cur_owner_area_disp = fillstring(40," ")
+set cur_inv_area_disp = fillstring(40, " ")
+
+/* Retrieve display values for requested Owner Area and Inventory Area */
+if (request->cur_owner_area_cd = 0.0)
+    set cur_owner_area_disp = captions->all
+else
+    set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+endif
+
+if (request->cur_inv_area_cd = 0.0)
+    set cur_inv_area_disp = captions->all
+else
+    set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+endif
+
+record temp_person
+(
+ 1  person_id                   = f8
+ 1  name_full_formatted         = c45
+ 1  ssn_alias                   = c15
+ 1  birth_dt_tm                 = dq8
+ 1  birth_tz                    = i4
+ 1  productlist[*]
+     2  product_id              = f8
+     2  product_cd              = f8
+     2  product_disp            = c40
+     2  product_nbr             = c26
+     2  cur_expire_dt_tm        = dq8
+     2  expected_usage_dt_tm    = dq8
+)
+
+;Declare Variables
+declare alias_type_code_set     = i4
+declare ssn_alias_cdf_meaning   = vc
+declare ssn_alias_type_cd       = f8
+declare count1                  = i2
+declare select_ok_ind           = i2
+declare rpt_cnt                 = i2
+
+/*
+ * Set Constants
+ */
+    set alias_type_code_set         = 4
+    set ssn_alias_cdf_meaning       = "SSN"
+
+/*
+ * Set Global Variables
+ */
+    set reply->status_data->status = "F"
+    set count1 = 0
+    set ssn_alias_type_cd       = 0.0
+
+/* Get ssn_alias_type_cd */
+set stat = UAR_GET_MEANING_BY_CODESET(alias_type_code_set, nullterm(ssn_alias_cdf_meaning), 1, ssn_alias_type_cd)
+if (ssn_alias_type_cd = 0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        SET stat = ALTERLIST(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get ssn_alias_type_cd"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_trans_cmte"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue
+        = "could not get ssn alias type code_value"
+    go to EXIT_SCRIPT
+endif
+
+set select_ok_ind = 0
+set rpt_cnt = 0
+
+execute cpm_create_file_name_logical "bbt_temp_person", "txt", "x"
+
+select into cpm_cfn_info->file_name_logical
+   pcd_ind = decode(pcd.seq, "Y", "N")
+   , ad.active_status_dt_tm ";;f"
+   , ad.person_id
+   , ad.product_id
+   , ad.encntr_id
+   , ad.expected_usage_dt_tm
+   , pcd.person_combine_id
+   , per.person_id
+   , per.name_full_formatted
+   , per.birth_dt_tm
+   , p.product_id
+   , p.product_nbr
+   , p.cur_expire_dt_tm
+   , p.product_nbr
+   , p.product_sub_nbr
+   , p_display = uar_get_code_display(p.product_cd)
+   , pa.person_alias_id
+   , pa_ind = decode(pa.seq, "Y", "N")
+   , e_ind = decode(e.seq, build(e.person_id), "0.0")
+
+FROM
+    auto_directed ad
+    , (dummyt d_pcd with seq = 1)
+    , person_combine_det pcd
+    , person per
+    , product p
+    , blood_product bp
+    , (dummyt d_pa with seq = 1)
+    , person_alias pa
+    , (dummyt d_e with seq = 1)
+    , encounter e
+
+PLAN    ad      where ad.encntr_id = 0 
+                         and ad.person_id +0 > 0 
+                         and ad.product_event_id +0 > 0 
+                         and ad.active_ind = 1
+
+JOIN    p       where   p.product_id            = ad.product_id
+                  and ((request->cur_owner_area_cd > 0.0
+                  and request->cur_owner_area_cd = p.cur_owner_area_cd)
+                  or (request->cur_owner_area_cd = 0.0))
+                  and ((request->cur_inv_area_cd > 0.0
+                  and request->cur_inv_area_cd = p.cur_inv_area_cd)
+                  or (request->cur_inv_area_cd = 0.0))
+
+JOIN    bp      WHERE bp.product_id = p.product_id
+
+JOIN    per     where per.person_id             = ad.person_id
+
+JOIN    (d_e where d_e.seq = 1
+    JOIN        e      where e.person_id           = ad.person_id)
+
+JOIN    (d_pcd  where d_pcd.seq = 1
+    JOIN    pcd    where pcd.entity_name           = "AUTO_DIRECTED"
+                           and pcd.entity_id       =  ad.product_event_id)
+
+JOIN    (d_pa    where d_pa.seq = 1
+    JOIN        pa      where pa.person_id                      = per.person_id
+                                and pa.person_alias_type_cd     = ssn_alias_type_cd
+                                and pa.active_ind               = 1)
+ 
+ORDER BY
+    per.name_full_formatted, per.person_id, p.product_nbr, p.product_id
+
+HEAD REPORT
+    product_cnt = 0
+    select_ok_ind = 0
+
+HEAD PAGE
+   new_page = "Y"
+   call center(captions->rpt_title,1,125)
+   col 104, captions->rpt_time
+   COL 118, curtime  "@TIMENOSECONDS;;M",
+ 
+   row + 1,
+   col 104, captions->rpt_as_of_date
+   COL 118, curdate "@DATECONDENSED;;d",
+ 
+ 
+   row + 2
+   col 104 captions->page_no
+   COL 118, curpage "##",
+
+%i cclsource:bbt_print_location_info.inc
+ 
+   row + 1
+   col  1, captions->blood_bank_owner
+   col 19, cur_owner_area_disp,
+   row + 1
+   col  1, captions->inventory_area
+   col 19, cur_inv_area_disp
+   row + 2
+   line = fillstring (125, "-")		
+   LINE2 = FILLSTRING (125, "-")	
+   row + 1
+      col 001, captions->person_name
+      col 118, captions->expected
+   ROW + 1
+      col 004, captions->ssn
+      col 021, captions->birth_date
+      col 033, captions->product_number
+      col 061, captions->type
+      col 103, captions->expiration
+      col 120, captions->usage
+   ROW + 1,
+   line_ssn       = fillstring (18, "-")
+   line_birthdate = fillstring (10, "-")
+   line_product   = fillstring (26, "-")
+   line_type      = fillstring (40, "-")
+   line_expire    = fillstring (12, "-")
+   line_usage     = fillstring (8, "-")
+      col 001, line_ssn
+      col 021, line_birthdate
+      col 031, line_product		;011
+      col 061, line_type
+      col 103, line_expire
+      col 118, line_usage
+
+HEAD per.person_id
+    new_person = "Y"
+    temp_person->person_id              = per.person_id
+    temp_person->name_full_formatted    = per.name_full_formatted
+    if (pa_ind = "Y")
+        temp_person->ssn_alias          = CNVTALIAS(pa.alias,pa.alias_pool_cd)
+    else
+        temp_person->ssn_alias          = captions->not_on_file
+    endif
+    temp_person->birth_dt_tm            = per.birth_dt_tm
+    temp_person->birth_tz               = validate(per.birth_tz, 0)
+    product_cnt = 0
+    stat = ALTERLIST(temp_person->productlist, 0)       ; clear temp_person->productlist
+    stat = ALTERLIST(temp_person->productlist, 5)
+
+HEAD p.product_id
+    if ((pcd_ind != "Y") and (e_ind = "0.0"))
+        product_cnt = product_cnt + 1
+        if (MOD(product_cnt, 5) = 1 and product_cnt != 1)
+            stat = ALTERLIST(temp_person->productlist, product_cnt + 4)
+        endif
+        temp_person->productlist[product_cnt]->product_id           = p.product_id
+        temp_person->productlist[product_cnt]->product_cd           = p.product_cd
+        temp_person->productlist[product_cnt]->product_disp         = p_display
+        temp_person->productlist[product_cnt]->cur_expire_dt_tm     = p.cur_expire_dt_tm
+        temp_person->productlist[product_cnt]->product_nbr          = concat(trim(p.product_nbr), " ",
+                                                                                trim(p.product_sub_nbr))
+        temp_person->productlist[product_cnt]->expected_usage_dt_tm = ad.expected_usage_dt_tm
+    endif
+ 
+FOOT per.person_id
+        if (product_cnt > 0)
+            IF (ROW + product_cnt + 1 > 56)
+                break
+            ENDIF
+            IF (new_page = "Y")
+                new_page = "N"
+            ELSE
+                ROW + 1
+            ENDIF
+ 
+            ROW + 1
+            COL 001,    temp_person->name_full_formatted
+ 
+            prod = 1
+            WHILE(prod = 1 or prod <= product_cnt)
+                ROW + 1
+                IF (prod = 1)
+                    COL 004,    temp_person->ssn_alias
+                    if (curutc = 1)
+                        temp1 = format(datetimezone(temp_person->birth_dt_tm,
+                                temp_person->birth_tz),"@DATECONDENSED;4;q")
+                    else
+                        temp1 = format(temp_person->birth_dt_tm,"@DATECONDENSED;;d" )
+                    endif
+                    COL 021,    temp1
+                ENDIF
+                IF (prod <= product_cnt)
+                    COL 032,    temp_person->productlist[prod]->product_nbr		
+                    COL 061,    temp_person->productlist[prod]->product_disp
+                    COL 103,    temp_person->productlist[prod]->cur_expire_dt_tm "@DATETIMECONDENSED;;d"
+                    COL 118,    temp_person->productlist[prod]->expected_usage_dt_tm "@DATECONDENSED;;d"
+                ENDIF
+                prod = prod + 1
+            ENDWHILE
+        endif
+
+foot page
+    row 58,     col 001,    line
+    row + 1,    col   1,    captions->rpt_id
+                col  60,    captions->rpt_page
+                col 067,    curpage "###"
+                col 100,    captions->printed
+                col 110,    curdate "@DATECONDENSED;;d"
+                col 120,    curtime "@TIMENOSECONDS;;M"
+                col 80,     captions->printed_by
+                col 85,     reportByUsername "#############" 
+
+foot report
+    row + 1
+    COL 053, captions->end_of_report
+    report_complete_ind = "Y"
+    select_ok_ind = 1
+
+WITH    nocounter,
+        nullreport,
+        outerjoin(d_e),
+        dontcare(e),
+        outerjoin(d_pcd),
+        dontcare(pcd),
+        outerjoin(d_pa),
+        dontcare(pa),
+        maxrow = 61,
+        compress,
+        nolandscape
+
+go to EXIT_SCRIPT
+ 
+#EXIT_SCRIPT
+for (x = 1 to count1)
+    call echo(reply->status_data->status)
+    call echo(reply->status_data->subeventstatus[1]->OperationName)
+    call echo(reply->status_data->subeventstatus[1]->OperationStatus)
+    call echo(reply->status_data->subeventstatus[1]->TargetObjectName)
+    call echo(reply->status_data->subeventstatus[1]->TargetObjectValue)
+endfor
+
+set reply->status_data->status = "S"
+
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+ 
+if (trim(request->batch_selection) > "")
+    set spool value(reply->rpt_list[rpt_cnt].rpt_filename) value(request->output_dist)
+endif
+ 
+if (select_ok_ind = 1)
+    set reply->status_data->status = "S"
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

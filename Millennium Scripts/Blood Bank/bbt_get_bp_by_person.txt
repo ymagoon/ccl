@@ -1,0 +1,345 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bloodbankproductclass/BBT_GET_bp_by_person.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2006 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_bp_by_person.prg
+        Object name:            bbt_get_bp_by_person
+        Request #:              225125
+
+        Product:                Pathnet                              
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Get a blood product by product nbr & person id
+                                
+        Tables read:            product, blood product, product_event
+                               
+        Tables updated:         none
+        Executing from:         Blood Bank Product Server
+
+        Special Notes:          none
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 06/15/95 Teresa Davis         Initial Release                     *
+;     002 01/29/95 Yvonne Klipfel       Add new CCL standard changes        *
+;     003 06/03/96 Martin Olson         Data model changes                  *
+;     004 10/06/98 Julie Petersen       Added Product_Cd logic              *
+;     005 11/11/98 Jose Suarez          Added pool option id  in request    *
+;     006 01/19/00 Jose Suarez          Removed request->debug_ind          *
+;     007 06/20/00 John Rieck               Added Verified state            *
+;     008 09/29/00 Jose Suarez          added flag chars in reply           *
+;     009 01/08/02 SD4221              Use the correct alias in the select  *
+;                                       that joins from the product_event   *
+;                                       table (pe.product_id)               *
+;     010 08/09/05 Jim Jensen           Add disease_cd, donation_type_cd to *
+;                                       the reply structure.                *
+;     011 08/22/05 JA7516               Add electronic_entry_flag to reply  *
+;     012 02/03/06 Jason Coy            Add req_label_verify_ind to reply.  *
+;    *013 04/27/06 David Fifer          Added checks for the Intransit and  *
+;                                       Modified Product.                   *
+;    *014 10/27/06 Tom Brecht           Added xmatch_required_ind to reply  *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_get_bp_by_person:dba go
+create program bbt_get_bp_by_person:dba
+
+/*
+record request
+(
+ 1  person_id           = f8
+ 1  product_nbr         = c20
+ 1  product_cd          = f8
+ 1  pool_option_id      = f8                    
+ 1  verify_status       = i2
+ 1  active_states       = i2
+ 1  assign              = i2
+ 1  quarantine          = i2
+ 1  crossmatch          = i2
+ 1  dispense            = i2
+ 1  disposed            = i2
+ 1  transfer            = i2
+ 1  transfused          = i2
+ 1  modification        = i2
+ 1  unconfirmed         = i2
+ 1  autologous          = i2
+ 1  directed            = i2
+ 1  available           = i2
+ 1  received            = i2
+ 1  destruction         = i2
+ 1  shipped             = i2
+ 1  in_progress         = i2
+ 1  pooled              = i2
+ 1  pooled_prod         = 12
+ 1  confirmed           = i2
+ 1  drawn               = i2
+ 1  tested              = i2
+ 1  shipment_in_process = i2
+ 1  verified            = i2
+ 1  modified_prod       = i2
+ 1  intransit           = i2
+)
+*/
+
+record reply
+( 1 qual[*]
+%i cclsource:bbt_bpc_gbp_rep.inc
+%i cclsource:status_block.inc
+)
+
+/* Initialize Variables */
+set reply->status_data->status = "F"
+set prod_cnt = 0
+set max_event_cnt = 0
+
+
+; ** Get event_type_cd and collation_seq for requested event_type_mean's
+%i cclsource:bbt_bpc_event_type_cd_seq.inc
+
+
+/* Select Records */
+/* THE FIRST READ OF THE DATA BASE IS AGAINST THE PRODUCT_EVENT TABLE, TO GET ALL THE PRODUCT_ID'S THAT HAVE
+   THE REQUEST->PERSON_ID ON THEM, AND THE PRODUCT TABLE TO LOAD THE PRODUCT INFORMATION FOR THE REPLY. AFTER
+   THIS READ THE DATABASE IS READ BY JOINING TO THE REPLY ARRAY FOR EFFICIENCY.  THE SECOND READ GETS BLOOD
+   PRODUCT OR DERIVATIVE INFORMATION, COMMNENTS INDICATOR AND SUPPLIER NAME.  THE THIRD READ IS TO LOAD THE 
+   PRODUCT EVENT INFORMATION.  THE PRODUCT EVENT TABLE IS READ TWICE THE SECOND READ IS BY PROUDUCT ID. THE 
+   FOURTH HIT ON THE DATA BASE IS TO LOAD THE EVENT INFORMATION OFF THE CHILDREN TABLE OF THE PRODUCT_EVENT
+*/
+
+
+set stat = alterlist(reply->qual, 1)
+
+;READ THE PRODUCT_EVENT TABLE AND THE PRODUCT TABLE FOR INFORMATION
+select distinct into "nl:"
+   p.product_id,
+   pe.product_event_id
+
+from 
+   product_event pe,
+   product p,
+   product_category pc,
+   component cmp,
+   (dummyt d_bbd with seq = 1),
+   bb_inv_device bbd,
+   (dummyt d_r with seq = 1),
+   receipt r
+
+plan pe where pe.person_id = request->person_id
+                and (
+                     request->active_states = 0
+
+                     or (request->active_states = 1 
+                         and pe.active_ind = 1)
+                    )
+
+                and (pe.event_status_flag < 1 or pe.event_status_flag = NULL)
+
+                and pe.event_type_cd > 0
+                and pe.event_type_cd in (assign_event_type_cd, quarantine_event_type_cd,
+                                         crossmatch_event_type_cd, dispense_event_type_cd,
+                                         disposed_event_type_cd, transfer_event_type_cd,
+                                         transfused_event_type_cd, modification_event_type_cd,
+                                         unconfirmed_event_type_cd, autologous_event_type_cd,
+                                         directed_event_type_cd, available_event_type_cd,
+                                         destruction_event_type_cd, shipped_event_type_cd,
+                                         in_progress_event_type_cd, pooled_event_type_cd,
+                                         pooled_prod_event_type_cd, received_event_type_cd,
+                                         confirmed_event_type_cd, drawn_event_type_cd,
+                                         tested_event_type_cd, shipment_in_process_event_type_cd,
+                                         verified_event_type_cd, modified_prod_event_type_cd,
+                                         in_transit_event_type_cd)
+ 
+                and pe.product_id > 0.0
+ 
+join p where p.product_id = pe.product_id
+                and (
+                      (request->product_nbr > " "
+                           and CNVTUPPER(p.product_nbr) = CNVTUPPER(request->product_nbr)
+                           and request->product_id <= 0.0)
+
+                      or (request->product_nbr <= " " 
+                           and request->product_id > 0.0
+                           and p.product_id = request->product_id)
+                      or (request->product_nbr <= " "
+                           and p.product_id > 0.0
+                           and request->product_id <= 0.0)
+                     ) 
+                and (request->product_cd = 0 or (request->product_cd = p.product_cd))
+                and p.product_id > 0.0    
+                
+join pc  where pc.product_cat_cd = p.product_cat_cd
+ 
+join cmp where (( request->pool_option_id > 0.0 and 
+                      cmp.option_id = request->pool_option_id and
+                      cmp.product_cd = p.product_cd and
+                      cmp.active_ind = 1)
+                  or (request->pool_option_id = 0.0 and 
+                      cmp.option_id = 0.0))  
+                     
+join (d_bbd where d_bbd.seq = 1
+    join    bbd     where   bbd.bb_inv_device_id   = p.cur_dispense_device_id
+                              and bbd.bb_inv_device_id != NULL
+                              and bbd.bb_inv_device_id > 0)
+join (d_r where d_r.seq = 1
+    join r where r.product_id = p.product_id)
+
+order by pe.product_id, r.updt_dt_tm ;this was added in order to get orig_ship_cond_cd and orig_vis_insp_cd
+
+
+head report 
+    prod_cnt = 0
+
+head pe.product_id
+    prod_cnt = prod_cnt + 1
+    if ((mod(prod_cnt, 5) = 1 and prod_cnt != 1)
+    or prod_cnt = 2)
+        if (prod_cnt = 2)
+            stat = alterlist(reply->qual, 5)
+        else
+            stat = alterlist(reply->qual,prod_cnt + 4)
+        endif
+    endif
+
+    reply->qual[prod_cnt].product_id = p.product_id
+    reply->qual[prod_cnt].product_nbr = p.product_nbr
+    reply->qual[prod_cnt].flag_chars = p.flag_chars
+    reply->qual[prod_cnt].alternate_nbr = p.alternate_nbr
+    reply->qual[prod_cnt].product_sub_nbr = p.product_sub_nbr
+    reply->qual[prod_cnt].product_cd = p.product_cd
+    reply->qual[prod_cnt].product_cat_cd = p.product_cat_cd
+    reply->qual[prod_cnt].product_class_cd = p.product_class_cd
+    reply->qual[prod_cnt].cur_supplier_id = p.cur_supplier_id           
+    reply->qual[prod_cnt].cur_inv_locn_cd = p.cur_inv_locn_cd
+    reply->qual[prod_cnt].orig_inv_locn_cd = p.orig_inv_locn_cd 
+    reply->qual[prod_cnt].recv_dt_tm = cnvtdatetime(p.recv_dt_tm)
+    reply->qual[prod_cnt].recv_prsnl_id = p.recv_prsnl_id
+    reply->qual[prod_cnt].storage_temp_cd = p.storage_temp_cd
+    reply->qual[prod_cnt].cur_unit_meas_cd = p.cur_unit_meas_cd  
+    reply->qual[prod_cnt].pooled_product_ind = p.pooled_product_ind
+    reply->qual[prod_cnt].modified_product_ind = p.modified_product_ind
+    reply->qual[prod_cnt].donated_by_relative_ind = p.donated_by_relative_ind
+    reply->qual[prod_cnt].corrected_ind = p.corrected_ind
+    reply->qual[prod_cnt].pooled_product_id = p.pooled_product_id
+    reply->qual[prod_cnt].modified_product_id = p.modified_product_id 
+    reply->qual[prod_cnt].orig_vis_insp_cd            = r.vis_insp_cd
+    reply->qual[prod_cnt].orig_ship_cond_cd           = r.ship_cond_cd
+    reply->qual[prod_cnt].cur_expire_dt_tm = cnvtdatetime(p.cur_expire_dt_tm)
+    reply->qual[prod_cnt].product_updt_cnt = p.updt_cnt
+    reply->qual[prod_cnt].product_updt_dt_tm = cnvtdatetime(p.updt_dt_tm)
+    reply->qual[prod_cnt].product_updt_id = p.updt_id
+    reply->qual[prod_cnt].product_updt_task = p.updt_task
+    reply->qual[prod_cnt].product_updt_applctx = p.updt_applctx
+    reply->qual[prod_cnt].locked_ind = p.locked_ind 
+    if (bbd.bb_inv_device_id != NULL and bbd.bb_inv_device_id > 0)
+        reply->qual[prod_cnt].cur_device_id           = p.cur_dispense_device_id
+        reply->qual[prod_cnt].cur_device_desc         = bbd.description
+;        reply->qual[prod_cnt].service_resource_cd     = bbd.service_resource_cd
+;        reply->qual[prod_cnt].inventory_area_cd       = bbd.inventory_area_cd
+;        reply->qual[prod_cnt].device_type_cd          = bbd.device_type_cd
+    else
+        reply->qual[prod_cnt].cur_device_id           = 0.0
+        reply->qual[prod_cnt].cur_device_desc         = ""
+;        reply->qual[prod_cnt].service_resource_cd     = 0.0
+;        reply->qual[prod_cnt].inventory_area_cd       = 0.0
+;        reply->qual[prod_cnt].device_type_cd          = 0.0
+    endif
+    reply->qual[prod_cnt].cur_owner_area_cd       = p.cur_owner_area_cd
+    reply->qual[prod_cnt].cur_inv_area_cd         = p.cur_inv_area_cd
+    reply->qual[prod_cnt].cur_inv_device_id       = p.cur_inv_device_id
+    reply->qual[prod_cnt].disease_cd              = p.disease_cd
+    reply->qual[prod_cnt].donation_type_cd        = p.donation_type_cd
+    reply->qual[prod_cnt].electronic_entry_flag	  = p.electronic_entry_flag
+    reply->qual[prod_cnt].req_label_verify_ind    = p.req_label_verify_ind
+    reply->qual[prod_cnt].xmatch_required_ind     = pc.xmatch_required_ind
+
+foot report
+    stat = alterlist(reply->qual, prod_cnt)
+
+with nocounter, dontcare(bbd), outerjoin(d_r)
+
+
+;if there were no matches found then exit the script
+if (prod_cnt = 0)
+    go to END_SCRIPT
+endif
+
+
+;READ THE DATABASE A SECOND TIME FOR THE BLOOD_PRODUCT OR DERIVATIVE INFO, THE COMMENTS_IND, ETC  
+%i cclsource:bbt_bpc_gbp_det.inc
+
+
+/*THIRD READ OF DATA BASE FOR PRODUCT EVENTS*/
+%i cclsource:bbt_bpc_gbp_sta.inc
+
+
+/*FOURTH SCAN FOR TABLE SPECIFIC INFORMATION*/
+%i cclsource:bbt_bpc_gbp_sub.inc
+
+
+#END_SCRIPT
+if (prod_cnt = 0)
+   set reply->status_data.status = "Z"
+elseif (reply->qual[1]->product_id < 1)
+   set reply->status_data.status = "Z"
+else
+   set reply->status_data.status = "S"
+endif
+
+;006 begin
+;if (validate(request->debug_ind, 0) = 1)
+;    call echo(reply->status_data.status)
+;    set prod_cnt = cnvtint(size(reply->qual, 5))
+;    for (prod = 1 to prod_cnt)
+;        call echo(build(prod, ".",
+;            reply->qual[prod]->product_id                             , "/",
+;            reply->qual[prod]->product_type                           , "/",
+;            reply->qual[prod]->product_nbr                            , "/",
+;            reply->qual[prod]->barcode_nbr                            , "/",
+;            reply->qual[prod]->supplier_prefix                        , "/",
+;            reply->qual[prod]->orig_vis_insp_cd                       , "/",
+;            reply->qual[prod]->orig_ship_cond_cd                      )) 
+;        set event_cnt = cnvtint(size(reply->qual[prod]->qual2, 5))
+;        for (event = 1 to event_cnt)
+;            call echo(build(event, ".....", 
+;                    reply->qual[prod]->qual2[event]->product_event_id           , "/",
+;                    reply->qual[prod]->qual2[event]->event_type_cd              , "/",
+;                    reply->qual[prod]->qual2[event]->related_product_event_id   , "/",
+;                    reply->qual[prod]->qual2[event]->sub_reason_cd              , "/",
+;                    reply->qual[prod]->qual2[event]->collation_seq              ))
+;       endfor
+;    endfor
+;endif
+;006 end
+
+end go     
+
+;Generated by GNU enscript 1.6.4.

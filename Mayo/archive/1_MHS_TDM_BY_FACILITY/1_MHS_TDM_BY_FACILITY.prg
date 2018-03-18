@@ -1,0 +1,470 @@
+drop program 1_mhs_tdm_by_facility go
+create program 1_mhs_tdm_by_facility
+ 
+ 
+ 
+/*******************************************************************
+ 
+Report Name:  TDM report for multiple facilites
+Report Path:  /mayo/mhspd/prg/1_mhs_tdm_by_facility.prg
+Report Description: Combinded 10 programs into one
+              Prints to promted printer for prompted site.
+              original program names are
+              	1_mhs_rcmc_tdm
+				1_mhs_lcmc_tdm
+				1_mhs_isj_tdm
+				1_mhs_stj_tdm
+				1_mhs_amc_tdm
+				1_mhs_almc_tdm
+				1_mhs_fmc_tdm
+				1_mhs_cfmc_tdm
+				1_lm_eth_tdm_lh_bl_os
+				1_lm_eth_barron_tdm
+Displays patients with TDM/WARF/etc.
+ 
+Created by:  Akcia - Phil Landry
+Created date:  11/2012
+ 
+ 
+Modified by: Akcia - Phil Landry
+Modified date:12/06/2012
+Modifications:Added New Prague
+Modification Number: 001
+ 
+Mod   Modified by  Modified date   Modifications
+-------------------------------------------------------------------
+002   JTW-M026751  8/28/2013       Add MAIJ PCU Nurse Unit to ISJ Report
+003   Akcia-SE	   03/12/2014	   Add Red Wing to report
+004   JTW-M026751  10/16/2014      Add MAIJ ED OBS, MAQN PCU & EULHOBSERVATION Nurse unit locations
+005	  Akcia - SE	 01/21/15      Add Red Wing Medical/Surgical/Pediatric - South
+006	  Akcia - pel    03/04/15      Add additional drugs apixaban, argatroban, bivalirudin, desirudin
+										fondaparinux, rivaroxaban
+ 
+*******************************************************************/
+ 
+ prompt
+	"Output to File/Printer/MINE" = "MINE"   ;* Enter or select the printer or file name to send this report to.
+	, "Site" = 0
+ 
+with OUTDEV, site
+ 
+ 
+;;;site
+;;;rcmc  				= 1
+;;;lcmc  				= 2
+;;;isj  				= 3
+;;;stj  				= 4
+;;;amc  				= 5
+;;;almc  				= 6
+;;;fmc  				= 7
+;;;cfmc  				= 8
+;;;lm_eth_lh_bl_os      = 9
+;;;lm_eth_barron  		= 10
+;; New Prague           = 11   ;001
+ 
+ 
+;SET MaxSecs = 1800
+ 
+ declare idx1 = i4
+ declare idx2 = i4
+ declare idx3 = i4
+ declare domain_type_cd = f8 with protect, constant(uar_get_code_by("MEANING", 339, "CENSUS"))
+ declare detail_meaning = vc with protect
+declare rw_msp_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 220, "RWHOMSPSOUTH"))  ;005
+ 
+record nu
+(1 qual [*]
+   2 code = f8
+  )
+ 
+record cat
+(1 qual [*]
+   2 code = f8
+  )
+ 
+select into "nl:"
+  from code_value cv
+  where cv.code_set = 200
+    and cv.display_key in (
+				"DISPLAY_KEY",
+				"DABIGATRAN",
+				"WARFARIN",
+				"VANCOMYCIN",
+				"TOBRAMYCIN",
+				"GENTAMICIN",
+				"AMIKACIN",
+				"HXZZVANCOMYCINLEVEL",
+				"HXZZTOBRAMYCINLEVEL",
+				"HXZZGENTAMICINLEVEL",
+				"HXZZAMIKACINLEVEL",
+				"WARFARINDAILYORDER",
+				"WARFARINDAILYORDER",
+				"THERAPEUTICDRUGMONITORINGPHARMACIST",
+;006				"WARFARINMONITORING")
+				"WARFARINMONITORING", 					;006
+				"RIVAROXABAN", 							;006
+				"APIXABAN" , 							;006
+				"ARGATROBAN", 							;006
+				"EDOXABAN"  , 							;006
+				"BIVALIRUDIN", 							;006
+				"DESIRUDIN", 							;006
+				"FONDAPARINUX"  						;006
+				) 										;006
+	head report
+		x = 0
+	detail
+	 	x = x + 1
+	 	stat = alterlist(cat->qual,x)
+	 	cat->qual[x].code = cv.code_value
+	with nocounter
+ 
+ if ($site = 1)   ; 1_mhs_rcmc_tdm
+    set stat = alterlist(nu->qual,6)
+    set nu->qual[1].code = 24991843.00
+    set nu->qual[2].code = 24991856.00
+    set nu->qual[3].code = 24991881.00
+    set nu->qual[4].code = 24991894.00
+    set nu->qual[5].code = 24991913.00
+    set nu->qual[6].code = 24991925.00
+ 
+    set detail_meaning = "FREETXTDOSE"
+ 
+ elseif ($site = 2)  ;1_mhs_lcmc_tdm
+    set stat = alterlist(nu->qual,6)
+    set nu->qual[1].code = 24991974.00
+    set nu->qual[2].code = 24991979.00
+    set nu->qual[3].code = 24992002.00
+    set nu->qual[4].code = 24992005.00
+    set nu->qual[5].code = 25049490.00
+    set nu->qual[6].code = 31158534.00
+ 
+    set detail_meaning = "FREETXTDOSE"
+ 
+ 
+ elseif ($site = 3)  ; 1_mhs_isj_tdm
+ 
+    set detail_meaning = "FREETXTDOSE"
+ 
+    set stat = alterlist(nu->qual,19)
+    set nu->qual[1].code =    31032378.00
+    set nu->qual[2].code =    31032381.00
+    set nu->qual[3].code =    24992009.00
+    set nu->qual[4].code =    24992033.00
+    set nu->qual[5].code =    24992054.00
+    set nu->qual[6].code =    24992519.00
+    set nu->qual[7].code =    24992526.00
+    set nu->qual[8].code =    24992553.00
+    set nu->qual[9].code =    24992350.00
+    set nu->qual[10].code =   24992561.00
+    set nu->qual[11].code =   24992570.00
+    set nu->qual[12].code =   24992573.00
+    set nu->qual[13].code =   24992129.00
+    set nu->qual[14].code =   24992392.00
+    set nu->qual[15].code =   24992415.00
+    set nu->qual[16].code =   24992444.00
+    set nu->qual[17].code =   24992479.00
+    set nu->qual[18].code =  755299940.00   ;002 JTW
+    set nu->qual[19].code =  828399474.00   ;004 MAIJ ED OBS
+ 
+ 
+    select INTO "NL:"
+     from code_value CV
+    where CV.code_set = 220
+    ; and cdf_meaning = "NURSEUNIT"
+    AND CV.display_KEY  = "MAIJPCU"
+    AND CV.ACTIVE_IND = 1
+    HEAD REPORT
+      NU_CNT = 0
+    DETAIL
+      NU_CNT = SIZE(NU->QUAL,5) + 1
+      stat = alterlist(nu->qual,NU_CNT)
+      nu->qual[NU_CNT].code =   CV.CODE_VALUE
+    WITH NOCOUNTER
+ 
+ 
+ 
+ elseif ($site = 4)    ;1_mhs_stj_tdm
+ 
+    set detail_meaning = "FREETXTDOSE"
+ 
+    set stat = alterlist(nu->qual,2)
+    set nu->qual[1].code =   115105857.00
+    set nu->qual[2].code =   115106031.00
+ 
+ 
+ elseif ($site = 5)    ; 1_mhs_amc_tdm
+    set detail_meaning = "FREETXTDOSE"
+ 
+    set stat = alterlist(nu->qual,7)
+    set nu->qual[1].code = 24991776.00
+    set nu->qual[2].code = 24991802.00
+    set nu->qual[3].code = 24991641.00
+    set nu->qual[4].code = 24991660.00
+    set nu->qual[5].code = 24991713.00
+    set nu->qual[6].code = 24991725.00
+    set nu->qual[7].code = 24991748.00
+ 
+ 
+ elseif ($site = 6)  ; 1_mhs_almc_tdm
+    set detail_meaning = "FREETXTDOSE"
+ 
+    set stat = alterlist(nu->qual,7)
+    set nu->qual[1].code = 24990276.00
+    set nu->qual[2].code = 24987393.00
+    set nu->qual[3].code = 24990409.00
+    set nu->qual[4].code = 24990434.00
+    set nu->qual[5].code = 24990469.00
+    set nu->qual[6].code = 24990379.00
+    set nu->qual[7].code = 24990405.00
+ 
+ 
+ elseif ($site = 7)  ; 1_mhs_fmc_tdm
+    set detail_meaning = "FREETXTDOSE"
+ 
+    set stat = alterlist(nu->qual,8)
+    set nu->qual[1].code =  24992690.00
+    set nu->qual[2].code =  24992707.00
+    set nu->qual[3].code =  24992726.00
+    set nu->qual[4].code =  24992606.00
+    set nu->qual[5].code =  24992613.00
+    set nu->qual[6].code = 117872572.00
+    set nu->qual[7].code = 117873327.00
+    set nu->qual[8].code = 117873631.00
+ 
+ 
+ 
+ elseif ($site = 8)  ; 1_mhs_cfmc_tdm
+ 
+    set detail_meaning = "FREETXTDOSE"
+ 
+    set stat = alterlist(nu->qual,1)
+    set nu->qual[1].code = 24991944.00
+ 
+ 
+ elseif ($site = 9)  ;  1_lm_eth_tdm_lh_bl_os
+ 
+    set stat = alterlist(nu->qual,29)
+    set nu->qual[1].code =       683731.00
+    set nu->qual[2].code =     28026680.00
+    set nu->qual[3].code =     28026679.00
+    set nu->qual[4].code =      2867129.00
+    set nu->qual[5].code =      3186602.00
+    set nu->qual[6].code =      3186600.00
+    set nu->qual[7].code =      3186603.00
+    set nu->qual[8].code =      3186634.00
+    set nu->qual[9].code =      3186681.00
+    set nu->qual[10].code =     7284841.00
+    set nu->qual[11].code =    10697808.00
+    set nu->qual[12].code =     3186645.00
+    set nu->qual[13].code =     3186674.00
+    set nu->qual[14].code =    43199228.00
+    set nu->qual[15].code =    11004055.00
+    set nu->qual[16].code =    11003800.00
+    set nu->qual[17].code =    11906847.00
+    set nu->qual[18].code =   172225126.00
+    set nu->qual[19].code =   172223946.00
+    set nu->qual[20].code =   172222695.00
+    set nu->qual[21].code =   172221055.00
+    set nu->qual[22].code =   177886319.00
+    set nu->qual[23].code =   177893453.00
+    set nu->qual[24].code =   177890657.00
+    set nu->qual[25].code =   179653105.00
+    set nu->qual[26].code =   177894544.00
+    set nu->qual[27].code =   177892486.00
+    set nu->qual[28].code =     3186524.00
+    set nu->qual[29].code =   907559638.00	 ;004 EULH Observation
+ 
+ 
+ elseif ($site = 10)   ;  1_lm_eth_barron_tdm
+ 
+ 
+    set stat = alterlist(nu->qual,14)
+    set nu->qual[1].code =    11004425.00
+    set nu->qual[2].code =    11004433.00
+    set nu->qual[3].code =    11004457.00
+    set nu->qual[4].code =    11004468.00
+    set nu->qual[5].code =    11004474.00
+    set nu->qual[6].code =    11004489.00
+    set nu->qual[7].code =    11004499.00
+    set nu->qual[8].code =    11004503.00
+    set nu->qual[9].code =    11004508.00
+    set nu->qual[10].code =   11004522.00
+    set nu->qual[11].code =    7402799.00
+    set nu->qual[12].code =   56390798.00
+    set nu->qual[13].code =  540556926.00
+    set nu->qual[14].code =  490850762.00
+ 
+ elseif ($site = 11)  ; new prague                        		;001
+ 
+    set detail_meaning = "FREETXTDOSE"                        	;001
+ 
+    set stat = alterlist(nu->qual,6)                        	;001
+    set nu->qual[1].code = 554985206.00                        	;001
+    set nu->qual[2].code = 554988560.00                        	;001
+    set nu->qual[3].code = 554992962.00                        	;001
+    set nu->qual[4].code = 554994261.00                        	;001
+    set nu->qual[5].code = 554997029.00                        	;001
+    set nu->qual[6].code = 894539009.00                         ;004 MAQN PCU
+ 
+ elseif ($site = 12)  ; red wing                       	    	;002
+ 
+    set detail_meaning = "FREETXTDOSE"                        	;002
+ 
+;005    set stat = alterlist(nu->qual,4)                        	;002
+    set stat = alterlist(nu->qual,5)                        	;005
+    set nu->qual[1].code = 792775765.00                        	;002
+    set nu->qual[2].code = 792775970.00                        	;002
+    set nu->qual[3].code = 792774226.00                        	;002
+    set nu->qual[4].code = 792775010.00                       	;002
+    set nu->qual[5].code = rw_msp_cd 							;005
+ 
+ else
+   go to end_program
+ endif
+ 
+ 
+call echorecord(nu)
+call echorecord(cat)
+ 
+ 
+SELECT INTO $OUTDEV
+	E_LOC_NURSE_UNIT_DISP = UAR_GET_CODE_DISPLAY( E.LOC_NURSE_UNIT_CD )
+	,E_LOC_FACILITY_DISP = UAR_GET_CODE_DISPLAY( E.LOC_FACILITY_CD )
+	, P.NAME_FULL_FORMATTED
+	, E_LOC_ROOM_DISP = UAR_GET_CODE_DISPLAY( E.LOC_ROOM_CD )
+	, O.ORDER_ID
+	, O_ORDER_STATUS_DISP = UAR_GET_CODE_DISPLAY( O.ORDER_STATUS_CD )
+	, O_CATALOG_DISP = UAR_GET_CODE_DISPLAY( O.CATALOG_CD )
+	, EA.ALIAS
+	, OD.OE_FIELD_MEANING
+	, OD.OE_FIELD_DISPLAY_VALUE
+	, OD.ACTION_SEQUENCE
+ 
+FROM
+	ORDERS   O
+	, PERSON   P
+	, ENCOUNTER   E
+	, ENCNTR_ALIAS   EA
+	, ORDER_DETAIL   OD
+	, Nurse_unit nu
+	, encntr_domain ed
+;	, DM_FLAGS  D
+;	, dummyt d1
+;
+PLAN nu
+   where expand(idx2,1,size(nu->qual,5),nu.location_cd,nu->qual[idx2]->code)
+ 
+join ed
+	where  ed.end_effective_dt_tm > sysdate
+	  and ed.loc_nurse_unit_cd = nu.location_cd
+	  and ed.encntr_domain_type_cd = domain_type_cd
+ 
+join o
+	WHERE o.encntr_id = ed.encntr_id
+      and expand(idx3,1,size(cat->qual,5),O.CATALOG_CD,cat->qual[idx3]->code)
+	  AND O.ORDER_STATUS_CD = 2550
+ 	  AND O.ACTIVE_IND = 1
+JOIN P
+	WHERE O.PERSON_ID = P.PERSON_ID
+	and p.name_last_key != "TESTPATIENT" ;or p.name_last_key != "*TEST*"
+JOIN E
+	WHERE O.ENCNTR_ID = E.ENCNTR_ID
+	  AND E.DISCH_DT_TM = null
+JOIN EA
+	WHERE O.ENCNTR_ID = EA.ENCNTR_ID
+	  AND EA.encntr_alias_type_cd = 1077
+	  AND EA.ACTIVE_IND = 1
+ 
+ 
+JOIN OD
+	WHERE OUTERJOIN(O.ORDER_ID)= OD.ORDER_ID
+	  AND OD.OE_FIELD_MEANING = outerjoin("FREETXTDOSE")
+	  AND OD.ACTION_SEQUENCE = OUTERJOIN(o.last_action_sequence)
+;;join d1
+;;
+;;JOIN D
+;;	WHERE D.TABLE_NAME = "ORDERS"
+;;	  AND D.COLUMN_NAME = "ORIG_ORD_AS_FLAG"
+;;	  AND O.ORIG_ORD_AS_FLAG = D.FLAG_VALUE
+;;	  AND D.definition = "Normal Order"
+ 
+ORDER BY
+	E_LOC_FACILITY_DISP,
+	E_LOC_NURSE_UNIT_DISP,
+	P.NAME_FULL_FORMATTED
+ 
+Head Report
+	m_NumLines = 0
+%I cclsource:vccl_diortf.inc
+	y_pos = 18
+SUBROUTINE OFFSET( yVal )
+	CALL PRINT( FORMAT( y_pos + yVal, "###" ))
+END
+ 
+Head Page
+	y_pos = 36
+	ROW + 1, "{F/5}{CPI/11}"
+;006	CALL PRINT(CALCPOS(125,y_pos+0)) "TDM / WARF / Amikacin / Gentamicin / Tobramycin / Vancomycin / Dabigatran - Pharmacist"
+    	CALL PRINT(CALCPOS(200,y_pos+0))  "TDM / Aminoglycosides / Vancomycin / Anticoagulants"
+	ROW + 1, "{F/5}{CPI/11}"  ;006
+	y_pos = y_pos + 10			;006
+ 
+		CALL PRINT(CALCPOS(175,y_pos+0)) "(Does not include heparin, bivalirudin, argatroban, enoxaparin or dalteparin)"  ; 006
+	ROW + 1, "{F/1}{CPI/14}"
+	CALL PRINT(CALCPOS(270,y_pos+12)) curdate
+	y_pos = y_pos + 25
+ 
+Head E_LOC_NURSE_UNIT_DISP
+	ROW + 1, "{F/1}{CPI/14}"
+	CALL PRINT(CALCPOS(20,y_pos+0)) E_LOC_FACILITY_DISP
+	ROW + 1
+	CALL PRINT(CALCPOS(20,y_pos+10)) E_LOC_NURSE_UNIT_DISP
+	ROW + 1
+	CALL PRINT(CALCPOS(36,y_pos+24)) "Name"
+	CALL PRINT(CALCPOS(216,y_pos+23)) "FIN Number"
+	CALL PRINT(CALCPOS(288,y_pos+23)) "Person Room"
+	CALL PRINT(CALCPOS(360,y_pos+23)) "Catalog Desc"
+	ROW + 1
+	y_pos = y_pos + 47
+ 
+Head P.NAME_FULL_FORMATTED
+	ROW + 1, "{F/0}{CPI/14}"
+	CALL cclrtf_print( 0, 36, 0, 30, P.NAME_FULL_FORMATTED, 100, 1 )
+ 
+	y_pos = y_pos + (m_NumLines * 12)
+ 
+	ROW + 1
+ 
+Detail
+	if (( y_pos + 67) >= 792 ) y_pos = 0,  break endif
+	ALIAS1 = SUBSTRING( 1, 10, EA.ALIAS ),
+	E_LOC_ROOM_DISP1 = SUBSTRING( 1, 6, E_LOC_ROOM_DISP ),
+	ROW + 1, "{F/0}{CPI/14}"
+	CALL PRINT(CALCPOS(72,y_pos+0)) O.ORDER_ID
+	CALL PRINT(CALCPOS(216,y_pos+0)) ALIAS1
+	CALL PRINT(CALCPOS(288,y_pos+0)) E_LOC_ROOM_DISP1
+	CALL PRINT(CALCPOS(361,y_pos+0)) O_CATALOG_DISP
+	ROW + 1
+	CALL PRINT(CALCPOS(88,y_pos+8))	OD.OE_FIELD_DISPLAY_VALUE
+	y_pos = y_pos + 25
+ 
+Foot P.NAME_FULL_FORMATTED
+	y_pos = y_pos + 0
+ 
+Foot E_LOC_NURSE_UNIT_DISP
+	BREAK
+ 
+Foot Report
+	if (( y_pos + 64) >= 792 ) y_pos = 0 break
+	else y_pos = y_pos + 36 endif
+	ROW + 1, "{F/5}{CPI/11}"
+;006	CALL PRINT(CALCPOS(130,y_pos+0)) "End TDM / WARF / Amikacin / Gentamicin / Tobramycin / Vancomycin / Dabigatran - Pharmacist"
+	CALL PRINT(CALCPOS(180,y_pos+0)) "End TDM / Aminoglycosides / Vancomycin / Anticoagulants"
+WITH MAXCOL = 300, MAXROW = 500, DIO= 08, NOHEADING, FORMAT= VARIABLE ;, TIME= VALUE( MaxSecs )
+ 
+#End_Program
+END
+GO
+ 
+ 
+ 

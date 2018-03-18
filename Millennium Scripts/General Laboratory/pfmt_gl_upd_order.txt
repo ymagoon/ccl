@@ -1,0 +1,724 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_gl_upd_order/pfmt_gl_upd_order.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/***************************************************************************** 
+
+        Source file name:       pfmt_gl_upd_order.prg 
+        Object name:            pfmt_gl_upd_order
+        Request #:              560200 (Async Order Server Step ID) 
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Call Order Server to update an order by
+                                setting its status to either In-Process or
+                                Complete, whichever is appropriate.
+
+        Tables read:            code_value, orders
+
+        Tables updated:         none
+
+        Executing from:         Process Server
+
+        Special Notes:          Triggered from Request 250074.
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 11/07/97 Jeff Fry             Initial Release                     *
+;    *001 11/03/98 Jeff Fry             Read to see if all pending tests are*
+;    *                                  Verified, Autoverified or Corrected *
+;    *                                  and if so, complete the order.  This*
+;    *                                  is to account for two or more tech's*
+;    *                                  working on the same order at the    *
+;    *                                  same time.                          *
+;    *002 12/11/98 Jeff Fry             Read the updt_cnt from the orders   *
+;    *                                  table to prevent timing errors.     *
+;    *003 03/12/99 Gary Runde		Modify select to add "into "nl:""   *
+;    *004 06/04/99 Hal Patchen          Set order to complete in the event  *
+;    *                                  that no pending tests are defined   *
+;    *                                  and verified results exist.         *
+;    *005 08/24/99 Gary Runde           Add error logging to msgview        *
+;    *006 10/25/00 Gary Runde           Set the commit_ind to 0 on failure  *
+;    *007 05/17/01 Jay Ferstl           Add execute to add orders to mic_ic_orders*
+;    *008 4/17/02  Kevin Duggins        Set variables for order_id, accession and   * 
+;                                           completed_dt_tm                              * 
+;    *009 8/25/03 Amy Henry		code for complete_ind to be passed  *
+;					for pfmt_gl_to_expedite             *
+;    *010 02/06/02 Scott Haven          Skip Helix order status updates.    *
+;    *011 5/18/04 Amy Henry             Qualify for active_ind = 1 from the *
+;                                       profile_task_r                      *
+;    *012 06/05/08 Scott Haven          Send Helix orders to mic_ic_orders  *
+;    *013 08/13/08 Revathy Sreenath     Added Select to send service_res_cd *
+;                                       to order server for completed orders*
+;    *014 07/27/09 Kiran Vankadaru      Update detail_mean of complete_ind  *
+;                                       to 1 when all the reqd. assays are  *
+;                                       verified (CR# 1-1561603762)         *
+;    *015 03/25/10 Balaji Murali        Fix for expedites are not firing    * 
+;                                       for corrected results               *
+;    *016 03/16/12 Scott Haven          Remove logic that skips HLX.        *
+;    *017 03/25/14 abhroneel chowdhury  Modified error trapping             *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program pfmt_gl_upd_order:dba go
+create program pfmt_gl_upd_order:dba
+
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC                                  ;005
+SET LOG_PROGRAM_NAME = "pfmt_gl_upd_order"                            ;005
+
+/***********************************************************************
+ *   Print date and time to log file.                                  *
+ ***********************************************************************/
+  select into "nl:"                                                ;005
+    currentdate = cnvtdatetime(curdate,curtime3)                   ;005
+  detail                                                           ;005
+    sText = fillstring(254, " ")                                   ;005
+    sText = CONCAT("{{Script::PFMT_GL_UPD_ORDER}} Started at ",    ;005
+                   format(currentdate, "dd-mmm-yyyy-hhmm;;d"))     ;005
+    call uar_SysEvent(hSys, 4, "ScriptTrace", NULLTERM(sText))     ;005
+  with nocounter                                                   ;005
+
+call LOG_MESSAGE( build("Starting GL Update Order (",
+                  format(curdate, "MM/DD/YY;;D")," ", 
+                  format(curtime, " HHMM;;M"),")" ), LOG_LEVEL_DEBUG)            ;005
+                  
+free set pn_rec_detail
+record pn_rec_detail
+(
+   1 pn_rec[*]
+     2 pn_recovery_id = f8
+)                  
+ 
+/**** Main Processing ****/
+
+set ORDER_ACTION_CODESET    = 6003
+set ACTION_COMPLETE_CDF     = "COMPLETE"
+set ACTION_COMPLETE_CD      = 0.0
+set ACTION_STATUSCHANGE_CDF = "STATUSCHANGE"
+set ACTION_STATUSCHANGE_CD  = 0.0
+
+set ORDER_STATUS_CODESET    = 6004
+set ORDERED_CDF             = "ORDERED"
+set ORDERED_CD              = 0.0
+set IN_PROCESS_CDF          = "INPROCESS"
+set IN_PROCESS_CD           = 0.0
+
+set DEPT_STATUS_CODESET     = 14281
+set LAB_IN_PROCESS_CDF      = "LABINPROCESS"
+set LAB_IN_PROCESS_CD       = 0.0
+
+set RESULT_STATUS_CODESET   = 1901
+set VERIFIED_CDF            = "VERIFIED"
+set VERIFIED_CD             = 0.0
+set AUTOVERIFIED_CDF        = "AUTOVERIFIED"
+set AUTOVERIFIED_CD         = 0.0
+set INREVIEW_CDF            = "INREVIEW"
+set INREVIEW_CD             = 0.0
+set CORRECTED_CDF           = "CORRECTED"                               ;001
+set CORRECTED_CD            = 0.0                                       ;001
+
+set cur_order_status_cd     = 0.0
+set cur_updt_cnt            = 0                                         ;002
+set nbr_of_orders           = 0
+set nbr_of_assays           = 0
+set complete_cnt            = 0
+set changes_made            = 0
+
+set oidx                    = 0
+set aidx                    = 0
+set found_qual              = 0
+
+DECLARE lAssaySize              = i4 with public, noconstant(0)
+DECLARE lAssayIdx               = i4 with public, noconstant(0)
+DECLARE nProcessInd             = i2 with public, noconstant(0)
+
+declare dCompletedOrderStatusCd = f8 with noconstant(0.0), protect
+declare dCompletedDeptStatusCd = f8 with noconstant(0.0), protect
+declare dOrderId = f8 with noconstant(0.0), protect
+
+;Only create the record structures if program exists.
+record UCMUpdCasesReq
+(
+%i cclsource:ucm_upd_case_statuses_req.inc
+) with protect
+
+record UCMUpdCasesRep
+(
+%i cclsource:ucm_upd_case_statuses_rep.inc
+%i cclsource:status_block.inc
+) with protect
+
+set dCompletedOrderStatusCd = uar_get_code_by("MEANING", 6004, "COMPLETED")
+set dCompletedDeptStatusCd = uar_get_code_by("MEANING", 14281, "COMPLETED")
+
+%I cclsource:mic_add_glb_ic_orders.inc
+  
+  ;turn back on call echo's since inc file turned it off by executing cpmstartup_procare
+  set trace callecho
+  
+if ( requestin->reply->status_data->status = "F" )
+     set reqinfo->commit_ind = 0
+     call LOG_MESSAGE ("  Requestin failure", LOG_LEVEL_DEBUG)            ;005 
+     go to EXIT_SCRIPT
+endif                                                                         ;010
+
+;if (reqinfo->app = 260002)
+;    call LOG_MESSAGE ("This is from ROP!", LOG_LEVEL_DEBUG)            ;005
+;endif
+
+
+select into "nl:"
+    cv.code_value
+  from code_value cv
+  where (cv.code_set = ORDER_ACTION_CODESET and 
+         cv.cdf_meaning in (ACTION_COMPLETE_CDF, ACTION_STATUSCHANGE_CDF))
+  or    (cv.code_set = ORDER_STATUS_CODESET and
+         cv.cdf_meaning in (ORDERED_CDF, IN_PROCESS_CDF))
+  or    (cv.code_set = DEPT_STATUS_CODESET and
+         cv.cdf_meaning = LAB_IN_PROCESS_CDF)
+  or    (cv.code_set = RESULT_STATUS_CODESET and
+         cv.cdf_meaning in (VERIFIED_CDF, AUTOVERIFIED_CDF,             ;001
+         CORRECTED_CDF, INREVIEW_CDF))                                  ;001
+;001         cv.cdf_meaning in (VERIFIED_CDF, AUTOVERIFIED_CDF, INREVIEW_CDF))
+
+  detail
+     case (cv.code_set)
+       of ORDER_ACTION_CODESET:
+          case (cv.cdf_meaning)
+            of ACTION_COMPLETE_CDF:
+               ACTION_COMPLETE_CD = cv.code_value
+            of ACTION_STATUSCHANGE_CDF:
+               ACTION_STATUSCHANGE_CD = cv.code_value
+          endcase
+       of ORDER_STATUS_CODESET:
+          case (cv.cdf_meaning)
+            of ORDERED_CDF:
+               ORDERED_CD = cv.code_value
+            of IN_PROCESS_CDF:
+               IN_PROCESS_CD = cv.code_value
+          endcase
+       of DEPT_STATUS_CODESET:
+          case (cv.cdf_meaning)
+            of LAB_IN_PROCESS_CDF:
+               LAB_IN_PROCESS_CD = cv.code_value
+          endcase
+       of RESULT_STATUS_CODESET:
+          case (cv.cdf_meaning)
+            of VERIFIED_CDF:
+               VERIFIED_CD = cv.code_value
+            of AUTOVERIFIED_CDF:
+               AUTOVERIFIED_CD = cv.code_value
+            of INREVIEW_CDF:
+               INREVIEW_CD = cv.code_value
+            of CORRECTED_CDF:                                           ;001
+               CORRECTED_CD = cv.code_value                             ;001
+          endcase
+     endcase
+
+with nocounter
+
+CALL ERROR_MESSAGE(0)                                                                  ;005
+
+
+set nbr_of_orders = size(requestin->request->orders, 5)
+set stat = alterlist(ordersin->qual, nbr_of_orders)
+
+for (oidx = 1 to nbr_of_orders)
+   call LOG_MESSAGE ( build("  Processing OrderID =",
+               requestin->request->orders[oidx]->order_id), LOG_LEVEL_DEBUG)           ;005
+
+   ;default update_review_ind to update test_reviewer table to be pending 
+   ;when all pending assays are in-review or greater
+   if (requestin->request->orders[oidx].review_required_ind = 1 and 
+       requestin->request->orders[oidx].pending_review_ind = 0 )
+     set pfmt_reply->orders[oidx].update_review_ind = 1.
+   endif
+
+   select into "nl:"
+      o.order_id
+   from orders o
+   where o.order_id = requestin->request->orders[oidx]->order_id
+   detail
+      cur_order_status_cd = o.order_status_cd
+      cur_updt_cnt = o.updt_cnt                                                        ;002
+   with nocounter
+
+   if (cur_order_status_cd = dCompletedOrderStatusCd)
+     set requestin->reply->orders[oidx]->complete_ind = 1
+     set pn_results->orders[oidx]->complete_ind =
+              requestin->reply->orders[oidx]->complete_ind
+   endif
+ 
+   CALL ERROR_MESSAGE(0)                                                               ;005
+
+;******  Behind the scenes check to see if order is complete! *******
+   if (requestin->reply->orders[oidx]->complete_ind = 0)                               ;001
+      call LOG_MESSAGE("--> Order Not Marked As Complete", LOG_LEVEL_DEBUG)            ;005
+      call LOG_MESSAGE("  --> Checking Status Of Pending Procedures", LOG_LEVEL_DEBUG) ;005
+      if (cur_order_status_cd in (ORDERED_CD, IN_PROCESS_CD))                          ;001
+         call LOG_MESSAGE("    --> Order Status Qualifies", LOG_LEVEL_DEBUG)           ;005
+         
+         set o_qual = 1                                                 ;001
+;003         select                                                         ;001
+           select into "nl:"   						;003
+           ptr.pending_ind,                                             ;001
+           d_r.seq,                                                     ;001
+           r_exists = decode(r.result_id, "Y", "N"),                    ;001
+           r.result_status_cd
+         from                                                           ;001
+           profile_task_r ptr,                                          ;001
+           (dummyt d_r with seq = 1),                                   ;001
+           result r
+         plan ptr                                                       ;001
+           where ptr.catalog_cd =                                       ;001
+                requestin->request->orders[oidx]->catalog_cd            ;001
+                and ptr.active_ind = 1                                  ;010
+         join d_r                                                       ;001
+           where d_r.seq = 1                                            ;001
+         join r                                                         ;001
+           where r.order_id =                                           ;001
+                requestin->request->orders[oidx]->order_id              ;001
+           and r.task_assay_cd = ptr.task_assay_cd                      ;001
+           and r.result_status_cd in                                    ;001
+               (VERIFIED_CD, AUTOVERIFIED_CD, CORRECTED_CD, INREVIEW_CD)             ;001
+         head report                                                    ;004
+            found_pending_test_ind = 0                                  ;004
+            pending_w_noresult_ind = 0                                  ;004
+            nonpending_w_result_ind = 0                                 ;004
+            found_nonpending_in_review_result_ind = 0
+         detail                                                         ;001
+           if (ptr.pending_ind = 1)                                     ;004
+              found_pending_test_ind = 1                                ;004
+           endif                                                        ;004
+           ;* Check for pending test with no verified result.           ;004
+           if (ptr.pending_ind = 1                                      ;004
+           and ((r_exists = "N") or (r_exists = "Y" and r.result_status_cd = INREVIEW_CD)))
+              pending_w_noresult_ind = 1                                ;004
+           endif                                                        ;004
+           ;* Check for non-pending test with a verified result.        ;004
+           if (ptr.pending_ind = 0                                      ;004
+           and r_exists = "Y"                                          ;004
+           and r.result_status_cd in                                    ;001
+               (VERIFIED_CD, AUTOVERIFIED_CD, CORRECTED_CD))
+              nonpending_w_result_ind = 1                                ;004
+           endif                                                        ;004
+
+           ;set update_review_ind to zero if required assay is found with no result
+           ;meaning this HLA Review Queue Item cannot be updated to Pending.
+           if (ptr.pending_ind = 1 and r_exists = "N")
+             pfmt_reply->orders[oidx].update_review_ind = 0
+           endif
+           ;check for non-pending test with a in-review or greater result
+           if (ptr.pending_ind = 0 and r_exists = "Y")
+             found_nonpending_in_review_result_ind = 1
+           endif
+
+        foot report                                                     ;004
+           ;* If pending tests exist and a pending test was found       ;004
+           ;* with no verified results, the order can not be completed. ;004
+           if (found_pending_test_ind = 1                               ;004
+           and pending_w_noresult_ind = 1)                              ;004
+              o_qual = 0                                                ;004
+           endif                                                        ;004
+           ;* If all tests are non-pending and no verified results      ;004
+           ;* were found, the order can not be set to complete.         ;004
+           if (found_pending_test_ind = 0                               ;004
+           and nonpending_w_result_ind = 0)                             ;004
+              o_qual = 0                                                ;004
+           endif                                                        ;004
+
+           ;* If all tests are non-pending and no in-review or greater results
+           ;* were found, the review status cannot be updated to pending
+           if (found_pending_test_ind = 0
+           and found_nonpending_in_review_result_ind = 0)
+              pfmt_reply->orders[oidx].update_review_ind = 0
+           endif
+
+         with outerjoin = d_r
+
+
+         CALL ERROR_MESSAGE(0)                                          ;005
+
+         if (curqual > 0)                                               ;001
+            if (o_qual = 1)                                             ;001
+               call LOG_MESSAGE("    --> Marking Order For Completion", LOG_LEVEL_DEBUG)  ;005
+               set requestin->reply->orders[oidx]->complete_ind = 1     ;001
+	       if (pn_results->orders[oidx]->complete_ind !=              ;009
+	         requestin->reply->orders[oidx]->complete_ind)           ;009
+	       	   set pn_results->orders[oidx]->complete_ind =            ;009
+		    requestin->reply->orders[oidx]->complete_ind        ;009
+	
+	           ;need to update pn_recovery_detail table to keep in sync     ;009
+	           /************************/					;009
+                  /* Lock rows for update */ 					;009
+                 /************************/					;009
+                 
+            set pidx = 0
+            set idx1 = 0
+            set stat = alterlist(pn_rec_detail->pn_rec, 5)
+            select into "nl:"
+                pr.pn_recovery_id
+            from pn_recovery pr
+            plan pr
+            where pr.parent_entity_id = requestin->request->orders[oidx]->order_id
+                 and pr.parent_entity_name = "ORDERS"
+            detail
+                pidx = pidx + 1
+                if (pidx > size(pn_rec_detail->pn_rec, 5))
+                	stat = alterlist(pn_rec_detail->pn_rec, pidx+5)
+                endif
+                pn_rec_detail->pn_rec[pidx]->pn_recovery_id = pr.pn_recovery_id
+            with nocounter
+ 
+            set stat = alterlist(pn_rec_detail->pn_rec, pidx)
+ 
+            select into "nl:"					;009
+            from pn_recovery_detail prd				;009
+            plan prd
+            where
+                expand(idx1, 1, size(pn_rec_detail->pn_rec,5), prd.parent_entity_id,
+                       pn_rec_detail->pn_rec[idx1]->pn_recovery_id)
+                and prd.parent_entity_name = "PN_RECOVERY"		;009
+		        and prd.detail_mean = "COMPLETE_IND"			;009
+            with nocounter, forupdate(prd)				;009
+ 
+ 
+	    	 if (curqual > 0)
+                    update into						;009
+		    	        pn_recovery_detail prd				;009
+		            set 							;009
+		                prd.detail_value = 	pn_results->orders[oidx]->complete_ind      ;009
+		            where							;009
+                        expand(idx1, 1, size(pn_rec_detail->pn_rec,5), prd.parent_entity_id,
+                               pn_rec_detail->pn_rec[idx1]->pn_recovery_id)
+		       	        and prd.parent_entity_name = "PN_RECOVERY"		;009
+		   	            and prd.detail_mean = "COMPLETE_IND"			;009
+		            with nocounter
+		
+		   	    CALL ERROR_MESSAGE(0)                                   ;009
+		        if (curqual != 0 )
+                   	set changes_made = 1					;009
+		        endif
+		     endif
+	       endif	  						;009
+            else                                                        ;001
+               call LOG_MESSAGE("    --> Order Not Complete", LOG_LEVEL_DEBUG)            ;005
+            endif                                                       ;001
+         else                                                           ;001
+            call LOG_MESSAGE("    --> No Assays Qualified", LOG_LEVEL_DEBUG)              ;005
+         endif                                                          ;001
+      endif                                                             ;001
+   endif                                                                ;001
+;**************************************************************************
+
+   ;Look for orders that need to be completed.
+   if (requestin->reply->orders[oidx]->complete_ind = 1)
+      call LOG_MESSAGE("  --> Order Marked For Completion", LOG_LEVEL_DEBUG)              ;005
+
+      set ordersin->qual[oidx]->order_id = requestin->request->orders[oidx]->order_id                         ;008
+      set ordersin->qual[oidx]->accession = requestin->request->orders[oidx]->accession                        ;008
+      set ordersin->qual[oidx]->complete_dt_tm = 0                                                               ;008 
+
+      if (cur_order_status_cd in (ORDERED_CD, IN_PROCESS_CD))
+         call LOG_MESSAGE("    --> Order Status Qualifies", LOG_LEVEL_DEBUG)              ;005
+
+         set complete_cnt = complete_cnt + 1
+         set stat = alterlist(replyout->orderList, complete_cnt)
+         set replyout->orderList[complete_cnt]->orderId =
+            requestin->request->orders[oidx]->order_id
+         set replyout->orderList[complete_cnt]->lastUpdtCnt =
+            cur_updt_cnt                                                ;002
+;002           requestin->request->orders[oidx]->updt_cnt
+         set replyout->orderList[complete_cnt]->actionTypeCd =
+            ACTION_COMPLETE_CD
+         set replyout->orderList[complete_cnt]->orderDtTm =
+            cnvtdatetime(curdate,curtime)
+         set ordersin->qual[oidx]->complete_dt_tm =
+            cnvtdatetime(replyout->orderList[complete_cnt]->orderDtTm)
+ ;008        set ordersin->qual[oidx]->order_id = requestin->request->orders[oidx]->order_id
+ ;008        set ordersin->qual[oidx]->accession = requestin->request->orders[oidx]->accession
+         set replyout->orderList[complete_cnt]->catalogCd =
+            requestin->request->orders[oidx]->catalog_cd
+         set replyout->orderList[complete_cnt]->catalogTypeCd =
+            requestin->request->orders[oidx]->catalog_type_cd
+
+         call LOG_MESSAGE("    --> Starting PR serviceResourceCd Select...", LOG_LEVEL_DEBUG)	
+         	
+         /* To send the service_resource_cd to order server for orderable */
+         set dOrderId = 0.0
+         set dOrderId = requestin->request->orders[oidx]->order_id
+         set stat = alterlist(replyout->orderList[complete_cnt]->resourcelist, 1)
+         
+         select into "nl:"
+           p.service_resource_cd
+         from result r
+              , profile_task_r ptr
+              , perform_result p
+         
+         plan r where r.order_id = dOrderId 
+         join ptr where (r.task_assay_cd = ptr.task_assay_cd and r.catalog_cd = ptr.catalog_cd) 
+         join p where (p.result_id = r.result_id and p.result_status_cd = r.result_status_cd)
+         
+         order by r.order_id, ptr.catalog_cd, ptr.pending_ind DESC , ptr.sequence
+        
+         head r.order_id
+            
+           replyout->orderList[complete_cnt]->resourceList[1].serviceResourceCd = p.service_resource_cd
+                  
+         with nocounter
+         
+         set changes_made = 1
+         
+         set stat = alterlist(UCMUpdCasesReq->status_updates, complete_cnt)
+         set UCMUpdCasesReq->status_updates[complete_cnt].order_id = replyout->orderList[complete_cnt]->orderId
+         set UCMUpdCasesReq->status_updates[complete_cnt].updt_cnt = replyout->orderList[complete_cnt]->lastUpdtCnt
+         set UCMUpdCasesReq->status_updates[complete_cnt].order_status_cd = dCompletedOrderStatusCd
+         set UCMUpdCasesReq->status_updates[complete_cnt].dept_status_cd = dCompletedDeptStatusCd
+         set UCMUpdCasesReq->status_updates[complete_cnt].update_ind = 0
+      else
+         call LOG_MESSAGE("    --> Order Status Does Not Qualify", LOG_LEVEL_DEBUG)        ;005
+      endif
+
+;For orders which were reviewed and are now complete, set the pending review in 
+;on the order laboratory table to false.
+
+      call LOG_MESSAGE("  --> Check Pending Review Indicator", LOG_LEVEL_DEBUG)            ;005
+
+      if (requestin->request->orders[oidx].pending_review_ind = 1)
+
+         call LOG_MESSAGE("    --> Reset Pending Review Indicator", LOG_LEVEL_DEBUG)       ;005
+         update into order_laboratory a
+         set 
+           a.pending_review_ind = 0
+         plan a 
+            where a.order_id = requestin->request.orders[oidx].order_id
+         with nocounter
+         CALL ERROR_MESSAGE(0)                                                             ;005
+         set changes_made = 1
+      endif
+
+   else
+      call LOG_MESSAGE("  --> Attempting To Set To In-Process", LOG_LEVEL_DEBUG)           ;005
+      if (cur_order_status_cd = ORDERED_CD)
+         call LOG_MESSAGE("    --> Order Status Qualifies", LOG_LEVEL_DEBUG)               ;005
+         set nbr_of_assays = size(requestin->request->orders[oidx]->assays, 5)
+         set aidx = 1
+         set found_qual = 0
+         while (aidx <= nbr_of_assays and found_qual = 0)
+            if (requestin->reply->orders[oidx]->assays[aidx]->result_status_cd in
+            (VERIFIED_CD, AUTOVERIFIED_CD, INREVIEW_CD))
+               set found_qual = 1
+            else
+               set aidx = aidx + 1
+            endif
+         endwhile
+         if (found_qual = 1)
+            call LOG_MESSAGE("    --> Found Qualified Assay", LOG_LEVEL_DEBUG)             ;005
+
+            set complete_cnt = complete_cnt + 1
+            set stat = alterlist(replyout->orderList, complete_cnt)
+            set replyout->orderList[complete_cnt]->orderId =
+               requestin->request->orders[oidx]->order_id
+            set replyout->orderList[complete_cnt]->lastUpdtCnt =
+               requestin->request->orders[oidx]->updt_cnt
+            set replyout->orderList[complete_cnt]->actionTypeCd =
+               ACTION_STATUSCHANGE_CD
+            set replyout->orderList[complete_cnt]->orderStatusCd =
+               IN_PROCESS_CD
+            set replyout->orderList[complete_cnt]->deptStatusCd =
+               LAB_IN_PROCESS_CD
+            set replyout->orderList[complete_cnt]->orderDtTm =
+               cnvtdatetime(curdate,curtime)
+            set ordersin->qual[oidx]->complete_dt_tm = 
+              cnvtdatetime(replyout->orderList[complete_cnt]->orderDtTm)
+            set ordersin->qual[oidx]->order_id = requestin->request->orders[oidx]->order_id
+            set ordersin->qual[oidx]->accession = requestin->request->orders[oidx]->accession    
+            set replyout->orderList[complete_cnt]->catalogCd =
+               requestin->request->orders[oidx]->catalog_cd
+            set replyout->orderList[complete_cnt]->catalogTypeCd =
+               requestin->request->orders[oidx]->catalog_type_cd
+
+            set changes_made = 1
+            set stat = alterlist(UCMUpdCasesReq->status_updates, complete_cnt)
+            set UCMUpdCasesReq->status_updates[complete_cnt].order_id = replyout->orderList[complete_cnt]->orderId
+            set UCMUpdCasesReq->status_updates[complete_cnt].updt_cnt = replyout->orderList[complete_cnt]->lastUpdtCnt
+            set UCMUpdCasesReq->status_updates[complete_cnt].order_status_cd = replyout->orderList[complete_cnt]->orderStatusCd
+            set UCMUpdCasesReq->status_updates[complete_cnt].dept_status_cd = replyout->orderList[complete_cnt]->deptStatusCd
+            set UCMUpdCasesReq->status_updates[complete_cnt].update_ind = 0
+         else
+            call LOG_MESSAGE("    --> No Assays Qualified", LOG_LEVEL_DEBUG)               ;005
+         endif
+      else
+         call LOG_MESSAGE("    --> Order Status Does Not Qualify", LOG_LEVEL_DEBUG)        ;005
+         set ordersin->qual[oidx]->complete_dt_tm = 
+             cnvtdatetime(replyout->orderList[complete_cnt]->orderDtTm)
+         set ordersin->qual[oidx]->order_id = requestin->request->orders[oidx]->order_id
+         set ordersin->qual[oidx]->accession = requestin->request->orders[oidx]->accession
+      endif
+
+;For orders which are being reviewed, set the pending review indicator on the
+;order laboratory table to true.
+      call LOG_MESSAGE("  --> Check Pending Review Indicator", LOG_LEVEL_DEBUG)            ;005
+
+      if (pfmt_reply->orders[oidx].create_review_ind = 1
+          or pfmt_reply->orders[oidx].update_review_ind = 1)
+
+         call LOG_MESSAGE("    --> Set To Pending Review", LOG_LEVEL_DEBUG)                ;005
+         update into order_laboratory a
+         set 
+           a.pending_review_ind = 1
+         plan a 
+            where a.order_id = requestin->request.orders[oidx].order_id
+         with nocounter
+         CALL ERROR_MESSAGE(0)                                                             ;005
+         set changes_made = 1
+      endif
+
+   endif
+
+/************************************************************
+* Only process orders if status is verified/corrected       *
+************************************************************/
+/* GYL
+   SET nProcessInd = 0  
+   SET lAssaySize = size(requestin->request->orders[oidx]->assays,5)
+   FOR (lAssayIdx = 1 to lAssaySize)
+     IF (requestin->request->orders[oidx]->assays[lAssayIdx]->result_status_cd in 
+         (dVerifiedCd, dCorrectedCd))
+       SET nProcessInd = 1  
+       SET lAssayIdx = lAssaySize
+     ENDIF
+   ENDFOR
+    SET nErrorStatus = ERROR(sErrorMsg, 0)
+    IF (nErrorStatus = 0)
+       SET lOrderCnt = 0
+    ELSE
+       SET recError->sLocation = "Before GLB to mic_ic_orders"                   
+       SET recError->sMessage = sErrorMsg
+       SET recError->nBackgroundInd = 0
+       SET recError->nLogicalInd = 1
+       SET recError->sScript = "pfmt_mic_add_ic_orders"
+       CALL error_handler(1)
+    ENDIF
+   IF (nProcessInd = 1)
+     call Add_Glb_Ic_Orders(0)
+   ;SET lOrderCnt = 0
+   ENDIF 
+    SET nErrorStatus = ERROR(sErrorMsg, 0)
+    IF (nErrorStatus = 0)
+       SET lOrderCnt = 0
+    ELSE
+       SET recError->sLocation = "Adding GLB1 to mic_ic_orders"                   
+       SET recError->sMessage = sErrorMsg
+       SET recError->nBackgroundInd = 0
+       SET recError->nLogicalInd = 1
+       SET recError->sScript = "pfmt_mic_add_ic_orders"
+       CALL error_handler(1)
+    ENDIF
+*/
+endfor
+
+/* Update any Cases as necessary. */
+call LOG_MESSAGE("--> Execute UCM_UPD_CASE_STATUSES", LOG_LEVEL_DEBUG)  
+execute ucm_upd_case_statuses with replace("REQUEST", "UCMUPDCASESREQ"),
+                           replace("REPLY", "UCMUPDCASESREP")
+if (UCMUpdCasesRep->status_data->status != "S")
+  call LOG_MESSAGE(build("Error Calling UCM_UPD_CASE_STATUSES, status: ",
+                   UCMUpdCasesRep->status_data->status), LOG_LEVEL_WARNING)
+endif
+
+if (changes_made = 1)
+   commit
+   set reqinfo->commit_ind = 1
+   for (oidx = 1 to nbr_of_orders)
+      SET nProcessInd = 0  
+      SET lAssaySize = size(requestin->request->orders[oidx]->assays,5)
+      FOR (lAssayIdx = 1 to lAssaySize)
+         IF (requestin->request->orders[oidx]->assays[lAssayIdx]->result_status_cd in (dVerifiedCd, dCorrectedCd, dAutoverifiedCd))
+            SET nProcessInd = 1  
+            SET lAssayIdx = lAssaySize
+         ENDIF
+      ENDFOR
+ 
+      set nErrorStatus = 1
+      WHILE (nErrorStatus != 0)
+	      SET nErrorStatus = ERROR(sErrorMsg, 0)
+	      IF (nErrorStatus = 0)
+	         SET lOrderCnt = 0
+	      ELSE
+	         SET recError->sLocation = "Before GLB to mic_ic_orders"
+	         SET recError->sMessage = sErrorMsg
+	         SET recError->nBackgroundInd = 0
+	         SET recError->nLogicalInd = 1
+	         SET recError->sScript = "pfmt_mic_add_ic_orders"
+	         CALL error_handler(1)
+	      ENDIF
+	  ENDWHILE
+ 
+      IF (nProcessInd = 1)
+        call Add_Glb_Ic_Orders(oidx)         
+      ENDIF 
+
+      set nErrorStatus = 1
+      WHILE (nErrorStatus != 0)
+	      SET nErrorStatus = ERROR(sErrorMsg, 0)
+	      IF (nErrorStatus = 0)
+	         SET lOrderCnt = 0
+	      ELSE
+	         SET recError->sLocation = "Adding GLB1 to mic_ic_orders"
+	         SET recError->sMessage = sErrorMsg
+	         SET recError->nBackgroundInd = 0
+	         SET recError->nLogicalInd = 1
+	         SET recError->sScript = "pfmt_mic_add_ic_orders"
+	         CALL error_handler(1)
+	      ENDIF
+	  ENDWHILE
+   endfor
+
+else                                                              ;006
+   set reqinfo->commit_ind = 0                                    ;006
+   rollback
+endif
+
+#END_PROGRAM
+
+commit
+
+#EXIT_SCRIPT
+call LOG_MESSAGE( build("Ending GL Update Order (",
+                  format(curdate, "MM/DD/YY;;D")," ", 
+                  format(curtime, " HHMM;;M"),")" ), LOG_LEVEL_DEBUG)                     ;005
+call uar_SysDestroyHandle(hSys)                                                           ;005
+free record UCMUpdCasesReq
+free record UCMUpdCasesRep
+free set pn_rec_detail
+end go
+
+;Generated by GNU enscript 1.6.4.

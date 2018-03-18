@@ -1,0 +1,170 @@
+/**************************************************************************
+                      MODIFICATION CONTROL LOG                 *
+**************************************************************************
+ Mod Date     Engineer      Comment
+ --- -------- ------------  ---------------------------------------
+ 000 01/19/12 Akcia - SE    Initial release
+ 001 07/05/12 Akcia - SE	make facility 4 characters instead of 2 
+*************************************************************************/
+drop program mayo_mn_clinic_med_rec_mu:dba go
+create program mayo_mn_clinic_med_rec_mu:dba
+ 
+prompt
+	"Output to File/Printer/MINE" = "MINE"
+	, "Start Date" = CURDATE
+	, "End Date" = CURDATE
+	, "Site" = ""
+ 
+with OUTDEV, start_date, end_date, site
+ 
+declare attending_cd = f8 with protect, constant(uar_get_code_by("MEANING", 333, "ATTENDDOC"))
+declare clin_outpat_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 71, "CLINICOUTPATIENT"))
+declare user_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 263, "USERLOCATION"))
+declare npi_cd = f8 with protect, constant(uar_get_code_by("DISPLAYKEY", 263, "NPI"))
+ 
+declare ops_ind = c1 with noconstant("N")
+set ops_ind =  validate(request->batch_selection, "Z")
+ 
+if (ops_ind = "Z")
+	set beg_dt = cnvtdatetime(cnvtdate($start_date),0)
+  	set end_dt = cnvtdatetime(cnvtdate($end_date),235959)
+else
+	set beg_dt = datetimefind(cnvtlookbehind("1,M",sysdate),"M","B","B")
+  	set end_dt = datetimefind(cnvtlookbehind("1,M",sysdate),"M","E","E")
+endif
+ 
+record data (
+1 facility[*]
+  2 name = vc
+  2 physician[*]
+    3 name = vc
+    3 npi = vc
+    3 inpat_encs = f8
+    3 admit_comp = f8
+    3 admit_percent = f8
+    3 disch_encs = f8
+    3 disch_comp = f8
+    3 disch_percent = f8
+)
+ 
+ 
+select into "nl:"
+;001 fac_name = substring(1,2,pa.alias),
+fac_name = substring(1,4,pa.alias),		;001
+e.encntr_id ,
+pl.name_full_formatted,
+epr.prsnl_person_id,
+ore1.order_recon_id
+from
+encounter e,
+encntr_prsnl_reltn epr,
+prsnl pl,
+prsnl_alias pa,
+prsnl_alias pa1,
+order_recon ore1
+ 
+plan e
+where e.reg_dt_tm between cnvtdatetime(beg_dt) and cnvtdatetime(end_dt)
+  and e.active_ind = 1
+;  and e.loc_facility_cd = (select cv.code_value from code_value cv where cv.code_value = e.loc_facility_cd
+; 					 		and cv.display_key = value(concat(trim($site,3),"*"))
+; 					 		and cv.description != "*Hospital*")
+  and e.encntr_type_cd in (clin_outpat_cd)
+  and e.loc_nurse_unit_cd = (select cust.loc_cd from mhscix.cust_report_location cust
+  								where cust.loc_cd = e.loc_nurse_unit_cd
+  								  and cust.rpt_name = "MedRecClinic"
+  								  and cust.loc_type = "NURSEUNIT"
+  								  and cust.loc_name = value(concat(trim($site,3),"*")))
+ 
+join epr
+where epr.encntr_id = e.encntr_id
+  and epr.encntr_prsnl_r_cd = attending_cd
+  and epr.end_effective_dt_tm > sysdate
+  and epr.active_ind = 1
+ 
+join pl
+where pl.person_id = epr.prsnl_person_id
+ 
+join pa
+where pa.person_id = outerjoin(pl.person_id)
+  and pa.alias_pool_cd = outerjoin(user_cd)
+  and pa.active_ind = outerjoin(1)
+  and pa.end_effective_dt_tm > outerjoin(sysdate)
+ 
+join pa1
+where pa1.person_id = outerjoin(pl.person_id)
+  and pa1.alias_pool_cd = outerjoin(npi_cd)
+  and pa1.active_ind = outerjoin(1)
+  and pa1.end_effective_dt_tm > outerjoin(sysdate)
+ 
+join ore1
+where ore1.encntr_id = outerjoin(e.encntr_id)
+  and ore1.recon_type_flag = outerjoin(3)
+ 
+ 
+order fac_name, pl.name_full_formatted, e.encntr_id
+ 
+head report
+fcnt = 0
+pcnt = 0
+ 
+head fac_name
+fcnt = fcnt + 1
+stat = alterlist(data->facility,fcnt)
+if (fac_name > " ")
+  data->facility[fcnt]->name = fac_name
+else
+  data->facility[fcnt]->name = "Unknown"
+endif
+ 
+pcnt = 0
+ 
+head pl.name_full_formatted
+pcnt = pcnt + 1
+stat = alterlist(data->facility[fcnt]->physician,pcnt)
+if (pl.person_id > 0)
+  data->facility[fcnt]->physician[pcnt]->name = pl.name_full_formatted
+else
+  data->facility[fcnt]->physician[pcnt]->name = "Unknown"
+endif
+data->facility[fcnt]->physician[pcnt]->npi = pa1.alias
+ 
+head e.encntr_id
+data->facility[fcnt]->physician[pcnt]->disch_encs = data->facility[fcnt]->physician[pcnt]->disch_encs + 1
+ 
+if (ore1.order_recon_id > 0)
+  data->facility[fcnt]->physician[pcnt]->disch_comp = data->facility[fcnt]->physician[pcnt]->disch_comp + 1
+endif
+ 
+foot pl.name_full_formatted
+data->facility[fcnt]->physician[pcnt]->disch_percent =
+		  (data->facility[fcnt]->physician[pcnt]->disch_comp/data->facility[fcnt]->physician[pcnt]->disch_encs)*100
+ 
+with nocounter
+ 
+call echorecord(data)
+ 
+ 
+select into $outdev
+Facility = data->facility[d.seq].name,
+Physician = data->facility[d.seq].physician[d1.seq].name,
+Disch_Encs = data->facility[d.seq].physician[d1.seq].disch_encs,
+Disch_Complete = data->facility[d.seq].physician[d1.seq].disch_comp,
+Disch_Percent = data->facility[d.seq].physician[d1.seq].disch_percent,
+NPI = substring(1,15,data->facility[d.seq].physician[d1.seq]->npi)
+from
+(dummyt d with seq = size(data->facility,5)),
+(dummyt d1 with seq = 1)
+ 
+plan d
+where maxrec(d1,size(data->facility[d.seq]->physician,5))
+ 
+join d1
+ 
+order facility, physician
+ 
+with format, separator = " "
+ 
+ 
+ 
+end go

@@ -1,0 +1,141 @@
+drop program 1mayo_mn_pat_appt_list_v2:dba go
+create program 1mayo_mn_pat_appt_list_v2:dba
+/****************************************************************************
+ *                                                                          *
+ *  Copyright Notice:  (c) 1983 Laboratory Information Systems &            *
+ *                              Technology, Inc.                            *
+ *       Revision      (c) 1984-1999 Cerner Corporation                     *
+ *                                                                          *
+ *  Cerner (R) Proprietary Rights Notice:  All rights reserved.             *
+ *  This material contains the valuable properties and trade secrets of     *
+ *  Cerner Corporation of Kansas City, Missouri, United States of           *
+ *  America (Cerner), embodying substantial creative efforts and            *
+ *  confidential information, ideas and expressions, no part of which       *
+ *  may be reproduced or transmitted in any form or by any means, or        *
+ *  retained in any storage or retrieval system without the express         *
+ *  written permission of Cerner.                                           *
+ *                                                                          *
+ *  Cerner is a registered mark of Cerner Corporation.                      *
+ *                                                                          *
+ ****************************************************************************
+ 
+          Date Written:       	11/15/12
+          Source file name:   	1mayo_mn_pat_appt_list_v2.prg
+          Object name:        	1mayo_mn_pat_appt_list_v2
+          Request #:
+ 
+          Product:            	Discern MPages
+          Product Team:
+          HNA Version:        	V500
+          CCL Version:        	8.3
+ 
+          Program purpose:    	Wrapper program used to create patient portal on IQHealth
+								that pulls patient appointments occuring from current date/time called.
+ 
+          Tables read:        	NONE
+          Tables updated:     	NONE
+          Executing from:     	MPages Mobile servers (IQHealth)
+ 
+          Special Notes:		NONE
+ **********************************************************************************************
+ *                      GENERATED MODIFICATION CONTROL LOG
+ **********************************************************************************************
+ *
+ *Mod Date     Feature  Engineer     Comment
+ *--- -------- -------- ------------ -----------------------------------------------------------
+ *001 11/15/12   000000 BH018364     Initial Release
+ *002 01/03/13	 000000 BH018364	 Updated for return of JSON string through public subroutine
+ **********************************************************************************************/
+prompt
+	"Output to File/Printer/MINE" = "MINE"   ;* Enter or select the printer or file name to send this report to.
+	, "Person Id:" = 0.0
+	, "XMLCclRequest Ind:" = 1
+ 
+with OUTDEV, inputPersonId, asyncInd
+ 
+/**********************************************************************************************
+	Varibles/Constants
+***********************************************************************************************/
+declare person_id = f8 with protect, constant(CNVTREAL($inputPersonId))
+declare json_str = gvc with persistscript, noconstant("")
+declare loop_cnt = i4 with noconstant(0)
+ 
+declare loadPatientData( dummy ) = null with protect
+ 
+/**********************************************************************************************
+	Script Execution
+***********************************************************************************************/
+call loadPatientData(0)
+ 
+/**********************************************************************************************
+	Subroutines
+***********************************************************************************************/
+subroutine loadPatientData( dummy )
+	execute 1mayo_mn_sch_itnry_by_pat_v2 ^mine^,
+				^a.beg_dt_tm >= CNVTDATETIME(CURDATE,CURTIME)^,
+				^a.end_dt_tm < CNVTDATETIME("31-DEC-2100 00:00")^,
+				BUILD2(^r.person_id=^,person_id)
+ 
+	/* Update EU Claire Visits */
+	declare x = i4 with protect, noconstant(0)
+	select into "nl:"
+	from
+		(dummyt d with seq = value(size(T_LIST->LOC,5)))
+	plan d
+		where (T_LIST->LOC[d.seq].BUILDING = patstring("Eau*") or
+			T_LIST->LOC[d.seq].BUILDING = patstring("EAU*"))
+	detail
+		x = 1
+		for (x = 1 to size(T_LIST->LOC[d.seq].APPT,5))
+			T_LIST->LOC[d.seq].APPT[x].LPREPCNT = 1
+			T_LIST->LOC[d.seq].APPT[x].LPREPLNECNT = 1
+			stat = alterlist(T_LIST->LOC[d.seq].APPT[x].PREPS,1)
+			T_LIST->LOC[d.seq].APPT[x].PREPS[1].PREPINSTRUCT = BUILD(
+				"Please refer to your paper itinerary for any special instructions.&nbsp;&nbsp;",
+				"If you do not have a paper itinerary you may contact your providers office with any questions."
+			)
+		endfor
+	with nocounter
+ 
+	/* Updating Timezones for each visit according to facility */
+	select into "nl:"
+	from
+		(dummyt d with seq=value(size(T_LIST->LOC,5)))
+		, location_group lg
+		, time_zone_r tzr
+	plan d
+	join lg
+		where T_LIST->LOC[d.seq].building_cd = lg.child_loc_cd
+		and lg.active_ind = 1
+	join tzr
+		where tzr.parent_entity_id = lg.parent_loc_cd
+		and tzr.parent_entity_name = "LOCATION"
+	detail
+		loop_size = size(T_LIST->LOC[d.seq].APPT,5)
+		for (loop_cnt = 1 to loop_size)
+			T_LIST->LOC[d.seq].APPT[loop_cnt].DT_TM =
+				DATETIMEZONEFORMAT(T_LIST->LOC[d.seq].APPT[loop_cnt].APPT_DT_TM,
+					datetimezonebyname(tzr.time_zone),"MM/DD/YYYY HH:mm:ss ZZZ",CURTIMEZONEDEF)
+		endfor
+	with nocounter
+ 
+	set json_str = CNVTRECTOJSON(t_list)
+end ;loadPatientData( dummy )
+ 
+/**********************************************************************************************
+	Exit Script
+***********************************************************************************************/
+#exit_script
+if ($asyncInd)
+	set _MEMORY_REPLY_STRING = json_str
+endif
+if (person_id != 0.0)
+	if (validate(debug_ind,0) = 1)
+		call echorecord( t_list )
+	elseif ($asyncInd)
+		free record t_list
+	endif
+endif
+end
+go
+ 

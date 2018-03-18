@@ -1,0 +1,730 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_upd_av_status/glb_upd_av_status.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_UPD_AV_STATUS.PRG
+        Object name:            GLB_UPD_AV_STATUS
+        Request #:              250200
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Update the auto_verify table and write
+                                av_status event
+
+        Tables read:            auto_verify
+
+        Tables updated:         auto_verify
+
+        Executing from:         General Lab AVStatus.dll
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 05/03/00 Gary Runde           Initial Release                     *
+;     001 03/21/01 Gary Runde           Do not do checks if val_qc_sched is off*	
+;     002 04/26/06 Ryan Sullivan        Defect Resolution CR #1-644876654   *
+;     003 08/02/07 Ryan Manuel          Fix Out of Control Changed Results  *
+;     004 11/11/09 Antony greetan       Fix for CR# 1-3523332261            *
+;     005 05/10/10 Sharada K            Fix for CR# 1-3927712961 
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+    drop program GLB_UPD_AV_STATUS:dba go
+    create program GLB_UPD_AV_STATUS:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+    record request
+    (
+      1  service_resource_cd          = f8
+      1  av_ind                       = i2
+      1  all_assays_ind               = i2
+      1  assays[*]
+         2  task_assay_cd             = f8
+         2  service_resource_cd       = f8
+    )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+    record reply
+    (
+      ;reply record used to hold resources that are not changed
+      1  resources_failed             = i2
+      1  assayresources[*]
+         2  task_assay_cd             = f8
+         2  task_assay_disp           = vc
+         2  service_resource_cd       = f8
+         2  service_resource_disp     = vc
+         2  setup_ind                 = i2
+         2  updated_ind               = i2
+         2  curr_av_status            = i2
+         2  found_perf_results        = i2     ;found perf results, do not let user turn on
+         2  found_eval_results        = i2     ;found unevaluated results, do not let user turn on
+         2  found_out_control         = i2     ;found rej/disc last result verf, do not let user turn on
+         2  found_no_qc_run           = i2     ;did not find QC_STEP_STATUS, do not let user turn on
+         2  control_desc              = vc
+%I cclsource:status_block.inc
+    )
+
+    record sr
+    (
+      1  nbr_sr                     = i4
+      1  sr_list[2]
+         2  service_resource_cd     = f8
+    )
+
+    record assays
+    (
+      1  assays[*]
+         2  task_assay_cd         = f8
+         2  service_resource_cd   = f8
+    )
+
+   #Script
+    set reply->status_data->status = "F"
+    set reply->resources_failed = 0
+    set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+    set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+    set FAILED = "F"
+    set r_cnt = 0
+    set a_cnt = 0
+    set u_cnt = 0
+
+    ;get the performed and verified result status code
+    set verf_status_cd       = 0.0
+    set perf_status_cd       = 0.0
+    set discarded_status_cd  = 0.0
+    set rejected_status_cd   = 0.0
+    set autoverf_status_cd   = 0.0
+
+         
+    declare eCnt                         = i4 with protect, noconstant(0)
+    
+    declare result_status_in_control_cd  = f8 with protect, noconstant(0.0)
+    declare result_status_checked_cd     = f8 with protect, noconstant(0.0)
+    declare result_status_out_control_cd = f8 with protect, noconstant(0.0)
+    declare changed_status_cd            = f8 with protect, noconstant(0.0)
+
+    declare RESULT_STATUS_IN_CONTROL_CDF  = c12 with protect, constant("IN_CONTROL")
+    declare RESULT_STATUS_CHECKED_CDF     = c12 with protect, constant("CHECKED")
+    declare RESULT_STATUS_OUT_CONTROL_CDF = c12 with protect, constant("OUT_CONTROL")
+    declare RESULT_STATUS_CODE_SET        = i4  with protect, constant(1902)
+
+    set stat = uar_Get_meaning_by_codeset(RESULT_STATUS_CODE_SET, 
+                  RESULT_STATUS_IN_CONTROL_CDF,1, result_status_in_control_cd)
+
+    set stat = uar_Get_meaning_by_codeset(RESULT_STATUS_CODE_SET, 
+                  RESULT_STATUS_CHECKED_CDF,1, result_status_checked_cd)
+
+    set stat = uar_Get_meaning_by_codeset(RESULT_STATUS_CODE_SET, 
+                  RESULT_STATUS_OUT_CONTROL_CDF,1, result_status_out_control_cd)
+
+    call uar_get_meaning_by_codeset(1901, "PERFORMED", 1, perf_status_cd)
+    call uar_get_meaning_by_codeset(1901, "VERIFIED", 1, verf_status_cd)
+    call uar_get_meaning_by_codeset(1901, "REJECT", 1, rejected_status_cd)
+    call uar_get_meaning_by_codeset(1901, "DISCARD", 1, discarded_status_cd)
+    call uar_get_meaning_by_codeset(1901, "AUTOVERIFIED", 1, autoverf_status_cd)
+    call uar_get_meaning_by_codeset(1901, "CHANGE", 1, changed_status_cd)
+
+    set sr_cnt = 1
+    set sr->sr_list[1]->service_resource_cd = request->service_resource_cd
+
+    subroutine check_qc_results (arg_resource_cd, arg_assay_cd)
+       ;subroutine to query the QC_RESULT table to check to see if the
+       ;resource/assay passed in has any performed results or verified results
+       ;that have not been evaluated associated with it
+       ;if they do, do not allow turn on of autoverfication
+
+       set found = 0
+       set av_req_qc_ind = 0
+       
+       set val_qc_schedule_ind = 0                                    ;001
+
+       ;check the lab_instrument table to see if QC is required
+       select into "nl:"
+         l.service_resource_cd,
+         l.av_req_qc_ind
+       from 
+         lab_instrument l
+       plan l 
+         where l.service_resource_cd = arg_resource_cd 
+           and l.active_ind = 1
+       head l.service_resource_cd
+         av_req_qc_ind = l.av_req_qc_ind
+       with nocounter
+       
+       
+       ;001 BEGIN NEW CODE
+       
+       ;get the validate_qc_schedule_ind from the auto_verify table
+       select into "nl:"
+         av.validate_qc_schedule_ind,
+         av.service_resource_cd,
+         av.task_assay_cd
+       from 
+         auto_verify av
+       plan av
+         where av.service_resource_cd = arg_resource_cd 
+           and av.task_assay_cd = arg_assay_cd
+           and cnvtdatetime(curdate, curtime3) between 
+                      av.beg_effective_dt_tm and
+                      av.end_effective_dt_tm
+           and av.active_ind = 1
+       head av.service_resource_cd
+         val_qc_schedule_ind = av.validate_qc_schedule_ind
+       with nocounter 
+
+       ;001 END NEW CODE
+       
+       ;make sure that the user is turning on autoverf
+       ;and that QC is required for autoverf
+       if ((request->av_ind = 1) and (av_req_qc_ind = 1) and (val_qc_schedule_ind = 1))            ;001
+         select into "nl:"
+            q.result_status_cd,
+            q.service_resource_cd,
+            q.task_assay_cd,
+            c.control_id
+         from qc_result q,
+              control_material c
+         plan q
+            where q.task_assay_cd = arg_assay_cd
+              and q.service_resource_cd = arg_resource_cd
+              and q.qc_result_type_flag = 0
+              and q.preactive_ind = 0
+              and ((q.result_status_cd = verf_status_cd and q.result_control_cd = 0.0) or
+                   (q.result_status_cd = perf_status_cd))
+         join c
+            where c.control_id = q.control_id
+
+         order by q.service_resource_cd
+         head q.service_resource_cd
+            ;add this assay to the reply structure
+            found = 1
+            r_cnt = r_cnt + 1
+            if (mod(r_cnt, 10) = 1)
+              stat = alterlist(reply->assayresources, r_cnt + 10)
+            endif
+            reply->assayresources[r_cnt].service_resource_cd = arg_resource_cd
+            reply->assayresources[r_cnt].task_assay_cd = arg_assay_cd
+            reply->assayresources[r_cnt].setup_ind = 1
+            reply->assayresources[r_cnt].control_desc = c.short_description
+            reply->assayresources[r_cnt].curr_av_status = 9
+            reply->assayresources[r_cnt].updated_ind = 0
+            reply->resources_failed = 1
+            if (q.result_status_cd = verf_status_cd and q.result_control_cd = 0.0)
+              reply->assayresources[r_cnt].found_perf_results = 0
+              reply->assayresources[r_cnt].found_eval_results = 1
+            elseif (q.result_status_cd = perf_status_cd)
+              reply->assayresources[r_cnt].found_perf_results = 1
+              reply->assayresources[r_cnt].found_eval_results = 0
+            endif
+         with nocounter
+
+
+         ;get the last completed step date/time
+         ;and use it to find the last verified result for each control
+         ;if the last verf result is rejected or discarded do not allow user
+         ;to turn on autoverf
+         set found_qss_row = 0
+         
+         ;load the equivalent assays for the given assay
+         free set equiv_assays
+         record equiv_assays
+         (
+           1 qual[*]
+             2 task_assay_cd           = f8
+             2 qc_step_nbr_found       = i4
+             2 qc_step_complete_dt_tm  = dq8
+         )
+         
+         set eCnt = 1
+         set stat = alterlist(equiv_assays->qual, eCnt)
+         set equiv_assays->qual[eCnt]->task_assay_cd = arg_assay_cd
+         set equiv_assays->qual[eCnt]->qc_step_nbr_found = 0
+         set equiv_assays->qual[eCnt]->qc_step_complete_dt_tm = cnvtdatetime(curdate, curtime3)
+
+         select into "nl:"
+         from
+           related_assay ra1,
+           related_assay ra2
+         plan ra1
+            where ra1.task_assay_cd = arg_assay_cd
+         join ra2
+            where ra2.related_entity_id = ra1.related_entity_id
+              and ra2.task_assay_cd != ra1.task_assay_cd
+         order by ra2.task_assay_cd
+         head ra2.task_assay_cd
+           eCnt = eCnt + 1
+           if (eCnt > size(equiv_assays->qual, 5))
+             stat = alterlist(equiv_assays->qual, eCnt + 3)
+           endif
+           equiv_assays->qual[eCnt]->task_assay_cd = ra2.task_assay_cd
+           equiv_assays->qual[eCnt]->qc_step_nbr_found = 0
+           equiv_assays->qual[eCnt]->qc_step_complete_dt_tm = cnvtdatetime(curdate, curtime3)
+         with nocounter 
+         
+         if (eCnt > 1)
+           set stat = alterlist(equiv_assays->qual, eCnt)
+         endif
+
+
+         ;get the time the last step completed
+         select into "nl:"
+            qss.step_complete_dt_tm,
+            qss.task_assay_cd,
+            qss.service_resource_cd
+         from 
+            (dummyt d1 with seq = value(eCnt)),
+            qc_step_status qss
+         plan d1
+         join qss
+            where qss.service_resource_cd = arg_resource_cd
+              and qss.task_assay_cd = equiv_assays->qual[d1.seq]->task_assay_cd
+         order by qss.task_assay_cd, cnvtdatetime(qss.step_complete_dt_tm) desc
+         head qss.task_assay_cd
+            found_qss_row = 1
+            equiv_assays->qual[d1.seq]->qc_step_nbr_found = qss.step_nbr 
+            equiv_assays->qual[d1.seq]->qc_step_complete_dt_tm = cnvtdatetime(qss.step_complete_dt_tm)
+         with nocounter
+
+         ;check to see if qc_step_status row was found, if not do not
+         ;allow user to turn on autoverf
+         if (found_qss_row = 0)
+            set found = 1
+            set r_cnt = r_cnt + 1
+            if (mod(r_cnt, 10) = 1)
+              set stat = alterlist(reply->assayresources, r_cnt + 10)
+            endif
+            set reply->assayresources[r_cnt].service_resource_cd = arg_resource_cd
+            set reply->assayresources[r_cnt].task_assay_cd = arg_assay_cd
+            set reply->assayresources[r_cnt].setup_ind = 1
+            set reply->assayresources[r_cnt].curr_av_status = 9
+            set reply->assayresources[r_cnt].updated_ind = 0
+            set reply->resources_failed = 1
+            set reply->assayresources[r_cnt].found_no_qc_run = 1
+         else
+            ;if qc_step_status info found, then look for out of control qc results since
+            ;the last step completed
+            select into "nl:"
+               q.qc_result_id,
+               q.service_resource_cd,
+               q.task_assay_cd,
+               c.control_id
+            from (dummyt d1 with seq = value(eCnt)),
+                 qc_result q,
+                 control_material c,
+                 qc_result_event qre
+            plan d1
+               where equiv_assays->qual[d1.seq]->qc_step_nbr_found > 0
+            join q
+               where q.task_assay_cd = equiv_assays->qual[d1.seq]->task_assay_cd
+                 and q.service_resource_cd = arg_resource_cd
+                and ((q.result_status_cd in (rejected_status_cd, discarded_status_cd)
+                      and q.result_control_cd in (result_status_in_control_cd,
+                                                  result_status_checked_cd,
+                                                  result_status_out_control_cd))
+                or   (q.result_status_cd = changed_status_cd
+                      and q.result_control_cd = result_status_out_control_cd))
+                 and q.event_dt_tm >= cnvtdatetime(equiv_assays->qual[d1.seq]->qc_step_complete_dt_tm) and
+                     q.event_dt_tm <= cnvtdatetime(curdate, curtime3)
+ 
+                and
+                not exists
+                (select q1.* from qc_result q1
+                 where q1.task_assay_cd =
+                 equiv_assays->qual[d1.seq]->task_assay_cd
+                and q1.service_resource_cd = arg_resource_cd
+                and q1.control_id = q.control_id
+                and q1.result_status_cd in
+                (autoverf_status_cd, verf_status_cd) and
+                q1.result_control_cd = result_status_in_control_cd
+                and q1.event_dt_tm >= q.event_dt_tm and
+                     q1.event_dt_tm <= cnvtdatetime(curdate, curtime3))
+            join c
+               where c.control_id = q.control_id
+            join qre
+               where qre.qc_result_id = q.qc_result_id
+                 and qre.event_dt_tm >= cnvtdatetime(equiv_assays->qual[d1.seq]->qc_step_complete_dt_tm) and
+                     qre.event_dt_tm <= cnvtdatetime(curdate, curtime3)
+                 and qre.event_type_cd in (autoverf_status_cd, verf_status_cd)
+            order by q.control_id, q.task_assay_cd, cnvtdatetime(q.event_dt_tm) desc
+            head q.control_id
+              row +0
+            head q.task_assay_cd
+                found = 1
+                r_cnt = r_cnt + 1
+                if (mod(r_cnt, 10) = 1)
+                  stat = alterlist(reply->assayresources, r_cnt + 10)
+                endif
+                reply->assayresources[r_cnt].service_resource_cd = q.service_resource_cd
+                reply->assayresources[r_cnt].task_assay_cd = q.task_assay_cd
+                reply->assayresources[r_cnt].setup_ind = 1
+                reply->assayresources[r_cnt].curr_av_status = 9
+                reply->assayresources[r_cnt].control_desc = c.short_description
+                reply->assayresources[r_cnt].updated_ind = 0
+                reply->resources_failed = 1
+                reply->assayresources[r_cnt].found_out_control = 1
+            with nocounter
+         endif
+       endif
+     
+       return (found)
+    end
+
+    ;if we are updating all of the assays for the resource passed in,
+    if (value(request->all_assays_ind) = 1)
+      ;Get the necessary resources if this is a subsection
+      select into "nl:"
+         r.child_service_resource_cd,
+         s.service_resource_cd
+      from
+         resource_group r,
+         service_resource s
+      plan r where
+          request->service_resource_cd = r.parent_service_resource_cd
+          and r.root_service_resource_cd = 0.0
+      join s where
+          s.service_resource_cd = r.child_service_resource_cd
+          and s.activity_type_cd in
+            (
+            select
+              cvat.code_value
+            from
+              code_value cvat
+            where cvat.cdf_meaning = ("GLB")
+              and cvat.code_set = 106
+            )
+      order by
+         r.parent_service_resource_cd
+      head report
+         sr_cnt = 0
+      detail
+         sr_cnt = sr_cnt + 1
+         if (mod(sr_cnt,2) = 1)
+            stat = alter(sr->sr_list,sr_cnt + 2)
+         endif
+         sr->sr_list[sr_cnt]->service_resource_cd =
+            r.child_service_resource_cd
+         sr->nbr_sr = sr_cnt
+      WITH
+         nocounter
+
+      if (sr->nbr_sr = 0)
+         set sr->nbr_sr = 1
+      endif
+      set stat = alter(sr->sr_list, sr->nbr_sr)
+      set nbr_sr = size(sr->sr_list,5)
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set Failed = "T"
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+      ;For each resource get the assays that belong to it
+      select into "nl:"
+         d1.seq,
+         d2.seq,
+         av.av_status_flag,
+         av.prev_verf_ind,
+         av.service_resource_cd,
+         av.task_assay_cd,
+         resource_assay = build(av.service_resource_cd, av.task_assay_cd),
+	     av_exists = decode(av.seq, "Y", "N")
+      from
+         (dummyt d1 with seq = value(nbr_sr)),
+         (dummyt d2 with seq = 1),
+         auto_verify av
+      plan d1
+      join d2
+         where d2.seq = 1
+      join av
+         where av.service_resource_cd = sr->sr_list[d1.seq]->service_resource_cd
+           and cnvtdatetime(curdate, curtime3) between av.beg_effective_dt_tm and
+                                                       av.end_effective_dt_tm
+           and av.active_ind = 1
+      order by resource_assay
+      head report
+         ;reply record counter
+         r_cnt = 0
+         ;assay record counter
+         a_cnt = 0
+      head resource_assay
+         if (av_exists = "Y")
+          if (av.prev_verf_ind = 1)
+          ;if the resource/assay is not set up add it to the reply structure
+          ;and do not update it
+            r_cnt = r_cnt + 1
+            if (mod(r_cnt, 10) = 1)
+               stat = alterlist(reply->assayresources, r_cnt + 10)
+            endif
+            reply->resources_failed = 1
+            reply->assayresources[r_cnt].service_resource_cd = av.service_resource_cd
+            reply->assayresources[r_cnt].task_assay_cd = av.task_assay_cd
+            reply->assayresources[r_cnt].setup_ind = 0
+            reply->assayresources[r_cnt].updated_ind = 0
+            reply->assayresources[r_cnt].curr_av_status = av.av_status_flag
+          elseif (av.av_status_flag = request->av_ind)
+          ;check to see if resource is setup but will not be updated
+          ;because value has is already on or off
+            r_cnt = r_cnt + 1
+            if (mod(r_cnt, 10) = 1)
+               stat = alterlist(reply->assayresources, r_cnt + 10)
+            endif
+            reply->resources_failed = 1
+            reply->assayresources[r_cnt].service_resource_cd = av.service_resource_cd
+            reply->assayresources[r_cnt].task_assay_cd = av.task_assay_cd
+            reply->assayresources[r_cnt].setup_ind = 1
+            reply->assayresources[r_cnt].updated_ind = 0
+            reply->assayresources[r_cnt].curr_av_status = av.av_status_flag
+          elseif (av.av_status_flag != request->av_ind)
+          ;else the assay IS setup and av_status_flag will be updated so add info
+          ;to assays record
+            a_cnt = a_cnt + 1
+            if (mod(a_cnt, 10) = 1)
+               stat = alterlist(assays->assays, a_cnt + 10)
+            endif
+            assays->assays[a_cnt].service_resource_cd = av.service_resource_cd
+            assays->assays[a_cnt].task_assay_cd = av.task_assay_cd
+          endif
+         endif
+      foot report
+         ;alter the records to the correct value
+         if (a_cnt > 0)
+            stat = alterlist(assays->assays, a_cnt)
+         endif
+      with nocounter, outerjoin = d2
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set Failed = "T"
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+      ;if assays were found to update, update the auto_verify table with
+      ;the correct av_status_flag value
+      if (a_cnt > 0)
+         for (u_cnt = 1 to a_cnt)
+            ;if user is turning on autoverf check to see if any QC is still in performed
+            ;or is verified and rules have not been evaluated
+            if (check_qc_results (assays->assays[u_cnt].service_resource_cd,
+                                      assays->assays[u_cnt].task_assay_cd ) = 0)
+              update into auto_verify av
+              set
+                 av.av_status_flag   = request->av_ind,
+                 av.updt_applctx     = reqinfo->updt_applctx,
+                 av.updt_cnt         = av.updt_cnt + 1,
+                 av.updt_dt_tm       = cnvtdatetime(curdate, curtime3),
+                 av.updt_id          = reqinfo->updt_id,
+                 av.updt_task        = reqinfo->updt_task
+              where av.service_resource_cd = assays->assays[u_cnt].service_resource_cd
+                and av.task_assay_cd = assays->assays[u_cnt].task_assay_cd
+                and cnvtdatetime(curdate, curtime3) between av.beg_effective_dt_tm and
+                                                                 av.end_effective_dt_tm
+                and av.active_ind = 1
+              with nocounter
+
+              set error_check = ERROR(sErrorMsg,0)   ;get error message
+              if (error_check != 0)
+                set Failed = "T"
+                set reply->status_data->status = "F"
+                set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+                go to exit_script
+              endif
+
+              ;add this assay to the reply structure
+              set r_cnt = r_cnt + 1
+              if (mod(r_cnt, 10) = 1)
+                set stat = alterlist(reply->assayresources, r_cnt + 10)
+              endif
+              set reply->assayresources[r_cnt].service_resource_cd = assays->assays[u_cnt].service_resource_cd
+              set reply->assayresources[r_cnt].task_assay_cd = assays->assays[u_cnt].task_assay_cd
+              set reply->assayresources[r_cnt].setup_ind = 1
+              set reply->assayresources[r_cnt].updated_ind = 1
+              set reply->assayresources[r_cnt].curr_av_status = request->av_ind
+
+              ;write the new av_status_event row
+              set av_status_id = 0.0
+              select into "nl:"
+                next_seq_nbr = seq(pathnet_seq,nextval) "######################;rp0"
+              from
+                dual
+              detail
+                av_status_id = cnvtreal(next_seq_nbr)
+              with nocounter, format
+
+              set error_check = ERROR(sErrorMsg,0)   ;get error message
+              if (error_check != 0)
+                set Failed = "T"
+                set reply->status_data->status = "F"
+                set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+                go to exit_script
+              endif
+
+              insert into av_status_event ae
+              set
+                ae.accession_id           = 0.0,
+                ae.av_event_id            = av_status_id,
+                ae.av_ind                 = request->av_ind,
+                ae.task_assay_cd          = assays->assays[u_cnt].task_assay_cd,
+                ae.person_id              = 0.0,
+                ae.service_resource_cd    = assays->assays[u_cnt].service_resource_cd,
+                ae.updt_applctx           = reqinfo->updt_applctx,
+                ae.updt_cnt               = 0,
+                ae.updt_dt_tm             = cnvtdatetime(curdate, curtime3),
+                ae.updt_id                = reqinfo->updt_id,
+                ae.updt_task              = reqinfo->updt_task
+              plan ae
+              with nocounter
+
+              set error_check = ERROR(sErrorMsg,0)   ;get error message
+              if (error_check != 0)
+                set Failed = "T"
+                set reply->status_data->status = "F"
+                set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+                go to exit_script
+              endif
+            endif
+         endfor
+      endif
+    ;if we are updating only the assays/resources passed in
+    elseif (value(request->all_assays_ind) = 0)
+      set a_cnt = size(request->assays, 5)
+      for (u_cnt = 1 to a_cnt)
+         ;if user is turning on autoverf check to see if any QC is still in performed
+         ;or is verified and rules have not been evaluated
+         if (check_qc_results (request->assays[u_cnt].service_resource_cd,
+                                   request->assays[u_cnt].task_assay_cd ) = 0)
+            update into auto_verify av
+            set
+              av.av_status_flag   = request->av_ind,
+              av.updt_applctx     = reqinfo->updt_applctx,
+              av.updt_cnt         = av.updt_cnt + 1,
+              av.updt_dt_tm       = cnvtdatetime(curdate, curtime3),
+              av.updt_id          = reqinfo->updt_id,
+              av.updt_task        = reqinfo->updt_task
+           where av.service_resource_cd = request->assays[u_cnt].service_resource_cd
+             and av.task_assay_cd = request->assays[u_cnt].task_assay_cd
+             and cnvtdatetime(curdate, curtime3) between av.beg_effective_dt_tm and
+                                                         av.end_effective_dt_tm
+             and av.active_ind = 1
+           with nocounter
+
+           set error_check = ERROR(sErrorMsg,0)   ;get error message
+           if (error_check != 0)
+             set Failed = "T"
+             set reply->status_data->status = "F"
+             set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+             go to exit_script
+           endif
+
+           ;add this assay to the reply structure
+           set r_cnt = r_cnt + 1
+           if (mod(r_cnt, 10) = 1)
+              set stat = alterlist(reply->assayresources, r_cnt + 10)
+           endif
+           set reply->assayresources[r_cnt].service_resource_cd = request->assays[u_cnt].service_resource_cd
+           set reply->assayresources[r_cnt].task_assay_cd = request->assays[u_cnt].task_assay_cd
+           set reply->assayresources[r_cnt].setup_ind = 1
+           set reply->assayresources[r_cnt].updated_ind = 1
+           set reply->assayresources[r_cnt].curr_av_status = request->av_ind
+
+           ;write the new av_status_event row
+           set av_status_id = 0.0
+           select into "nl:"
+              next_seq_nbr = seq(pathnet_seq,nextval) "######################;rp0"
+           from
+              dual
+           detail
+              av_status_id = cnvtreal(next_seq_nbr)
+           with nocounter, format
+
+           set error_check = ERROR(sErrorMsg,0)   ;get error message
+           if (error_check != 0)
+             set Failed = "T"
+             set reply->status_data->status = "F"
+             set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+             go to exit_script
+           endif
+
+           insert into av_status_event ae
+           set
+              ae.accession_id           = 0.0,
+              ae.av_event_id            = av_status_id,
+              ae.av_ind                 = request->av_ind,
+              ae.task_assay_cd          = request->assays[u_cnt].task_assay_cd,
+              ae.person_id              = 0.0,
+              ae.service_resource_cd    = request->assays[u_cnt].service_resource_cd,
+              ae.updt_applctx           = reqinfo->updt_applctx,
+              ae.updt_cnt               = 0,
+              ae.updt_dt_tm             = cnvtdatetime(curdate, curtime3),
+              ae.updt_id                = reqinfo->updt_id,
+              ae.updt_task              = reqinfo->updt_task
+           plan ae
+           with nocounter
+
+           set error_check = ERROR(sErrorMsg,0)   ;get error message
+           if (error_check != 0)
+             set Failed = "T"
+             set reply->status_data->status = "F"
+             set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+             go to exit_script
+           endif
+        endif
+      endfor
+    endif
+
+    ;realter the reply structure if needed
+    if (r_cnt > 0)
+       set stat = alterlist(reply->assayresources, r_cnt)
+    endif
+    
+/********************************************************************/
+/*  Exit Script                                                     */
+/********************************************************************/
+#EXIT_SCRIPT
+     if (failed = "F")
+        set reply->status_data->status = "S"
+        commit
+     else
+        rollback
+     endif
+
+END
+GO
+
+;Generated by GNU enscript 1.6.4.

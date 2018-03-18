@@ -1,0 +1,313 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_person/glb_get_person.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_person.prg
+        Object name:            glb_get_person
+        Request #:              250051
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        This script can either load person information
+                                for a given person_id or load a range of
+                                persons based on a starting last name.
+
+                                If a specific person_id is known, the script
+                                can be called by filling out the person_id.
+
+                                Otherwise, load a number (request->maxqual)
+                                of person table records based on starting 
+                                last name, first name, and person type.  
+                                Multiple calls will result in continuing 
+                                from the point where the previous call left
+                                off.
+
+        Tables read:            code_value
+                                person
+                                person_alias
+
+        Tables updated:         None
+        Executing from:         
+
+        Special Notes:          Uses context record for continuation of 
+                                original request.
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 01/03/96 Hal Patchen          Initial Release                     *
+;    *001 04/07/98 Hal Patchen          Return formatted alias              *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_PERSON:dba go    
+             create program GLB_GET_PERSON:dba
+     
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  person_id                    = f8
+         1  last_name_begin              = vc
+         1  first_name_begin             = vc
+         1  person_type_cdf_mean         = c12
+         1  maxqual                      = i4
+      )
+      */
+      /***********************************************************************
+      * Context Record                                                       *
+      ***********************************************************************/
+      /*
+      record context
+      (
+         1  last_name_begin              = vc
+         1  first_name_begin             = vc
+         1  person_id                    = f8
+         1  person_type_cd               = f8
+         1  alias_type_mrn_cd            = f8
+         1  maxqual                      = i4
+         1  updt_cnt                     = i4
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      ( 
+         1  qual[*]
+            2  age                       = vc
+            2  person_id                 = f8
+            2  name_last_key             = vc
+            2  name_first_key            = vc
+            2  name_full_formatted       = vc
+            2  birth_dt_tm               = dq8
+            2  sex_cd                    = f8
+            2  sex_disp                  = vc
+            2  sex_mean                  = c12
+            2  alias                     = vc
+            2  alias_formatted           = vc                          ;001
+            2  deceased_dt_tm            = dq8
+         1  context_more_data            = c1  ;T=True, F=False
+%i cclsource:status_block.inc
+      )
+%i cclsource:pcs_format_age.inc      
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set ALIAS_TYPE_CODE_SET         = 4
+         set ALIAS_TYPE_MRN_CDF          = "MRN"
+         set PERSON_TYPE_CODE_SET        = 302
+         declare person_type_cdf         = c12
+         declare q_cnt                   = i4
+         declare lIndex                  = i4 with protected, noconstant(0)
+         declare lCnt                    = i4 with protected, noconstant(0)
+
+         set reply->status_data.status = "F"
+         set reply->context_more_data = "F"
+         set q_cnt = 0
+
+      /***********************************************************************
+      * Build Context record for contination calls to script                 *
+      ***********************************************************************/
+         if (validate(context->updt_cnt, 0) = 0)
+            /* No context record exists */
+            record context
+            (
+               1  last_name_begin          = vc
+               1  first_name_begin         = vc
+               1  person_id                = f8
+               1  person_type_cd           = f8
+               1  alias_type_mrn_cd        = f8
+               1  maxqual                  = i4
+               1  updt_cnt                 = i4
+            )
+            if (request->last_name_begin > " ")
+               set context->last_name_begin = 
+                 trim(cnvtupper(cnvtalphanum(request->last_name_begin)))
+            else
+               set context->last_name_begin = ""
+            endif
+            if (request->first_name_begin > " ")
+               set context->first_name_begin =
+                 trim(cnvtupper(cnvtalphanum(request->first_name_begin)))
+            else
+               set context->first_name_begin = ""
+            endif
+            if (request->person_id > 0.0)
+               set context->person_id = request->person_id
+               set context->maxqual = 1
+            else
+               set context->person_id = 0.0
+               set context->maxqual = request->maxqual
+            endif
+            set context->updt_cnt = 0
+            /* Load person type code and person medical record number code */
+            set person_type_cdf = trim(cnvtupper(request->person_type_cdf_mean))
+ 
+            set context->alias_type_mrn_cd = uar_get_code_by("MEANING", ALIAS_TYPE_CODE_SET, nullterm(ALIAS_TYPE_MRN_CDF))
+            set context->person_type_cd = uar_get_code_by("MEANING", PERSON_TYPE_CODE_SET, nullterm(person_type_cdf))
+            
+            ;* Verify that all required code value records were read.
+            if (context->alias_type_mrn_cd <= 0.0)
+               go to Exit_Script
+            endif
+            if (context->person_type_cd < 0.0)
+               set context->person_type_cd = 0.0
+            endif
+         endif
+         set stat = alterlist(reply->qual, context->maxqual)
+
+      /***********************************************************************
+      * Select person information based on person_id or person last name     *
+      ***********************************************************************/
+         select 
+         if (request->person_id > 0.0)
+            /* Look for a specific person based on person_id */
+            plan    p   where p.person_id = context->person_id
+                       
+         else
+            /* Load person based on last name */
+            plan    p   where (p.name_last_key > context->last_name_begin
+                           or (p.name_last_key = context->last_name_begin 
+                             and p.name_first_key = context->first_name_begin
+                             and p.person_id > context->person_id)
+                           or (p.name_last_key = context->last_name_begin
+                             and p.name_first_key > context->first_name_begin))
+                         and (context->person_type_cd = 0.0
+                           or p.person_type_cd = context->person_type_cd)
+                       
+         endif
+         into "nl:"
+            p.person_id,
+            p.person_type_cd,
+            p.name_last_key,
+            p.name_first_key,
+            p.name_full_formatted,
+            p.sex_cd
+
+         from
+            person p
+
+         order 
+            p.name_last_key,
+            p.name_first_key,
+            p.person_id
+        
+         head report
+            q_cnt = 0
+
+         detail         
+            q_cnt = q_cnt + 1
+            if (q_cnt <= context->maxqual)
+               reply->qual[q_cnt].person_id = p.person_id
+               reply->qual[q_cnt].name_last_key = p.name_last_key
+               reply->qual[q_cnt].name_first_key = p.name_first_key
+               reply->qual[q_cnt].name_full_formatted = p.name_full_formatted
+               reply->qual[q_cnt].birth_dt_tm = p.birth_dt_tm
+               reply->qual[q_cnt].age = FormatAge(p.birth_dt_tm, p.deceased_dt_tm, "CHRONOAGE")
+               reply->qual[q_cnt].sex_cd = p.sex_cd
+               reply->qual[q_cnt].deceased_dt_tm = p.deceased_dt_tm
+            endif
+            ;*** If maximum requested reached, save last record
+            if (q_cnt = context->maxqual)
+               context->last_name_begin = p.name_last_key
+               context->first_name_begin = p.name_first_key
+               context->person_id = p.person_id
+            endif
+            ;*** Additional data exists
+            if (q_cnt > context->maxqual)
+               context->updt_cnt = context->updt_cnt + 1
+               reply->context_more_data = "T"
+               q_cnt = q_cnt - 1
+            endif
+
+         foot report
+            stat = alterlist(reply->qual, q_cnt)
+
+         with 
+            nocounter,
+            maxqual(p, value(context->maxqual + 1))
+
+      /***********************************************************************
+      * Select person alias.                                                 *
+      * NOTE: This was separated into 2 selects because the maxqual was      *
+      *       conflicting with the order by clause.                          *
+      ***********************************************************************/
+         
+         select into "nl:"
+            pa.alias_pool_cd,                                          ;001
+            alias_frmt = cnvtalias(pa.alias, pa.alias_pool_cd),        ;001
+            pa.alias
+
+         from
+            person_alias pa
+
+         where expand(lCnt, 1, size(reply->qual,5), pa.person_id, reply->qual[lCnt].person_id) 
+                       and pa.person_alias_type_cd = context->alias_type_mrn_cd
+                       and pa.active_ind = 1
+
+         head report
+            lIndex = 0
+         
+         detail
+            lIndex = locateval(lCnt, 1, size(reply->qual, 5), pa.person_id, reply->qual[lCnt].person_id) 	
+            reply->qual[lIndex].alias = pa.alias
+            reply->qual[lIndex].alias_formatted = alias_frmt              ;001
+
+         with 
+            nocounter
+
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+         endif
+
+      /***********************************************************************
+      * If no more data exists, free context record.                         *
+      ***********************************************************************/
+         if (reply->context_more_data = "F")
+            free set context
+         endif
+
+      #Exit_Script
+         end
+         go      
+
+;Generated by GNU enscript 1.6.4.

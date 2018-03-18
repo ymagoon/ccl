@@ -1,0 +1,532 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_iam/GLB_GET_IAM.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_IAM.PRG
+        Object name:            GLB_GET_IAM
+        Request #:              250168
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve all accessions pertaining to a
+                                specific service_resource_cd with result_status
+                                of autoverified and a performed_dt_tm between a
+                                specified time period
+
+        Tables read:            perform_result
+                                result
+                                accession_order_r
+
+        Tables updated:         n/a
+        Executing from:         General Lab Instrument Activity Monitor App.
+
+        Special Notes:          n/a
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 07/27/98 Gary Runde           Initial Release                     *
+;    *001 12/16/98 Chad Moats           Added Autoverify Error Code Logic   *
+;    *002 07/26/00 Soham Dhakal         Changes to Autoverify Error Code,   *
+;    *                                  and Rework                          *
+;    *003 09/12/02 Mark Brooks          Added service resource security.    *
+;    *004 03/30/05 Tim Sady (ts010410)  Added test_site_mode_ind to the     *
+;    *                                  request.                            *
+;    *005 10/12/07 Shruthi Ramesh       Added expand to increase performance*
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+    drop program glb_get_iam:dba go
+        create program glb_get_iam:dba
+
+/*
+        record request
+        (
+           1  service_resource_cd          = F8
+           1  start_dt_tm                  = DQ8
+           1  end_dt_tm                    = dq8
+           1  accession                    = vc
+           1  test_site_mode_ind           = i2
+    )
+*/
+
+        record reply
+        (
+           1  qual[*]
+             2  accession                  = VC
+             2  order_id                   = f8
+             2  catalog_cd                 = f8
+             2  catalog_disp               = vc
+             2  tasks[*]
+               3  task_assay_cd            = F8
+               3  task_assay_disp          = VC
+               3  result_id                = f8
+               3  result_status_cd         = f8
+               3  result_status_disp       = vc
+               3  result_status_mean       = vc
+               3  perform_results[*]
+                 4  result_events[*]
+                   5  event_type_cd        = F8
+                   5  event_type_disp      = VC
+                   5  event_personnel_name = vc
+                   5  event_dt_tm          = dq8
+                   5  event_sequence       = i4
+                 4  av_errors [*]
+                   5  av_error_cd          = F8
+                   5  av_error_disp        = VC
+                   5  av_error_mean        = vc
+                 4  result_type_cd         = F8
+                 4  result_type_disp       = vc
+                 4  result_type_mean       = vc
+                 4  result_value_dt_tm     = DQ8
+                 4  result_value_alpha     = VC
+                 4  result_value_numeric   = F8
+                 4  ascii_text             = VC
+                 4  less_great_flag        = I2
+                 4  dilution_factor        = F8
+                 4  normal_cd              = F8
+                 4  critical_cd            = F8
+                 4  review_cd              = F8
+                 4  delta_cd               = F8
+                 4  linear_cd              = F8
+                 4  feasible_cd            = F8
+                 4  perform_dt_tm          = DQ8
+                 4  perform_result_id      = f8
+                 4  interface_flag         = i2
+                 4  service_resource_cd    = f8
+                 4  service_resource_disp  = vc
+%i cclsource:status_block.inc
+        )
+
+
+    ; temp structure to get all of the performed results
+    record temp_result
+    (
+      1 results[*]
+        2 result_id = f8
+    )
+
+%i cclsource:pcs_resource_security.inc                                      ;003
+
+    /* Variable initialization */
+    set reply->status_data->status = "F"
+    set performed_cd = 0.0
+    set autoverify_cd = 0.0
+    set a_cnt = 0
+    set t_cnt = 0
+    set tr_cnt = 0
+    set pr_cnt = 0
+    set av_cnt = 0
+    set re_cnt = 0
+    set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+    set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+    set RESULT_CODESET = 1901
+    set AUTOVERIFY_CDF = fillstring(12," ")
+    set PERFORMED_CDF = fillstring(12," ")
+    set AUTOVERIFY_CDF = "AUTOVERIFIED"
+    set PERFORMED_CDF = "PERFORMED"
+    set stat = 0
+    declare dServiceResourceCd = f8 with protect, noconstant(0.0)           ;003
+    declare nResSecCheckInd = i2 with protect, noconstant(0)                ;003
+
+    declare i = i4 with protect,noconstant(0)                               ;005
+    declare mlLoopCnt = i4 with noconstant(0), protect                      ;005
+	declare mlTmpSize = i4 with noconstant(0), protect                      ;005
+	declare mnBatchSize = i4 with noconstant(0), protect                    ;005
+	declare mlStartNdx = i4 with noconstant(0), protect                     ;005
+    ; use the UAR's to get the code Values
+    set stat = uar_Get_meaning_by_codeset(RESULT_CODESET, AUTOVERIFY_CDF,
+            1, autoverify_cd)
+    set stat = uar_Get_meaning_by_codeset(RESULT_CODESET, PERFORMED_CDF,
+            1, performed_cd)
+
+    ; test site mode
+    if (request->test_site_mode_ind = 1)
+        call InitResourceSecurity(0)                                        ;003
+
+        ;get all the result_ids for date range from result_event
+        select into "nl:"
+           re.result_id
+        from result_event re
+        where (re.event_dt_tm >= cnvtdatetime(request->start_dt_tm)
+           and re.event_dt_tm <= cnvtdatetime(request->end_dt_tm))
+           and re.event_type_cd in (performed_cd)
+        order re.result_id
+        head re.result_id
+           tr_cnt = tr_cnt + 1
+           if (mod(tr_cnt,10) = 1)
+               stat = alterlist(temp_result->results, (tr_cnt + 10))
+           endif
+           temp_result->results[tr_cnt].result_id = re.result_id
+        detail
+           row + 0
+        foot re.result_id
+           row + 0
+        with nocounter
+        set stat = alterlist(temp_result->results, tr_cnt )
+
+        set mnBatchSize = 40                                                        ;005
+	    set mlLoopCnt = ceil(cnvtreal(size(temp_result->results,5))/mnBatchSize)    ;005
+	    set mlTempSize = mlLoopCnt * mnBatchSize                                    ;005
+	    set mlStat = alterlist(temp_result->results,mlTempSize)                     ;005
+	    for (i = size(temp_result->results,5) + 1 to mlTempSize)                    ;005
+		     set temp_result->results[i].result_id = temp_result->results[size(temp_result->results,5)].result_id
+	    endfor
+	    set mlStartNdx = 1                                                          ;005
+        ;get all the perform result rows
+        select into "nl:"
+            pr.result_id,
+            pr.perform_dt_tm,
+            r.task_assay_cd,
+            aor.accession,
+            d_tr.seq
+        from
+            perform_result pr,
+            prsnl p,
+            result r,
+            accession_order_r aor,
+            (dummyt d_tr with seq = value(mlLoopCnt)),                            ;005
+            result_event re
+        plan d_tr
+         where initarray(mlStartNdx,evaluate(d_tr.seq,1,1,mlStartNdx+mnBatchSize));005
+        join pr where
+         expand(i,mlStartNdx,mlStartNdx+(mnBatchSize-1),pr.result_id,temp_result->results[i].result_id)    ;005
+                and (pr.service_resource_cd = request->service_resource_cd
+                or pr.service_resource_cd = 0)
+        join re
+            where pr.result_id = re.result_id
+               and pr.perform_result_id = re.perform_result_id
+        join r
+            where pr.result_id = r.result_id
+        join p
+            where re.event_personnel_id = p.person_id
+        join aor
+            where r.order_id = aor.order_id
+               and aor.primary_flag = 0
+        order    r.order_id, r.result_id, pr.perform_result_id
+
+        head report
+                a_cnt = 0
+        head r.order_id
+            a_cnt = a_cnt + 1
+            if (mod(a_cnt,10) = 1)
+              stat = alterlist(reply->qual, (a_cnt + 10))
+            endif
+            reply->qual[a_cnt].accession = aor.accession
+            reply->qual[a_cnt].order_id = aor.order_id
+            reply->qual[a_cnt].catalog_cd = r.catalog_cd
+            r_cnt = 0
+        head r.result_id
+            r_cnt = r_cnt + 1
+            if (mod(r_cnt,10) = 1)
+                stat = alterlist(reply->qual[a_cnt].tasks, (r_cnt + 10))
+            endif
+            reply->qual[a_cnt].tasks[r_cnt].task_assay_cd = r.task_assay_cd
+            reply->qual[a_cnt].tasks[r_cnt].result_id = pr.result_id
+            reply->qual[a_cnt].tasks[r_cnt]
+                    .result_status_cd = r.result_status_cd
+            pr_cnt = 0
+        head pr.perform_result_id
+            pr_cnt = pr_cnt + 1
+            if (mod(pr_cnt,10) = 1)
+                stat = alterlist(reply->qual[a_cnt].tasks[r_cnt].
+                        perform_results, (pr_cnt + 10))
+            endif
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .result_type_cd = pr.result_type_cd
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .result_value_dt_tm = pr.result_value_dt_tm
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .result_value_numeric = pr.result_value_numeric
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .result_value_alpha = pr.result_value_alpha
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .ascii_text = pr.ascii_text
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .less_great_flag = pr.less_great_flag
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .dilution_factor = pr.dilution_factor
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .normal_cd = pr.normal_cd
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .critical_cd = pr.critical_cd
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .review_cd = pr.review_cd
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .delta_cd = pr.delta_cd
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                .linear_cd = pr.linear_cd
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                .feasible_cd = pr.feasible_cd
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                .perform_result_id = pr.perform_result_id
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                .service_resource_cd = pr.service_resource_cd
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                .interface_flag = pr.interface_flag
+            av_cnt = 0
+            re_cnt = 0
+        detail
+            ;get the resultevents
+            re_cnt = re_cnt + 1
+            if (mod(re_cnt,10) = 1)
+                stat = alterlist(reply->qual[a_cnt].tasks[r_cnt]
+                        .perform_results[pr_cnt].result_events, (re_cnt + 10))
+            endif
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .result_events[re_cnt].event_type_cd = re.event_type_cd
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                   .result_events[re_cnt].event_personnel_name = p.name_full_formatted
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                    .result_events[re_cnt].event_dt_tm = re.event_dt_tm
+            reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                   .result_events[re_cnt].event_sequence = re.event_sequence
+        foot pr.perform_result_id
+            stat = alterlist(reply->qual[a_cnt].tasks[r_cnt].
+                    perform_results[pr_cnt].result_events, re_cnt)
+        foot r.result_id
+            stat = alterlist(reply->qual[a_cnt].tasks[r_cnt].
+                    perform_results, pr_cnt)
+        foot r.order_id
+            stat = alterlist(reply->qual[a_cnt].tasks, r_cnt)
+        foot report
+            stat = alterlist(reply->qual, a_cnt)
+          ;003 with dontcare =  aec, nocounter
+        with nocounter
+    else    ;accession was entered so only get the results for that accession
+        call InitResourceSecurity(1)                     ;003
+
+        select into "nl:"
+            pr.result_id,
+            pr.perform_dt_tm,
+            r.task_assay_cd,
+            aor.accession,
+            re.result_id
+        from
+            perform_result pr,
+            prsnl p,
+            result r,
+            accession_order_r aor,
+            result_event re
+        plan aor
+            where aor.accession = request->accession
+        join r
+            where r.order_id = aor.order_id
+        join pr
+            where pr.result_id = r.result_id
+        join re
+            where pr.perform_result_id = re.perform_result_id
+               and pr.result_id = re.result_id
+               and re.event_sequence > 0
+               and (pr.service_resource_cd = request->service_resource_cd
+                    or request->service_resource_cd = 0.0)
+        join p
+           where re.event_personnel_id = p.person_id
+        order    r.order_id, r.result_id, pr.perform_result_id
+
+        head report
+            a_cnt = 0
+            r_cnt = 1                                                   ;003
+        head r.order_id
+            a_cnt = a_cnt + 1
+
+            ; Prevent unnecessary allocation of records because of roll back
+            ; logic in foot section.
+            if ( (mod(a_cnt,10) = 1) and (r_cnt > 0) )                  ;003
+               stat = alterlist(reply->qual, (a_cnt + 10))
+            endif
+            reply->qual[a_cnt].accession = aor.accession
+            reply->qual[a_cnt].order_id = aor.order_id
+            reply->qual[a_cnt].catalog_cd = r.catalog_cd
+            r_cnt = 0
+            pr_cnt = 1                                                  ;003
+        head r.result_id
+            r_cnt = r_cnt + 1
+
+            ; Prevent unnecessary allocation of records because of roll back
+            ; logic in foot section.
+            if ( (mod(r_cnt,10) = 1) and (pr_cnt > 0) )                 ;003
+                stat = alterlist(reply->qual[a_cnt].tasks, (r_cnt + 10))
+            endif
+            reply->qual[a_cnt].tasks[r_cnt].task_assay_cd = r.task_assay_cd
+            reply->qual[a_cnt].tasks[r_cnt].result_id = pr.result_id
+            reply->qual[a_cnt].tasks[r_cnt].result_status_cd = r.result_status_cd
+            pr_cnt = 0
+
+        head pr.perform_result_id
+            dServiceResourceCd = pr.service_resource_cd                 ;003
+            if (IsResourceViewable(dServiceResourceCd) = True)          ;003
+                pr_cnt = pr_cnt + 1
+                if (mod(pr_cnt,10) = 1)
+                    stat = alterlist(reply->qual[a_cnt].tasks[r_cnt].
+                    perform_results, (pr_cnt + 10))
+                endif
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .result_type_cd = pr.result_type_cd
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .result_value_dt_tm = pr.result_value_dt_tm
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .result_value_numeric = pr.result_value_numeric
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .result_value_alpha = pr.result_value_alpha
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .ascii_text = pr.ascii_text
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .less_great_flag = pr.less_great_flag
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .dilution_factor = pr.dilution_factor
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .normal_cd = pr.normal_cd
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .critical_cd = pr.critical_cd
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .review_cd = pr.review_cd
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .delta_cd = pr.delta_cd
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .linear_cd = pr.linear_cd
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .feasible_cd = pr.feasible_cd
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .perform_result_id = pr.perform_result_id
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .service_resource_cd = pr.service_resource_cd
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                        .interface_flag = pr.interface_flag
+                nResSecCheckInd = 1                                         ;003
+            endif
+
+            av_cnt = 0
+            re_cnt = 0
+        detail
+
+            ;Only process result event information if user has access to resource.
+            if (nResSecCheckInd = 1)                                        ;003
+                re_cnt = re_cnt + 1
+                if (mod(re_cnt,10) = 1)
+                    stat = alterlist(reply->qual[a_cnt].tasks[r_cnt]
+                            .perform_results[pr_cnt].result_events, (re_cnt + 10))
+                endif
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                       .result_events[re_cnt].event_type_cd = re.event_type_cd
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                       .result_events[re_cnt].event_personnel_name = p.name_full_formatted
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                       .result_events[re_cnt].event_dt_tm = re.event_dt_tm
+                reply->qual[a_cnt].tasks[r_cnt].perform_results[pr_cnt]
+                       .result_events[re_cnt].event_sequence = re.event_sequence
+            endif                                                           ;003
+        foot pr.perform_result_id
+            if (nResSecCheckInd = 1)                                        ;003
+                stat = alterlist(reply->qual[a_cnt].tasks[r_cnt].
+                    perform_results[pr_cnt].result_events, re_cnt)
+            endif                                                           ;003
+            nResSecCheckInd = 0                                             ;003
+
+        foot r.result_id
+            stat = alterlist(reply->qual[a_cnt].tasks[r_cnt].perform_results, pr_cnt)
+
+            ; Roll back last task if there were no performing results.
+            if ( (pr_cnt = 0) and (r_cnt > 0) )                             ;003
+                r_cnt = r_cnt - 1                                           ;003
+            endif                                                           ;003
+
+
+        foot r.order_id
+            stat = alterlist(reply->qual[a_cnt].tasks, r_cnt)
+
+            ; Roll back last qual if there were no tasks.
+            if ( (r_cnt = 0) and (a_cnt > 0) )                              ;003
+                a_cnt = a_cnt - 1                                           ;003
+            endif                                                           ;003
+
+        foot report
+            stat = alterlist(reply->qual, a_cnt)
+
+        ; with dontcare =  aec, nocounter
+        with nocounter
+    endif
+
+    ;get the auto_verify_codes
+    for (i=1 to value(size(reply->qual,5)))
+        for (j =1 to value(size(reply->qual[i].tasks,5)))
+            for (k = 1 to value(size(reply->qual[i].tasks[j].perform_results,5)))
+                select into "nl:"
+                    av.auto_verify_cd,
+                    error_exists = decode(avc.auto_verify_cd,"Y", "N")
+                from auto_verify_code avc
+                where avc.parent_entity_id =
+                    reply->qual[i].tasks[j].perform_results[k].perform_result_id
+                head report
+                    av_cnt = 0
+                detail
+                    if (error_exists = "Y")
+                        av_cnt = av_cnt + 1
+                        if (mod(av_cnt,10) = 1)
+                            stat = alterlist(reply->qual[i].tasks[j]
+                                    .perform_results[k].av_errors, (av_cnt + 10))
+                        endif
+                        reply->qual[i].tasks[j].perform_results[k].av_errors[av_cnt]
+                                .av_error_cd = avc.auto_verify_cd
+                    endif
+               foot report
+                    stat = alterlist(reply->qual[i].tasks[j].perform_results[k]
+                            .av_errors, av_cnt)
+            endfor
+        endfor
+    endfor
+
+    set error_check = ERROR(sErrorMsg,0)   ;get error message
+    if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+    endif
+
+    if (a_cnt = 0)
+        set reply->status_data->status = "Z"
+        go to exit_script
+    endif
+
+    set reply->status_data->status = "S"
+
+#exit_script
+    if ((reply->status_data->status != "F") and
+        (GetResourceSecurityStatus(0) != "S"))                              ;003
+        call PopulateResSecStatusBlock(0)                                   ;003
+        set reply->status_data->status = GetResourceSecurityStatus(0)       ;003
+    endif
+
+    end go
+
+;Generated by GNU enscript 1.6.4.

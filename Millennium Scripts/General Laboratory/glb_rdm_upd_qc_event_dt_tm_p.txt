@@ -1,0 +1,160 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_rdm_upd_qc_event_dt_tm_p/glb_rdm_upd_qc_event_dt_tm_p.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-2005 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+ 
+ 
+        Source file name:   glb_rdm_upd_qc_event_dt_tm_p.prg
+        Object name:        glb_rdm_upd_qc_event_dt_tm_p
+        Request #:          N/A
+ 
+        Product:            Database Architecture
+        Product Team:       Data Access Review
+        HNA Version:        500
+        CCL Version:        8.0
+ 
+        Program purpose:  This is the GLB_RDM_UPD_QC_EVENT_DT_TM_P script.  It's a script
+                          that will divide  the QC_RESULT table into 3 roughly equal sections to allow
+                          updates to execute concurrently.  
+       
+        Tables read:      QC_RESULT, dm_ocd_log, dm_info 
+ 
+        Tables updated:  
+ 
+        Executing from:   
+ 
+        Special Notes:    This is a parent readme.  This script goes along with GLB_RDM_UPD_QC_EVENT_DT_TM_c and 
+                          GLB_RDM_UPD_QC_EVENT_DT_TM_cc and GLB_RDM_UPD_QC_EVENT_DT_TM_cc2 to process the rows 
+                          in cat 2.  Then, to clean up any rows GLB_RDM_UPD_QC_EVENT_DT_TM_p2 will run in cat 5.
+
+        Legend:             Variables should be prefixed with scope and type,
+                            followed by an underscore and deobjective variable name.
+
+                            Variable Scope Abbreviations    Variable Type Abbreviations
+                            p - private                     n - i2
+                            m - protect                     l - i2
+                            g - public                      f - f8
+                            u - persistobject               d - dq8
+                                                            s - vc
+                                                            c - c
+
+                            Examples:
+                            pn_status_ind = private, i2
+                            gf_number     = public, f8
+
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     01 06/15/2006 MD013471              Initial Release                   *
+;     02 07/17/2007 JH016266			Re: CR#1-1195158251			   		*
+;										Removed if-conditional in      		*	
+;										#EXIT_PROGRAM	            		*
+;										Updated rollback-checking   		*	
+;     03 03/14/2008 VA017112			Code Updated based on new template  *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+  drop program glb_rdm_upd_qc_event_dt_tm_p:dba  go
+create program glb_rdm_upd_qc_event_dt_tm_p:dba 
+ 
+%i cclsource:dm_readme_data.inc
+%i cclsource:dm_run_parallel_p.inc
+
+;NOTES:
+; Any time in this process if PL/SQL funtions or procedures are used, internationalization
+; needs to be taken into account.  CCL handles internationalization but when we get to 
+; straight Oracle, internationalization will not be handled.
+
+; Set default status
+set readme_data->status = 'F'
+set readme_data->message = concat('FAILED STARTING README ', cnvtstring( readme_data->readme_id,32,2))
+
+declare mf_max_range_id    = f8 with protect, noconstant(0.0)
+declare ms_info_domain_nm  = vc with protect, noconstant("")
+declare mf_min_range_id    = f8 with protect, noconstant(0.0)
+declare ms_range_prefix    = vc with protect, noconstant("")
+declare errMsg			   = vc with protect, noconstant("")
+
+; Set the default variables here based on the comments
+
+; This variable will store a name for the readme process.  This name will be associated
+; with all the rows on dm_info that store the ranges.
+; Before choosing a domain name the dm_info table should be checked to be sure this name has not 
+; been used before.  Use a unique name so it won't be an issue in the future.
+set ms_info_domain_nm = "RDM_UPD_QC_EVENT_DT_TM PROCESS"
+
+; This next variable will store the prefix that prepend all child ranges' names
+set ms_range_prefix = "QC_RESULT_ID RANGE "
+
+; Set the number of children that are within this readme set
+set mn_num_children = 3
+
+if(sbr_check_for_prev_rdm(2488, 3, ms_info_domain_nm, ms_range_prefix) IN (2, 1))
+	go to EXIT_PROGRAM
+endif
+
+;always start the minium at 1
+set mf_min_range_id = 1.0
+
+; This select to find the maximum id that will be broken
+; into mn_num_children seperate values.  Follow this sample query only change
+; to the table and column you want to break into ranges.
+
+; Note: only the primary key of a table should be used to divide the table into ranges
+select into "nl:"
+  max_val = max(qr.qc_result_id)
+from
+  qc_result qr
+detail
+  mf_max_range_id = cnvtreal(max_val)
+with nocounter
+
+; If there are any errors exit out
+if (error(errMsg, 0) != 0)
+	set readme_data->status = 'F'
+	set readme_data->message = concat('Error selecting the max ID: ', errMsg)
+	go to EXIT_PROGRAM
+endif
+
+; Run logic for parent to subdivide the rows and insert the ranges into DM_INFO
+if(sbr_run_parent(mf_max_range_id, mf_min_range_id, ms_range_prefix, ms_info_domain_nm, mn_num_children) IN (2, 0))
+	go to EXIT_PROGRAM
+endif
+
+
+set readme_data->status = "S"
+set readme_data->message = "Readme completed successfully"
+
+#EXIT_PROGRAM
+; Defined in dm_parallel_oragen.inc
+free record parallel_oragen3
+; Defined in dm_run_parallel_parent.inc
+free record range_info
+
+execute dm_readme_status
+call echorecord(readme_data)
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

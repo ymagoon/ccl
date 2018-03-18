@@ -1,0 +1,157 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_glb_comp_incomplete_order/pfmt_glb_comp_incomplete_order.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       pfmt_glb_comp_incomplete_order.prg
+        Object name:            pfmt_glb_comp_incomplete_order
+        Request #:              560200 (Order Server Step ID)
+ 
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Call Order Server to complete an incomplete orders.
+ 
+        Tables read:            orders
+ 
+        Tables updated:         none
+ 
+        Executing from:         Process Server
+ 
+        Special Notes:          Triggered from Request 250235.
+ 
+******************************************************************************/
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 12/17/10 Abhroneel Chowdhury  Initial Release                     *
+;~DE~************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program pfmt_glb_comp_incomplete_order:dba go
+create program pfmt_glb_comp_incomplete_order:dba
+
+ 
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC                                        ;001
+SET LOG_PROGRAM_NAME = "pfmt_glb_comp_incomplete_order"                    ;001
+ 
+/***********************************************************************
+ *   Print date and time to log file.                                  *
+ ***********************************************************************/
+select into "nl:"                                                        ;001
+detail                                                                   ;001
+  sText = fillstring(254, " ")                                           ;001
+  sText = "{{Script::PFMT_GLB_COMP_INCOMPLETE_ORDER}} Beginning..."
+  call uar_SysEvent(hSys, 4, "ScriptBegin", NULLTERM(sText))             ;001
+with nocounter                                                           ;001
+  
+/**** Main Processing ****/
+  
+if ( requestin->reply->status_data->status = "F" )
+     set reqinfo->commit_ind = 0
+     Call LOG_MESSAGE("  Requestin failure", LOG_LEVEL_INFO) 			   ;001	
+     go to EXIT_SCRIPT
+endif
+
+/**************************************************************
+; DVDev DECLARED VARIABLES
+**************************************************************/
+declare ACTION_COMPLETE_CD = f8 with Constant(uar_get_code_by("MEANING",6003,"COMPLETE")),protect
+if(ACTION_COMPLETE_CD <= 0.0)
+      Call LOG_MESSAGE ("Code Value Failure.", LOG_LEVEL_ERROR)
+      go to EXIT_SCRIPT
+endif 
+declare nbr_of_orders = i4 with Protect, noconstant(0)
+declare oidx = i4 with Protect, noconstant(0)
+declare complete_cnt = i4 with Protect, noconstant(0)
+declare dOrderId = f8 with Protect, noconstant(0.0)
+ 
+; Set commitGroupInd=0 to commit each order individually                                               
+set replyout->commitGroupInd = 0
+set nbr_of_orders = size(requestin->reply->orders, 5)
+for (oidx = 1 to nbr_of_orders)
+   Call LOG_MESSAGE( build("  Processing OrderID =",
+               requestin->reply->orders[oidx]->order_id), LOG_LEVEL_DEBUG)   ;001
+ 
+   ;Fill out order server request.		 								     ;001
+         set complete_cnt = complete_cnt + 1
+         set stat = alterlist(replyout->orderList, complete_cnt)
+         set replyout->orderList[complete_cnt]->orderId =
+            requestin->reply->orders[oidx]->order_id
+         set replyout->orderList[complete_cnt]->lastUpdtCnt =
+            requestin->reply->orders[oidx]->updt_cnt
+         set replyout->orderList[complete_cnt]->actionTypeCd =
+            ACTION_COMPLETE_CD	
+         set replyout->orderList[complete_cnt]->orderDtTm =
+            cnvtdatetime(curdate,curtime)
+         set replyout->orderList[complete_cnt]->catalogCd =
+            requestin->reply->orders[oidx]->catalog_cd
+         set replyout->orderList[complete_cnt]->catalogTypeCd =
+            requestin->reply->orders[oidx]->catalog_type_cd
+            
+         /* To send the service_resource_cd to order server for orderable */
+         set dOrderId = 0.0
+         set dOrderId = requestin->reply->orders[oidx]->order_id
+         set stat = alterlist(replyout->orderList[complete_cnt]->resourcelist, 1)
+ 
+         select into "nl:"
+           p.service_resource_cd
+         from   result r
+              , profile_task_r ptr
+              , perform_result p
+ 
+         plan r where r.order_id = dOrderId
+         join ptr where (r.task_assay_cd = ptr.task_assay_cd and r.catalog_cd = ptr.catalog_cd)
+         join p where (p.result_id = r.result_id and p.result_status_cd = r.result_status_cd)
+ 
+         order by r.order_id, ptr.catalog_cd, ptr.pending_ind DESC , ptr.sequence
+ 
+         head r.order_id
+ 
+           replyout->orderList[complete_cnt]->resourceList[1].serviceResourceCd = p.service_resource_cd
+ 
+         with nocounter   
+            
+endfor
+ 
+#EXIT_SCRIPT
+Call LOG_MESSAGE( build("Ending GL Complete Order (",
+                  format(curdate, "MM/DD/YY;;D")," ",
+                  format(curtime, " HHMM;;M"),")" ), LOG_LEVEL_DEBUG)        ;001
+
+if (complete_cnt = 0)
+   set reqinfo->commit_ind = 0
+else
+   set reqinfo->commit_ind = 1
+endif
+ 
+call uar_SysDestroyHandle(hSys)                                              ;001
+ 
+end go
+
+;Generated by GNU enscript 1.6.4.

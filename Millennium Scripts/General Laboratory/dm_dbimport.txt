@@ -1,0 +1,324 @@
+ ;;Solution_Test/script/Database Architecture -- Tools/DM_DBIMPORT/DM_DBIMPORT.PRG Turn on black mode
+
+drop program dm_dbimport:dba go
+create program dm_dbimport:dba
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+ 
+        Source file name:       dm_dbimport.prg
+        Object name:            dm_dbimport
+        Request #:              ?
+ 
+        Product:                Database Architecture -ACCESS
+        Product Team:           Database Architecture -ACCESS
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        This program is only intended to be ran by
+                                the installation tools to process a load data
+                                into a table, given a csv file, load script
+                                and blocks to process.
+                                1) Determine if CSV file exists
+                                2) Deterime if load script exists.
+                                3) Determine total rows in CSV file.
+                                4) Divide total rows by blocks process.
+                                5) Pass csv file, starting row and ending row
+                                   to RDM_DBIMPORT to load record structure.
+                                6) Execute load script for the blocks.
+                                7) If readme status is still "S" commit,
+                                   otherwise exit script.
+                                8) Increase the starting row and ending row.
+                                9) If starting row is still less then total
+                                   rows go to step 6 with new starting row
+                                   and ending row.
+ 
+        Tables updated:         Depends on load script passed in.
+ 
+        Executing from:         CCL
+ 
+******************************************************************************/
+;~DB~************************************************************************
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date      Engineer  Comment                                       *
+;    *--- --------  --------- --------------------------------------------- *
+;     000 4/9/02    DH3635    Initial Release                               *
+;     001 8/29/02   DH3635    Enhance error checking for calling programs.  *
+;     002 9/26/02   JM6512    Added with public to declarations so that load*
+;                             scripts can use these variables. Also added   *
+;                             vars from rdm_dbimport.                       *
+;     003 3/10/03   JM6512    Made 'logical' dynamic.                       *
+;     004 12/1/03   JM6512    Added logic to handle larger csv files using  *
+;                             rtl3. Also elminiated the problem of data     *
+;                             carryover from one row to another             *
+;     005 12/14/04  AG010103  Modified code to minimize memory leak         *
+;     006 08/24/05  SH011956  Modified SetDelim subroutine to find correct  *
+;                             delimiter if csv file begins with a quote.    *
+;                             Changed SetDelim to macro                     *
+;     007 09/29/05  SH011956  Set default delimiter to comma                *
+;     008 05/16/06  AC010168  Extracted the CreateRequestin subroutine into *
+;                             separate include file as part of initiative to*
+;                             reduce usage of 'with persistscript' option.  *
+;                             Also added code to allow for loads to process *
+;                             that don't automatically commit after the load*
+;                             for a Foundations project.                    *
+;     009 06/05/06  AC010168  Rearranged variables to remove the free set   *
+;                             commands and use validate to ensure scope is  *
+;                             retained.  Added default block size check, and*
+;                             added the validate check for requestin resize.*
+;                             Added 2 more readmes to the exclusion list.   *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************/
+
+%i cclsource:dm_readme_data.inc
+ 
+/*****  Validate the Commit Status  *****/
+if (validate(dm_dbi_parent_commit_ind, -999) = -999)
+  declare dm_dbi_parent_commit_ind = i2 with public, noconstant(0)
+endif
+
+/*****  009 - Rearranged to validate before declaring to 
+        resolve scope issues  *****/
+/*****  Variables used only in dm_dbimport  *****/
+if (validate(dm_dbi_load_script, "None") = "None")
+  declare  dm_dbi_load_script = c40  with public                  ;name of script to load
+endif
+
+if (validate(dm_dbi_blocks, -999) = -999)
+  declare  dm_dbi_blocks      = i4   with public, noconstant(1)   ;number of blocks to process
+else
+  set dm_dbi_blocks = 1
+endif
+
+if (validate(dm_dbi_file_loc, "None") = "None")
+  declare  dm_dbi_file_loc    = c100  with public                 ;name of csv file
+endif
+
+if (validate(dm_dbi_stat, -999) = -999)
+  declare  dm_dbi_stat        = i4   with public, noconstant(1)   ;does the csv file exist
+endif
+
+if (validate(dm_dbi_csv_rows, -999) = -999)
+  declare  dm_dbi_csv_rows    = i4   with public, noconstant(0)   ;number of rows in the csv file
+else
+  set dm_dbi_csv_rows = 0
+endif
+
+if (validate(dm_dbi_start_row, -999) = -999)
+  declare  dm_dbi_start_row   = i4   with public, noconstant(1)   ;first row to process
+else
+  set dm_dbi_start_row = 1
+endif
+
+if (validate(dm_dbi_end_row, -999) = -999)
+  declare  dm_dbi_end_row     = i4   with public, noconstant(1)   ;last row to process
+else
+  set dm_dbi_end_row = 1
+endif
+
+if (validate(dm_unique_logical, "None") = "None")
+  declare  dm_unique_logical  = c30  with public                  ;dynamic logical                ;003
+endif
+
+if (validate(dm_dbi_rtl3_ind, -999) = -999)
+  declare  dm_dbi_rtl3_ind    = i2   with public, noconstant(0)
+else
+  set dm_dbi_rtl3_ind = 0
+endif
+/*****  End 009  *****/
+
+set dm_dbi_load_script = " "
+set dm_dbi_file_loc    = " "
+ 
+if (readme_data->readme_id > 0)                                                                         ;003
+   set dm_unique_logical = concat("dm_logical",trim(cnvtstring(readme_data->readme_id),3))              ;003
+else                                                                                                    ;003
+   set dm_unique_logical = "dm_unique_logical"                                                          ;003
+endif                                                                                                   ;003
+ 
+set dm_dbi_file_loc    = $1
+set dm_dbi_load_script = cnvtupper($2)
+set dm_dbi_blocks      = $3
+
+/*****  009  *****/
+if (dm_dbi_blocks = 0)
+  set dm_dbi_blocks = 500
+endif
+/*****  End 009  *****/
+ 
+call parser(concat('set logical ',trim(value(dm_unique_logical),3),' "',trim(dm_dbi_file_loc,3),'" go'));003
+ 
+;001 change default to "F" instead of "S"
+set readme_data->status = "F" ;allows for new and old to be ran.
+ 
+;check if csv file exists
+set dm_dbi_stat = findfile(dm_dbi_file_loc)
+ 
+if(dm_dbi_stat = 0)
+  call echo("*****************************************")
+  call echo("********    Program failed     **********")
+  call echo("**** CSV file could not be found ********")
+  call echo("*****************************************")
+;001 add message
+  set readme_data->status  = "F"
+  set readme_data->message = "CSV File cound not be found."
+  go to exit_script
+endif
+ 
+;check if the load script exists
+call parser('select into "NL:"')
+call parser('from dprotect d where d.object = "P" and d.group = 0 and d.object_name =')
+call parser(build('"',dm_dbi_load_script,'"'))
+call parser('with nocounter go')
+ 
+if(curqual=0)
+  call echo("*****************************************")
+  call echo("********    Program failed     **********")
+  call echo("** Load program could not be found ******")
+  call echo("*****************************************")
+;001 add message
+  set readme_data->status  = "F"
+  set readme_data->message = "Load program cound not be found."
+  go to exit_script
+endif
+ 
+;determine rows in csv file
+free define rtl2
+;define rtl2 is "dm_dbi_logical"                        ;003
+define rtl2 is value(dm_unique_logical)                 ;003
+ 
+select into "NL:"
+  from rtl2t t
+detail
+  dm_dbi_csv_rows = dm_dbi_csv_rows + 1
+ 
+  if (textlen(trim(t.line,3)) > 1999)                   ;004
+     dm_dbi_rtl3_ind = 1                                ;004
+  endif                                                 ;004
+with nocounter
+ 
+;004
+if (dm_dbi_rtl3_ind = 1)
+   if (dm_dbi_blocks > 500)
+      set dm_dbi_blocks = 500
+   endif
+endif
+;004
+ 
+call echo(build("Numbers of rows to process: ",dm_dbi_csv_rows-1))
+  
+/* 001 add check to see if CSV has more then 1 row */
+if(dm_dbi_csv_rows = 1)
+  call echo("*****************************************")
+  call echo("********    Program failed     **********")
+  call echo("** Only one row in the csv file ******")
+  call echo("*****************************************")
+  
+  set readme_data->status  = "F"
+  set readme_data->message = "Only one row in the CSV file, program failed"
+  go to exit_script
+endif
+;001 passed all checks, set to "S" and process
+ 
+set dm_dbi_start_row   = 1 ;first row to process in a run
+set dm_dbi_end_row     = 0 ;last row to process in a run
+
+/*****  008  *****/
+%i cclsource:dm_prepare_requestin.inc
+call prepare_requestin(trim(dm_dbi_file_loc,3), 0)
+
+%i cclsource:dm_create_requestin.inc
+
+if (readme_data->status = 'F')
+  call echo("*****************************************")
+  call echo("********    Program failed     **********")
+  call echo(concat("** ",readme_data->message, " **"))
+  call echo("*****************************************")
+  go to exit_script
+endif
+/*****  008  *****/
+
+while(readme_data->status = "S" and dm_dbi_start_row < dm_dbi_csv_rows)
+ 
+  set dm_dbi_end_row = dm_dbi_end_row + dm_dbi_blocks
+  call echo(build("Processing rows: ",dm_dbi_start_row," to: ",dm_dbi_end_row))
+  call echo(concat("Here is the csv file name: ",dm_dbi_file_loc))
+  call echo("-----")
+ 
+  execute rdm_dbimport dm_dbi_file_loc, dm_dbi_start_row, dm_dbi_end_row, dm_dbi_rtl3_ind  ;004
+ 
+  ;execute the load script
+  call parser("execute ")
+  call parser(dm_dbi_load_script)
+  call parser(" go")
+ 
+  if (readme_data->status = "S")
+    /*****  008  *****/
+    if (dm_dbi_parent_commit_ind != 1)
+      commit
+    endif
+    
+    if ((validate(requestin->dm_dbimport_validate, "Nope") = "Nope") AND
+        (readme_data->readme_id not in (2496,2632,2667,2694,2750,2772,2933,2939,2958,
+                                        2984,3212,3324,3349,3358,3388,3413,3414,3466,
+                                        2630,3350,3413,3414,2759,
+      /*****  009  *****/
+                                        2417,2512)))
+      if (validate(requestin,0))
+         set rdm_stat = alterlist(requestin->list_0, 0)
+      endif
+      /*****  End 009  *****/
+      
+    endif
+    /*****  008  *****/
+  else
+    call echo("Load script has reported a failure, exiting script")
+    call echo("*****************************************")
+    call echo("** Load program reported a failure. *****")
+    call echo("************ Exiting program *********** ")
+    call echo("*****************************************")
+    
+    /*****  008  *****/
+    if (dm_dbi_parent_commit_ind != 1)
+      rollback
+    endif
+    /*****  008  *****/
+    go to exit_script
+  endif
+ 
+  set dm_dbi_start_row = dm_dbi_end_row + 1
+endwhile
+ 
+#exit_script
+
+if ((validate(requestin->dm_dbimport_validate, "Nope") = "Nope") AND
+    (readme_data->readme_id not in (2496,2632,2667,2694,2750,2772,2933,2939,2958,
+                                    2984,3212,3324,3349,3358,3388,3413,3414,3466,
+                                    2630,3350,3413,3414,2759,
+                                    2417,2512))) ;009
+%i cclsource:dm_purge_requestin.inc
+endif
+ 
+end
+go
+
+;Generated by GNU enscript 1.6.4.

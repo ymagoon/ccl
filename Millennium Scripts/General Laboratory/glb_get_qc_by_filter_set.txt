@@ -1,0 +1,624 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_qc_by_filter_set/glb_get_qc_by_filter_set.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Incl.                       *
+      *       Revision      (c) 1984-2003 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reservedta.       *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerneqrg.                                     *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+  Source file name:   GLB_GET_QC_BY_FILTER_SET.PRG
+  Object name:        GLB_GET_QC_BY_FILTER_SET
+  Request #:          250226
+ 
+  Product:            GLB DB QC Templates
+  Product Team:       Pathnet General Lab
+  HNA Version:        500
+  CCL Version:        8.2
+ 
+  Program purpose:    Script will return QC Results based on the current filterset.
+ 
+  Tables read:        QC_RESULT, CONTROL_LOT, QC_RESULT_GRP, ACCESSION,
+                      DISCRETE_TASK_ASSAY, NOMENCLATURE, ASSAY_PROCESSING_R,
+                      QC_RESULT_EVENT, PRSNL
+  Tables updated:     none
+  Executing from:
+ 
+  Special Notes:
+ 
+******************************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+; *Mod Date     Engineer      Feature   	Comment 	              *
+;    *--- -------- --------------------	----------------------------------- *
+;    *001 11/12/03 cs6265               Initial Release			            *
+;    *002 12/08/07 st013736  155584     Performance Improvement
+;    *                                                                      *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program glb_get_qc_by_filter_set:dba go
+create program glb_get_qc_by_filter_set:dba
+ 
+%i cclsource:pcs_resource_security.inc
+%i cclsource:pcs_subevent.inc
+set modify predeclare
+;*************************************************************************
+;*         Record Request                                                *
+;*************************************************************************
+/*
+record request
+(
+ 
+  1 controls[*]
+	  2 control_id			      = f8
+  1 test_sites[*]
+	  2 service_resource_cd	      = f8
+  1 procedures[*]
+	  2 task_assay_cd             = f8
+  1 result_statuses[*]
+	  2 result_status_cd          = f8
+  1 lot_type_flag                 = i2 (0=preactive, 1=active, 2=both)
+  1 beg_dt_tm                     = dq8
+  1 end_dt_tm                     = dq8
+  1 filter_range_flag             = i2
+  1 filter_range_nbr              = i4
+)
+*/
+ 
+;***********************************************************************
+;*   Reply Record                                                      *
+;***********************************************************************
+record reply
+(
+    1 results[*]
+        2 control_desc              = vc
+        2 display_sequence          = i4
+        2 qc_result_id              = f8
+        2 qc_group_id               = f8
+        2 accession_id              = f8
+        2 accession                 = c20
+        2 result_status_cd          = f8
+        2 result_status_disp        = c40
+        2 review_tech               = vc
+        2 review_dt_tm              = dq8
+        2 review2_tech              = vc
+        2 review2_dt_tm             = dq8
+        2 control_id                = f8
+        2 lot_id                    = f8
+        2 lot_number                = c20
+        2 service_resource_cd       = f8
+        2 service_resource_disp     = vc
+        2 task_assay_cd             = f8
+        2 mnemonic                  = c40
+        2 result_tech               = vc
+        2 result_tech_id            = f8
+        2 perform_dt_tm             = dq8
+        2 result_type_cd            = f8
+        2 result_type_disp          = c40
+        2 result_type_mean          = c12
+        2 result_value_numeric      = f8
+        2 result_value_alpha        = c25
+        2 nomenclature_id           = f8
+        2 resource_error_codes      = vc
+        2 multiplex_resource_cd     = f8
+        2 rule_id                   = f8
+        2 mean                      = f8
+        2 prev_result_id            = f8
+        2 clinical_std_dev          = f8
+        2 statistical_std_dev       = f8
+        2 abs_low                   = f8
+        2 abs_high                  = f8
+        2 result_control_cd         = f8
+        2 result_control_disp       = c40
+        2 result_control_mean       = c12
+        2 numeric_raw_value         = f8
+        2 z_score                   = f8 ; (result minus mean)/ sd
+        2 preactive_ind             = i2
+        2 qc_result_updt_cnt        = i4
+        2 result_process_cd         = f8
+        2 result_process_disp       = c40
+        2 ascii_text                = c60
+        2 interface_flag            = i2
+        2 comment_ind               = i2
+ 
+%I CCLSOURCE:STATUS_BLOCK.INC
+)
+ 
+ 
+;***********************************************************************
+;*   Variable Declarations                                             *
+;***********************************************************************
+ 
+declare nPREV_NBR_RES_FILTER_FLAG            = i2 with protect, constant(0)
+declare nLOT_TO_DATE_FILTER_FLAG             = i2 with protect, constant(5)
+ 
+declare nIterations                          = i2 with protect, noconstant(0)
+declare nContinueInd                         = i2 with protect, noconstant(1)
+declare lStatus                              = i4 with protect, noconstant(0)
+declare lControlslist                        = i4 with protect, constant(size(request->controls,5))
+declare lTestSiteslist                       = i4 with protect, constant(size(request->test_sites,5))
+declare lProcedureslist                      = i4 with protect, constant(size(request->procedures,5))
+declare lResultslist                         = i4 with protect, constant(size(request->result_statuses,5))
+declare lResultsCnt                          = i4 with protect, noconstant(0)
+declare nStat                                = i2 with protect, noconstant(0)
+declare sControl_Parser                      = vc with protect, noconstant("")
+declare nControlCnt                          = i2 with protect, noconstant(0)
+declare nTestsiteCnt                         = i2 with protect, noconstant(0)
+declare sTestsite_Parser                     = vc with protect, noconstant("")
+declare sProcedure_Parser                    = vc with protect, noconstant("")
+declare nProcedureCnt                        = i2 with protect, noconstant(0)
+declare sResultstatus_Parser                 = vc with protect, noconstant("")
+declare nResultstatusCnt                     = i2 with protect, noconstant(0)
+ 
+declare RESULT_STATUS_VERIFIED_CDF           = c12 with protect, constant("VERIFIED")
+declare RESULT_STATUS_AUTO_VERF_CDF          = c12 with protect, constant("AUTOVERIFIED")
+declare RESULT_STATUS_REVIEWED_CDF           = c12 with protect, constant("REVIEWED")
+declare RESULT_STATUS_REVIEWED2_CDF          = c12 with protect, constant("REVIEWED2")
+declare RESULT_STATUS_CHANGED_CDF            = c12 with protect, constant("CHANGE")
+declare RESULT_STATUS_PERFORMED_CDF          = c12 with protect, constant("PERFORMED")
+declare RESULT_STATUS_OLD_PERFORMED_CDF      = c12 with protect, constant("OLDPERFORMED")
+declare RESULT_STATUS_OLD_CHANGE_CDF         = c12 with protect, constant("OLD CHANGE")
+ 
+declare RESULT_STATUS_CODESET                = i4 with protect, constant(1901)
+declare FOOTNOTE_CODESET                     = i4 with protect, constant(14)
+declare SERV_RES_TYPE_CODESET                = i4 with protect, constant(223)
+declare result_status_reviewed_cd            = f8 with protect, noconstant(0.0)
+declare result_status_reviewed2_cd           = f8 with protect, noconstant(0.0)
+declare result_status_verified_cd            = f8 with protect, noconstant(0.0)
+declare result_status_auto_verf_cd           = f8 with protect, noconstant(0.0)
+declare result_status_changed_cd             = f8 with protect, noconstant(0.0)
+declare result_status_performed_cd           = f8 with protect, noconstant(0.0)
+declare result_status_old_change_cd          = f8 with protect, noconstant(0.0)
+declare result_status_old_performed_cd       = f8 with protect, noconstant(0.0)
+ 
+;***********************************************************************
+;*   Initializations                                                   *
+;***********************************************************************
+set reply->status_data->status = "F"
+ 
+ /***********************************************************************
+ * Load result status and footnote code set                             *
+ ***********************************************************************/
+set nStat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_REVIEWED_CDF,1,result_status_reviewed_cd)
+  if (result_status_reviewed_cd = 0)
+    call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of REVIEWED (cs 1901) failed.")
+    go to exit_script
+  endif
+ 
+set nStat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_REVIEWED2_CDF,1,result_status_reviewed2_cd)
+  if (result_status_reviewed2_cd = 0)
+    call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of REVIEWED2 (cs 1901) failed.")
+    go to exit_script
+  endif
+ 
+set nStat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_VERIFIED_CDF,1,result_status_verified_cd)
+  if (result_status_verified_cd = 0)
+    call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of VERIFIED (cs 1901) failed.")
+    go to exit_script
+  endif
+ 
+set nStat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_AUTO_VERF_CDF,1,result_status_auto_verf_cd)
+  if (result_status_auto_verf_cd = 0)
+    call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of AUTO VERIFIED (cs 1901) failed.")
+    go to exit_script
+  endif
+ 
+set nStat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_CHANGED_CDF,1,result_status_changed_cd)
+  if (result_status_changed_cd = 0)
+    call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of CHANGED (cs 1901) failed.")
+    go to exit_script
+  endif
+ 
+set nStat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_PERFORMED_CDF,1,result_status_performed_cd)
+  if (result_status_performed_cd = 0)
+    call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of PERFORMED (cs 1901) failed.")
+    go to exit_script
+  endif
+ 
+  set nStat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_OLD_PERFORMED_CDF,1,result_status_old_performed_cd)
+  if (result_status_old_performed_cd = 0)
+    call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of OLDPERFORMED (cs 1901) failed.")
+    go to exit_script
+  endif
+ 
+  set nStat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_OLD_CHANGE_CDF,1,result_status_old_change_cd)
+  if (result_status_old_change_cd = 0)
+    call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of OLD CHANGE (cs 1901) failed.")
+    go to exit_script
+  endif
+ 
+/***********************************************************************
+*build controlstring                                                   *
+***********************************************************************/
+ 
+if (lControlslist > 0)
+  set sControl_Parser = "qr.control_id in("
+  for (nControlCnt = 1 to lControlslist)
+    if (nControlCnt > 1)
+      set sControl_Parser = build(sControl_Parser, ",", request->controls[nControlCnt]->control_id)
+    else
+      set sControl_Parser = build(sControl_Parser, request->controls[nControlCnt]->control_id)
+    endif
+  endfor
+  set sControl_Parser = build(sControl_Parser,")")
+else
+  set sControl_Parser = "1 = 1"
+endif
+ 
+/************************************************************************
+*build resource string                                                  *
+************************************************************************/
+ 
+if (lTestSiteslist > 0)
+  set sTestsite_Parser = "qr.service_resource_cd in("
+  for (nTestsiteCnt = 1 to lTestSiteslist)
+    if (nTestsiteCnt > 1)
+      set sTestsite_Parser = build(sTestsite_Parser, ",", request->test_sites[nTestsiteCnt]->service_resource_cd)
+    else
+      set sTestsite_Parser = build(sTestsite_Parser, request->test_sites[nTestsiteCnt]->service_resource_cd)
+    endif
+  endfor
+  set sTestsite_Parser = build(sTestsite_Parser,")")
+else
+  set sTestsite_Parser = "1 = 1"
+endif
+ 
+/************************************************************************
+*build assay string                                                     *
+************************************************************************/
+ 
+if (lProcedureslist > 0)
+  set sProcedure_Parser = "qr.task_assay_cd in("
+  for (nProcedureCnt = 1 to lProcedureslist)
+    if (nProcedureCnt > 1)
+      set sProcedure_Parser = build(sProcedure_Parser, ",", request->procedures[nProcedureCnt]->task_assay_cd)
+    else
+      set sProcedure_Parser = build(sProcedure_Parser, request->procedures[nProcedureCnt]->task_assay_cd)
+    endif
+  endfor
+  set sProcedure_Parser = build(sProcedure_Parser,")")
+else
+  set sProcedure_Parser = "1 = 1"
+endif
+ 
+/************************************************************************
+*build result_status string                                             *
+************************************************************************/
+ 
+if (lResultslist > 0)
+  set sResultstatus_Parser = "qr.result_status_cd in("
+  for (nResultstatusCnt = 1 to lResultslist)
+    if (nResultstatusCnt > 1)
+      set sResultstatus_Parser = build(sResultstatus_Parser, ",", request->result_statuses[nResultstatusCnt]->result_status_cd)
+    else
+      set sResultstatus_Parser = build(sResultstatus_Parser, request->result_statuses[nResultstatusCnt]->result_status_cd)
+    endif
+  endfor
+  set sResultstatus_Parser = build(sResultstatus_Parser,")")
+else
+  set sResultstatus_Parser = "1 = 1"
+endif
+ 
+/************************************************************************
+* Check For Lot to date filter                                         *
+************************************************************************/
+if (request->filter_range_flag = nLOT_TO_DATE_FILTER_FLAG)
+%i cclsource:glb_get_qc_lot_to_date.inc
+  call LoadQCForLotToDate(0)
+ 
+  go to exit_script
+endif
+ 
+while (nContinueInd = 1)
+ 
+  ;if the filter range is of type previous number of results
+  ;then adjust the date range for each iteration of the loop
+  if (request->filter_range_flag = nPREV_NBR_RES_FILTER_FLAG)
+ 
+    set nIterations = nIterations + 1
+ 
+    if (nIterations = 1)
+      ;if first time, then set the beg and end to be three days apart
+      ;and do not modify the end
+      set request->beg_dt_tm = datetimeadd(request->end_dt_tm, -3)
+    elseif (nIterations <= 30)
+      ;if the number of times we tried this is less than thirty then set the end to the previous
+      ;begin and the beg to be three days before the previous begin
+      set request->end_dt_tm = request->beg_dt_tm
+      set request->beg_dt_tm = datetimeadd(request->end_dt_tm, -3)
+    else
+      ;if the number of iterations has been 30, give up and open the date range
+      ;from Jan 1, 1950 to the last begin
+      set request->end_dt_tm = request->beg_dt_tm
+      set request->beg_dt_tm = cnvtdatetime("01-JAN-1950 00.00.00")
+ 
+      ;set the contine indicator to stop looping
+      set nContinueInd = 0
+    endif
+  else
+    ;only run this select once if not the previous number of results filter
+    set nContinueInd = 0
+  endif
+ 
+  select into "nl:"
+ 
+  from
+    qc_result qr,
+    control_lot cl,
+    control_material cm,
+    qc_result_grp qrg,
+    accession a,
+    discrete_task_assay dta,
+    nomenclature n
+  plan qr
+  	where parser(sControl_Parser)
+  	  and parser(sTestsite_Parser)
+  	  and parser(sProcedure_Parser)
+  	  and parser(sResultstatus_Parser)
+  	  and qr.qc_result_type_flag = 0
+  	  and (qr.perform_dt_tm between cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm))
+ 
+        and ((request->lot_type_flag = 1 and qr.preactive_ind = 1) or
+             (request->lot_type_flag = 2 and qr.preactive_ind = 0) or
+             (request->lot_type_flag = 0))
+        and qr.result_status_cd not in (result_status_performed_cd,
+                                        result_status_old_change_cd,
+                                        result_status_old_performed_cd)
+  join cl
+    where cl.lot_id = qr.lot_id
+  join qrg
+    where qrg.qc_group_id = qr.qc_group_id
+  join cm
+    where cm.control_id = qr.control_id
+  join a
+    where a.accession_id = qrg.accession_id
+  join dta
+    where dta.task_assay_cd = qr.task_assay_cd
+  join n
+    where n.nomenclature_id = qr.nomenclature_id
+ 
+ 
+  ORDER BY  qr.qc_result_id desc
+ 
+  HEAD qr.qc_result_id
+ 
+    dServiceResourceCd = qr.service_resource_cd
+ 
+    if (IsResourceViewable(dServiceResourceCd) = True)
+ 
+      if (((lResultsCnt <= request->filter_range_nbr) and (request->filter_range_flag = nPREV_NBR_RES_FILTER_FLAG))
+        or (request->filter_range_flag != nPREV_NBR_RES_FILTER_FLAG))
+        
+      	lResultsCnt = lResultsCnt + 1
+ 
+        if (lResultsCnt > size(reply->results, 5))
+          lStatus = alterlist(reply->results, lResultsCnt + 9)
+        endif
+ 
+        reply->results[lResultsCnt]->qc_result_id          = qr.qc_result_id,
+        reply->results[lResultsCnt]->qc_group_id           = qr.qc_group_id,
+        reply->results[lResultsCnt]->accession_id          = qrg.accession_id,
+        reply->results[lResultsCnt]->accession             = a.accession,
+        reply->results[lResultsCnt]->control_desc          = cm.short_description,
+        reply->results[lResultsCnt]->control_id            = cm.control_id,
+        reply->results[lResultsCnt]->result_status_cd      = qr.result_status_cd,
+        reply->results[lResultsCnt]->result_control_cd     = qr.result_control_cd,
+        reply->results[lResultsCnt]->lot_id                = qr.lot_id,
+        reply->results[lResultsCnt]->lot_number            = cl.lot_number,
+        reply->results[lResultsCnt]->service_resource_cd   = qr.service_resource_cd,
+        reply->results[lResultsCnt]->task_assay_cd         = qr.task_assay_cd,
+        reply->results[lResultsCnt]->mnemonic              = dta.mnemonic,
+        reply->results[lResultsCnt]->perform_dt_tm         = cnvtdatetime(qr.perform_dt_tm),
+        reply->results[lResultsCnt]->result_type_cd        = qr.result_type_cd,
+        reply->results[lResultsCnt]->result_value_numeric  = qr.result_value_numeric,
+        reply->results[lResultsCnt]->result_value_alpha    = n.source_string,
+        reply->results[lResultsCnt]->nomenclature_id       = n.nomenclature_id,
+        reply->results[lResultsCnt]->resource_error_codes  = qr.resource_error_codes,
+        reply->results[lResultsCnt]->multiplex_resource_cd = qr.multiplex_resource_cd,
+        reply->results[lResultsCnt]->rule_id               = qr.rule_id,
+        reply->results[lResultsCnt]->mean                  = qr.mean,
+        reply->results[lResultsCnt]->prev_result_id        = qr.prev_result_id,
+        reply->results[lResultsCnt]->clinical_std_dev      = qr.clinical_std_dev,
+        reply->results[lResultsCnt]->statistical_std_dev   = qr.statistical_std_dev,
+        reply->results[lResultsCnt]->abs_low               = qr.abs_low,
+        reply->results[lResultsCnt]->abs_high              = qr.abs_high,
+        reply->results[lResultsCnt]->result_control_cd     = qr.result_control_cd,
+        reply->results[lResultsCnt]->numeric_raw_value     = qr.numeric_raw_value,
+        reply->results[lResultsCnt]->z_score               = qr.z_score,
+        reply->results[lResultsCnt]->preactive_ind         = qr.preactive_ind,
+        reply->results[lResultsCnt]->qc_result_updt_cnt    = qr.updt_cnt,
+        reply->results[lResultsCnt]->result_process_cd     = qr.result_process_cd,
+        reply->results[lResultsCnt]->ascii_text            = qr.ascii_text,
+        reply->results[lResultsCnt]->interface_flag        = qr.interface_flag,
+        reply->results[lResultsCnt]->comment_ind           = qr.comment_ind
+ 
+       endif
+      endif
+       
+ 
+  foot report
+   if ((lResultsCnt >= request->filter_range_nbr) and (request->filter_range_flag = nPREV_NBR_RES_FILTER_FLAG))
+     lStatus = alterlist(reply->results, request->filter_range_nbr)
+   else
+     lStatus = alterlist(reply->results, lResultsCnt)
+   endif
+ 
+  with
+    nocounter
+ 
+  ;if we have hit the number of results we need, set the continue indicator to stop
+  if ((lResultsCnt >= request->filter_range_nbr) and (request->filter_range_flag = nPREV_NBR_RES_FILTER_FLAG))
+    set nContinueInd = 0
+  endif
+ 
+endwhile
+/* ;002....start*/
+
+if (size(reply->results,5) > 0) 
+/******************************************************************************
+*                              To retrive display_sequence                    *
+*******************************************************************************/
+declare lCnt                      = i4  with protect, noconstant(0)
+declare lStart                    = i4  with protect, noconstant(0)
+declare lLoopCnt                  = i4  with protect, noconstant(0)
+declare lTempCnt                  = i4  with protect, noconstant(0)
+declare lEIdx                     = i4  with protect, noconstant(0)
+declare lOrderIdx                 = i4  with protect, noconstant(0)
+declare lExpandSize               = i4  with protect, constant(50)
+declare giStat		                = i4 with protect, noconstant(0)
+
+set lCnt = size(reply->results, 5)
+set lStart = 1
+set lLoopCnt = ceil(cnvtreal(lCnt)/lExpandSize)
+set lTempCnt = lLoopCnt * lExpandSize
+set giStat = alterlist(reply->results, lTempCnt)
+
+;* Pad the new items in the reply with the last assay so that the expand can be broken up
+   for (lOrderIdx=lCnt+1 to lTempCnt)
+      set reply->results[lOrderIdx].task_assay_cd = reply->results[lCnt].task_assay_cd
+      set reply->results[lOrderIdx].service_resource_cd = reply->results[lCnt].service_resource_cd
+      set reply->results[lOrderIdx].qc_result_id = reply->results[lCnt].qc_result_id
+   endfor
+
+   select into "nl:"
+      lLocStart = lStart
+   from
+      (dummyt d with seq = lLoopCnt),
+      assay_processing_r apr
+      plan d where initarray(lStart, evaluate(d.seq, 1,1, lStart+lExpandSize))
+  join apr
+   where expand(lEIdx, lStart, lStart + (lExpandSize - 1), apr.service_resource_cd,
+            reply->results[lEIdx].service_resource_cd, 
+            apr.task_assay_cd, reply->results[lEIdx].task_assay_cd, lExpandSize)
+            
+   head report
+      row + 0
+   detail
+      lLocStop = lLocStart + lExpandSize - 1
+      if (lLocStop > lCnt)
+         lLocStop = lCnt
+      endif
+      lOrderIdx = locateval(lEIdx, lLocStart, lLocStop, 
+                             apr.task_assay_cd, reply->results[lEIdx].task_assay_cd,
+                             apr.service_resource_cd, reply->results[lEIdx].service_resource_cd)
+      while(lOrderIdx > 0)
+         reply->results[lOrderIdx].display_sequence = apr.display_sequence
+   
+         lOrderIdx = locateval(lEIdx, lOrderIdx + 1, lLocStop, 
+                                apr.task_assay_cd, reply->results[lEIdx].task_assay_cd,
+                                apr.service_resource_cd, reply->results[lEIdx].service_resource_cd)
+      endwhile
+   foot report
+   stat = alterlist(reply->results, lCnt)
+   with nocounter
+/******************************************************************************
+*                              To retrive resulted date time and person               *
+*******************************************************************************/
+
+   set lStart = 1
+   set giStat = alterlist(reply->results, lTempCnt)
+   select into "nl:"   
+      lLocStart = lStart        
+   from 
+   (dummyt d with seq = lLoopCnt),
+   qc_result_event qe, 
+   prsnl p
+   Plan d
+   where initarray(lStart, evaluate(d.seq, 1,1, lStart+lExpandSize))
+   join qe 
+   WHERE expand(lEIdx,lStart,lStart + (lExpandSize - 1),qe.qc_result_id,reply->results[lEIdx].qc_result_id,lExpandSize)
+   join p  
+       where p.person_id = qe.event_personnel_id
+
+   HEAD qe.qc_result_id 
+       
+       iServ_Resource_Viewable = 0  
+       result_tech_ind = 0          
+       result_tech_id_ind = 0         
+       review_tech_ind = 0          
+       review_dt_tm_ind = 0         
+       review2_tech_ind = 0         
+       review2_dt_tm_ind = 0 
+          
+      lLocStop = lLocStart + lExpandSize - 1
+      if (lLocStop > lCnt)
+        lLocStop = lCnt
+      endif
+      lOrderIdx = locateval(lEIdx, lLocStart, lLocStop, 
+                             qe.qc_result_id, reply->results[lEIdx].qc_result_id)   
+        
+   detail
+
+          CASE (qe.event_type_cd)   
+            OF result_status_verified_cd: 
+            OF result_status_auto_verf_cd:   
+            OF result_status_changed_cd:  
+              if (result_tech_ind = 0) 
+                reply->results[lOrderIdx]->result_tech = p.name_full_formatted   
+                result_tech_ind = 1 
+              endif  
+              if (result_tech_id_ind = 0) 
+                reply->results[lOrderIdx]->result_tech_id = p.person_id 
+                result_tech_id_ind = 1 
+              endif 
+            OF result_status_reviewed_cd: 
+              if (review_tech_ind = 0) 
+                reply->results[lOrderIdx].review_tech = p.name_full_formatted 
+                review_tech_ind = 1 
+              endif  
+              if (review_dt_tm_ind = 0)   
+                reply->results[lOrderIdx].review_dt_tm = qe.event_dt_tm 
+                review_dt_tm_ind = 1   
+              endif  
+            OF result_status_reviewed2_cd:   
+              if (review2_tech_ind = 0)   
+                reply->results[lOrderIdx].review2_tech = p.name_full_formatted   
+                review2_tech_ind = 1   
+              endif  
+              if (review2_dt_tm_ind = 0)  
+                reply->results[lOrderIdx].review2_dt_tm = qe.event_dt_tm   
+                 review2_dt_tm_ind = 1 
+              endif  
+           ENDCASE  
+  
+   foot report
+   stat = alterlist(reply->results, lCnt)
+   with nocounter
+endif 
+ /*...002....End*/
+ 
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+#exit_script
+ 
+if (lResultsCnt = 0)
+  set reply->status_data->status = "Z"
+else
+  set reply->status_data->status = "S"
+endif
+ 
+end go
+ 
+ 
+
+;Generated by GNU enscript 1.6.4.

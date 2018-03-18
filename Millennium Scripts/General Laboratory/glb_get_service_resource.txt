@@ -1,0 +1,352 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_service_resource/glb_get_service_resource.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_SERVICE_RESOURCE.PRG
+        Object name:            GLB_GET_SERVICE_RESOURCE
+        Request #:              250056
+
+        Product:                General Lab                          
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load a range of service resources.
+                                Service resources for specific accessions
+                                and/or orderable procedures can be queried
+                                by completing the optional accession and
+                                catalog_cd fields of the request record.
+
+        Tables read:            accession_order_r
+                                code_value
+                                orc_resource_list
+                                orders
+                                order_pending
+                                service_resource
+
+        Tables updated:         none
+        Executing from:         GLB.EXE
+
+        Special Notes:          if service_resource_type_cdf meaning in the
+                                request record is blank then select all
+                                service resource types.  Otherwise, select
+                                only the service resources that apply to the
+                                resource type.
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 09/22/95 Hal Patchen          Initial Release                     *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+         drop program GLB_GET_SERVICE_RESOURCE:dba go    
+         create program GLB_GET_SERVICE_RESOURCE:dba
+     
+      /***********************************************************************
+      *   Request Record                                                     *
+      ***********************************************************************/
+      /*
+      record request                                      
+      (                                       
+         1  service_resource_disp_begin  = c40
+         1  service_resource_disp_end    = c40
+         1  service_resource_type_cdf    = c12
+         1  catalog_cd                   = f8
+         1  accession                    = c18
+      ) 
+      */
+
+      /***********************************************************************
+      *   Reply Record                                                       *
+      ***********************************************************************/
+      record reply
+      ( 
+         1  qual[*]
+            2  service_resource_cd       = f8
+            2  service_resource_disp     = vc
+            2  description               = vc
+            2  service_resource_type_cd  = f8
+            2  parent_ind                = i2
+         1  status_data
+            2  status                    = c1
+            2  subeventstatus[1]
+               3  OperationName          = c15
+               3  OperationStatus        = c1
+               3  TargetObjectName       = c15
+               3  TargetObjectValue      = vc
+      )
+
+      /***********************************************************************
+      *   Script                                                             *
+      ***********************************************************************/
+      #SCRIPT
+         record code_value
+         (
+            1  service_resource_type_cd  = f8
+         )
+         set SERVICE_RESOURCE_CODE_SET = 221
+         set SERVICE_RESOURCE_TYPE_CODE_SET = 223
+         set reply->status_data.status = "F"
+         set q_cnt = 0
+         set serv_rsrc_begin = cnvtupper(request->service_resource_disp_begin)
+         set serv_rsrc_begin = cnvtalphanum(request->service_resource_disp_begin)
+         set serv_rsrc_end = cnvtupper(request->service_resource_disp_end)
+         set serv_rsrc_end = cnvtalphanum(request->service_resource_disp_end)
+         set serv_rsrc_type_cdf = 
+                           trim(cnvtupper(request->service_resource_type_cdf))
+                 
+;     *
+;     * If a specific service_resource_type_cdf meaning was requested,
+;     * load the code value for the type requested. 
+;     *
+         set code_value->service_resource_type_cd = 0.0
+         if (trim(request->service_resource_type_cdf) > "")
+            select into "nl:"
+               cv.code_value
+            from
+               code_value cv
+            where cv.code_set = SERVICE_RESOURCE_TYPE_CODE_SET
+              and cv.cdf_meaning = serv_rsrc_type_cdf
+              and cv.active_ind = 1
+              and (cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                and  cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+            detail
+               code_value->service_resource_type_cd = cv.code_value
+            with
+               nocounter
+         endif
+
+         if (trim(request->accession) > "")
+            go to SELECT_ACCESSION
+         else
+            go to SELECT_NO_ACCESSION
+         endif
+
+;     *
+;     * Select valid service resources for a given accession.
+;     *
+      #SELECT_ACCESSION
+         select into "nl:"
+            aor.accession,
+            o.catalog_cd,
+            op.service_resource_cd,
+            sr.service_resource_type_cd,
+/*dqb*/     rg.parent_service_resource_cd,
+            cv.display,
+            cv.description
+
+         from
+            accession_order_r aor,
+            orders o,
+            order_pending op,
+            service_resource sr,
+/*dqb*/     dummyt d1,
+/*dqb*/     resource_group rg,
+            code_value cv
+          
+
+         plan   aor where aor.accession = request->accession
+         join   o   where aor.order_id = o.order_id
+                      and (request->catalog_cd = 0.0
+                        or request->catalog_cd = o.catalog_cd)
+         join   op  where aor.order_id = op.order_id
+         join   sr  where sr.service_resource_cd = op.service_resource_cd
+                      and (code_value->service_resource_type_cd = 0.0
+                       or  sr.service_resource_type_cd =
+                                     code_value->service_resource_type_cd)
+                      and sr.active_ind = 1
+                      and sr.beg_effective_dt_tm <= 
+                                     cnvtdatetime(curdate,curtime3)
+                      and sr.end_effective_dt_tm >= 
+                                     cnvtdatetime(curdate,curtime3)
+/*dqb*/  join (d1 where 1 = d1.seq            
+/*dqb*/  join rg where rg.parent_service_resource_cd = sr.service_resource_cd
+                   and rg.root_service_resource_cd = 0.0
+                   and rg.active_ind = 1
+                   and rg.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+                   and rg.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3))
+         join cv  where cv.code_value = sr.service_resource_cd
+                    and cv.display_key between serv_rsrc_begin 
+                                           and serv_rsrc_end
+                    and cv.active_ind = 1
+                    and cv.begin_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+                    and cv.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3)
+
+         order op.service_resource_cd
+
+         head report
+            q_cnt = 0
+
+         head op.service_resource_cd
+            q_cnt = q_cnt + 1    
+            if (mod(q_cnt,10) = 1)
+               stat = alterlist(reply->qual, q_cnt + 10)
+            endif
+            reply->qual[q_cnt].service_resource_cd = op.service_resource_cd
+            reply->qual[q_cnt].service_resource_disp = cv.display
+            reply->qual[q_cnt].description = cv.description
+            reply->qual[q_cnt].service_resource_type_cd = 
+                                                sr.service_resource_type_cd
+/*dqb*/
+            if (rg.seq > 0)
+               reply->qual[q_cnt].parent_ind = 1
+            else
+               reply->qual[q_cnt].parent_ind = 0
+            endif 
+/*dqb*/            
+         detail    
+            row+0
+
+         foot op.service_resource_cd
+            row+0
+ 
+         with counter,outerjoin=d1
+
+         go to CHECK_QUALIFICATIONS
+
+
+;     *
+;     * Select service resources when accession is not known
+;     * The select will query based on the following:
+;     *   1) catalog_cd was not passed (i.e. = 0.0)
+;     *   2) catalog_cd was passed (i.e. > 0.0)
+;     *
+      #SELECT_NO_ACCESSION
+         select
+         if (request->catalog_cd = 0.0)
+            into "nl:"
+               cv.code_value,
+               cv.display,
+               cv.description,
+               sr.service_resource_type_cd,
+/*dqb*/        group = decode(rg.seq,"Y","N"),
+/*dqb*/        rg.parent_service_resource_cd
+   
+            from 
+               code_value cv,
+               service_resource sr,
+/*dqb*/        dummyt d2,
+/*dqb*/        resource_group rg
+   
+            plan   cv  where cv.code_set = SERVICE_RESOURCE_CODE_SET
+                         and cv.display_key between serv_rsrc_begin
+                                                and serv_rsrc_end
+                         and cv.active_ind = 1
+                         and cv.begin_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+                         and cv.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3)
+            join   sr  where sr.service_resource_cd = cv.code_value
+                         and (code_value->service_resource_type_cd = 0.0
+                          or  sr.service_resource_type_cd =
+                                     code_value->service_resource_type_cd)
+                         and sr.active_ind = 1
+                         and sr.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+                         and sr.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3)
+/*dqb*/     join (d2 where 1 = d2.seq            
+/*dqb*/     join rg where rg.parent_service_resource_cd = sr.service_resource_cd
+                      and rg.root_service_resource_cd = 0.0
+                      and rg.active_ind = 1
+                      and rg.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+                      and rg.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3))
+         else
+            into "nl:"
+               orl.service_resource_cd,
+               orl.catalog_cd,
+               sr.service_resource_type_cd,
+/*dqb*/        group = decode(rg.seq,"Y","N"),
+/*dqb*/        rg.parent_service_resource_cd,
+               cv.code_value,
+               cv.display,
+               cv.description
+   
+            from 
+               orc_resource_list orl,
+               service_resource sr,
+/*dqb*/        dummyt d3,
+/*dqb*/        resource_group rg,
+               code_value cv
+   
+            plan   orl where request->catalog_cd = orl.catalog_cd
+                         and orl.active_ind = 1
+            join   sr  where sr.service_resource_cd = orl.service_resource_cd
+                         and (code_value->service_resource_type_cd = 0.0
+                          or  sr.service_resource_type_cd =
+                                     code_value->service_resource_type_cd)
+                         and sr.active_ind = 1
+                         and sr.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+                         and sr.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3)
+            join   cv  where cv.code_value = sr.service_resource_cd
+                         and cv.display_key between serv_rsrc_begin 
+                                                and serv_rsrc_end
+                         and cv.active_ind = 1
+                         and cv.begin_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+                         and cv.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3)
+/*dqb*/     join (d3 where 1 = d3.seq            
+/*dqb*/     join rg where rg.parent_service_resource_cd = sr.service_resource_cd
+                      and rg.root_service_resource_cd = 0.0
+                      and rg.active_ind = 1
+                      and rg.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+                      and rg.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3))
+         endif
+         head report
+            q_cnt = 0
+
+         detail    
+            q_cnt = q_cnt + 1    
+            if (mod(q_cnt,10) = 1)
+               stat = alterlist(reply->qual, q_cnt + 10)
+            endif
+            reply->qual[q_cnt].service_resource_cd = cv.code_value
+            reply->qual[q_cnt].service_resource_disp = cv.display
+            reply->qual[q_cnt].description = cv.description
+            reply->qual[q_cnt].service_resource_type_cd = 
+                                                sr.service_resource_type_cd
+            if (group = "Y")
+               reply->qual[q_cnt].parent_ind = 1
+            else
+               reply->qual[q_cnt].parent_ind = 0
+            endif 
+         with counter,maxqual(rg,1),outerjoin=d2,outerjoin=d3
+
+         go to CHECK_QUALIFICATIONS
+
+
+      #CHECK_QUALIFICATIONS
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Success
+         else
+            set reply->status_data.status = "Z"    ;Zero qualifications
+            set q_cnt = 1
+         endif
+         set stat = alterlist(reply->qual,q_cnt)
+         end
+         go      
+
+;Generated by GNU enscript 1.6.4.

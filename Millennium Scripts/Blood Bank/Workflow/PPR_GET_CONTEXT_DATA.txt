@@ -1,0 +1,208 @@
+ ;;Solution_Test/script/Scheduling/PPR Filter Service Scripts/ppr_get_context_data.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+	Source file name:       ppr_get_context_data.prg
+	Object name:            ppr_get_context_data
+	Request #:		        
+
+	Product:		        Patient Privacy
+	Product Team:		    Patient Privacy
+	HNA Version:            500
+	CCL Version:            8.1
+	
+	Program purpose:        Used to get one or more entries from the 
+				location table.
+
+	Tables read:            location
+	Tables updated:		    none
+	Executing from:         Filter Service
+
+	Special Notes:		none
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer		Comment 			                        *
+;    *--- -------- --------------------	----------------------------------- *
+;     001 03/25/03 Chandra Venkat	Initial Release			                *
+;     002 06/07/05 BM010352         CR 1-631770921, incorrect facility context returned 
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program ppr_get_context_data:dba go
+create program ppr_get_context_data:dba
+
+/****************************************************************************
+* 	Request Record							    *
+*****************************************************************************/
+/*
+record request
+( 1 qual[x]
+    2 location_cd	   = f8
+    2 organization_id  = f8
+    2 encntr_id        = f8
+)
+*/
+
+/****************************************************************************
+* 	Reply Record							    *
+*****************************************************************************/
+record reply
+( 1 qual[*]
+    2 location_cd 	    = f8
+    2 organization_id   = f8
+    2 loc_facility_cd   = f8
+    2 encntr_id         = f8
+%i cclsource:status_block.inc
+)
+
+declare PPR_CS_LOCATION_TYPE = i4 with constant(222)
+declare PPR_CDF_FACILITY_TYPE = vc with constant("FACILITY")
+
+declare facility_type_cd = f8 with noconstant(0.0)
+declare BED_CD = f8 with noconstant(0.0)
+declare ROOM_CD = f8 with noconstant(0.0)
+declare BUILDING_CD = f8 with noconstant(0.0)
+declare NURSE_UNIT_CD = f8 with noconstant(0.0)
+declare sMEANING = vc with constant("MEANING")
+
+set BED_CD = uar_get_code_by(nullterm(sMEANING), 222, "BED")
+set ROOM_CD = uar_get_code_by(nullterm(sMEANING), 222, "ROOM")
+set BUILDING_CD = uar_get_code_by(nullterm(sMEANING), 222, "BUILDING")
+set NURSE_UNIT_CD = uar_get_code_by(nullterm(sMEANING), 222, "NURSEUNIT")
+
+
+/****************************************************************************
+* 	Declare Variables	                            					    *
+*****************************************************************************/
+declare loop_max_cnt = i4 with constant(5); max number of times the loop should be executed
+declare loop_cnt = i4 with noconstant(0)
+/****************************************************************************
+* 	Initialize Variables						    *
+*****************************************************************************/
+set reply->status_data->status = "F"
+set count1 = 0
+set number_to_get = size(request->qual,5)
+
+;****************************************************************************
+;* Retreieve the root location                                              *
+;****************************************************************************
+record tmp_fs_root_loc
+(
+    1 qual[*]
+    2 cur_cnt          = i2
+)
+
+set stat = alterlist(tmp_fs_root_loc->qual,number_to_get)
+set stat = alterlist(reply->qual,number_to_get)
+for (i = 1 to number_to_get)
+    set reply->qual[i].loc_facility_cd   = request->qual[i].location_cd
+    set reply->qual[i].location_cd       = request->qual[i].location_cd
+    set reply->qual[i].organization_id   = request->qual[i].organization_id
+    set reply->qual[i].encntr_id         = request->qual[i].encntr_id
+endfor
+
+select into "nl:"
+from encounter e,
+     (dummyt d1 with seq = value(number_to_get))
+
+plan d1 where reply->qual[d1.seq].encntr_id > 0
+join e  where e.encntr_id = reply->qual[d1.seq].encntr_id
+
+detail
+    reply->qual[d1.seq].location_cd = e.loc_facility_cd
+    reply->qual[d1.seq].loc_facility_cd = e.loc_facility_cd
+with nocounter
+
+set stat = uar_get_meaning_by_codeset(PPR_CS_LOCATION_TYPE, nullterm(PPR_CDF_FACILITY_TYPE), 1, facility_type_cd)
+if (facility_type_cd = 0.0)
+    set Failed = "T"
+    go to exit_script
+endif
+
+while (loop_cnt <= loop_max_cnt)
+    set loop_cnt = loop_cnt + 1
+    select into "nl:"
+      lg.root_loc_cd
+    from location_group lg, (dummyt d with seq= value(number_to_get))
+    plan d where reply->qual[d.seq].loc_facility_cd > 0
+    join lg
+    where lg.child_loc_cd = reply->qual[d.seq].loc_facility_cd and
+          lg.location_group_type_cd in (facility_type_cd,BED_CD,ROOM_CD,BUILDING_CD,NURSE_UNIT_CD) and
+          lg.active_ind =1 and
+          lg.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3) and
+          lg.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3) ;and
+          ;lg.active_status_cd = reqdata->active_status_cd
+    detail
+
+        reply->qual[d.seq]->loc_facility_cd = lg.parent_loc_cd
+        tmp_fs_root_loc->qual[d.seq]->cur_cnt = loop_cnt
+    with nocounter
+    if(curqual = 0)
+        set loop_cnt = loop_max_cnt + 1
+    endif
+endwhile
+
+/****************************************************************************
+* 	Select Organization or the location_cd  							    *
+*****************************************************************************/
+		
+select into "nl:"
+  l.location_cd,*
+
+from location l,
+     (dummyt d with seq = value(number_to_get))
+
+plan d where (tmp_fs_root_loc->qual[d.seq]->cur_cnt <= loop_max_cnt
+         and reply->qual[d.seq].loc_facility_cd  > 0)
+         or ( reply->qual[d.seq]->organization_id > 0)
+
+join l where (l.location_cd = reply->qual[d.seq].loc_facility_cd
+			  and l.organization_id > 0
+              and l.location_cd  > 0
+              and l.active_ind = 1
+             )
+          or ( l.organization_id = reply->qual[d.seq]->organization_id
+          	  and l.organization_id > 0 
+              and l.LOCATION_TYPE_CD = facility_type_cd
+              and l.active_ind = 1
+              )
+
+detail
+
+  reply->qual[d.seq]->organization_id   = l.organization_id
+  reply->qual[d.seq]->loc_facility_cd   = l.location_cd
+
+ 
+with nocounter
+
+set reply->status_data->status = "S"
+
+end go
+
+;Generated by GNU enscript 1.6.4.

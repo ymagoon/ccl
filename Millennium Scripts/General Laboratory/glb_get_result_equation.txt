@@ -1,0 +1,883 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_result_equation/glb_get_result_equation.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_result_equation.prg
+        Object name:            glb_get_result_equation
+        Request #:              250098
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load equation and any related cross accession
+                                results.  The qualifying equation for the
+                                given task_assay_cd and service_resource_cd
+                                will be determined in order of one of the
+                                following methods:
+                                  1) An equation was found for the assay
+                                     at the specific resource.
+                                  2) An equation was found for the assay
+                                     for a non-specific resource.
+                                  3) The default equation for the assay
+                                     was used. 
+                                Results are then loaded for the procedure
+                                components.  Results may be found in one
+                                of the following ways:
+                                  1) The component result exists for the
+                                     requesting order_id.
+                                  2) The component result exists on the
+                                     same accession of the requesting order_id,
+                                     but under a different order_id.
+                                  3) The component result exists across
+                                     accessions and was either performed
+                                     or verified within a given drawn date
+                                     and time.
+        Tables read:            accession_order_r,
+                                code_value,
+                                container,
+                                equation,
+                                equation_component,
+                                order_container_r,
+                                orders,
+                                perform_result,
+                                profile_task_r,
+                                result
+
+        Tables updated:         None
+        Executing from:         
+
+        Special Notes:          
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 06/25/96 Hal Patchen          Initial Release                     *
+;    *001 09/19/97 Hal Patchen          Add Autoverification logic          *
+;    *002 10/23/97 Kevin Brunner        Add equation_postfix to reply (MDI) *
+;    *003 11/21/97 Hal Patchen          Add check for accession primary_flag*
+;    *004 05/08/98 Jeff Fry             Add lookback logic                  *
+;    *005 11/30/98 Chris Heil           Add unknown age logic               *
+;    *006 02/15/00 Chris Heil           Autoverified and corrected results  *
+;                                       equal verified results when finding *
+;                                       components across date/time.        *
+;    *007 03/21/00 Chris Heil           Remove duplicate exit_script label  *
+;    *008 07/16/03 Ekta Agarwal         Remove ORAHINT                      *
+;    *009 05/25/06 Ryan Manuel          Fixed some problems caused by DAR   *
+;                                       changes.                            *
+;    *010 08/09/07 Subramanya           Fix for the CR 1-1127248891(Feature *
+;                                       142972)While loop is wrapped around *
+;                                       the if statement that checks service_*
+;                                       resource_cd passed from request     *
+;    *011 08/27/2008                    Add less_great_flag in reply        *
+;    *012 11/10/08 M Hlavaty            Fix to pick the most specific       *
+;                                       equation                            *
+;    *013 01/30/13 Hal Patchen          Return additional cross accn data   *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_RESULT_EQUATION:dba go    
+             create program GLB_GET_RESULT_EQUATION:dba 
+
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  species_cd                   = f8
+         1  sex_cd                       = f8
+         1  unknown_age_ind              = i2                         ;005
+         1  age_in_minutes               = i4
+         1  assays[x]
+            2  task_assay_cd             = f8
+            2  service_resource_cd       = f8
+            2  order_id                  = f8
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      ( 
+         1  qual[*]
+            2  task_assay_cd             = f8
+            2  service_resource_cd       = f8
+            2  order_id                  = f8
+            2  equation_id               = f8
+            2  species_cd                = f8
+            2  unknown_age_ind           = i2                         ;005
+            2  age_from_units_cd         = f8
+            2  age_from_minutes          = i4
+            2  age_to_units_cd           = f8
+            2  age_to_minutes            = i4
+            2  sex_cd                    = f8
+            2  equation_description      = vc
+            2  equation_postfix          = vc    ;002...
+            2  default_ind               = i2
+            2  default_equation_used_ind = i2
+            2  equation_comp[*]
+               3  sequence               = i4
+               3  result_status_cd       = f8
+               3  included_assay_cd      = f8
+               3  name                   = vc
+               3  default_value          = f8
+               3  cross_drawn_dt_tm_ind  = i2
+               3  time_window_minutes    = i4
+               3  time_window_back_minutes = i4                 ;004
+               3  result_req_flag        = i2
+               3  component_flag         = i2
+               3  constant_value         = f8
+               3  result_found_ind       = i2
+               3  result_id              = f8
+               3  perform_result_id      = f8
+               3  result_value_numeric   = f8
+               3  less_great_flag        = i2
+               3  accession_id           = f8
+               3  order_id               = f8
+               3  result_type_cd         = f8
+               3  cross_accn_drawn_dt_tm = dq8
+%i cclsource:status_block.inc
+      )
+
+      /***********************************************************************
+      * Equation default record                                              *
+      ***********************************************************************/
+      record default
+      (
+         1  equation_id                  = f8
+         1  task_assay_cd                = f8
+         1  service_resource_cd          = f8
+         1  species_cd                   = f8  
+         1  unknown_age_ind              = i2                         ;005
+         1  age_from_units_cd            = f8
+         1  age_from_minutes             = i4
+         1  age_to_units_cd              = f8
+         1  age_to_minutes               = i4
+         1  sex_cd                       = f8
+         1  equation_description         = vc
+         1  equation_postfix             = vc    ;002...
+         1  default_ind                  = i2
+      )
+
+      /***********************************************************************
+      * Drawn date/time range record                                         *
+      ***********************************************************************/
+      record drawn
+      (
+         1  curr_dt_tm                   = dq8
+         1  dt_tm_from                   = dq8      
+         1  dt_tm_to                     = dq8
+         1  closest_dt_tm                = dq8
+      )
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+;001         set CV_REQUIRED_RECS            = 7
+         set RESULT_TYPE_CODESET         = 289
+         set RESULT_TYPE_NUMERIC_CDF     = "3"
+         set RESULT_STATUS_CODESET       = 1901
+         set RESULT_STATUS_PENDING_CDF   = "PENDING"
+         set RESULT_STATUS_IN_LAB_CDF    = "INLAB"
+         set RESULT_STATUS_PERFORMED_CDF = "PERFORMED"
+         set RESULT_STATUS_OLD_PERF_CDF  = "OLDPERFORMED"
+         set RESULT_STATUS_VERIFIED_CDF  = "VERIFIED"
+         set RESULT_STATUS_AUTOVERIFIED_CDF  = "AUTOVERIFIED"          ;001
+         set RESULT_STATUS_CORRECTED_CDF = "CORRECTED"
+         declare result_type_numeric_cd  = f8
+         declare result_status_pending_cd   = f8
+         declare result_status_in_lab_cd    = f8
+         declare result_status_performed_cd = f8
+         declare result_status_old_perf_cd  = f8
+         declare result_status_verified_cd  = f8
+         declare result_status_autoverified_cd  = f8                   ;001
+         declare result_status_corrected_cd = f8
+         declare stat                    = i4
+         declare cnt                     = i4
+         declare q_cnt                   = i4
+         declare ec_cnt                  = i4
+         declare nbr_of_assays           = i4
+         declare nbr_of_components       = i4
+         declare species_match_ind       = i2
+         declare sex_match_ind           = i2
+         declare age_match_ind           = i2
+         declare default_found_ind       = i2
+         declare curr_person_id          = f8
+         declare lCnt                    = i4 with protected, noconstant(0)
+
+         set reply->status_data.status = "F"
+         set nbr_of_assays = size(request->assays,5)
+
+      /***********************************************************************
+      * Load result type and result status code sets                         *
+      ***********************************************************************/
+                  
+         set result_type_numeric_cd = uar_get_code_by("MEANING", RESULT_TYPE_CODESET, nullterm(RESULT_TYPE_NUMERIC_CDF))
+         set result_status_pending_cd = uar_get_code_by("MEANING", RESULT_STATUS_CODESET, nullterm(RESULT_STATUS_PENDING_CDF))
+         set result_status_in_lab_cd = uar_get_code_by("MEANING", RESULT_STATUS_CODESET, nullterm(RESULT_STATUS_IN_LAB_CDF))
+
+         set result_status_performed_cd = uar_get_code_by("MEANING", RESULT_STATUS_CODESET, nullterm(RESULT_STATUS_PERFORMED_CDF))
+         set result_status_old_perf_cd = uar_get_code_by("MEANING", RESULT_STATUS_CODESET, nullterm(RESULT_STATUS_OLD_PERF_CDF))
+         set result_status_verified_cd = uar_get_code_by("MEANING", RESULT_STATUS_CODESET, nullterm(RESULT_STATUS_VERIFIED_CDF))
+         set result_status_autoverified_cd = 
+            uar_get_code_by("MEANING", RESULT_STATUS_CODESET, nullterm(RESULT_STATUS_AUTOVERIFIED_CDF))
+
+         set result_status_corrected_cd = uar_get_code_by("MEANING", RESULT_STATUS_CODESET, nullterm(RESULT_STATUS_CORRECTED_CDF))
+
+         ;* Verify that all required code value records were read.
+         if (result_type_numeric_cd <= 0.0 or
+           result_status_pending_cd <= 0.0 or
+           result_status_in_lab_cd <= 0.0 or
+           result_status_performed_cd <= 0.0 or
+           result_status_old_perf_cd <= 0.0 or
+           result_status_verified_cd <= 0.0 or
+           result_status_autoverified_cd <= 0.0 or
+           result_status_corrected_cd <= 0.0)
+            go to Exit_Script
+         endif
+
+      /***********************************************************************
+      * Select equations that qualify for each assay                         *
+      ***********************************************************************/
+         
+         set stat = alterlist(reply->qual, nbr_of_assays)
+         
+         for (q_cnt = 1 to nbr_of_assays)
+            set reply->qual[q_cnt].task_assay_cd = 
+              request->assays[q_cnt].task_assay_cd
+            set reply->qual[q_cnt].service_resource_cd = 
+              request->assays[q_cnt].service_resource_cd
+            set reply->qual[q_cnt].order_id = 
+              request->assays[q_cnt].order_id
+         endfor
+         
+         if (nbr_of_assays > 0)
+           select into "nl:"
+              e.equation_id
+  
+              /* Selection fields:
+              d.seq,
+              e.equation_id,
+              e.task_assay_cd,
+              e.service_resource_cd,
+              e.species_cd,
+              e.unknown_age_ind,                                        ;005
+              e.age_from_units_cd,
+              e.age_from_minutes,
+              e.age_to_units_cd,
+              e.age_to_minutes,
+              e.sex_cd,
+              e.equation_description,
+              e.equation_postfix,      ;002...
+              e.default_ind,
+              e.active_ind
+              */
+  
+           from
+              equation e
+           
+           where expand(lCnt, 1, value(nbr_of_assays), e.task_assay_cd, request->assays[lCnt].task_assay_cd)
+                     and e.active_ind = 1
+                     
+           order by e.task_assay_cd, e.service_resource_cd, e.sex_cd, e.species_cd
+  
+           head report
+              q_cnt = 0
+              species_match_ind = 0
+              sex_match_ind = 0
+              age_match_ind = 0
+              default_found_ind = 0
+  
+           head e.task_assay_cd
+              default_found_ind = 0
+  
+           detail
+              species_match_ind = 0
+              sex_match_ind = 0
+              age_match_ind = 0
+  
+              ;* if equation record is the the default for the task assay,
+              ;* store off the information in case the default is used.
+              if (e.default_ind = 1)
+                 default_found_ind = 1
+                 default->equation_id          = e.equation_id
+                 default->task_assay_cd        = e.task_assay_cd
+                 default->service_resource_cd  = e.service_resource_cd
+                 default->species_cd           = e.species_cd
+                 default->unknown_age_ind      = e.unknown_age_ind      ;005
+                 default->age_from_units_cd    = e.age_from_units_cd
+                 default->age_from_minutes     = e.age_from_minutes
+                 default->age_to_units_cd      = e.age_to_units_cd
+                 default->age_to_minutes       = e.age_to_minutes
+                 default->sex_cd               = e.sex_cd
+                 default->equation_description = e.equation_description
+                 default->equation_postfix     = e.equation_postfix      ;002...
+                 default->default_ind          = e.default_ind
+              endif
+  
+              ;* Determine what matches are made for each qualification
+              if (e.species_cd = 0.0
+              or (e.species_cd > 0.0 and e.species_cd = request->species_cd))
+                 species_match_ind = 1
+              endif
+              if (e.sex_cd = 0.0
+              or (e.sex_cd > 0.0 and e.sex_cd = request->sex_cd))
+                 sex_match_ind = 1
+              endif
+
+              if ((request->unknown_age_ind = 1 and e.unknown_age_ind = 1) or   ;005
+                 ((e.age_from_minutes = 0 and e.age_to_minutes = 0) or          ;005
+                 ((e.age_from_minutes != 0 or e.age_to_minutes != 0) and        ;005
+                   e.age_from_minutes <= request->age_in_minutes and            ;005
+                   e.age_to_minutes   >= request->age_in_minutes)))             ;005
+                 age_match_ind = 1                                              ;005
+              endif  
+                ;* If all matches were successful and the equation crosses
+                ;* all service resources for the assay, fill out the reply 
+                ;* record an equation was found.
+                if (species_match_ind = 1
+                and sex_match_ind = 1
+                and age_match_ind = 1
+                and e.service_resource_cd = 0.0)
+              
+                   q_cnt = locateval(lCnt, 1, value(nbr_of_assays), e.task_assay_cd, request->assays[lCnt].task_assay_cd)
+                  
+                   while (q_cnt > 0)
+                     reply->qual[q_cnt].task_assay_cd = e.task_assay_cd
+                     reply->qual[q_cnt].service_resource_cd = e.service_resource_cd
+                     reply->qual[q_cnt].equation_id = e.equation_id
+                     reply->qual[q_cnt].species_cd = e.species_cd
+                     reply->qual[q_cnt].unknown_age_ind = e.unknown_age_ind    ;005
+                     reply->qual[q_cnt].age_from_units_cd = e.age_from_units_cd
+                     reply->qual[q_cnt].age_from_minutes = e.age_from_minutes
+                     reply->qual[q_cnt].age_to_units_cd = e.age_to_units_cd
+                     reply->qual[q_cnt].age_to_minutes = e.age_to_minutes
+                     reply->qual[q_cnt].sex_cd = e.sex_cd
+                     reply->qual[q_cnt].equation_description = e.equation_description
+                     reply->qual[q_cnt].equation_postfix = e.equation_postfix  ;002...
+                     reply->qual[q_cnt].default_ind = e.default_ind
+                     reply->qual[q_cnt].default_equation_used_ind = 0
+                     q_cnt = locateval(lCnt, q_cnt + 1, value(nbr_of_assays), e.task_assay_cd, request->assays[lCnt].task_assay_cd)
+                   endwhile
+                endif
+    
+                ;* If all matches were successful at the actual service
+                ;* resource for the assay, fill out the reply record an
+                ;* equation was found.
+                
+                q_cnt = locateval(lCnt, 1, value(nbr_of_assays), e.task_assay_cd, request->assays[lCnt].task_assay_cd,
+                                  e.service_resource_cd, request->assays[lCnt].service_resource_cd)
+                
+                while (q_cnt > 0)   ;010
+                
+                if (species_match_ind = 1
+                and sex_match_ind = 1
+                and age_match_ind = 1)
+                   
+                  
+                     reply->qual[q_cnt].task_assay_cd = e.task_assay_cd
+                     reply->qual[q_cnt].service_resource_cd = e.service_resource_cd
+                     reply->qual[q_cnt].equation_id = e.equation_id
+                     reply->qual[q_cnt].species_cd = e.species_cd
+                     reply->qual[q_cnt].unknown_age_ind = e.unknown_age_ind   ;005
+                     reply->qual[q_cnt].age_from_units_cd = e.age_from_units_cd
+                     reply->qual[q_cnt].age_from_minutes = e.age_from_minutes
+                     reply->qual[q_cnt].age_to_units_cd = e.age_to_units_cd
+                     reply->qual[q_cnt].age_to_minutes = e.age_to_minutes
+                     reply->qual[q_cnt].sex_cd = e.sex_cd
+                     reply->qual[q_cnt].equation_description = e.equation_description
+                     reply->qual[q_cnt].equation_postfix = e.equation_postfix  ;002...
+                     reply->qual[q_cnt].default_ind = e.default_ind
+                     reply->qual[q_cnt].default_equation_used_ind = 0
+                  endif
+                q_cnt = locateval(lCnt, q_cnt + 1, value(nbr_of_assays), e.task_assay_cd, request->assays[lCnt].task_assay_cd,
+                                  e.service_resource_cd, request->assays[lCnt].service_resource_cd)
+                endwhile ;010
+           foot e.task_assay_cd
+              ;* If no match was found, fill out reply using the default
+              ;* equation.
+              if (default_found_ind = 1)
+                q_cnt = locateval(lCnt, 1, value(nbr_of_assays), e.task_assay_cd, reply->qual[lCnt].task_assay_cd,
+                                  0.0, reply->qual[lCnt].equation_id)
+                while (q_cnt > 0)
+                   reply->qual[q_cnt].task_assay_cd = default->task_assay_cd
+                   reply->qual[q_cnt].service_resource_cd = default->service_resource_cd
+                   reply->qual[q_cnt].equation_id = default->equation_id
+                   reply->qual[q_cnt].species_cd = default->species_cd
+                   reply->qual[q_cnt].unknown_age_ind = default->unknown_age_ind   ;005
+                   reply->qual[q_cnt].age_from_units_cd = default->age_from_units_cd
+                   reply->qual[q_cnt].age_from_minutes = default->age_from_minutes
+                   reply->qual[q_cnt].age_to_units_cd = default->age_to_units_cd
+                   reply->qual[q_cnt].age_to_minutes = default->age_to_minutes
+                   reply->qual[q_cnt].sex_cd = default->sex_cd
+                   reply->qual[q_cnt].equation_description = default->equation_description
+                   reply->qual[q_cnt].equation_postfix = default->equation_postfix       ;002...
+                   reply->qual[q_cnt].default_ind = default->default_ind
+                   reply->qual[q_cnt].default_equation_used_ind = 1
+                   q_cnt = locateval(lCnt, q_cnt + 1, value(nbr_of_assays), e.task_assay_cd, request->assays[lCnt].task_assay_cd)
+                endwhile
+              endif
+  
+           with nocounter
+
+        /***********************************************************************
+        * Select equation components of the qualifying equations               *
+        ***********************************************************************/
+           select into "nl:"
+              ec.seq
+   
+              /* Selection fields:
+              d.seq,
+              ec.equation_id,
+              ec.sequence,
+              ec.result_status_cd,
+              ec.included_assay_cd,
+              ec.name,
+              ec.default_value,
+              ec.cross_drawn_dt_tm_ind,
+              ec.time_window_minutes,
+              ec.time_window_back_minutes,                                ;004
+              ec.result_req_flag,
+              ec.constant_value,
+              ec.component_flag
+              */
+  
+           from
+              equation_component ec
+           
+           where expand(lCnt, 1, value(nbr_of_assays), ec.equation_id, reply->qual[lCnt].equation_id)
+             and ec.equation_id > 0.0
+         
+           order by ec.equation_id
+  
+           head report
+              q_cnt = 0
+              ec_cnt = 0
+  
+           head ec.equation_id
+              ec_cnt = 0
+  
+           detail
+              ec_cnt = ec_cnt + 1
+              
+              q_cnt = locateval(lCnt, 1, value(nbr_of_assays), ec.equation_id, reply->qual[lCnt].equation_id)
+              while (q_cnt > 0)
+                stat = alterlist(reply->qual[q_cnt].equation_comp, ec_cnt)
+                reply->qual[q_cnt].equation_comp[ec_cnt].sequence =
+                  ec.sequence
+                reply->qual[q_cnt].equation_comp[ec_cnt].result_status_cd =
+                  ec.result_status_cd
+                reply->qual[q_cnt].equation_comp[ec_cnt].included_assay_cd =
+                  ec.included_assay_cd
+                reply->qual[q_cnt].equation_comp[ec_cnt].name =
+                  ec.name
+                reply->qual[q_cnt].equation_comp[ec_cnt].default_value =
+                  ec.default_value
+                reply->qual[q_cnt].equation_comp[ec_cnt].cross_drawn_dt_tm_ind =
+                  ec.cross_drawn_dt_tm_ind
+                reply->qual[q_cnt].equation_comp[ec_cnt].time_window_minutes =
+                  ec.time_window_minutes
+                reply->qual[q_cnt].equation_comp[ec_cnt].                   ;004
+                  time_window_back_minutes = ec.time_window_back_minutes    ;004
+                reply->qual[q_cnt].equation_comp[ec_cnt].result_req_flag =
+                  ec.result_req_flag
+                reply->qual[q_cnt].equation_comp[ec_cnt].constant_value =
+                  ec.constant_value
+                reply->qual[q_cnt].equation_comp[ec_cnt].component_flag =
+                  ec.component_flag
+                  
+                q_cnt = locateval(lCnt, q_cnt + 1, value(nbr_of_assays), ec.equation_id, reply->qual[lCnt].equation_id)
+              endwhile
+  
+           foot ec.equation_id
+              row+0
+  
+           with nocounter
+         endif  ;nbr_of_assays > 0
+      /***********************************************************************
+      * Select results for equation components.                              *
+      ***********************************************************************/
+         for (q_cnt = 1 to nbr_of_assays)
+            set nbr_of_components = size(reply->qual[q_cnt].equation_comp,5)
+            for (ec_cnt = 1 to nbr_of_components)
+               ;* If component is a procedure, find results for the procedure
+               if (reply->qual[q_cnt].equation_comp[ec_cnt].component_flag = 1)
+                  ;* Check current order for component results
+                  select into "nl:"
+                     aor.seq,
+                     r.seq,
+                     pr.seq
+                     /* Selection fields:
+                     aor.accession_id,
+                     r.result_id,
+                     r.order_id,
+                     r.task_assay_cd,
+                     r.result_status_cd,
+                     pr.perform_result_id,
+                     pr.result_id,
+                     pr.result_type_cd,
+                     pr.result_value_numeric
+                     */
+                  from
+                     accession_order_r aor,
+                     result r,
+                     perform_result pr
+                  plan aor where aor.order_id = reply->qual[q_cnt].order_id
+                             and aor.primary_flag = 0
+                  join r  where r.order_id = aor.order_id
+                            and r.task_assay_cd =
+                              reply->qual[q_cnt].equation_comp[ec_cnt].included_assay_cd
+                            and r.result_status_cd 
+                              in (result_status_performed_cd, 
+                                  result_status_autoverified_cd,       ;001
+                                  result_status_corrected_cd,                                      ;006
+                                  result_status_verified_cd)
+                  join pr where pr.result_id = r.result_id
+                            and pr.result_status_cd = r.result_status_cd
+                  detail
+                     if (pr.result_type_cd = result_type_numeric_cd)
+                        reply->qual[q_cnt].equation_comp[ec_cnt]
+                          .result_found_ind = 1
+                        reply->qual[q_cnt].equation_comp[ec_cnt].result_id =
+                          pr.result_id
+                        reply->qual[q_cnt].equation_comp[ec_cnt].perform_result_id =
+                          pr.perform_result_id
+                        reply->qual[q_cnt].equation_comp[ec_cnt].result_value_numeric =
+                          pr.result_value_numeric
+                        reply->qual[q_cnt].equation_comp[ec_cnt].less_great_flag =
+                          pr.less_great_flag
+                        reply->qual[q_cnt].equation_comp[ec_cnt].accession_id =
+                          aor.accession_id
+                        reply->qual[q_cnt].equation_comp[ec_cnt].order_id =
+                          r.order_id
+                        reply->qual[q_cnt].equation_comp[ec_cnt].result_type_cd =
+                          pr.result_type_cd
+
+                     endif
+                  with nocounter
+
+                  ;* If component wasn't found on current order_id, check
+                  ;* across the accession to see if it exists under a
+                  ;* different order_id.
+                  if (reply->qual[q_cnt].equation_comp[ec_cnt].result_id = 0.0)
+                     select into "nl:"
+                        a1.seq,
+                        a2.seq,
+                        r.seq,
+                        pr.seq
+                        /* Selection fields:
+                        a1.order_id,
+                        a1.accession,
+                        a2.order_id,
+                        r.result_id,
+                        r.order_id,
+                        r.task_assay_cd,
+                        r.result_status_cd,
+                        pr.perform_result_id,
+                        pr.result_id,
+                        pr.result_type_cd,
+                        pr.result_value_numeric
+                        */
+                     from
+                        accession_order_r a1,
+                        accession_order_r a2,
+                        result r,
+                        perform_result pr
+                     plan a1 where a1.order_id = reply->qual[q_cnt].order_id
+                               and a1.primary_flag = 0                 ;003
+                     join a2 where a2.accession = a1.accession
+                               and a2.order_id != reply->qual[q_cnt].order_id
+                     join r  where r.order_id = a2.order_id
+                               and r.task_assay_cd =
+                                 reply->qual[q_cnt].equation_comp[ec_cnt].included_assay_cd
+                               and r.result_status_cd 
+                                 in (result_status_performed_cd, 
+                                     result_status_autoverified_cd,    ;001
+                                     result_status_corrected_cd,                                   ;006
+                                     result_status_verified_cd)
+                     join pr where pr.result_id = r.result_id
+                               and pr.result_status_cd +0 = r.result_status_cd
+                     detail
+                     if (pr.result_type_cd = result_type_numeric_cd)
+                           reply->qual[q_cnt].equation_comp[ec_cnt]
+                             .result_found_ind = 1
+                           reply->qual[q_cnt].equation_comp[ec_cnt].result_id =
+                             pr.result_id
+                           reply->qual[q_cnt].equation_comp[ec_cnt].perform_result_id =
+                             pr.perform_result_id
+                           reply->qual[q_cnt].equation_comp[ec_cnt].result_value_numeric =
+                             pr.result_value_numeric
+                           reply->qual[q_cnt].equation_comp[ec_cnt].less_great_flag =
+                             pr.less_great_flag
+                           reply->qual[q_cnt].equation_comp[ec_cnt].accession_id =
+                             a1.accession_id
+                           reply->qual[q_cnt].equation_comp[ec_cnt].order_id =
+                             r.order_id
+                           reply->qual[q_cnt].equation_comp[ec_cnt].result_type_cd =
+                             pr.result_type_cd
+                        endif
+                     with nocounter
+                  endif
+
+                  ;* If component wasn't found on current order_id
+                  ;* or across the current accession, check across
+                  ;* accessions if the component is set up to look 
+                  ;* across different accessions.
+                  if (reply->qual[q_cnt].equation_comp[ec_cnt].result_id = 0.0
+                  and reply->qual[q_cnt].equation_comp[ec_cnt]
+                      .cross_drawn_dt_tm_ind = 1)
+                     select into "nl:"
+                        o.order_id,
+                        ocr.order_id,
+                        ocr.catalog_cd,
+                        c.container_id,
+                        c.drawn_dt_tm
+                     from
+                        orders o,
+                        order_container_r ocr,
+                        container c
+                     plan o   where o.order_id = reply->qual[q_cnt].order_id
+                     join ocr where ocr.order_id = o.order_id
+                                and ocr.catalog_cd = o.catalog_cd
+                     join c   where c.container_id = ocr.container_id
+                     head report
+                        nbr_mins = 0
+                     detail
+                        curr_person_id = o.person_id
+                        drawn->curr_dt_tm = c.drawn_dt_tm
+                        nbr_mins = 
+                          reply->qual[q_cnt].equation_comp[ec_cnt].     
+                              time_window_back_minutes                  ;004
+;004                              time_window_minutes
+                        drawn->dt_tm_from = 
+                          datetimeadd(c.drawn_dt_tm,(-1 * (nbr_mins/1440.0)))
+                        nbr_mins = 
+                          reply->qual[q_cnt].equation_comp[ec_cnt].
+                              time_window_minutes
+                        drawn->dt_tm_to =
+                          datetimeadd(c.drawn_dt_tm,(nbr_mins/1440.0))
+                     with nocounter,
+                        maxread(ocr,1)
+
+                     select into "nl:"
+                        ptr.seq,
+                        o.seq,
+                        aor.seq,
+                        ocr.seq,
+                        c.seq,
+                        r.seq,
+                        pr.seq
+                        /* Selection fields:
+                        ptr.task_assay_cd,
+                        ptr.catalog_cd,
+                        o.order_id,
+                        o.person_id,
+                        o.catalog_cd,
+                        aor.accession_id,
+                        ocr.order_id,
+                        ocr.container_id,
+                        c.container_id,
+                        c.drawn_dt_tm,
+                        r.result_id,
+                        r.order_id,
+                        r.task_assay_cd,
+                        r.result_status_cd,
+                        pr.perform_result_id,
+                        pr.result_id,
+                        pr.result_type_cd,
+                        pr.result_value_numeric
+                        */
+                     from
+                        profile_task_r ptr,
+                        orders o,
+                        accession_order_r aor,
+                        order_container_r ocr,
+                        container c,
+                        result r,
+                        perform_result pr
+                     plan ptr where ptr.task_assay_cd = 
+                                 reply->qual[q_cnt].equation_comp[ec_cnt].included_assay_cd
+                     join o   where o.person_id = curr_person_id
+                                and o.catalog_cd = ptr.catalog_cd
+                                and o.order_id != reply->qual[q_cnt].order_id
+                     join aor where aor.order_id = o.order_id
+                                and aor.primary_flag = 0
+                     join ocr where ocr.order_id = o.order_id
+                     join c   where c.container_id = ocr.container_id
+                                and c.drawn_dt_tm 
+                                    between cnvtdatetime(drawn->dt_tm_from)
+                                        and cnvtdatetime(drawn->dt_tm_to)
+                     join r  where r.order_id = o.order_id
+                               and r.task_assay_cd =
+                                 reply->qual[q_cnt].equation_comp[ec_cnt].included_assay_cd
+                               and r.result_status_cd 
+                                 in (result_status_performed_cd, 
+                                     result_status_autoverified_cd,    ;001
+                                     result_status_corrected_cd,                                   ;006
+                                     result_status_verified_cd)
+                     join pr where pr.result_id = r.result_id
+                               and pr.result_status_cd = r.result_status_cd
+                     head report
+                        rslt_stat_cd = 0.0
+                        dt_tm_diff = 0.0
+                        closest_dt_tm_diff = 0.0
+                        closest_drawn_result_id = 0.0
+                        closest_drawn_perform_result_id = 0.0
+                        closest_drawn_result_numeric = 0.0
+                        closest_dt_tm_diff = 9999999.0
+                        closest_less_great_flag = 0
+                        closest_accession_id = 0.0
+                        closest_order_id = 0.0
+                        closest_result_type_cd = 0.0
+                     detail
+                        ;* Check to make sure the status of the result
+                        ;* has reach an acceptable level to be used in the
+                        ;* equation.
+                        rslt_stat_cd =
+                          reply->qual[q_cnt].equation_comp[ec_cnt].result_status_cd
+                        if (r.result_status_cd = rslt_stat_cd
+                        or (r.result_status_cd = result_status_verified_cd
+                          and rslt_stat_cd = result_status_performed_cd)
+                        or (r.result_status_cd =                         ;001
+                              result_status_autoverified_cd              ;001
+;006                          and rslt_stat_cd = result_status_performed_cd) ;001
+                          and (rslt_stat_cd = result_status_performed_cd                           ;006
+                           or  rslt_stat_cd = result_status_verified_cd))                          ;006
+                        or (r.result_status_cd = result_status_corrected_cd
+;006                          and rslt_stat_cd = result_status_performed_cd))
+                          and (rslt_stat_cd = result_status_performed_cd                           ;006
+                           or  rslt_stat_cd = result_status_verified_cd)))                         ;006
+                           ;* Make sure the result is numeric
+                           if (pr.result_type_cd = result_type_numeric_cd)
+                              dt_tm_diff = 
+                                datetimediff(c.drawn_dt_tm, drawn->curr_dt_tm)
+                              if (abs(dt_tm_diff) < closest_dt_tm_diff)
+                                 closest_dt_tm_diff = abs(dt_tm_diff)
+                                 closest_drawn_result_id =
+                                   pr.result_id
+                                 closest_drawn_perform_result_id =
+                                   pr.perform_result_id
+                                 closest_drawn_result_numeric = 
+                                   pr.result_value_numeric
+                                 closest_less_great_flag = 
+                                   pr.less_great_flag
+                                 closest_accession_id = aor.accession_id
+                                 closest_order_id = r.order_id
+                                 closest_result_type_cd = pr.result_type_cd
+                                 drawn->closest_dt_tm = c.drawn_dt_tm
+                              endif
+                           endif
+                        endif
+                     foot report
+                        if (closest_dt_tm_diff < 9999999.0)
+                           reply->qual[q_cnt].equation_comp[ec_cnt]
+                             .result_found_ind = 1
+                           reply->qual[q_cnt].equation_comp[ec_cnt].result_id =
+                             closest_drawn_result_id
+                           reply->qual[q_cnt].equation_comp[ec_cnt].perform_result_id =
+                             closest_drawn_perform_result_id
+                           reply->qual[q_cnt].equation_comp[ec_cnt].result_value_numeric =
+                             closest_drawn_result_numeric
+                           reply->qual[q_cnt].equation_comp[ec_cnt].less_great_flag =
+                             closest_less_great_flag
+                           reply->qual[q_cnt].equation_comp[ec_cnt].accession_id =
+                             closest_accession_id
+                           reply->qual[q_cnt].equation_comp[ec_cnt].order_id =
+                             closest_order_id
+                           reply->qual[q_cnt].equation_comp[ec_cnt].result_type_cd =
+                             closest_result_type_cd
+                           reply->qual[q_cnt].equation_comp[ec_cnt].cross_accn_drawn_dt_tm =
+                             drawn->closest_dt_tm
+                        endif
+                     with nocounter
+                  endif
+                  ;* If a component result was not found, check across the accession
+                  ;* to see if the component exists as part of an order on the accession 
+                  ;* and return the accession_id & order_id.
+                  if (reply->qual[q_cnt].equation_comp[ec_cnt].result_id = 0.0)
+                     select into "nl:"
+                        a1.seq,
+                        a2.seq,
+                        o.seq,
+                        ptr.seq
+                        /* Selection fields:
+                        a1.order_id,
+                        a1.accession,
+                        a2.order_id,
+                        o.order_id,
+                        o.catalog_cd,
+                        ptr.task_assay_cd
+                        */
+                     from
+                        accession_order_r a1,
+                        accession_order_r a2,
+                        orders o,
+                        profile_task_r ptr
+                     plan a1  where a1.order_id = reply->qual[q_cnt].order_id
+                                and a1.primary_flag = 0
+                     join a2  where a2.accession = a1.accession
+                     join o   where o.order_id = a2.order_id
+                     join ptr where ptr.catalog_cd = o.catalog_cd
+                                and ptr.task_assay_cd = reply->qual[q_cnt].equation_comp[ec_cnt].included_assay_cd
+                                and ptr.active_ind = 1
+                     detail
+                       reply->qual[q_cnt].equation_comp[ec_cnt].accession_id = a2.accession_id 
+                       reply->qual[q_cnt].equation_comp[ec_cnt].order_id = a2.order_id 
+                     with nocounter
+                  endif
+               endif
+            endfor
+         endfor
+
+      /***********************************************************************
+      * Set status of reply                                                  *
+      ***********************************************************************/
+      #Exit_Script
+         set cnt = 0
+         for (q_cnt = 1 to nbr_of_assays)
+            if (reply->qual[q_cnt].equation_id > 0.0)
+               set cnt = cnt + 1
+            endif
+         endfor
+         if (cnt = nbr_of_assays)
+            set reply->status_data.status = "S"        ;Successful
+         elseif (cnt > 0 and cnt < nbr_of_assays)
+            set reply->status_data.status = "P"        ;Partial success
+         else
+            set reply->status_data.status = "F"        ;Failure
+         endif
+
+;007      #Exit_Script
+         end
+         go      
+
+;Generated by GNU enscript 1.6.4.

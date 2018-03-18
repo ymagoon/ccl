@@ -1,0 +1,218 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_pdm_graph_results/GLB_GET_PDM_GRAPH_RESULTS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       GLB_GET_PDM_GRAPH_RESULTS.PRG
+        Object name:            GLB_GET_PDM_GRAPH_RESULTS
+        Request #:              250172
+ 
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Retrieve a group of results for a graph that
+				is used to try to produce a bell curve
+ 
+        Tables read:            perform_result
+				result
+				person
+ 
+        Tables updated:         n/a
+        Executing from:         General Lab
+ 
+        Special Notes:          n/a
+ 
+******************************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 08/25/98 Gary Runde           Initial Release                     *
+;     001 02/04/00 Gary Runde           Qualify date instead of num results *
+;~DE~************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+	drop program glb_get_pdm_graph_results:dba go
+	create program glb_get_pdm_graph_results:dba
+ 
+/*
+	record request
+	(
+	   1  service_resource_cd	= F8
+;001	   1  num_results		= f8
+       1  beg_dt_tm         = dq8              ;001
+       1  end_dt_tm         = dq8              ;001
+	   1  task_assay_cd		= F8
+	   1  feasible_flag		= i2
+	   1  linear_flag		= i2
+	)
+*/
+ 
+	record reply
+	(
+	   1  qual[*]
+	      2  result         = f8
+	      2  birth_dt_tm    = DQ8
+	      2  sex_cd         = F8
+	      2  species_cd	    = F8
+	      2  perform_dt_tm  = DQ8
+	      2  drawn_dt_tm    = DQ8
+%i cclsource:status_block.inc
+	)
+ 
+/* Variable initialization */
+ 
+    set reply->status_data->status = "F"
+    set NUMERIC = 0.0
+    set AUTO = 0.0
+    set FEASIBLE = 0.0
+    set LINEAR = 0.0
+    set VERIFIED = 0.0
+    set CORRECTED = 0.0
+    set r_cnt = 0
+ 
+if (request->feasible_flag = 1 or request->linear_flag = 1)
+ 
+    ;get the code_Values for linear and feasible
+	select into "nl:"
+		code_value
+	from code_value cv
+	where cv.code_set = 1902 and cv.cdf_meaning in ("LINEAR", "FEASIBLE")
+	detail
+	CASE (cv.cdf_meaning)
+	  OF "FEASIBLE":
+	    	FEASIBLE = cv.code_value
+	  OF "LINEAR":
+		LINEAR = cv.code_value
+	ENDCASE
+	with nocounter
+endif
+set prWith = fillstring(100, " ")
+if (request->feasible_flag = 1)
+      set prWith = "pr.feasible_cd != FEASIBLE"
+else
+      set prWith = "1=1 "
+endif
+if (request->linear_flag = 1)
+       set prWith = build(prWith, " and pr.linear_cd != LINEAR")
+endif
+ 
+/*get the code value for the auto verfiy*/
+  select into "nl:"
+	 code_value
+  from code_value cv
+  where cv.code_set = 289 and cv.cdf_meaning = "3"
+  detail
+     NUMERIC = cv.code_value
+  with nocounter
+ 
+  select into "nl:"
+     code_value
+  from code_value cv
+  where cv.code_set = 1901 and cv.cdf_meaning IN
+             ("AUTOVERIFIED", "VERIFIED", "CORRECTED")
+  detail
+    CASE (cv.cdf_meaning)
+      OF "AUTOVERIFIED":
+        AUTO = cv.code_value
+      OF "VERIFIED":
+        VERIFIED = cv.code_value
+      OF "CORRECTED":
+        CORRECTED = cv.code_value
+    ENDCASE
+  with nocounter
+ 
+;001 select if (request->num_results = 0)
+;001		with nocounter
+;001	else
+;001		with nocounter, maxread(pr, value(request->num_results + 0))
+;001	endif
+ 
+select into "nl:"  ;001
+    re.perform_result_id,      ;001
+	pr.result_value_numeric,
+	pr.perform_dt_tm,
+	r.result_id,
+	p.person_id,
+	c.drawn_dt_tm
+from
+    result_event re,   ;001
+	perform_result pr,
+	person p,
+	result r,
+	container c
+plan re where re.event_dt_tm between cnvtdatetime(request->beg_dt_tm)          ;001
+                                 and cnvtdatetime(request->end_dt_tm)          ;001
+		and re.event_type_cd in (AUTO, VERIFIED, CORRECTED)                    ;001
+join pr where re.perform_result_id = pr.perform_result_id                      ;001
+        and pr.service_resource_cd+0 = request->service_resource_cd
+        and pr.result_type_cd = NUMERIC
+        and pr.less_great_flag = 0
+		and parser(prWith)
+join r where pr.result_id = r.result_id
+       and r.task_assay_cd = request->task_assay_cd
+join p where r.person_id = p.person_id
+join c where c.container_id = pr.container_id
+ 
+order re.event_dt_tm desc
+ 
+head report
+	r_cnt = 0
+detail
+	r_cnt = r_cnt + 1
+    if (mod(r_cnt,10) = 1)
+       stat = alterlist(reply->qual, (r_cnt + 10))
+    endif
+	reply->qual[r_cnt].result = pr.result_value_numeric
+	reply->qual[r_cnt].perform_dt_tm = pr.perform_dt_tm
+	reply->qual[r_cnt].birth_dt_tm = p.birth_dt_tm
+	reply->qual[r_cnt].sex_cd = p.sex_cd
+	reply->qual[r_cnt].species_cd = p.species_cd
+	reply->qual[r_cnt].drawn_dt_tm = c.drawn_dt_tm
+ 
+foot report
+    stat = alterlist(reply->qual, r_cnt)
+ 
+with nocounter,ORAHINTCBO("LEADING(re,pr)","INDEX(pr XIE11PERFORM_RESULT)")
+ 
+call echo(build("RCNT: ", r_cnt))
+/* If no record matching, exit with return
+   status of "F". */
+#EXIT_SCRIPT
+      if (curqual = 0)
+        set reply->status_data->status = "Z"
+        go to EXIT_PROGRAM
+      endif
+ 
+      set reply->status_data->status = "S"
+ 
+#EXIT_PROGRAM
+      end go
+
+;Generated by GNU enscript 1.6.4.

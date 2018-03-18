@@ -1,0 +1,602 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_mdi_download_info/glb_get_mdi_download_info.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_mdi_download_info.prg
+        Object name:            glb_get_mdi_download_info
+        Request #:              250216
+
+        Product:                General Lab
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Given orders and assays, this script will
+                                retrieve all the demographics information
+                                necessary to format a download record for
+                                the MDI server.
+
+        Tables read:
+
+        Tables updated:         None
+
+        Executing from:         GLB Result Server
+
+        Special Notes:
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 08/28/00 Chris Heil           Initial Release                     *
+;     002 02/16/01 Gary Runde           Fix reference to task_assay_cd      *
+;     003 02/19/01 Chris Heil           Add robotics logic to pass all      *
+;                                       task assays.                        *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop   program glb_get_mdi_download_info:dba go
+create program glb_get_mdi_download_info:dba
+
+%i cclsource:glb_script_logging.inc
+set LOG_PROGRAM_NAME = "GLB_GET_MDI_DOWNLOAD_INFO"
+
+/***********************************************************************
+ *   Request Record                                                    *
+ ***********************************************************************/
+/*
+record request
+(
+  1 all_assays_ind = i2
+  1 service_resource_cd = f8
+  1 order_cnt = i4
+  1 orders[x]
+    2 order_id = f8
+    2 accession = c20
+    2 container_id = f8
+    2 person_id = f8
+    2 encntr_id = f8
+    2 assay_cnt = i4
+    2 assays[x]
+      3 task_assay_cd = f8
+)
+*/
+
+/***********************************************************************
+ *   Reply Record                                                      *
+ ***********************************************************************/
+record reply
+(
+  1 hdnld_rec
+    2 inlab_orders[*]
+      3 accession = vc
+      3 container_id = vc
+      3 test_selection[*]
+        4 task_assay_cd = f8
+        4 assay_alias = vc
+      3 bar_code_nbr = vc
+      3 name = vc
+      3 frmt_med_nbr = vc
+      3 age_in_years = vc
+      3 sex_cd = f8
+      3 frmt_req_col_date = vc
+      3 req_col_time = vc
+      3 frmt_drawn_date = vc
+      3 drawn_time = vc
+      3 service_resource_cd = f8
+      3 doctor = vc
+      3 nurse_station_cd = f8
+      3 room_cd = f8
+      3 bed_cd = f8
+      3 identifier = vc
+      3 col_status_cd = f8
+      3 sample_type_cd = f8
+      3 patient_encounter_nbr = vc
+      3 patient_name = vc
+      3 client = vc
+      3 medical_nbr_only = vc
+      3 frmt_med_nbr2 = vc
+      3 fin_nbr = vc
+      3 infant_age = vc
+      3 doctor_name = vc
+      3 admit_doctor_nbr = vc
+      3 admit_doctor_name = vc
+      3 diagnosis_code = vc
+      3 diagnosis = vc
+      3 frmt_birthday = vc
+      3 frmt_admit_date = vc
+      3 frmt_disc_date = vc
+      3 service = vc
+      3 patient_type_cd = f8
+      3 patient_class_cd = f8
+      3 patient_race_cd = f8
+      3 source_ind = i2
+
+%i cclsource:status_block.inc
+)
+
+/***********************************************************************
+ *   Initialize Work Record                                            *
+ *   Parallel array to use with second select statement.               *
+ ***********************************************************************/
+record workrec
+(
+  1 dnld_rec[*]
+    2 accession      = vc
+    2 container_id   = f8
+    2 order_id       = f8
+    2 resource_cd    = f8
+    2 wor_identifier = c20
+    2 encntr_id      = f8
+    2 person_id      = f8
+)
+
+/***********************************************************************
+ *   Initialize Constants.                                             *
+ ***********************************************************************/
+  set N_ALIAS_CODESET = 319
+  set N_FIN_NBR_CDF_MEAN = "FIN NBR"
+  set N_MED_REC_NBR_CDF_MEAN = "MRN"
+  set N_RELTN_CODESET = 333
+  set N_ADMIT_CDF_MEAN = "ADMITDOC"
+  set N_ATTEND_CDF_MEAN = "ATTENDDOC"
+
+/***********************************************************************
+ *   Initialize Variables.                                             *
+ ***********************************************************************/
+  set failed = "F"
+  set reply->status_data->status = "F"
+
+  set max_orders = 0
+  set max_assays = 0
+
+  set demog_cnt = 0
+  set download_cnt = 0
+
+  set admit_cd = 0.0
+  set attend_cd = 0.0
+  set fin_nbr_cd = 0.0
+  set med_nbr_cd = 0.0
+  set cdf_meaning = fillstring(12, " ")
+
+/***********************************************************************
+ *   Determine maximum limit of arrays.                                *
+ ***********************************************************************/
+  set max_orders = request->order_cnt
+
+  for (i = 1 to max_orders)
+    if (request->orders[i]->assay_cnt > max_assays)
+      set max_assays = request->orders[i]->assay_cnt
+    endif
+  endfor
+
+/***********************************************************************
+ *   Retrieve code values.                                             *
+ ***********************************************************************/
+  set code_set = N_RELTN_CODESET
+  set code_value = 0.0
+  set cdf_meaning = N_ADMIT_CDF_MEAN
+  execute cpm_get_cd_for_cdf
+  set admit_cd = code_value
+
+  set code_set = N_RELTN_CODESET
+  set code_value = 0.0
+  set cdf_meaning = N_ATTEND_CDF_MEAN
+  execute cpm_get_cd_for_cdf
+  set attend_cd = code_value
+
+  set code_set = N_ALIAS_CODESET
+  set code_value = 0.0
+  set cdf_meaning = N_FIN_NBR_CDF_MEAN
+  execute cpm_get_cd_for_cdf
+  set fin_nbr_cd = code_value
+
+  set code_set = N_ALIAS_CODESET
+  set code_value = 0.0
+  set cdf_meaning = N_MED_REC_NBR_CDF_MEAN
+  execute cpm_get_cd_for_cdf
+  set med_nbr_cd = code_value
+
+/***********************************************************************
+ *   Select required fields for TQ.                                    *
+ ***********************************************************************/
+  select distinct into "nl:"
+    accession    = request->orders[d1.seq]->accession,
+    container_id = request->orders[d1.seq]->container_id,
+    order_id     = request->orders[d1.seq]->order_id,
+    resource_cd  = request->service_resource_cd,
+    cacc.accession_container_nbr,
+    cacc.barcode_accession,
+    cclass.container_id_print,
+    wor.identifier,
+    task_assay_cd = request->orders[d1.seq]->assays[d4.seq]->task_assay_cd
+  from (dummyt d1 with seq = value(max_orders)),
+       container cont,
+       container_accession cacc,
+       collection_class cclass,
+       (dummyt d2 with seq = 1),
+       worklist_order_r wor,
+       (dummyt d3 with seq = 1),
+       (dummyt d4 with seq = value(max_assays)),
+       assay_processing_r apr
+  plan d1
+  join cont
+    where cont.container_id = request->orders[d1.seq]->container_id
+  join cacc
+    where cacc.container_id = cont.container_id
+  join cclass
+    where cclass.coll_class_cd = cont.coll_class_cd
+  join d2
+    where d2.seq = 1
+  join wor
+    where wor.order_id = request->orders[d1.seq]->order_id
+  join d3
+    where d3.seq = 1
+  join d4
+    where d4.seq <= request->orders[d1.seq]->assay_cnt
+  join apr
+    where (request->all_assays_ind = 1)
+       or (request->all_assays_ind = 0
+      and  apr.task_assay_cd = request->orders[d1.seq]->assays[d4.seq]->task_assay_cd
+      and  apr.service_resource_cd = request->service_resource_cd
+      and apr.dnld_assay_alias > " "
+      and  apr.service_resource_cd = request->service_resource_cd)
+
+  order by
+    container_id,
+    resource_cd,
+    wor.identifier,
+    task_assay_cd,
+    0    ; force CCL to do distinct
+
+  head report
+    download_cnt = 0
+
+  head container_id
+    row +0
+
+  head resource_cd
+    row +0
+
+  head wor.identifier
+    row +0
+
+  detail
+    record_idx = 0
+
+    if (download_cnt > 0)
+      for (idx = 1 to download_cnt)
+        if ((workrec->dnld_rec[idx]->accession = accession) and
+            (workrec->dnld_rec[idx]->container_id = container_id) and
+            (workrec->dnld_rec[idx]->order_id = order_id) and
+            (workrec->dnld_rec[idx]->resource_cd = resource_cd) and
+            (workrec->dnld_rec[idx]->wor_identifier = wor.identifier))
+          record_idx = idx
+        endif
+      endfor
+    endif
+
+    if (record_idx = 0)
+      download_cnt = download_cnt + 1
+      if (mod(download_cnt,10) = 1)
+        stat = alterlist(reply->inlab_orders, download_cnt + 10)
+        stat = alterlist(workrec->dnld_rec, download_cnt + 10)
+      endif
+
+      if (cclass.container_id_print = "B" or cclass.container_id_print = "b")
+        reply->inlab_orders[download_cnt]->accession =
+               concat(trim(cacc.barcode_accession), char(cacc.accession_container_nbr+64))
+      else
+        reply->inlab_orders[download_cnt]->accession =
+                                           cacc.barcode_accession
+      endif
+      reply->inlab_orders[download_cnt]->container_id =
+                                         cnvtstring(cacc.accession_container_nbr)
+      reply->inlab_orders[download_cnt]->service_resource_cd =
+                                         resource_cd
+      reply->inlab_orders[download_cnt]->bar_code_nbr = wor.identifier
+      reply->inlab_orders[download_cnt]->identifier = wor.identifier
+
+      workrec->dnld_rec[download_cnt]->accession = accession
+      workrec->dnld_rec[download_cnt]->container_id = container_id
+      workrec->dnld_rec[download_cnt]->order_id = order_id
+      workrec->dnld_rec[download_cnt]->resource_cd = resource_cd
+      workrec->dnld_rec[download_cnt]->wor_identifier = wor.identifier
+      workrec->dnld_rec[download_cnt]->encntr_id = request->orders[d1.seq]->encntr_id
+      workrec->dnld_rec[download_cnt]->person_id = request->orders[d1.seq]->person_id
+
+      record_idx = download_cnt
+    endif
+
+    test_cnt = size(reply->inlab_orders[record_idx]->
+                           test_selection, 5) + 1
+    stat = alterlist(reply->inlab_orders[record_idx]->
+                            test_selection, test_cnt)
+    reply->inlab_orders[record_idx]->test_selection[test_cnt]->task_assay_cd =
+           task_assay_cd
+    if (request->all_assays_ind = 0)
+    reply->inlab_orders[record_idx]->test_selection[test_cnt]->assay_alias =
+           nullterm(trim(apr.dnld_assay_alias))
+    endif
+
+  foot container_id
+    row +0
+
+  foot resource_cd
+    row +0
+
+  foot wor.identifier
+    row +0
+
+  foot report
+    stat = alterlist(reply->inlab_orders, download_cnt)
+    stat = alterlist(workrec->dnld_rec, download_cnt)
+
+  with outerjoin = d2,
+       outerjoin = d3,
+       dontcare = wor,
+       nocounter
+
+  if (ERROR_MESSAGE(1) = 1)
+    go to script_error
+  endif
+
+  if (download_cnt = 0)
+    go to zero_download
+  endif
+
+/***********************************************************************
+ *   Select non-required fields for TQ.                                *
+ ***********************************************************************/
+  select distinct into "nl:"
+    container_id       = workrec->dnld_rec[d1.seq]->container_id,
+    resource_cd        = request->service_resource_cd,
+    wor_identifier     = workrec->dnld_rec[d1.seq]->wor_identifier,
+    coll_dt_tm         = cnvtdatetime(cont.drawn_dt_tm),
+    cont.specimen_type_cd,
+    epr1.prsnl_person_id,
+    p1.name_full_formatted,        ; attending doctor
+    epr2.prsnl_person_id,
+    p2.name_full_formatted,        ; admitting doctor
+    pers.name_full_formatted,
+    pers.birth_dt_tm,
+    pers.sex_cd,
+    pers.race_cd,
+    encntr.loc_nurse_unit_cd,
+    encntr.loc_room_cd,
+    encntr.loc_bed_cd,
+    encntr.reg_dt_tm,
+    encntr.disch_dt_tm,
+    encntr.encntr_type_cd,
+    encntr.encntr_class_cd,
+    lab.report_priority_cd,        ; collected status
+    ea1.alias,                     ; med rec nbr
+    ea2.alias                      ; fin nbr
+  from (dummyt d1 with seq = value(download_cnt)),
+       container cont,
+       encounter encntr,
+       person pers,
+       order_laboratory lab,
+       (dummyt d3 with seq = 1),
+       encntr_alias ea1,
+       (dummyt d4 with seq = 1),
+       encntr_alias ea2,
+       (dummyt d5 with seq = 1),
+       encntr_prsnl_reltn epr1,
+       prsnl p1,
+       (dummyt d6 with seq = 1),
+       encntr_prsnl_reltn epr2,
+       prsnl p2
+  plan d1
+  join cont
+    where cont.container_id = workrec->dnld_rec[d1.seq]->container_id
+  join encntr
+    where encntr.encntr_id = workrec->dnld_rec[d1.seq]->encntr_id
+  join pers
+    where pers.person_id = workrec->dnld_rec[d1.seq]->person_id
+  join lab
+    where lab.order_id = workrec->dnld_rec[d1.seq]->order_id
+  join d3
+    where d3.seq = 1
+  join ea1
+    where ea1.encntr_id = encntr.encntr_id
+      and ea1.encntr_alias_type_cd = med_nbr_cd
+      and ea1.active_ind = 1
+      and (ea1.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+      and  ea1.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+  join d4
+    where d4.seq = 1
+  join ea2
+    where ea2.encntr_id = encntr.encntr_id
+      and ea2.encntr_alias_type_cd = fin_nbr_cd
+      and ea2.active_ind = 1
+      and (ea2.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+      and  ea2.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+  join d5
+    where d5.seq = 1
+  join epr1
+    where epr1.encntr_id = encntr.encntr_id
+      and epr1.encntr_prsnl_r_cd = attend_cd
+      and epr1.active_ind = 1
+      and (epr1.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+      and  epr1.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+  join p1
+    where p1.person_id = epr1.prsnl_person_id
+  join d6
+    where d6.seq = 1
+  join epr2
+    where epr2.encntr_id = encntr.encntr_id
+      and epr2.encntr_prsnl_r_cd = admit_cd
+      and epr2.active_ind = 1
+      and (epr2.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+      and  epr2.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+  join p2
+    where p2.person_id = epr2.prsnl_person_id
+
+  order by
+    d1.seq,
+    0    ; force CCL to do distinct
+
+  head d1.seq
+    row + 0
+    first_ind = 1
+
+  detail
+    if (first_ind = 1)
+      first_ind = 0
+      demog_cnt = demog_cnt + 1
+
+      reply->inlab_orders[d1.seq]->name = pers.name_full_formatted
+      reply->inlab_orders[d1.seq]->frmt_med_nbr = ea1.alias
+      reply->inlab_orders[d1.seq]->age_in_years =
+             cnvtage(cnvtdate2(format(pers.birth_dt_tm,"mm/dd/yyyy;;d"),
+                               "mm/dd/yyyy"),
+             cnvtint(format(pers.birth_dt_tm,"hhmm;;m")))
+      reply->inlab_orders[d1.seq]->sex_cd = pers.sex_cd
+      reply->inlab_orders[d1.seq]->frmt_req_col_date =
+             format(coll_dt_tm, "ddmmmyy;;d")
+      reply->inlab_orders[d1.seq]->req_col_time =
+             format(coll_dt_tm, "hhmm;;mt")
+      reply->inlab_orders[d1.seq]->frmt_drawn_date =
+             format(coll_dt_tm, "ddmmmyy;;d")
+      reply->inlab_orders[d1.seq]->drawn_time =
+             format(coll_dt_tm, "hhmm;;mt")
+      reply->inlab_orders[d1.seq]->doctor = cnvtstring(epr1.prsnl_person_id,19,0)
+      reply->inlab_orders[d1.seq]->nurse_station_cd = encntr.loc_nurse_unit_cd
+      reply->inlab_orders[d1.seq]->room_cd = encntr.loc_room_cd
+      reply->inlab_orders[d1.seq]->bed_cd = encntr.loc_bed_cd
+      reply->inlab_orders[d1.seq]->col_status_cd = lab.report_priority_cd
+      reply->inlab_orders[d1.seq]->sample_type_cd = cont.specimen_type_cd
+      reply->inlab_orders[d1.seq]->patient_encounter_nbr = cnvtstring(encntr.encntr_id,19,0)
+      reply->inlab_orders[d1.seq]->patient_name = pers.name_full_formatted
+      reply->inlab_orders[d1.seq]->frmt_med_nbr2 = ea1.alias
+      reply->inlab_orders[d1.seq]->fin_nbr = ea2.alias
+      reply->inlab_orders[d1.seq]->doctor_name = p1.name_full_formatted
+      reply->inlab_orders[d1.seq]->admit_doctor_nbr =
+                                   cnvtstring(epr2.prsnl_person_id,19,0)
+      reply->inlab_orders[d1.seq]->admit_doctor_name = p2.name_full_formatted
+      reply->inlab_orders[d1.seq]->frmt_birthday =
+                                   format(pers.birth_dt_tm, "ddmmmyy;;d")
+      reply->inlab_orders[d1.seq]->frmt_admit_date =
+                                   format(encntr.reg_dt_tm, "ddmmmyy;;d")
+      reply->inlab_orders[d1.seq]->frmt_disc_date =
+                                   format(encntr.disch_dt_tm, "ddmmmyy;;d")
+      reply->inlab_orders[d1.seq]->patient_type_cd = encntr.encntr_type_cd
+      reply->inlab_orders[d1.seq]->patient_class_cd = encntr.encntr_class_cd
+      reply->inlab_orders[d1.seq]->patient_race_cd = pers.race_cd
+    endif
+
+  foot d1.seq
+    row + 0
+
+  with outerjoin = d3,
+       outerjoin = d4,
+       outerjoin = d5,
+       outerjoin = d6,
+       dontcare = ea1,
+       dontcare = ea2,
+       dontcare = epr1,
+       dontcare = p1,
+       nocounter
+
+  if (ERROR_MESSAGE(1) = 1)
+    go to script_error
+  endif
+
+  if (demog_cnt != download_cnt)
+    go to count_mismatch
+  endif
+
+  go to exit_script
+/***********************************************************************
+ *   Error handling routines.                                          *
+ ***********************************************************************/
+#script_error
+  set failed = "T"
+  go to exit_script
+
+#fail_status
+  set sText = fillstring(254, " ")
+  set sText = "{{Script::GLB_GET_MDI_DOWNLOAD_INFO}} Return Status = F"
+  CALL LOG_MESSAGE(sText, 4)
+  set failed = "T"
+  go to exit_script
+
+#zero_download
+  set sText = fillstring(254, " ")
+  set sText = "{{Script::GLB_GET_MDI_DOWNLOAD_INFO}} Download Count = 0"
+  CALL LOG_MESSAGE(sText, 4)
+  set failed = "T"
+  go to exit_script
+
+#count_mismatch
+  set sText = fillstring(254, " ")
+  set sText = CONCAT("{{Script::GLB_GET_MDI_DOWNLOAD_INFO}} Download ",
+                     "and Demographic Count Mismatch")
+  CALL LOG_MESSAGE(sText, 4)
+
+  set sText = fillstring(254, " ")
+  set sText = CONCAT("{{Script::GLB_GET_MDI_DOWNLOAD_INFO}} ",
+                     "Download Count = ", CNVTSTRING(download_cnt))
+  CALL LOG_MESSAGE(sText, 4)
+
+  set sText = fillstring(254, " ")
+  set sText = CONCAT("{{Script::GLB_GET_MDI_DOWNLOAD_INFO}} ",
+                     "Demographics Count = ", CNVTSTRING(demog_cnt))
+  CALL LOG_MESSAGE(sText, 4)
+
+  set failed = "T"
+  go to exit_script
+
+/***********************************************************************
+ *   exit_script                                                       *
+ ***********************************************************************/
+#exit_script
+  if (failed = "F")
+    set sText = fillstring(254, " ")
+    set sText = CONCAT("{{Script::GLB_GET_MDI_DOWNLOAD_INFO}} ",
+                       "Download Count = ", CNVTSTRING(download_cnt))
+    call uar_SysEvent(hSys, 4, "ScriptTrace", NULLTERM(sText))
+
+    set sText = fillstring(254, " ")
+    set sText = CONCAT("{{Script::GLB_GET_MDI_DOWNLOAD_INFO}} ",
+                       "Demographics Count = ", CNVTSTRING(demog_cnt))
+    call uar_SysEvent(hSys, 4, "ScriptTrace", NULLTERM(sText))
+
+    set sText = fillstring(254, " ")
+    set sText = "{{Script::GLB_GET_MDI_DOWNLOAD_INFO}} Download Complete"
+    call uar_SysEvent(hSys, 3, "ScriptEnd", NULLTERM(sText))
+
+    set reply->status_data->status = "S"
+  endif
+
+  call uar_SysDestroyHandle(hSys)
+end go
+
+;Generated by GNU enscript 1.6.4.

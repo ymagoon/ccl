@@ -1,0 +1,340 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_upd_qc_stats/glb_upd_qc_stats.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_UPD_QC_STATS.PRG
+        Object name:            GLB_UPD_QC_STATS
+        Request #:              257584
+
+        Product:                General Lab - Quality Control
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Update assay_resource_lot table from stats
+                                calculated in QC Inquiry
+
+        Tables read:            n/a
+
+        Tables updated:         assay_resource_lot
+
+
+        Executing from:         QC Inquiry
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *### 05/20/99 Chad Moats           Initial Release                     *
+;    *001 09/07/00 Gary Runde           Add check to make sure performed    *
+;    *                                  results don't exist before          *
+;    *                                  inactivating ARL rows               *
+;    *002 03/26/04 Scott Sundahl        Change reply to return a list of    *
+;    *                                  controls, test sites, and assays    *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_UPD_QC_STATS:dba go
+      create program GLB_UPD_QC_STATS:dba
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 nbr_assays                = i4
+         1 assays[*]
+           2 lot_id                  = f8
+           2 service_resource_cd     = f8
+           2 task_assay_cd           = f8
+           2 mean                    = f8
+           2 std_dev                 = f8
+           2 low                     = f8
+           2 high                    = f8
+)
+*/
+
+        record reply
+        (
+           1 qc_perf_found_ind       = i2               ;001
+           1 perf_results[*]
+              2 assay_name           = vc
+              2 control_name         = vc
+              2 test_site            = vc
+%i cclsource:status_block.inc
+)
+
+        set a_cnt = 0
+        set b_cnt = 0
+        set bFoundFlag = 0
+        set hold_arl_id = 0.00
+        set temp_arl_id = 0.00
+        set hold_rule_id = 0.00
+        set hold_manf_low = 0.00
+        set hold_manf_high = 0.00
+        set hold_manf_SD = 0.00
+        set hold_manf_mean = 0.00
+        set reply->status_data->status = "F"
+
+
+/**********************001 BEGIN NEW CODE *************************************/
+	    set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+	    set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+	    set failed = "F"
+
+	    ;get the performed status code value
+	    declare result_status_performed = f8
+	    declare temp_control_name = vc with protect, noconstant("")
+	    set stat = uar_get_meaning_by_codeset(1901, "PERFORMED", 1, result_status_performed)
+
+        set reply->qc_perf_found_ind = 0
+ ;       set reply->qc_perf_assay_disp = ""
+        
+      /***********************************************************************
+      * Check to see if ARL id exists on performed result                    *
+      ***********************************************************************/
+        subroutine check_arl_id ( arg_arl_id )
+           set found_qc_result = 0
+           set temp_assay_cd = 0.0
+           set temp_test_site_cd = 0.0
+           declare temp_assay_disp = vc
+           ;plan off of the assay_resource_lot table, since the
+           ;qc_result table does not have a index on the arl_id
+           ;join to the qc_result table by lot_id, servrescd, taskassaycd because there
+           ;is an index for that
+           select into "nl:"
+              arl.arl_id,
+              qr.qc_group_id,
+              qr.arl_id,
+              qr.result_status_cd
+           from assay_resource_lot arl,
+                qc_result qr,
+                control_material cm
+           plan arl
+             where arl.arl_id = arg_arl_id
+           join qr
+             where arl.lot_id = qr.lot_id
+               and arl.task_assay_cd = qr.task_assay_cd
+               and arl.service_resource_cd = qr.service_resource_cd
+               and qr.result_status_cd = result_status_performed
+           join cm where qr.control_id = cm.control_id
+           
+           order by qr.task_assay_cd
+           head qr.task_assay_cd
+              found_qc_result = 1
+              temp_assay_cd = qr.task_assay_cd
+              temp_test_site_cd = qr.service_resource_cd
+              temp_control_name = cm.short_description   
+              call echo(cm.short_description)
+              call echo(temp_control_name)        
+           with nocounter
+
+		   set error_check = ERROR(sErrorMsg,0)
+		   if (error_check != 0)
+			 set Failed = "T"
+			 set reply->status_data->status = "F"
+			 set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+			 go to exit_script
+		   endif
+
+           if (found_qc_result = 1)
+			  set bFoundFlag = 1
+			  set b_cnt = b_cnt + 1
+			  if (size(reply->perf_results, 5) < b_cnt)
+			     set stat = alterlist(reply->perf_results, b_cnt + 9) 
+			  endif
+              set temp_assay_disp = uar_get_code_display(temp_assay_cd)
+              set temp_test_site_name = uar_get_code_display(temp_test_site_cd) 
+              set reply->qc_perf_found_ind = 1
+              set reply->perf_results[b_cnt]->assay_name = temp_assay_disp
+              set reply->perf_results[b_cnt]->control_name = temp_control_name
+              set reply->perf_results[b_cnt]->test_site = temp_test_site_name
+		      set failed = "T"
+;		      go to exit_script
+		   endif
+		end
+
+/**********************001 END NEW CODE *************************************/
+      /***********************************************************************
+      * Update assay on table                                                *
+      ***********************************************************************/
+        declare update_assay ( none ) = i4
+        subroutine update_assay ( none )
+
+        set temp_arl_id = 0.00
+        set hold_rule_id = 0.00
+        set hold_manf_low = 0.00
+        set hold_manf_high = 0.00
+        set hold_manf_SD = 0.00
+        set hold_manf_mean = 0.00
+
+        select into "nl:"
+          a2.arl_id
+        from assay_resource_lot a2
+        where (a2.lot_id = request->assays[a_cnt].lot_id)
+          and (a2.service_resource_cd =
+                        request->assays[a_cnt].service_resource_cd)
+          and (a2.task_assay_cd = request->assays[a_cnt].task_assay_cd)
+          and (a2.active_ind = 1)
+        detail
+          temp_arl_id = a2.arl_id
+          hold_rule_id = a2.rule_id
+          hold_manf_low = a2.manf_low
+          hold_manf_high = a2.manf_high
+          hold_manf_SD = a2.manf_Std_dev
+          hold_manf_mean = a2.manf_mean
+        with
+          nocounter
+
+		set error_check = ERROR(sErrorMsg,0)   ;get error message                         ;001
+		if (error_check != 0)                                                             ;001
+		  set Failed = "T"                                                                ;001
+		  set reply->status_data->status = "F"                                            ;001
+		  set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg        ;001
+		  go to exit_script                                                               ;001
+		endif                                                                             ;001
+
+        if (temp_arl_id > 0.00)
+
+            call check_arl_id (temp_arl_id)                                               
+	        
+	        if (bFoundFlag = 0)
+	        
+    	        update
+    	          into assay_resource_lot a2
+    	        set
+    	          a2.active_ind          = 0,
+    	          a2.end_effective_dt_tm = cnvtdatetime(curdate,curtime),
+    	          a2.updt_dt_tm          = cnvtdatetime(curdate,curtime),
+    	          a2.updt_cnt            = a2.updt_cnt + 1,
+    	          a2.updt_task           = reqinfo->updt_task,
+    	          a2.updt_id             = reqinfo->updt_id,
+    	          a2.updt_applctx        = reqinfo->updt_applctx
+    	        plan a2
+    	           where a2.arl_id = temp_arl_id
+    	        with
+    	          nocounter
+                return (curqual)
+        
+            else
+            
+                return (0)
+            
+            endif
+        
+        else
+            return (0)
+        endif
+        
+        end
+
+      /***********************************************************************
+      * Insert assay on table                                                *
+      ***********************************************************************/
+        declare insert_assay ( none ) = i4
+        subroutine insert_assay ( none )
+
+        set hold_arl_id = 0.00
+
+        SELECT
+           into "nl:"
+              y = seq(reference_seq,nextval) "##################;rp0"
+        FROM
+           dual
+        DETAIL
+           hold_arl_id = cnvtreal(y)
+        WITH
+           format, counter
+
+        insert
+          into assay_resource_lot a2
+        set
+          a2.arl_id              = hold_arl_id,
+          a2.lot_id              = request->assays[a_cnt].lot_id,
+          a2.service_resource_cd = request->assays[a_cnt].service_resource_cd,
+          a2.task_assay_cd       = request->assays[a_cnt].task_assay_cd,
+          a2.mean                = request->assays[a_cnt].mean,
+          a2.clinical_std_dev    = request->assays[a_cnt].std_dev,
+          a2.statistical_std_dev = request->assays[a_cnt].std_dev,
+          a2.abs_low             = request->assays[a_cnt].low,
+          a2.abs_high            = request->assays[a_cnt].high,
+          a2.rule_id             = hold_rule_id,
+          a2.manf_low            = hold_manf_low,
+          a2.manf_high           = hold_manf_high,
+          a2.manf_std_dev        = hold_manf_sd,
+          a2.manf_mean           = hold_manf_mean,
+          a2.active_ind          = 1,
+          a2.beg_effective_dt_tm = cnvtdatetime(curdate, curtime3),
+          a2.end_effective_dt_tm = cnvtdatetime("31-DEC-2100 00:00"),
+          a2.updt_dt_tm          = cnvtdatetime(curdate, curtime3),
+          a2.updt_cnt            = 0,
+          a2.updt_task           = reqinfo->updt_task,
+          a2.updt_id             = reqinfo->updt_id,
+          a2.updt_applctx        = reqinfo->updt_applctx
+        with nocounter
+
+        return (curqual)
+
+		set error_check = ERROR(sErrorMsg,0)   ;get error message                         ;001
+		if (error_check != 0)                                                             ;001
+		  set Failed = "T"                                                                ;001
+		  set reply->status_data->status = "F"                                            ;001
+		  set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg        ;001
+		  go to exit_script                                                               ;001
+		endif                                                                             ;001
+
+        end
+
+
+/********************************************************************/
+/* Script                                                           */
+/********************************************************************/
+        set a_cnt = 0
+
+        for (a_cnt = 1 to request->nbr_assays)
+                if ( update_assay( 0 ) > 0)
+                        call insert_assay ( 0 )
+                endif
+                set bFoundFlag = 0
+        endfor
+        if (size(reply->perf_results, 5) > 0)
+            set stat = alterlist(reply->perf_results, b_cnt)
+        endif
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+
+     if (failed = "F")                                ;001
+         set reply->status_data->status = "S"
+         commit
+     else                                             ;001
+         rollback                                     ;001
+     endif                                            ;001
+
+END
+GO
+
+;Generated by GNU enscript 1.6.4.

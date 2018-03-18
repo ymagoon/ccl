@@ -1,0 +1,616 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_chg_wklst_ele/glb_chg_wklst_ele.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2000 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_CHG_WORKLIST_ELE.PRG
+        Object name:            GLB_CHG_WORKLIST_ELE
+        Request #:              250087
+
+        Product:                General Lab           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Update list of orders for an existing worklist                 
+                                in the database
+
+        Tables read:            worklist
+
+        Tables updated:         worklist
+                                worklist_accession_r
+                                worklist_order_r         
+
+        Executing from:         General Lab worklist request           
+
+        Special Notes:          Deletes and rebuilds worklist_order_r and
+                                worklist_accession_r table entries for the 
+                                current worklist.
+
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     500 05/17/96 Newton Hughes        Initial Release                     *
+;     501 01/27/98 Kurt Gugler          add sequence identifier             *
+;    *502 01/13/00 Hal Patchen          Fill out update record info         *
+;    *003 05/01/06 Scott Sundahl        Added template/event history logic  *
+;    *004 02/05/07 Scott Sundahl        Changes to position updates         *
+;    *005 09/02/10 Steve Hendrick       Add qc_group_id field               *
+;    *006 09/16/10 Ryan Manuel          Changes to support scenarios that   *
+;                                       arise when deleting accesssions off *
+;                                       of an automatic worklist            *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      DROP PROGRAM glb_chg_wklst_ele:dba GO
+      CREATE PROGRAM glb_chg_wklst_ele:dba
+/*
+      RECORD request
+      (
+        1 worklist_id                   = f8
+        1 worklist_prsnl_id             = f8  ;* Currently not used
+        1 status_cd                     = f8  ;* Currently not used
+        1 service_resource_cd           = f8  ;* Currently not used
+        1 worklist_type_flag            = i4  ;* Currently not used
+        1 worklist_alias                = c25
+        1 orders[x]
+          2 order_id                    = f8
+          2 accession_id                = f8
+          2 sequence                    = i4
+          2 sequence_ident              = c20
+          2 positions[*]
+            3 position_id               = f8
+          2 qc_group_id                 = f8
+        1 components[*]
+          2 catalog_cd                  = f8
+          2 task_assay_cd               = f8
+        1 template_ind                  = i2
+        1 positions[*]
+          2 sequence                    = i4
+          2 order_id                    = f8
+          2 accession_id                = f8
+          2 person_accession_ind        = i2
+          2 position_id                 = f8
+      )
+*/
+
+if (not validate(reply, 0))
+      RECORD reply
+      (
+%i cclsource:glb_chg_wklst_ele_rep.inc
+      )
+endif
+
+%i cclsource:pm_dynamic_query.inc
+%i cclsource:pm_create_request.inc
+%i cclsource:glb_worklist_status.inc
+      
+      record m_dm2_seq_stat
+      (
+        1 n_status    = i4
+        1 s_error_msg = vc
+      ) with protect
+      
+      RECORD worklist_element
+      (
+		    1 qual[*]
+			    2 worklist_id        = f8
+			    2 catalog_cd         = f8
+			    2 task_assay_cd      = f8 
+			    2 order_id           = f8
+      )
+      
+      record deleted_orders
+      (
+        1 qual[*]
+          2 order_id = f8
+      )
+      
+      record deleted_perform_results
+      (
+        1 qual[*]
+          2 perform_result_id = f8
+      )
+      
+/*******************************************************************************/
+; DECLARE VARIABLES
+
+DECLARE lOrd_cnt            = i4 with protect, noconstant(0)  
+DECLARE worklist_element_id = f8 with protect, noconstant(0.0)
+declare sErrorMessage       = vc with protect, noconstant(" ")
+declare lErrorCode          = i4 with protect, noconstant(0)
+declare lLoopCount          = i4 with protect, noconstant(0)
+declare lLoopCount2         = i4 with protect, noconstant(0)
+declare lNewIdCount         = i4 with protect, noconstant(0)
+declare bConvert            = i2 with protect, noconstant(false)
+declare lPositionCount      = i4 with protect, noconstant(0)
+declare lDeletedResultCnt   = i4 with protect, noconstant(0)
+declare lDeletedOrderCnt    = i4 with protect, noconstant(0)
+declare lStart              = i4 with protect, noconstant(0)
+declare lIndex              = i4 with protect, noconstant(0)
+declare lLoopCnt            = i4 with protect, noconstant(0)
+declare nBATCH_SIZE         = i2 with protect, constant(20)
+declare dCurrentStatusCd    = f8 with protect, noconstant(0.0)
+
+/*******************************************************************************/
+
+#script
+      SET reply->status_data->status = "F"
+      SET failed = "F"
+      SET order_cnt = size(request->orders, 5)
+      SET updt_cnt = 0
+
+/*******************************************************************/
+/* Handle potentially outdated position logic                      */
+/*******************************************************************/ 
+
+for (lLoopCount = 1 to order_cnt)
+  if (size(request->orders[lLoopCount].positions, 5) > 0)
+    call echo(build("order index: ", lLoopCount))
+    set bConvert = true
+    set lLoopCount = order_cnt + 1
+  endif
+endfor
+
+if (bConvert = true)
+  for (lLoopCount = 1 to order_cnt)
+    for (lLoopCount2 = 1 to size(request->orders[lLoopCount].positions, 5))
+      set lPositionCount = lPositionCount + 1
+      set stat = alterlist(request->positions, lPositionCount)
+      set request->positions[lPositionCount].sequence = request->orders[lLoopCount].sequence
+      set request->positions[lPositionCount].order_id = request->orders[lLoopCount].order_id
+      set request->positions[lPositionCount].accession_id = request->orders[lLoopCount].accession_id
+      set request->positions[lPositionCount].person_accession_ind = 0
+      set request->positions[lPositionCount].position_id = request->orders[lLoopCount].positions[lLoopCount2].position_id
+    endfor
+  endfor
+endif
+
+call echorecord(request)
+
+/*jpm - update worklist alias on worklist table*/
+        
+        update into worklist wo
+        set
+          wo.worklist_alias = request->worklist_alias
+          ,wo.updt_dt_tm = cnvtdatetime(curdate, curtime3)               ;502
+          ,wo.updt_id = reqinfo->updt_id                                 ;502
+          ,wo.updt_task = reqinfo->updt_task                             ;502
+          ,wo.updt_cnt = wo.updt_cnt + 1                                 ;502
+          ,wo.updt_applctx = reqinfo->updt_applctx                       ;502
+        where wo.worklist_id = request->worklist_id
+        with nocounter
+
+/* end jpm update*/
+
+/* Get update count from worklist table (to use to set worklist_order_r updt_cnt) */
+
+      SELECT INTO "nl:"
+        w.updt_id
+      FROM
+        worklist w
+      WHERE
+        w.worklist_id = request->worklist_id
+      DETAIL
+        updt_cnt = w.updt_cnt
+        dCurrentStatusCd = w.status_cd
+      WITH
+        NOCOUNTER
+        , MAXQUAL(w, 1)
+
+; delete position/order relationship rows if a template is being used for this worklist
+
+      if(request->template_ind > 0)
+        
+        ; lock rows to be deleted
+        select into "nl:"
+        
+        from worklist_pos_order_r w
+        
+        where w.worklist_id = request->worklist_id
+        
+        with forupdate(w)
+        
+        set lErrorCode = error(sErrorMessage, 0)
+        if (lErrorCode > 0)
+          set reply->status_data->subeventstatus[1]->targetObjectValue = "locking of worklist_pos_order_r failed"
+          go to wo_update_failed
+        endif
+
+        ; delete existing rows for this worklist
+        delete from worklist_pos_order_r w
+        
+        where w.worklist_id = request->worklist_id
+        
+        with nocounter
+        
+        set lErrorCode = error(sErrorMessage, 0)
+        if (lErrorCode > 0)
+          set reply->status_data->subeventstatus[1]->targetObjectValue = "delete from worklist_pos_order_r failed"
+          go to wo_update_failed
+        endif
+        
+      endif
+      
+      ; If this is an automatic worklist we need to figure out which orders and results have been deleted
+      if (dCurrentStatusCd > 0.0)
+        select into "nl:"
+        from worklist_order_r wor
+        plan wor where wor.worklist_id = request->worklist_id
+        detail
+          if (locateval(lIndex, 1, order_cnt, wor.order_id, request->orders[lIndex].order_id) <= 0)
+            lDeletedOrderCnt = lDeletedOrderCnt + 1
+            if (mod(lDeletedOrderCnt, 10) = 1)
+              stat = alterlist(deleted_orders->qual, lDeletedOrderCnt + 9)
+            endif
+            deleted_orders->qual[lDeletedOrderCnt].order_id = wor.order_id
+          endif
+        foot report
+          stat = alterlist(deleted_orders->qual, lDeletedOrderCnt)        
+        with nocounter
+        
+        set lLoopCnt = ceil(cnvtreal(lDeletedOrderCnt) / nBATCH_SIZE)
+        set lStart = 1
+        select into "nl:"
+        from (dummyt d1 with seq = value(lLoopCnt)),
+             result r,
+             perform_result pr
+        plan d1 where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+        join r  where expand(lIndex, lStart, minval(lDeletedOrderCnt, lStart + (nBATCH_SIZE-1)),
+                             r.order_id, deleted_orders->qual[lIndex].order_id)
+        join pr where pr.result_id = r.result_id
+                  and pr.worklist_id + 0.0 = request->worklist_id
+        detail
+          lDeletedResultCnt = lDeletedResultCnt + 1
+          if (mod(lDeletedResultCnt, 10) = 1)
+            stat = alterlist(deleted_perform_results->qual, lDeletedResultCnt + 9)
+          endif
+          deleted_perform_results->qual[lDeletedResultCnt].perform_result_id = pr.perform_result_id 
+        foot report
+          stat = alterlist(deleted_perform_results->qual, lDeletedResultCnt)  
+        with nocounter
+      endif
+
+/* Delete and recreate all worklist_order_r records for the current worklist. */
+
+      DELETE FROM
+        worklist_order_r wo
+      WHERE
+        wo.worklist_id = request->worklist_id
+      WITH
+        NOCOUNTER
+                                            
+/* Create new list of orders for the worklist. */
+
+      INSERT INTO 
+        worklist_order_r wo
+        , (dummyt d1 with seq = value(order_cnt))
+      SET
+        wo.worklist_id = request->worklist_id
+        , wo.order_id = request->orders[d1.seq]->order_id
+        , wo.sequence = request->orders[d1.seq]->sequence
+        , wo.identifier = request->orders[d1.seq]->sequence_ident      ;501
+        , wo.create_dt_tm = cnvtdatetime(curdate, curtime)             ;501
+        , wo.updt_dt_tm = cnvtdatetime(curdate, curtime)
+        , wo.updt_id = reqinfo->updt_id
+        , wo.updt_task = reqinfo->updt_task
+        , wo.updt_cnt = updt_cnt
+        , wo.updt_applctx = reqinfo->updt_applctx 
+      PLAN d1
+        WHERE request->orders[d1.seq]->order_id != 0.0
+      JOIN wo
+        WHERE wo.order_id = request->orders[d1.seq]->order_id
+      WITH
+        NOCOUNTER
+
+      SET order_qual = curqual
+
+      DELETE FROM
+        worklist_accession_r wa
+      WHERE
+        wa.worklist_id = request->worklist_id
+      WITH
+        NOCOUNTER
+
+      INSERT INTO
+        worklist_accession_r wa
+        , (dummyt d1 with seq = value(order_cnt))
+      SET 
+        wa.worklist_id = request->worklist_id
+        , wa.accession_id = request->orders[d1.seq]->accession_id
+        , wa.sequence = request->orders[d1.seq]->sequence
+        , wa.identifier = request->orders[d1.seq]->sequence_ident      ;501
+        , wa.create_dt_tm = cnvtdatetime(curdate, curtime)             ;501
+        , wa.updt_dt_tm = cnvtdatetime(curdate, curtime)
+        , wa.updt_id = reqinfo->updt_id
+        , wa.updt_task = reqinfo->updt_task
+        , wa.updt_cnt = updt_cnt
+        , wa.updt_applctx = reqinfo->updt_applctx
+        , wa.qc_group_id = request->orders[d1.seq]->qc_group_id
+      PLAN d1
+        WHERE request->orders[d1.seq]->order_id = 0.0
+      JOIN wa
+        WHERE wa.accession_id = request->orders[d1.seq]->accession_id
+      WITH
+        NOCOUNTER
+
+      IF (order_qual + curqual = 0)
+        set reply->status_data->subeventstatus[1]->targetObjectValue = "insert into worklist_accession_r failed."
+        GO TO wo_update_failed
+      ENDIF
+      
+; delete all rows from the worklist_element table by worklist_id		
+		  if(size(request->components, 5) > 0)
+
+        DELETE FROM
+          worklist_element we
+        WHERE
+          we.worklist_id = request->worklist_id
+        WITH
+          NOCOUNTER
+  
+    	  FOR (x = 1 to SIZE(request->orders,5))
+    	  	
+    	  	IF (request->orders[x].order_id > 0.0)
+    	  	
+    	  		SELECT INTO "nl:"
+    	  		FROM
+    	  			 orders o
+    	  			 , (dummyt d1 with seq = value(SIZE(request->components, 5)))
+    	  			 
+    	  		PLAN d1
+    	  			WHERE request->components[d1.seq].catalog_cd > 0.0
+    	  		
+    	  		JOIN o WHERE o.order_id = request->orders[x].order_id
+    	  		       AND o.catalog_cd = request->components[d1.seq].catalog_cd
+    	  		
+    	  		ORDER by o.order_id
+    	  		
+    	  		HEAD o.order_id
+    	  			lOrd_cnt = lOrd_cnt + 1
+              IF (lOrd_cnt > SIZE(worklist_element->qual, 5))
+                stat = alterlist(worklist_element->qual, lOrd_cnt + 9)
+              ENDIF
+    	  			worklist_element->qual[lOrd_cnt].order_id = o.order_id
+    	  			worklist_element->qual[lOrd_cnt].catalog_cd = o.catalog_cd
+    	  			worklist_element->qual[lOrd_cnt].worklist_id = request->worklist_id
+    	  		
+    	  		WITH NOCOUNTER
+    	
+    	  		
+    	  		SELECT INTO "nl:"
+    	  		
+    	  		FROM 
+    	  			  orders o 
+    	  			 , profile_task_r ptr
+    	  			 , (dummyt d1 with seq = value(SIZE(request->components, 5)))
+    	  		
+    	  		PLAN d1
+    	  			WHERE request->components[d1.seq].task_assay_cd > 0.0
+    	  		
+    	  		JOIN o 
+    	  			WHERE o.order_id = request->orders[x].order_id
+    	  		
+    	  		JOIN ptr 
+    	  			WHERE ptr.catalog_cd = o.catalog_cd 
+    	  			AND ptr.task_assay_cd = request->components[d1.seq].task_assay_cd     
+    	  		
+    	  		ORDER by o.order_id, ptr.task_assay_cd
+    	  		
+    	  		head o.order_id
+    	  		  row + 0
+    	  		
+    	  		HEAD ptr.task_assay_cd
+    	  			lOrd_cnt = lOrd_cnt + 1
+              IF (lOrd_cnt > SIZE(worklist_element->qual, 5))
+                stat = alterlist(worklist_element->qual, lOrd_cnt + 9)
+              ENDIF
+    	  			worklist_element->qual[lOrd_cnt].order_id = o.order_id
+    	  		  worklist_element->qual[lOrd_cnt].worklist_id = request->worklist_id
+    	  		  worklist_element->qual[lOrd_cnt].task_assay_cd = ptr.task_assay_cd
+    	  		
+    	  		WITH NOCOUNTER
+    	  	
+    	  	ENDIF
+        
+        ENDFOR
+        
+  	  		
+  	    IF (lOrd_cnt > 0)
+          SET stat = alterlist(worklist_element->qual, lOrd_cnt)
+        ENDIF
+
+        FOR (x = 1 to SIZE(worklist_element->qual, 5))
+       
+          INSERT INTO worklist_element we
+          
+          SET we.catalog_cd = worklist_element->qual[x].catalog_cd
+              ,we.worklist_element_id = seq(pathnet_seq, nextval)
+              ,we.task_assay_cd = worklist_element->qual[x].task_assay_cd
+              ,we.order_id = worklist_element->qual[x].order_id
+              ,we.worklist_id = worklist_element->qual[x].worklist_id
+              ,we.updt_dt_tm = cnvtdatetime(curdate, curtime)
+              ,we.updt_id = reqinfo->updt_id
+              ,we.updt_task = reqinfo->updt_task
+              ,we.updt_cnt = 0
+              ,we.updt_applctx = reqinfo->updt_applctx
+          
+          WITH NOCOUNTER
+     
+          set lErrorCode = error(sErrorMessage, 0)
+          if (lErrorCode > 0)
+              set reply->status_data->subeventstatus[1]->targetObjectValue = "insert into worklist_element failed."
+              go to wo_update_failed
+          endif
+     
+        ENDFOR
+        
+      endif
+
+/*******************************************************************/
+/* insert rows into worklist event table                           */
+/*******************************************************************/  
+
+      if (request->status_cd = 0.0)
+        insert into worklist_event we
+  
+        set we.worklist_event_id      = seq(reference_seq, nextval),
+            we.worklist_id            = request->worklist_id,
+            we.event_dt_tm            = cnvtdatetime(curdate, curtime3),
+            we.event_prsnl_id         = reqinfo->updt_id,
+            we.event_type_flag        = 2,
+            we.updt_dt_tm             = cnvtdatetime(curdate, curtime3),
+            we.updt_id                = reqinfo->updt_id,
+            we.updt_task              = reqinfo->updt_task,
+            we.updt_cnt               = 0,
+            we.updt_applctx           = reqinfo->updt_applctx
+  
+        with nocounter
+      endif
+
+/*******************************************************************/
+/* insert rows into worklist order position relationship table     */
+/*******************************************************************/  
+   
+      if(request->template_ind > 0)
+  
+        ; retrieve a batch of sequences for insert
+        free set new_ids
+        record new_ids
+        (
+          1 qual[*]
+            2 id = f8
+        )
+        
+        set lNewIdCount = size(request->positions, 5)
+        
+        if(lNewIdCount > 0)    
+          execute dm2_dar_get_bulk_seq "new_ids->qual", lNewIdCount, "id", 1, "pathnet_seq"
+        
+          if( m_dm2_seq_stat->n_status != 1)
+            call echo(concat("Sequence retrieval error: ", m_dm2_seq_stat->s_error_msg))
+            set reply->status_data->subeventstatus[1]->targetObjectValue = "retrieval of sequences failed."
+            go to wo_update_failed
+          endif
+
+          call echorecord(new_ids)
+
+          for(lLoopCount = 1 to lNewIdCount)
+
+            call echo(build("***********************************loop number:", lLoopCount))
+            
+            insert into worklist_pos_order_r w
+            
+            set w.worklist_pos_order_r_id   = new_ids->qual[lLoopCount].id,
+                w.worklist_id               = request->worklist_id,
+                w.worklist_ref_pos_id       = request->positions[lLoopCount].position_id,
+                w.active_ind                = 1,
+                w.order_id                  = request->positions[lLoopCount].order_id,
+                w.accession_id              = request->positions[lLoopCount].accession_id,
+                w.accession_sequence        = request->positions[lLoopCount].sequence,
+                w.person_accession_ind      = request->positions[lLoopCount].person_accession_ind,
+                w.updt_dt_tm                = cnvtdatetime(curdate, curtime3),
+                w.updt_id                   = reqinfo->updt_id,
+                w.updt_task                 = reqinfo->updt_task,
+                w.updt_cnt                  = 0,
+                w.updt_applctx              = reqinfo->updt_applctx
+          
+            with nocounter
+              
+            set lErrorCode = error(sErrorMessage, 0)
+            if (lErrorCode > 0)
+              set reply->status_data->subeventstatus[1]->targetObjectValue = "insert into worklist_pos_order_r failed"
+              go to wo_update_failed
+            endif
+          
+          endfor
+          
+        endif
+
+      endif
+      
+      if (dCurrentStatusCd > 0.0 and lDeletedResultCnt > 0)     
+        set lLoopCnt = ceil(cnvtreal(lDeletedResultCnt) / nBATCH_SIZE)
+        set lStart = 1
+        update into (dummyt d1 with seq = value(lLoopCnt)),
+                    perform_result pr
+        set pr.worklist_id = 0.0,
+            pr.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+            pr.updt_id = reqinfo->updt_id,
+            pr.updt_task = reqinfo->updt_task,
+            pr.updt_cnt = pr.updt_cnt + 1,
+            pr.updt_applctx = reqinfo->updt_applctx
+        plan d1 where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+        join pr where expand(lIndex, lStart, minval(lDeletedResultCnt, lStart + (nBATCH_SIZE-1)),
+                             pr.perform_result_id, deleted_perform_results->qual[lIndex].perform_result_id)
+        with nocounter
+                    
+        set lErrorCode = error(sErrorMessage, 0)
+        if (lErrorCode > 0)
+          set reply->status_data->subeventstatus[1]->targetObjectValue = "update into perform_result failed"
+          go to wo_update_failed
+        endif
+        
+        free record request_worklist_status
+        call cr_createRequest(0, 250164, "request_worklist_status")
+        
+        set request_worklist_status->worklist_id = request->worklist_id
+        
+        free record reply_worklist_status
+        record reply_worklist_status
+        (
+%i cclsource:glb_upd_worklist_status_rep.inc        
+        )
+        
+        execute glb_upd_worklist_status with replace("REQUEST", "REQUEST_WORKLIST_STATUS"),
+                                             replace("REPLY", "REPLY_WORKLIST_STATUS")
+                                             
+        if (reply_worklist_status->status_data.status = "F")
+          set reply->status_data->subeventstatus[1]->targetObjectValue = "call to glb_upd_worklist_status failed"
+          go to worklist_status_failed
+        endif
+      endif
+      
+      GO TO exit_script   
+   
+
+#w_update_failed
+
+#wo_update_failed
+
+#worklist_status_failed
+      SET failed = "T"
+
+#exit_script
+      free set worklist_element
+
+      IF (failed = "F")
+        SET reply->status_data->status = "S"
+        set reqinfo->commit_ind = 1
+      ELSE
+        set reqinfo->commit_ind = 0
+      ENDIF
+
+      END GO
+
+;Generated by GNU enscript 1.6.4.

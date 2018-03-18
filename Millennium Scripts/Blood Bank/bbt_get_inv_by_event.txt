@@ -1,0 +1,169 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Scriptinventorysearch/BBT_GET_INV_BY_EVENT.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       BBT_GET_INV_BY_EVENT.PRG
+        Object name:            BBT_GET_INV_BY_EVENT
+        Request #:              225169
+
+        Product:                Pathnet                        
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Retrieve inventory items for a search based
+                                on event selected
+
+        Tables read:            code_value, product_index
+        Tables updated:         none
+        Executing from:         Blood Bank Inventory Search
+
+        Special Notes:          
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *001 08/01/96 Mike Goings          Initial Release                     *
+;    *002 05/27/97 Jon Weekes           Added Inventory Area logic          *
+;    *003 12/21/01 John Rieck           Updated select to join to the dummy *
+;    *                                  table first.                        *
+;    *004 08/30/05 JA7516               Search on electronic entry flag     *
+;    *005 05/01/11 AG017309             Search on cur_dispense_device_id    *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+Drop Program   BBT_GET_INV_BY_EVENT : dba go
+Create Program  BBT_GET_INV_BY_EVENT : dba
+
+/*
+Record request
+(
+ 1  product_cd     = f8
+ 1  abo_cd         = f8
+ 1  rh_cd          = f8
+ 1  location_cd    = f8
+ 1  cur_owner_area_cd  = f8
+ 1  cur_inv_area_cd    = f8
+ 1  cur_inv_device_id  = f8
+ 1  states_count  = i2
+ 1  states_data[*]
+   2  states_cd     = f8
+ 1  days_to_expire    = i4
+ 1  electronic_entry_only_ind = i2
+)
+*/
+
+Record  Reply
+(
+%i cclsource:bbt_inv_rep_struct.inc
+%i cclsource:status_block.inc
+)
+
+;set  reply -> status_data -> status  =  "F" 
+set product_count = 0
+set antigen_count = 0
+set states_count = 0
+set derivative_flag = fillstring(1," ")
+set cnvt_days_to_expire = 0
+set product_count = 0
+
+set cnvt_days_to_expire = (curdate + request->days_to_expire)
+set dummydata = 0
+
+call Get_Products (dummydata)
+if (product_count > 0)
+    call Get_Events_Notes_SpecTest (dummydata)
+endif
+
+go to end_script
+
+ 
+/*************************************************/
+subroutine Get_Products (nodata)
+
+    select into  "nl:"
+        p.product_id
+
+    from  
+        product p
+        , product_event pe
+        , (dummyt d_pe with seq = value(request->states_count))
+        , (dummyt d_bp_d with seq = 1)
+        , blood_product bp
+        , derivative d
+        , bb_inv_device bbid
+
+    plan    p   where   p.product_id != NULL
+                          and p.product_id > 0
+                          and p.cur_expire_dt_tm < cnvtdatetime(cnvt_days_to_expire, curtime3)
+                          and p.active_ind = 1
+                          and ((request->product_cd > 0.0
+                                and p.product_cat_cd = request->product_cd)
+                            or (request->product_cd = 0.0))
+                          and ((request->location_cd > 0 
+                                and p.cur_inv_locn_cd = request->location_cd)
+                            or (request->location_cd = 0.0))
+                          and ((request->cur_owner_area_cd > 0.0
+                                and p.cur_owner_area_cd = request->cur_owner_area_cd)
+                            or (request->cur_owner_area_cd = 0.0))
+                          and ((request->cur_inv_area_cd > 0.0
+                                and p.cur_inv_area_cd = request->cur_inv_area_cd)
+                            or (request->cur_inv_area_cd = 0.0))
+                          and ((request->cur_inv_device_id > 0.0
+                                and p.cur_dispense_device_id = request->cur_inv_device_id)
+                            or (request->cur_inv_device_id = 0.0))
+                          and ((request->electronic_entry_only_ind != 0
+                                and p.electronic_entry_flag != 0)
+                            or (request->electronic_entry_only_ind = 0))
+    join    d_pe                        
+    join    pe  where   pe.product_id = p.product_id
+                          and pe.event_type_cd = request->states_data[d_pe.seq]->states_cd
+                          and pe.active_ind = 1
+    join bbid where bbid.bb_inv_device_id = outerjoin(p.cur_dispense_device_id)
+    join    (d_bp_d where  d_bp_d.seq = 1
+        join    bp  where   bp.product_id = p.product_id
+                              and ((request->abo_cd > 0.0
+                                    and bp.cur_abo_cd = request->abo_cd)
+                                or (request->abo_cd = 0.0))
+                              and ((request->rh_cd > 0.0
+                                    and bp.cur_rh_cd = request->rh_cd)
+                                or (request->rh_cd = 0.0))
+        orjoin  d   where    d.product_id = p.product_id)
+
+
+%i cclsource:bbt_inv_get_products_select.inc
+
+end   ; end subroutine Get_Products
+
+%i cclsource:bbt_inv_events_notes_spectest.inc
+
+#end_script
+
+end go
+
+;Generated by GNU enscript 1.6.4.

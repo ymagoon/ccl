@@ -1,0 +1,358 @@
+/***********************************************************************
+ *                  GENERATED MODIFICATION CONTROL LOG                 *
+ ***********************************************************************
+ *                                                                     *
+ *Mod Date     Engineer             Comment                            *
+ *--- -------- -------------------- -----------------------------------*
+ *000 00/00/00 Unknown              Unknown                            *
+	;;Cerner created ftp for WIR files
+	;;password changed 10/11/2010, L. Sword
+ *001 12/01/11 Rob Banks            Modify to use DB2                  *
+ *002 02/17/2012 Lisa Sword  password changed from asystwir7 to asystwir6
+ *003 02/28/13 Akcia                Change mod 001 to lookup password in registry
+ 
+ ******************** End of Modification Log **************************/
+ 
+DROP PROGRAM   WI_IMMUNIZATION_FTP : DBA  GO
+CREATE PROGRAM  WI_IMMUNIZATION_FTP : DBA
+ 
+;;/*** START 001 ***/
+;;;*********************************************************************
+;;;*** If PROD / CERT then run as 2nd oracle instance to improve
+;;;*** efficiency. Will auto Fail-over to Instance 1 if Instance 2 down.
+;;;*********************************************************************
+;;IF(CURDOMAIN = "PROD")
+;;  FREE DEFINE oraclesystem
+;;  DEFINE oraclesystem 'v500/fullmoon@mhprbrpt'
+;;ELSEIF(CURDOMAIN = "MHPRD")
+;;  FREE DEFINE oraclesystem
+;;  DEFINE oraclesystem 'v500/fullmoon@mhprbrpt'
+;;ELSEIF(CURDOMAIN="MHCRT")
+;;  FREE DEFINE oraclesystem
+;;  DEFINE oraclesystem 'v500/java4t2@mhcrtrpt'
+;;ENDIF ;CURDOMAIN
+;;;*** Write instance ccl ran in to the log file
+;;;SET Iname = fillstring(10," ")
+;;;SELECT INTO value("mayo_logfiles:mayo_instance2.log")
+;;;  run_date = format(sysdate,";;q")
+;;; ,Iname = substring(1,7,instance_name)
+;;;FROM v$instance
+;;;DETAIL
+;;;  col  1 run_date
+;;;  col +1 curprog
+;;;  col +1 " *Instance="
+;;;  col +1 Iname
+;;;with nocounter
+;;;   , format
+;;;****************** End of INSTANCE 2 routine ************************
+;;/*** END 001 ***/
+ 
+/*** Start 003 - New Code ****/
+;****************** Begin ORACLE INSTANCE 2 routine ****************
+;*** If PROD / CERT then run as 2nd oracle instance to improve
+;***   efficiency. Will auto Fail-over to Instance 1 if Instance 2 down.
+;***   Then after at the end, set the program back to instance 1.
+;******************************************************************************
+ 
+;*** This section calls an O/S scritp that reads the current v500 password
+;***   from the Millennium registry and stores it in a file named
+;***   $CCLUSERDIR/dbinfo.dat
+declare dcl_command = vc
+declare dcl_size = i4
+declare dcl_stat = i4
+ 
+set dcl_command = "/mayo/procs/req_query.ksh"
+set dcl_size = size(dcl_command)
+set dcl_stat = 0
+ 
+call dcl(dcl_command,dcl_size,dcl_stat)
+ 
+;*** Next the password is read from the dbinfo.dat file to variable 'pass'.
+FREE DEFINE RTL
+DEFINE RTL IS "dbinfo.dat"
+ 
+declare pass=vc
+ 
+SELECT DISTINCT INTO "NL:"
+  line = substring(1,30,R.LINE)   ; 9,9       10,9
+FROM RTLT R
+PLAN R
+ 
+detail
+ 
+if (line = "dbpw*")
+  pass_in=substring(9,15,line)
+  pass=trim(pass_in,3)
+endif
+ 
+with counter
+ 
+;*** Now we are finished with the dbinfo.dat file and will delete it.
+set dcl_command = ""
+set dcl_command = "rm $CCLUSERDIR/dbinfo.dat"
+set dcl_size = size(dcl_command)
+set dcl_stat = 0
+ 
+call dcl(dcl_command,dcl_size,dcl_stat)
+ 
+declare system=vc
+ 
+;*** This section redifines the OracleSystem variable pointing it to
+;***   database instance 2 using the password read in above.
+;*** This only applies to PRD and CRT, because they are the only domains
+;***   that have multiple instance databases.
+IF (curdomain = "MHPRD")
+  Free define oraclesystem
+  set system=build(concat('v500/', pass, '@mhprdrpt'))
+  DEFINE oraclesystem system
+ELSEIF (CURDOMAIN="MHCRT")
+    FREE DEFINE oraclesystem
+    set system=build(concat('v500/', pass, '@mhcrtrpt'))
+    DEFINE oraclesystem system
+ENDIF
+/*** END 003 - New Code ***/
+ 
+DECLARE  LOCAL_DIR  =  VC
+ 
+DECLARE  BKUP_DIR  =  VC
+ 
+DECLARE  FILENAME  =  VC
+ 
+DECLARE  FTP_ADDRESS  =  VC
+ 
+DECLARE  REM_DIR  =  VC
+ 
+DECLARE  USER  =  VC
+ 
+DECLARE  PASSW  =  VC
+ 
+DECLARE  TODAY1  =  C8
+ 
+DECLARE  FTP_FILE ( NEW_FILENAME ) =  C1
+ 
+DECLARE  CREATE_BKUP ( LOCAL_DIR ,  NEW_FILENAME ,  BKUP_DIR ) =  C1
+ 
+DECLARE  RENAME_FILE ( FILENAME ,  TODAY1 ) =  C1
+ 
+FREE SET REPLY
+ 
+RECORD  REPLY  (
+ 1  STATUS_DATA
+ 2  STATUS  =  C1
+ 2  SUBEVENTSTATUS [ 1 ]
+ 3  OPERATIONNAME  =  C25
+ 3  OPERATIONSTATUS  =  C1
+ 3  TARGETOBJECTNAME  =  C25
+ 3  TARGETOBJECTVALUE  =  VC )
+ 
+SET  TODAY1  =  FORMAT ( CURDATE , "YYYYMMDD;;d" )
+ 
+ CALL ECHO ( BUILD ("This is today1!--->" ,  TODAY1 ,  CHAR ( 0 )))
+ 
+SET  LOCAL_DIR  = "/cerner/d_mhprd/ccluserdir/"
+ 
+SET  BKUP_DIR  = "/cerner/d_mhprd/ccluserdir/wir_bkup"
+ 
+SET  FILENAME  = "wirclient_*"
+ 
+SET  FTP_ADDRESS  = "jaeafs001w"
+ 
+SET  REM_DIR  = "/CORP/wir/prod/"
+ 
+SET  USER  = "mfad/TU02104"
+ 
+SET  PASSW  = "asystwir6"
+ 
+SET  REPLY -> STATUS_DATA -> STATUS  = "Z"
+ 
+SET  REPLY -> STATUS_DATA -> STATUS  =  FTP_FILE ( FILENAME )
+ 
+IF ( ( TRIM ( REPLY -> STATUS_DATA -> STATUS )!="S" ) )  GO TO  EXIT_SCRIPT
+ENDIF
+ 
+ 
+SET  REPLY -> STATUS_DATA -> STATUS  =  CREATE_BKUP ( BUILD ( LOCAL_DIR ,  FILENAME ),  BKUP_DIR )
+ 
+IF ( ( TRIM ( REPLY -> STATUS_DATA -> STATUS )!="S" ) )  GO TO  EXIT_SCRIPT
+ENDIF
+ 
+ 
+SET  FILENAME  = "wirimmz_*"
+ 
+SET  REPLY -> STATUS_DATA -> STATUS  =  FTP_FILE ( FILENAME )
+ 
+IF ( ( TRIM ( REPLY -> STATUS_DATA -> STATUS )!="S" ) )  GO TO  EXIT_SCRIPT
+ENDIF
+ 
+ 
+SET  REPLY -> STATUS_DATA -> STATUS  =  CREATE_BKUP ( BUILD ( LOCAL_DIR ,  FILENAME ),  BKUP_DIR )
+ 
+IF ( ( TRIM ( REPLY -> STATUS_DATA -> STATUS )!="S" ) )  GO TO  EXIT_SCRIPT
+ENDIF
+ 
+ 
+SUBROUTINE   RENAME_FILE  ( FILENAME ,  TODAY1  )
+ 
+DECLARE  RET_STATUS  =  C1
+DECLARE  COMMAND  =  VC
+DECLARE  NEW_FILENAME  =  VC  WITH  PERSISTSCRIPT
+SET  CMD_STATUS  =  0
+SET  RET_STATUS  = "Z"
+SET  NEW_FILENAME  =  BUILD ( FILENAME , "_" ,  TODAY1 )
+ CALL ECHO ( BUILD ("New File Name derived from rename_file--->" ,  NEW_FILENAME ,  CHAR ( 0 )))
+IF ( ( CURSYS ="AIX" ) )
+SET  COMMAND  =  CONCAT ("mv " ,  LOCAL_DIR ,  FILENAME , " " ,  LOCAL_DIR ,  NEW_FILENAME )
+ELSE
+SET  COMMAND  =  CONCAT ("rename " ,  LOCAL_DIR ,  FILENAME , " " ,  LOCAL_DIR ,  NEW_FILENAME )
+ENDIF
+ 
+ CALL ECHO ( BUILD ("FILE RENAME COMMAND: " ,  TRIM ( COMMAND ),  CHAR ( 0 )))
+ CALL DCL ( COMMAND ,  SIZE ( TRIM ( COMMAND )),  CMD_STATUS )
+ CALL ECHO ( BUILD ("FILE RENAME CMD STATUS---> " ,  CMD_STATUS ,  CHAR ( 0 )))
+SET  RET_STATUS  = "S"  RETURN ( RET_STATUS )
+ 
+ 
+END ;Subroutine
+ 
+ 
+SUBROUTINE   FTP_FILE  ( NEW_FILENAME  )
+ 
+DECLARE  RET_STATUS  =  C1
+DECLARE  COMMAND  =  VC
+SET  QUOTE  = '"'
+SET  CMD_STATUS  =  0
+SET  RET_STATUS  = "Z"
+IF ( ( CURSYS ="AIX" ) )
+SET  COMMAND  =  CONCAT ("print " ,  QUOTE , "open " ,  FTP_ADDRESS , "\n user " ,  USER , " " ,
+ PASSW , "\nbinary\nlcd " ,  LOCAL_DIR , "\ncd " ,  REM_DIR , "\nmput " ,  NEW_FILENAME ,  QUOTE ,
+" | ftp -i -n" )
+ELSE
+IF ( ( REM_DIR ="." ) )
+SET  REM_DIR  = ""
+ENDIF
+ 
+SET  COMMAND  =  CONCAT ("ftp " ,  FTP_ADDRESS , "/user=" ,  USER , " /pass=" ,  PASSW ,
+"/type=image" , " put " ,  LOCAL_DIR ,  NEW_FILENAME , " " ,  REM_DIR ,  NEW_FILENAME )
+ENDIF
+ 
+ CALL ECHO ( BUILD ("FTP COMMAND: " ,  TRIM ( COMMAND ),  CHAR ( 0 )))
+ CALL DCL ( COMMAND ,  SIZE ( TRIM ( COMMAND )),  CMD_STATUS )
+ CALL ECHO ( BUILD ("FTP CMD STATUS---> " ,  CMD_STATUS ,  CHAR ( 0 )))
+IF ( ( CMD_STATUS != 1 ) )
+ CALL ECHO ( BUILD ("ORIGINAL FTP FAILED - TRYING BACKUP" ,  CHAR ( 0 )))
+SET  COMMAND  =  CONCAT ("print " ,  QUOTE , "open " ,  FTP_ADDRESS , "\n user " ,  USER , " " ,
+ PASSW , "\nbinary\nlcd " ,  LOCAL_DIR , "\ncd " ,  REM_DIR , "\nmput " ,  NEW_FILENAME ,  QUOTE ,
+" | ftp -i -n" )
+DECLARE  COMMAND  =  VC
+DECLARE  FTP_COMMAND  =  VC
+DECLARE  OUT_FTPNAME  =  VC
+DECLARE  REMOTE_DIR_SZ  =  I4
+SET  REMOTE_DIR_SZ  =  SIZE ( TRIM ( REM_DIR ))
+ CALL ECHO ( BUILD ("remote dir size=" ,  REMOTE_DIR_SZ ,  CHAR ( 0 )))
+IF ( ( REMOTE_DIR_SZ > 0 ) )
+SET  FTP_COMMAND  =  CONCAT ("cd " ,  REM_DIR ,  CHAR ( 13 ),  CHAR ( 10 ), "mput " ,  LOCAL_DIR ,
+ NEW_FILENAME )
+ELSE
+SET  FTP_COMMAND  =  CONCAT ("mput " ,  REM_DIR ,  NEW_FILENAME )
+ENDIF
+ 
+ CALL ECHO ( BUILD ("BACKUP PUT COMMAND: " ,  TRIM ( FTP_COMMAND ),  CHAR ( 0 )))
+SET  OUT_FTPNAME  =  BUILD ( LOCAL_DIR , "ftp_input.dat" )
+SET  LOGICAL_VAL2  =  TRIM ( OUT_FTPNAME )
+SET  LOGICAL  OUTLOG2  LOGICAL_VAL2
+SELECT  INTO  OUTLOG2
+ FTP_COMMAND
+ WITH  NOHEADING
+SET  COMMAND  =  CONCAT ("ftp " ,  FTP_ADDRESS , "/user=" ,  QUOTE ,  USER ,  QUOTE , " /pass=" ,
+ QUOTE ,  PASSW ,  QUOTE , " /input=" ,  OUT_FTPNAME )
+ CALL ECHO ( BUILD ("BACKUP FTP COMMAND: " ,  TRIM ( COMMAND ),  CHAR ( 0 )))
+SET  CMD_STATUS  =  0
+ CALL DCL ( COMMAND ,  SIZE ( TRIM ( COMMAND )),  CMD_STATUS )
+FREE SET COMMAND
+SET  COMMAND  =  CONCAT ("delete " ,  OUT_FTPNAME , ";*" )
+ CALL ECHO ( BUILD ("ABOUT TO EXECUTE COMMAND: " ,  TRIM ( COMMAND ),  CHAR ( 0 )))
+SET  STATUS  =  0
+ CALL DCL ( COMMAND ,  SIZE ( TRIM ( COMMAND )),  STATUS )
+ENDIF
+ 
+IF ( ( CMD_STATUS != 1 ) )
+SET  ERROR_TEXT  =  CONCAT ("ERROR in FTP script. FTP failed: " ,  COMMAND )
+SET  RET_STATUS  = "Z"
+ELSE
+SET  RET_STATUS  = "S"
+ENDIF
+ 
+ CALL ECHO ( BUILD ("ret_status of FTP attempt--->" ,  RET_STATUS ,  CHAR ( 0 ))) RETURN (
+ RET_STATUS )
+ 
+ 
+END ;Subroutine
+ 
+ 
+SUBROUTINE   CREATE_BKUP  ( NEW_FILENAME ,  DIRECTORY  )
+ 
+SET  CMD_STATUS  =  0
+DECLARE  RET_STATUS  =  C1
+DECLARE  COMMAND  =  VC
+IF ( ( CURSYS ="AIX" ) )
+SET  COMMAND  =  CONCAT ("mv " ,  NEW_FILENAME , " " ,  DIRECTORY )
+ELSEIF ( ( CURSYS ="AXP" ) )
+SET  COMMAND  =  CONCAT ("rename " ,  LOCAL_DIR ,  NEW_FILENAME , " " ,  DIRECTORY )
+ELSE
+SET  ERROR_TEXT  =  CONCAT ("ERROR in FTP script. Unknown platform returned from cursys: " ,
+ CURSYS )
+SET  RET_STATUS  = "F"
+ENDIF
+ 
+ CALL ECHO ( BUILD ("BACKUP COMMAND: " ,  TRIM ( COMMAND ),  CHAR ( 0 )))
+ CALL DCL ( COMMAND ,  SIZE ( TRIM ( COMMAND )),  CMD_STATUS )
+IF ( ( CMD_STATUS != 1 ) )
+SET  ERROR_TEXT  =  CONCAT ("ERROR in FTP script.  Copy Failed: " ,  COMMAND )
+SET  RET_STATUS  = "Z"
+ELSE
+SET  RET_STATUS  = "S"
+ENDIF
+ 
+ CALL ECHO ( BUILD ("Ret_status of Backup attempt--->" ,  RET_STATUS ,  CHAR ( 0 ))) RETURN (
+ RET_STATUS )
+ 
+ 
+END ;Subroutine
+ 
+ 
+# EXIT_SCRIPT
+ 
+;;/*** START 001 ***/
+;;;*** After report put back to instance 1
+;;IF(CURDOMAIN = "PROD")
+;;  FREE DEFINE oraclesystem
+;;  DEFINE oraclesystem 'v500/fullmoon@mhprb1'
+;;ELSEIF(CURDOMAIN = "MHPRD")
+;;  FREE DEFINE oraclesystem
+;;  DEFINE oraclesystem 'v500/fullmoon@mhprb1'
+;;ELSEIF(CURDOMAIN="MHCRT")
+;;  FREE DEFINE oraclesystem
+;;  DEFINE oraclesystem 'v500/java4t2@mhcrt1'
+;;ENDIF ;CURDOMAIN
+;;/*** END 001 ***/
+ 
+ 
+ /****Start 003 - New Code ***/
+;*** Restore the OracleSystem variable to its normal definition pointing
+;***   to instance 1.
+IF (curdomain = "MHPRD")
+  Free define oraclesystem
+  set system=build(concat('v500/', pass, '@mhprd1'))
+  DEFINE oraclesystem system
+ 
+ELSEIF (CURDOMAIN="MHCRT")
+    FREE DEFINE oraclesystem
+    set system=build(concat('v500/', pass, '@mhcrt1'))
+    DEFINE oraclesystem system
+ 
+ENDIF
+ 
+/***END 003 - New Code ***/
+ 
+END
+GO

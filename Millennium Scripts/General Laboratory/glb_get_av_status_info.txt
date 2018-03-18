@@ -1,0 +1,378 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_av_status_info/glb_get_av_status_info.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       glb_get_av_status_info.prg
+        Object name:            glb_get_av_status_info
+        Request #:              250214
+ 
+        Product:                General Lab
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Used by autoverify server to retrieve the
+                                following non-cached parameters:
+                                1. Manual on/off state of autoverification
+                                2. ID of currently assigned tech
+                                3. State of QC step
+ 
+        Tables read:            lab_instrument, instrument_assignment
+        Tables updated:
+        Executing from:         GLB Result server
+ 
+        Special Notes:          None
+ 
+******************************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 08/02/00 Chris Heil           Initial Release                     *
+;     002 08/31/00 Gary Runde           Add logic to get qc schedule info   *
+;     003 01/08/01 Gary Runde           Initially fill out assayqual from   *
+;                                       auto_verify table if no QC set up   *
+;     004 04/24/01 Chris Heil           Return expired_flag if no QC step   *
+;                                       status row exists for assay.        *
+;     005 05/03/01 Chris Heil           Fix issue with mod 004.             *
+;     006 10/15/03 Andrew Dittrich      Performance Fix for QC              *
+;     007 05/02/06 Ryan Sullivan        Fix for AV in QC					*
+;     008 06/23/14 Veeresh Angadi       Fix for CR 1-7982442092				*
+;~DE~************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop   program glb_get_av_status_info:dba go
+create program glb_get_av_status_info:dba
+ 
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+/*
+  record request
+  (
+    1 service_resource_cd = f8
+  )
+*/
+ 
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+  record reply
+  (
+    1 assigned_id                 = f8
+    1 cycle_start_dt_tm           = dq8
+    1 assayqual[*]
+      2 task_assay_cd             = f8
+      2 last_step_nbr             = i4
+      2 last_step_comp_dt_tm      = dq8
+      2 last_step_expired_dt_tm   = dq8
+      2 step_interval_mins        = i4
+      2 expired_flag              = i2  ;0 = not expired
+                                        ;1 = expired because curr dt/tm > expire dt/tm
+                                        ;2 = expired because we started new cycle
+      2 av_status_flag            = i4  ;0 = off, 1 = on, 2 = QC off
+      2 found_uneval_results      = i2
+      2 found_perf_results        = i2
+%i cclsource:status_block.inc
+  )
+ 
+/****************************************************************************
+*       Initialize Variables                                                *
+*****************************************************************************/
+  set sErrorMsg = FILLSTRING(255," ")    ;string containing error message   ;002
+  set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty        ;002
+ 
+  set reply->status_data->status = "F"
+  set failed = "F"
+ 
+  set curr_dt_tm = cnvtdatetime(curdate, curtime3)
+ 
+  ;get the performed and verified result status code
+  set verf_status_cd = 0.0
+  set perf_status_cd = 0.0
+ 
+  call uar_get_meaning_by_codeset(1901, "PERFORMED", 1, perf_status_cd)
+  call uar_get_meaning_by_codeset(1901, "VERIFIED", 1, verf_status_cd)
+ 
+/****************************************************************************
+*     Get currently assigned technologist.                                  *
+*****************************************************************************/
+  set reply->assigned_id = 0.0
+ 
+  select into "nl:"
+    ia.seq
+  from instrument_assignment ia
+  where ia.service_resource_cd = request->service_resource_cd
+    and ia.active_ind = 1
+    and cnvtdatetime(curdate,curtime3)
+        between ia.beg_effective_dt_tm and ia.end_effective_dt_tm
+ 
+  detail
+    reply->assigned_id = ia.prsnl_id
+ 
+  with nocounter
+ 
+  set error_check = ERROR(sErrorMsg,0)   ;get error message                         ;002
+  if (error_check != 0)                                                             ;002
+    set Failed = "T"                                                                ;002
+    set reply->status_data->status = "F"                                            ;002
+    set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg        ;002
+    go to exit_script                                                               ;002
+  endif                                                                             ;002
+ 
+  subroutine check_for_qc_results (arg_resource_cd, arg_assay_cd)
+     ;subroutine to query the QC_RESULT table to check to see if the
+     ;resource/assay passed in has any performed results or verified results
+     ;that have not been evaluated associated with it
+     set found = 0
+ 
+     select into "nl:"
+        q.result_status_cd,
+        q.service_resource_cd,
+        q.task_assay_cd
+     from qc_result q
+     plan q
+        where (q.task_assay_cd = arg_assay_cd
+          and q.service_resource_cd = arg_resource_cd
+          and q.qc_result_type_flag+0 = 0
+          and q.result_status_cd = verf_status_cd   and q.preactive_ind = 0)	;008
+          or (q.task_assay_cd = arg_assay_cd
+          and q.service_resource_cd = arg_resource_cd
+          and q.qc_result_type_flag+0 = 0
+          and q.result_status_cd = perf_status_cd  and q.preactive_ind = 0)		;008
+     head q.service_resource_cd
+        if (q.result_status_cd = verf_status_cd and q.result_control_cd = 0.0)	;008
+          ;set the found flag to a one to indicate the unevaluated results were found
+          found = 1
+        elseif (q.result_status_cd = perf_status_cd)
+          ;set the found flag to a two to indicate the performed results were found
+          found = 2
+        endif
+     with nocounter
+ 
+     return (found)
+  end
+ 
+ 
+/****************************************************************************
+*     Get Schedule Information           .                                  *
+*****************************************************************************/
+ 
+  set cycle_start_time = cnvtdatetime(curdate, curtime)
+  set found_info = 0
+ 
+  ;get the step information for this resource
+  select into "nl:"
+	qs.qc_schedule_id,
+    qs.service_resource_cd
+  from qc_schedule qs
+  plan qs
+    where qs.service_resource_cd = request->service_resource_cd and
+          qs.active_ind = 1 and
+          cnvtdatetime(curr_dt_tm)
+               between qs.beg_effective_dt_tm and qs.end_effective_dt_tm
+  head qs.service_resource_cd
+    ;get the schedule's cycle dt/tm
+    cycle_start_time = qs.start_dt_tm
+    found_info = 1
+  with nocounter
+ 
+  set error_check = ERROR(sErrorMsg,0)
+  if (error_check != 0)
+    set Failed = "T"
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+    go to exit_script
+  endif
+ 
+  if (found_info != 0)
+    ;calculate the cycle start dt/tm to find out if the cycle started yesterday or today
+    ;get the current dt/tm's minutes
+    set curr_mins = format(cnvtdatetime(curr_dt_tm), "hhmmss;;m")
+    ;format the schedule start time's minutes so we can compare it to the current date/time's minutes
+    set cycleStartMins = format(cnvtdatetime(cycle_start_time), "hhmmss;;m")
+ 
+    ;if the current minutes is before the cycle start minutes then
+    ;the cycle started yesterday, else the cycle started today
+    if (curr_mins < cycleStartMins)
+      set tempdatestr = format(cnvtdatetime(curdate-1, curtime), "dd-mmm-yyyy;;d")
+    else
+      set tempdatestr = format(cnvtdatetime(curdate, curtime), "dd-mmm-yyyy;;d")
+    endif
+ 
+    ;format the schedule start time's minutes so it can be used in the cnvtdatetime function
+    set temptimestr = format(cnvtdatetime(cycle_start_time), "hh:mm:ss;;m")
+ 
+    ;convert the datetime to a rdb string value and set it to the cycle start date/time
+    set reply->cycle_start_dt_tm = cnvtdatetime(concat(tempdatestr, " ", temptimestr))
+  endif 
+    
+  
+/*********003 BEGIN NEW CODE *******************/
+  ;fill out the assayqual struct initially from the auto_verify table
+  ;instead of the qc_step_status since the client may not be using QC
+  set a_cnt = 0 
+
+  select into "nl:"
+    av.service_resource_cd,
+    av.task_assay_cd,
+    av.av_status_flag
+  from auto_verify av
+  plan av
+    where av.service_resource_cd = request->service_resource_cd
+      and cnvtdatetime(curr_dt_tm) between av.beg_effective_dt_tm and
+                                           av.end_effective_dt_tm
+      and av.active_ind = 1
+  order by av.task_assay_cd
+  head av.task_assay_cd
+    a_cnt = a_cnt + 1
+    if (mod(a_cnt, 5) = 1)
+       stat = alterlist(reply->assayqual, a_cnt + 5)
+    endif
+    reply->assayqual[a_cnt].task_assay_cd = av.task_assay_cd
+    reply->assayqual[a_cnt].av_status_flag = av.av_status_flag
+ 
+    ; expire qc by default for every row - later code will set correctly
+    reply->assayqual[a_cnt].expired_flag = 2
+  foot report
+    if (a_cnt > 0)
+      stat = alterlist(reply->assayqual, a_cnt)
+    endif
+  with nocounter
+ 
+  set error_check = ERROR(sErrorMsg,0)
+  if (error_check != 0)
+    set Failed = "T"
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+    go to exit_script
+  endif
+ 
+  ;if no assays were found, exit the script
+  if (a_cnt = 0)
+    set Failed = "T"
+    go to exit_script
+  endif
+ 
+  ;select from the qc_step_status table with the list of assays
+  ;retrieved from auto_verify table above to get the qc_step info
+  select into "nl:"
+    d1.seq,
+    qss.step_nbr,
+    qss.step_complete_dt_tm,
+    qss.interval_min
+  from 
+    (dummyt d1 with seq = value(a_cnt)),
+    qc_step_status qss
+  plan d1
+  join qss 
+    where qss.service_resource_cd = request->service_resource_cd
+      and qss.task_assay_cd = reply->assayqual[d1.seq].task_assay_cd
+  order by qss.task_assay_cd, cnvtdatetime(qss.step_complete_dt_tm) desc
+  head qss.task_assay_cd
+    reply->assayqual[d1.seq].last_step_nbr = qss.step_nbr
+    reply->assayqual[d1.seq].last_step_comp_dt_tm = qss.step_complete_dt_tm
+    reply->assayqual[d1.seq].step_interval_mins = qss.interval_min
+    reply->assayqual[d1.seq].expired_flag = 0
+    ;calculate the expired date/time for this step
+    reply->assayqual[d1.seq].last_step_expired_dt_tm =
+                 datetimeadd(cnvtdatetime(qss.step_complete_dt_tm),
+                      (cnvtreal(qss.interval_min) / 1440.0))
+  with nocounter
+ 
+  set error_check = ERROR(sErrorMsg,0)
+  if (error_check != 0)
+    set Failed = "T"
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+    go to exit_script
+  endif
+
+/*********003 END NEW CODE *******************/
+
+  for (l_cnt = 1 to a_cnt)
+    ;check to see if step expired or not
+    ;if the current dt/tm is greater than the expired date/time then step is expired
+    if ((cnvtdatetime(curr_dt_tm) >
+        cnvtdatetime(reply->assayqual[l_cnt].last_step_expired_dt_tm)) and
+        reply->assayqual[l_cnt].last_step_nbr > 0)
+           set reply->assayqual[l_cnt].expired_flag = 1
+    endif
+ 
+    ;the step could also be expired because we have started a new cycle
+    ;if the step is still good, and the last step was completed before the
+    ;cycle start dt/tm and the current date/time is equal to or after the cycle start dt/tm
+    if ( (cnvtdatetime(curr_dt_tm) <=
+          cnvtdatetime(reply->assayqual[l_cnt].last_step_expired_dt_tm))
+     and (cnvtdatetime(reply->assayqual[l_cnt].last_step_comp_dt_tm) <
+          cnvtdatetime(reply->cycle_start_dt_tm))
+     and (cnvtdatetime(curr_dt_tm) >=
+          cnvtdatetime(reply->cycle_start_dt_tm))
+       )
+           set reply->assayqual[l_cnt].expired_flag = 2
+    endif
+ 
+    ;call sub to check for unevaluated or performed only QC results
+    set return_val = check_for_qc_results (request->service_resource_cd,
+                                           reply->assayqual[l_cnt].task_assay_cd )
+ 
+    if (return_val = 1)
+      set reply->assayqual[l_cnt].found_uneval_results = 1
+      set reply->assayqual[l_cnt].found_perf_results = 0
+    elseif (return_val = 2)
+      set reply->assayqual[l_cnt].found_uneval_results = 0
+      set reply->assayqual[l_cnt].found_perf_results = 1
+    endif
+ 
+ 
+    set error_check = ERROR(sErrorMsg,0)
+    if (error_check != 0)
+      set Failed = "T"
+      set reply->status_data->status = "F"
+      set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+      go to exit_script
+    endif
+  endfor
+ 
+ 
+/****************************************************************************
+*     Exit Script                                                           *
+*****************************************************************************/
+#exit_script
+  if (failed = "T")
+    set reqinfo->commit_ind = 0
+  else
+    set reqinfo->commit_ind = 1
+    set reply->status_data->status = "S"
+  endif
+ 
+  call echorecord(reply)
+ 
+end go
+
+;Generated by GNU enscript 1.6.4.

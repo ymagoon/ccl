@@ -1,0 +1,1216 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_sites_old/glb_get_sites_old.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_SITES.PRG
+        Object name:            GLB_GET_SITES
+        Request #:              250090
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load a range of service resources.
+                                Service resources for specific accessions
+                                and/or orderable procedures can be queried
+                                by completing the optional accession and
+                                catalog_cd fields of the request record.
+                                At most 25 records are returned, beginning with
+                                the "beginstring" passed in the request record.
+                                The 26th record stores the beginning point for the next
+                                execution.
+
+        Tables read:            order_serv_res_container
+                                accession_order_r
+                                code_value
+                                orders
+                                service_resource
+                                order_catalog
+                                orc_resource_list
+                                assay_resource_list
+                                profile_task_r
+                                assay_processing_r
+
+
+        Tables updated:         none
+        Executing from:         TestSiteLookup.dll
+
+        Special Notes:          none
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 01/22/96 John Mitchell        Initial Release                     *
+;    *001 03/19/98 Kurt Gugler          allow multiple activitytype/subtypes*
+;    *002 02/22/99 Chris Heil           Add support for round robin accns.  *
+;    *003 07/26/99 Chris Heil           Fix substring commands.             *
+;    *004 07/28/99 Gary Runde           Allow filter by user's orgs         *
+;    *005 08/23/99 Gary Runde           Remove joins to rr_resource_r       *
+;    *006 06/23/00 Wally Wester         Remove reference to org_string and  *
+;                                       use request structure to qualify on *
+;                                       organization_ids.  OCD 4836         *
+;    *007 05/09/00 Gary Runde           Add level 5 for subsection/testsite *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+
+DROP PROGRAM glb_get_sites_old:dba GO
+CREATE PROGRAM glb_get_sites_old:dba
+
+      /***********************************************************************
+      *   Request                                                            *
+      ***********************************************************************/
+/*
+record request
+(
+        1 number_to_return  = long
+        1 catalog_cd
+        1 active_flag = short
+        1 display   = string
+        1 catalog_cds[*]
+                2 cat_cd   = f8
+        1 task_assay_cds[*]
+                2 assay_cd = f8
+        1 accession = c18
+        1 act_type_means[*]                        ;001
+                2 activity_type_mean = string      ;001
+        1 act_sub_means[*]                         ;001
+                2 activity_subtype_mean = string   ;001
+;001        1 activity_type_mean = string
+;001        1 activity_subtype_mean = string
+        1 location_cd = f8
+        1 beginstring = string
+        1 levelflag = long
+        1 organizations[*]                              ;004
+                2 organization_id       = f8            ;004
+)
+*/
+
+
+      /***********************************************************************
+      *   temporary array structure to store type codes                      *
+      ***********************************************************************/
+record myrec
+(
+1 vbeginstring    = vc
+)
+
+record typearray
+(
+        1 qual2[*]
+                2 glb_type_cd = f8
+)
+
+      /***********************************************************************
+      *  Reply record                                                        *
+      ***********************************************************************/
+
+record reply
+(
+        1 level                                      =vc
+        1 qual[*]
+                2 service_resource_cd                =f8
+                2 service_resource_disp              =vc
+                2 cdf_meaning                        =vc
+                2 service_resource_type_cd           =f8
+                2 active_ind                         =i2
+        1 context_more_data                          =c1
+%i cclsource:status_block.inc
+)
+
+set reply->level = "none"
+
+set reply->context_more_data = "F"
+set reply->status_data->status = "F"
+
+      /***********************************************************************
+      *   Initialize variables                                               *
+      ***********************************************************************/
+set cnt_temp = 0
+set counter2 = 0
+set cnt_1 = 0
+;001 set pars_1 = fillstring(200," ")
+SET pars_1 = fillstring(500," ")                                          ;001
+set pars_2 = fillstring(132," ")
+/* SET org_string = fillstring(500," ")                                     ;004     006 */
+
+;call echo("john mitchell was here")
+set myrec->vbeginstring = trim(cnvtupper(cnvtalphanum(request->beginstring)))
+
+
+      /***********************************************************************
+      *   get type codes from their corresponding cdf_meanings               *
+      ***********************************************************************/
+
+set counter9 = 0
+set ara[4] = 0
+
+select into "nl:"
+                c.code_value
+from            code_value c
+where           c.code_set = 223 and c.cdf_meaning in ("BENCH", "INSTRUMENT", "SECTION", "SUBSECTION")
+order           c.cdf_meaning
+detail          counter9 = counter9 + 1
+                ara[counter9] = c.code_value
+with            nocounter
+
+      /***********************************************************************
+      *   populate temporary array structure with type codes                 *
+      ***********************************************************************/
+
+
+case (request->levelflag)
+        of 3:
+                set stat = alterlist(typearray->qual2,4)
+                set typearray->qual2[1]->glb_type_cd = ara[1]
+                set typearray->qual2[2]->glb_type_cd = ara[2]
+                set typearray->qual2[3]->glb_type_cd = ara[3]
+                set typearray->qual2[4]->glb_type_cd = ara[4]
+                set cnt_1 = 4
+        of 1:
+                set stat = alterlist(typearray->qual2,3)
+                set typearray->qual2[1]->glb_type_cd = ara[1]
+                set typearray->qual2[2]->glb_type_cd = ara[2]
+                set typearray->qual2[3]->glb_type_cd = ara[4]
+                set cnt_1 = 3
+        of 0:
+                set stat = alterlist(typearray->qual2,2)
+                set typearray->qual2[1]->glb_type_cd = ara[1]
+                set typearray->qual2[2]->glb_type_cd = ara[2]
+                set cnt_1 = 2
+        of 2:
+                set stat = alterlist(typearray->qual2,1)
+                set typearray->qual2[1]->glb_type_cd = ara[3]
+                set cnt_1 = 1
+        of 4:
+                set stat = alterlist(typearray->qual2,1)
+                set typearray->qual2[1]->glb_type_cd = ara[2]
+                set cnt_1 = 1
+        of 5:                                                            ;007
+                set stat = alterlist(typearray->qual2,2)                 ;007
+                set typearray->qual2[1]->glb_type_cd = ara[2]            ;007
+                set typearray->qual2[2]->glb_type_cd = ara[4]            ;007
+                set cnt_1 = 2                                            ;007
+endcase
+
+      /***********************************************************************
+      *   dynamically build last part of where clause                        *
+      *   NOTE:  this query could not be accomplished by joining to an       *
+      *   array, since at most 25 records should be passed back, and maxqual *
+      *   returns records depending on the number of joins, which is a       *
+      *   function of the number of elements in the array                    *
+      ***********************************************************************/
+
+SET pars_1 = " "                                                          ;001
+SET act_cnt = value(size(request->act_type_means, 5))                     ;001
+IF (act_cnt > 0)                                                          ;001
+  SET pars_1 = build(pars_1,"(")                                          ;001
+  SET pars_1 = build(pars_1,"s.activity_type_cd in (select cv.code_value") ;001
+  SET pars_1 = build(pars_1," from code_value cv where cv.code_set")      ;001
+  SET pars_1 = build(pars_1," = 106 and cv.cdf_meaning in ('")            ;001
+  FOR (x = 1 TO act_cnt)                                                  ;001
+    IF (x > 1)                                                            ;001
+      SET pars_1 = build(pars_1,"','",request->act_type_means[x]->activity_type_mean) ;001
+    ELSE                                                                  ;001
+      SET pars_1 = build(pars_1,request->act_type_means[x]->activity_type_mean) ;001
+    ENDIF                                                                 ;001
+  ENDFOR                                                                  ;001
+  SET pars_1 = build(pars_1,"'))")                                        ;001
+ENDIF                                                                     ;001
+
+SET sub_cnt = value(size(request->act_sub_means, 5))                      ;001
+IF (sub_cnt > 0)                                                          ;001
+  IF (act_cnt > 0)                                                        ;001
+    SET pars_1 = build(pars_1," and")                                     ;001
+  ENDIF                                                                   ;001
+  SET pars_1 = build(pars_1," s.activity_subtype_cd in (select cv.code_value") ;001
+  SET pars_1 = build(pars_1," from code_value cv where cv.code_set")      ;001
+  SET pars_1 = build(pars_1," = 5801 and cv.cdf_meaning in ('")           ;001
+  FOR (x = 1 TO sub_cnt)                                                  ;001
+    IF (x > 1)                                                            ;001
+      SET pars_1 = build(pars_1,"','",request->act_sub_means[x]->activity_subtype_mean) ;001
+    ELSE                                                                  ;001
+      SET pars_1 = build(pars_1,request->act_sub_means[x]->activity_subtype_mean) ;001
+    ENDIF                                                                 ;001
+  ENDFOR                                                                  ;001
+  SET pars_1 = build(pars_1,"'))")                                        ;001
+  IF (act_cnt > 0)                                                        ;001
+    SET pars_1 = build(pars_1,") and")                                    ;001
+  ELSE                                                                    ;001
+    SET pars_1 = build(pars_1," and")                                     ;001
+  ENDIF                                                                   ;001
+ELSE                                                                      ;001
+  IF (act_cnt > 0)                                                        ;001
+    SET pars_1 = build(pars_1,") and")                                    ;001
+  ENDIF                                                                   ;001
+ENDIF                                                                     ;001
+
+;001 set pars_1 = " s.service_resource_type_cd in ("
+SET pars_1 = build(pars_1," s.service_resource_type_cd in (")             ;001
+for (x = 1 to cnt_1)
+        if(x>1)
+                set pars_1 = build(pars_1,",",typearray->qual2[x]->glb_type_cd)
+        else
+                set pars_1 = build(pars_1,typearray->qual2[x]->glb_type_cd)
+        endif
+endfor
+set pars_1 = build(pars_1,")")
+
+set num_orgs = value(size(request->organizations, 5))
+
+
+;006   /***********************************************************************          ;004
+;006   *   Build parse string to filter out the service resources by the      *          ;004
+;006   *   user's organizations if they exist                                 *          ;004
+;006   ***********************************************************************/          ;004
+;006                                                                                     ;004
+;006     set org_string = "((num_orgs = 0)"                                              ;004
+;006     if (num_orgs > 0)                                                               ;004
+;006             set org_string = build(org_string," or (s.organization_id in (")        ;004
+;006             set org_string = build(org_string, 0.0)                                 ;004
+;006             for (x = 1 to num_orgs)                                                 ;004
+;006                  set org_string = build(org_string,",")                             ;004
+;006                  set org_string = build(org_string, value(request->organizations[x].organization_id))   ;004
+;006              endfor                                                                  ;004
+;006              set org_string = build(org_string, "))")                                ;004
+;006      endif                                                                           ;004
+;006      set org_string = build(org_string, ")")                                         ;004
+
+
+      /***********************************************************************
+      *   If validation of a service_resource_display is all that is         *
+      *   required, then branch to #VALIDATE at end of script                *
+      ***********************************************************************/
+
+
+if (request->display > "")
+        go to VALIDATE
+endif
+
+        if (trim(request->accession) != " ")
+                go to SELECT_ACCESSION
+        endif
+        if ((value(size(request->catalog_cds, 5 )) > 0) or (value(size(request->task_assay_cds, 5)) > 0))
+                go to MULTIPLE_CATALOG_CDS
+        endif
+        if (request->catalog_cd > 0)
+                go to CATALOG_CD
+        endif
+
+      /***********************************************************************
+      *   Script                                                             *
+      ***********************************************************************/
+
+   select if (request->number_to_return > 0)
+        with nocounter
+;006      maxread(c, value(request->number_to_return + 1))           ;jdf
+;jdf             maxqual(c, value(request->number_to_return + 1))
+   else
+        with nocounter
+   endif
+    distinct                                               /* 006 */
+    into "nl:"
+         s.service_resource_cd,
+         c.display,
+         c.cdf_meaning,
+         s.service_resource_type_cd,
+         c.active_ind
+
+   from code_value c,
+        (dummyt d3 with seq = value(num_orgs)),            /* 006 */
+        service_resource s
+
+   plan c where c.code_set = 221
+         and (myrec->vbeginstring = " " or c.display_key >= myrec->vbeginstring)
+         and (request->active_flag = 1 or (c.active_ind = 1
+         and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+         and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+   join s where s.service_resource_cd = c.code_value
+         and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+;001         and (request->activity_type_mean <= " "
+;001              or s.activity_type_cd
+;001              in (select cv.code_value from code_value cv
+;001                  where cv.code_set = 106 and cv.cdf_meaning = cnvtupper(trim(request->activity_type_mean))))
+;001         and (request->activity_subtype_mean <= " "
+;001              or s.activity_subtype_cd
+;001              in (select cv.code_value from code_value cv
+;001                  where cv.code_set = 5801 and cv.cdf_meaning = cnvtupper(trim(request->activity_subtype_mean))))
+        and parser(pars_1)
+/*        and parser(org_string)                  ;004  006 */
+
+    join d3 where s.organization_id = request->organizations[d3.seq].organization_id     /*  006  */
+            or    num_orgs = 0                                                           /*  006  */
+            or    s.organization_id = 0.0                                                /*  006  */
+
+   order by c.display_key
+
+   head report
+        counter2 = 0
+   detail
+      if ((counter2 < request->number_to_return) or (request->number_to_return = 0))      ;006
+        counter2 = counter2 + 1
+        if (mod(counter2,10) = 1)
+              stat = alterlist(reply->qual,counter2+10)
+        endif
+        reply->qual[counter2]->service_resource_cd = s.service_resource_cd
+        reply->qual[counter2]->service_resource_disp = c.display
+        reply->qual[counter2]->service_resource_type_cd = s.service_resource_type_cd
+        reply->qual[counter2]->cdf_meaning = c.cdf_meaning
+        reply->qual[counter2]->active_ind = c.active_ind
+      elseif ((counter2 = request->number_to_return) and (request->number_to_return > 0))       ;006
+        reply->context_more_data = "T"                                                          ;006
+      endif                                                                                     ;006
+   foot report
+       stat = alterlist(reply->qual, counter2)
+   ;with nocounter, maxqual(c,value(request->number_to_return + 1))
+
+   go to EXIT_SCRIPT
+
+
+#SELECT_ACCESSION
+;003   if (substring(11,3) < "601")              /* 002 */
+    if (substring(10,3,trim(request->accession)) < "601") /* 003 */
+     select into "nl:"
+           s.service_resource_cd,
+           c.display,
+           c.cdf_meaning,
+           s.service_resource_type_cd,
+           c.active_ind
+
+     from  accession_order_r aor,
+           order_serv_res_container osrc,
+           orders o,
+           service_resource s,
+           (dummyt d4 with seq = value(num_orgs)),      /* 006 */
+           code_value c
+
+     plan aor where aor.accession = trim(request->accession)
+     join osrc where osrc.order_id = aor.order_id
+     join o where o.order_id = osrc.order_id
+         and (request->catalog_cd = 0.0 or request->catalog_cd = o.catalog_cd)
+     join s where s.service_resource_cd = osrc.service_resource_cd
+         and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+;001         and (request->activity_type_mean <= " " or s.activity_type_cd
+;001         in (select cv.code_value from code_value cv
+;001                where cv.code_set = 106 and cv.cdf_meaning = cnvtupper(trim(request->activity_type_mean))))
+;001         and (request->activity_subtype_mean <= " " or s.activity_subtype_cd
+;001         in (select cv.code_value from code_value cv
+;001                where cv.code_set = 5801 and cv.cdf_meaning = cnvtupper(trim(request->activity_subtype_mean))))
+         and parser(pars_1)
+/*         and parser(org_string)                 ;004        006  */
+     join d4 where s.organization_id = request->organizations[d4.seq].organization_id     /*  006  */
+            or    num_orgs = 0                                                            /*  006  */
+            or    s.organization_id = 0.0                                                 /*  006  */
+     join c where c.code_set = 221
+         and c.code_value = s.service_resource_cd
+         and (myrec->vbeginstring = " " or c.display_key >= myrec->vbeginstring)
+         and (request->active_flag = 1 or (c.active_ind = 1
+         and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+         and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+     order by c.display_key, s.service_resource_cd
+
+     head report
+        counter2 = 0
+     head s.service_resource_cd
+        counter2 = counter2 + 1
+        if (mod(counter2,10) = 1)
+              stat = alterlist(reply->qual,counter2+10)
+        endif
+        if (counter2 = 26)
+                reply->context_more_data = "T"
+        endif
+              reply->qual[counter2]->service_resource_cd = s.service_resource_cd
+              reply->qual[counter2]->service_resource_disp = c.display
+              reply->qual[counter2]->service_resource_type_cd = s.service_resource_type_cd
+              reply->qual[counter2]->cdf_meaning = c.cdf_meaning
+              reply->qual[counter2]->active_ind = c.active_ind
+     foot report
+              stat = alterlist(reply->qual, counter2)
+     with nocounter, maxqual(c,26),
+          orahint("index(accession_order_r xie3accession_order_r)")
+
+   else                                                           /* 002 */
+     /*************************************/
+     /* select for round robin accessions */
+     /*************************************/
+     select into "nl:"                                            /* 002 */
+       s.service_resource_cd,                                     /* 002 */
+       c.display,                                                 /* 002 */
+       c.cdf_meaning,                                             /* 002 */
+       s.service_resource_type_cd,                                /* 002 */
+       c.active_ind                                               /* 002 */
+     from accession acc,                                          /* 002 */
+          rr_accession_r rar,                                     /* 002 */
+;005      rr_resource_r rrr,                                      /* 002 */
+          rr_assay_r rrr,                                         /* 005 */
+          service_resource s,                                     /* 002 */
+          (dummyt d5 with seq = value(num_orgs)),                 /* 006 */
+          code_value c                                            /* 002 */
+     plan acc where acc.accession = trim(request->accession)      /* 002 */
+     join rar where rar.accession_id = acc.accession_id           /* 002 */
+     join rrr where rrr.round_robin_ref_id = rar.round_robin_ref_id       /* 002 */
+     join s where s.service_resource_cd = rrr.service_resource_cd /* 002 */
+              and (request->location_cd = 0.0 or                  /* 002 */
+                   s.location_cd = request->location_cd)          /* 002 */
+              and parser(pars_1)                                  /* 002 */
+/*              and parser(org_string)                    ;004   006     */
+     join d5 where s.organization_id = request->organizations[d5.seq].organization_id   /*  006  */
+             or    num_orgs = 0                                                         /*  006  */
+             or    s.organization_id = 0.0                        /* 006 */
+     join c where c.code_set = 221                                /* 002 */
+              and c.code_value = s.service_resource_cd            /* 002 */
+              and (myrec->vbeginstring = " " or                   /* 002 */
+                   c.display_key >= myrec->vbeginstring)          /* 002 */
+              and (request->active_flag = 1 or (c.active_ind = 1  /* 002 */
+              and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)           /* 002 */
+              and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))           /* 002 */
+     order by c.display_key, s.service_resource_cd                /* 002 */
+
+     head report                                                  /* 002 */
+          counter2 = 0                                            /* 002 */
+
+     head s.service_resource_cd                                   /* 002 */
+          counter2 = counter2 + 1                                 /* 002 */
+          if (mod(counter2,10) = 1)                               /* 002 */
+                stat = alterlist(reply->qual,counter2+10)         /* 002 */
+          endif                                                   /* 002 */
+          if (counter2 = 26)                                      /* 002 */
+                reply->context_more_data = "T"                    /* 002 */
+          endif                                                   /* 002 */
+
+          reply->qual[counter2]->service_resource_cd = s.service_resource_cd        /* 002 */
+          reply->qual[counter2]->service_resource_disp = c.display    /* 002 */
+          reply->qual[counter2]->service_resource_type_cd = s.service_resource_type_cd  /* 002 */
+          reply->qual[counter2]->cdf_meaning = c.cdf_meaning      /* 002 */
+          reply->qual[counter2]->active_ind = c.active_ind        /* 002 */
+
+     foot report                                                  /* 002 */
+          stat = alterlist(reply->qual, counter2)                 /* 002 */
+
+     with nocounter, maxqual(c,26)                                /* 002 */
+   endif                                                          /* 002 */
+
+   go to EXIT_SCRIPT
+
+#CATALOG_CD
+set cnt_1 = 0
+set var9 = 0
+;find out what level flag is set on order_catalog table
+
+
+select into "nl:"
+        oc.resource_route_lvl
+from    order_catalog oc
+plan oc where   oc.catalog_cd = request->catalog_cd
+detail  var9 = oc.resource_route_lvl
+with    maxqual(oc,1)
+
+select case(var9)
+        of 1:
+                go to label1
+        of 2:
+                go to label2
+        else
+                go to EXIT_SCRIPT
+endcase
+
+#label1
+select into "nl:"
+         s.service_resource_cd,
+         c.display,
+         c.cdf_meaning,
+         s.service_resource_type_cd,
+         c.active_ind
+
+from    orc_resource_list orl,
+        service_resource s,
+        (dummyt d6 with seq = value(num_orgs)),          /*  006  */
+        code_value c
+
+plan    orl where orl.catalog_cd = request->catalog_cd
+join    s where s.service_resource_cd = orl.service_resource_cd
+;001        and (request->activity_type_mean <= " " or s.activity_type_cd
+;001        in (select cv.code_value from code_value cv
+;001               where cv.code_set = 106 and cv.cdf_meaning = cnvtupper(trim(request->activity_type_mean))))
+;001        and (request->activity_subtype_mean <= " " or s.activity_subtype_cd
+;001        in (select cv.code_value from code_value cv
+;001               where cv.code_set = 5801 and cv.cdf_meaning = cnvtupper(trim(request->activity_subtype_mean))))
+        and parser(pars_1)
+/*        and parser(org_string)                  ;004     006 */
+join    d6  where s.organization_id = request->organizations[d6.seq].organization_id  /*  006  */
+            or    num_orgs = 0                                                        /*  006  */
+            or    s.organization_id = 0.0                                             /*  006  */
+join    c where c.code_set = 221 and c.code_value = s.service_resource_cd
+        and (myrec->vbeginstring = " " or c.display_key >= myrec->vbeginstring)
+        and (request->active_flag = 1 or (c.active_ind = 1
+        and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+        and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+order   c.display_key, s.service_resource_cd
+head report
+        cnt_1 = 0
+head s.service_resource_cd
+        cnt_1 = cnt_1 + 1
+        if (mod(cnt_1,10) = 1)
+                stat = alterlist(reply->qual,cnt_1+10)
+        endif
+        if (cnt_1 = 26)
+                reply->context_more_data = "T"
+        endif
+        reply->qual[cnt_1]->service_resource_cd = s.service_resource_cd
+        reply->qual[cnt_1]->service_resource_disp = c.display
+        reply->qual[cnt_1]->service_resource_type_cd = s.service_resource_type_cd
+        reply->qual[cnt_1]->cdf_meaning = c.cdf_meaning
+        reply->qual[cnt_1]->active_ind = c.active_ind
+foot report
+        stat = alterlist(reply->qual, cnt_1)
+with    nocounter,maxqual(c,26)
+go to EXIT_SCRIPT
+
+
+#label2
+select into "nl:"
+         s.service_resource_cd,
+         c.display,
+         c.cdf_meaning,
+         s.service_resource_type_cd,
+         c.active_ind
+
+
+from    profile_task_r ptr,
+        assay_resource_list arl,
+        service_resource s,
+        (dummyt d7 with seq = value(num_orgs)),       /*  006  */
+        code_value c
+
+plan    ptr where ptr.catalog_cd = request->catalog_cd
+join    arl where arl.task_assay_cd = ptr.task_assay_cd
+join    s where s.service_resource_cd = arl.service_resource_cd
+;001        and (request->activity_type_mean <= " " or s.activity_type_cd
+;001        in (select cv.code_value from code_value cv
+;001               where cv.code_set = 106 and cv.cdf_meaning = cnvtupper(trim(request->activity_type_mean))))
+;001        and (request->activity_subtype_mean <= " " or s.activity_subtype_cd
+;001        in (select cv.code_value from code_value cv
+;001               where cv.code_set = 5801 and cv.cdf_meaning = cnvtupper(trim(request->activity_subtype_mean))))
+        and parser(pars_1)
+/*        and parser(org_string)                  ;004        006  */
+join    d7 where s.organization_id = request->organizations[d7.seq].organization_id   /*  006  */
+            or    num_orgs = 0                                                        /*  006  */
+            or    s.organization_id = 0.0                                               /*  006  */
+join    c where c.code_set = 221 and c.code_value = s.service_resource_cd
+        and (myrec->vbeginstring = " " or c.display_key >= myrec->vbeginstring)
+        and (request->active_flag = 1 or (c.active_ind = 1
+        and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+        and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+order   c.display_key, s.service_resource_cd
+head report
+         cnt_1 = 0
+head s.service_resource_cd
+        cnt_1 = cnt_1 + 1
+        if (mod(cnt_1,10) = 1)
+                stat = alterlist(reply->qual,cnt_1+10)
+        endif
+        if (cnt_1 = 26)
+                reply->context_more_data = "T"
+        endif
+        reply->qual[cnt_1]->service_resource_cd = s.service_resource_cd
+        reply->qual[cnt_1]->service_resource_disp = c.display
+        reply->qual[cnt_1]->service_resource_type_cd = s.service_resource_type_cd
+        reply->qual[cnt_1]->cdf_meaning = c.cdf_meaning
+        reply->qual[cnt_1]->active_ind = c.active_ind
+foot report
+        stat = alterlist(reply->qual, cnt_1)
+with    nocounter,maxqual(c,26)
+
+go to EXIT_SCRIPT
+
+/***************************************************************************/
+/*             Handle arrays of catalog codes/assay codes                  */
+/***************************************************************************/
+
+#MULTIPLE_CATALOG_CDS
+
+/***************************************************************************/
+/*             find task_assays corresponding to catalog_cds               */
+/***************************************************************************/
+
+set exit_flag = 0
+set cntr_1 = 0
+
+record temp
+(
+1 task_assay_cds[*]
+        2 assay_cd     =   f8
+)
+
+
+
+if (value(size(request->task_assay_cds, 5)) > 0)
+        set stat = alterlist(temp->task_assay_cds, value(size(request->task_assay_cds, 5)))
+        for (i = 1 to value(size(request->task_assay_cds, 5)))
+;                call echo(buildstring("number", i)
+                set temp->task_assay_cds[i]->assay_cd = request->task_assay_cds[i]->assay_cd
+        endfor
+endif
+
+set cntr_1 = value(size(request->task_assay_cds, 5))
+
+if (value(size(request->catalog_cds, 5)) > 0) ;and (request->catalog_cds[1]->cat_cd > 0))
+;call echo("cat_cds")
+;call echo(request->catalog_cds[1]->cat_cd)
+;call echo("cat_cds")
+        select into "nl:"
+                ptr.task_assay_cd
+
+        from    profile_task_r ptr,
+                (dummyt d1 with seq = value(size(request->catalog_cds, 5)))
+
+        plan    d1
+        join    ptr where ptr.catalog_cd = request->catalog_cds[d1.seq]->cat_cd
+
+        detail
+                ;if task_assay_cd not in there, add it.
+                if (value(size(temp->task_assay_cds, 5)) > 0)
+                        for (i = 1 to value(size(temp->task_assay_cds, 5)))
+                                exit_flag = 0
+                                if (ptr.task_assay_cd = temp->task_assay_cds[i]->assay_cd)
+                                        ;exitfor
+                                        exit_flag = 1
+                                        i = value(size(temp->task_assay_cds, 5))
+                                endif
+                                if ((i = value(size(temp->task_assay_cds, 5)))
+                                              and  (exit_flag = 0))
+                                        cntr_1 = cntr_1 + 1
+                                        stat = alterlist(temp->task_assay_cds, cntr_1)
+                                        temp->task_assay_cds[cntr_1]->assay_cd = ptr.task_assay_cd
+                                endif
+                        endfor
+                else
+                        cntr_1 = cntr_1 + 1
+                        stat = alterlist(temp->task_assay_cds, cntr_1)
+                        temp->task_assay_cds[cntr_1]->assay_cd = ptr.task_assay_cd
+                endif
+
+                ;call echo(ptr.task_assay_cd)
+
+        with    nocounter
+
+endif
+
+/*
+if (value(size(temp->task_assay_cds, 5)) > 0)
+        for (i = 1 to value(size(temp->task_assay_cds, 5)))
+                call echo(temp->task_assay_cds[i]->assay_cd)
+        endfor
+endif
+call echo(" ")
+call echo(" ")
+*/
+
+if (value(size(temp->task_assay_cds, 5)) > 0)
+        set cnt_1 = 0
+        set cnt_temp = 0
+        select into "nl:"
+                s.service_resource_cd,
+                c.display,
+                c.cdf_meaning,
+                s.service_resource_type_cd,
+                c.active_ind
+                ;apr.task_assay_cd
+
+        from    code_value c,
+                service_resource s,
+                assay_processing_r apr,
+/*                (dummyt d2 with seq = value(size(temp->task_assay_cds, 5)))     0066  */
+                (dummyt d2 with seq = value(size(temp->task_assay_cds, 5))),   /*  006  */
+                (dummyt d8 with seq = value(num_orgs))                         /*  006  */
+        plan    d2
+        join    apr where apr.task_assay_cd = temp->task_assay_cds[d2.seq]->assay_cd
+        join    s where s.service_resource_cd = apr.service_resource_cd
+;001                and (request->activity_type_mean <= " " or s.activity_type_cd
+;001                in (select cv.code_value from code_value cv
+;001                where cv.code_set = 106 and cv.cdf_meaning = cnvtupper(trim(request->activity_type_mean))))
+;001                and (request->activity_subtype_mean <= " " or s.activity_subtype_cd
+;001                in (select cv.code_value from code_value cv
+;001                where cv.code_set = 5801 and cv.cdf_meaning = cnvtupper(trim(request->activity_subtype_mean))))
+                and parser(pars_1)
+/*                and parser(org_string)                  ;004       006  */
+        join    d8 where s.organization_id = request->organizations[d8.seq].organization_id       /*  006  */
+                   or    num_orgs = 0                                                             /*  006  */
+                   or    s.organization_id = 0.0                                                  /*  006  */
+        join    c where c.code_set = 221 and c.code_value = s.service_resource_cd
+                and (myrec->vbeginstring = " " or c.display_key >= myrec->vbeginstring)
+                and (request->active_flag = 1 or (c.active_ind = 1
+                and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+        order by
+                s.service_resource_cd
+        head report
+                cnt_1 = 0
+        head s.service_resource_cd
+                cnt_temp = 0
+        detail
+                cnt_temp = cnt_temp + 1
+                ;call echo(cnt_temp)
+
+                if (cnt_temp = value(size(temp->task_assay_cds, 5)))
+                        cnt_1 = cnt_1 + 1
+                        if (mod(cnt_1,10) = 1)
+                                stat = alterlist(reply->qual,cnt_1+10)
+                        endif
+                        ;call echo(" ")
+                        ;call echo(s.service_resource_cd)
+                        ;call echo(" ")
+
+                        reply->qual[cnt_1]->service_resource_cd = s.service_resource_cd
+                        reply->qual[cnt_1]->service_resource_disp = c.display
+                        reply->qual[cnt_1]->service_resource_type_cd = s.service_resource_type_cd
+                        reply->qual[cnt_1]->cdf_meaning = c.cdf_meaning
+                        reply->qual[cnt_1]->active_ind = c.active_ind
+                endif
+        foot report
+                stat = alterlist(reply->qual, cnt_1)
+        with    nocounter
+endif
+
+
+go to EXIT_SCRIPT
+
+#VALIDATE
+
+        if (trim(request->accession) != " ")
+                go to VALIDATE_ACCESSION
+        endif
+        if ((value(size(request->catalog_cds ,5)) > 0) or (value(size(request->task_assay_cds, 5)) > 0))
+                go to VALIDATE_MULTIPLE_CATALOG_CDS
+        endif
+        if (request->catalog_cd > 0)
+                go to VALIDATE_CATALOG_CD
+        endif
+
+select into "nl:"
+        s.service_resource_cd, c.display, s.service_resource_type_cd, c.cdf_meaning, c.active_ind
+from    code_value c,
+        (dummyt d9  with seq = value(num_orgs)),              /*  006  */
+        service_resource s
+plan    c where c.code_set = 221
+        and c.display_key = trim(cnvtupper(cnvtalphanum(request->display)))
+        and (request->active_flag = 1 or (c.active_ind = 1
+        and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+        and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+join    s where s.service_resource_cd = c.code_value
+        and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+;001        and (request->activity_type_mean <= " " or s.activity_type_cd
+;001        in (select cv.code_value from code_value cv
+;001               where cv.code_set = 106 and cv.cdf_meaning = cnvtupper(trim(request->activity_type_mean))))
+;001        and (request->activity_subtype_mean <= " " or s.activity_subtype_cd
+;001        in (select cv.code_value from code_value cv
+;001               where cv.code_set = 5801 and cv.cdf_meaning = cnvtupper(trim(request->activity_subtype_mean))))
+        and parser(pars_1)
+/*        and parser(org_string)                  ;004     006  */
+join    d9  where s.organization_id = request->organizations[d9.seq].organization_id    /*  006  */
+            or    num_orgs = 0                                                          /*  006  */
+            or    s.organization_id = 0.0                                               /*  006  */
+detail
+        stat = alterlist(reply->qual,1)
+        reply->qual[1]->service_resource_cd = s.service_resource_cd
+        reply->qual[1]->service_resource_disp = c.display
+        reply->qual[1]->cdf_meaning = c.cdf_meaning
+        reply->qual[1]->service_resource_type_cd = s.service_resource_type_cd
+        reply->qual[1]->active_ind = c.active_ind
+with    maxqual(c,1), nocounter
+
+        go to EXIT_SCRIPT
+
+#VALIDATE_ACCESSION
+
+;003   if (substring(10,3) < "601")              /* 002 */
+    if (substring(10,3,trim(request->accession)) < "601") /* 003 */
+     select into "nl:"
+           s.service_resource_cd,
+           c.display,
+           c.cdf_meaning,
+           s.service_resource_type_cd,
+           c.active_ind
+
+     from  accession_order_r aor,
+           order_serv_res_container osrc,
+           orders o,
+           service_resource s,
+           (dummyt d10 with seq = value(num_orgs)),    /*  006  */
+           code_value c
+
+     plan aor where aor.accession = trim(request->accession)
+     join osrc where osrc.order_id = aor.order_id
+     join o where o.order_id = osrc.order_id
+         and (request->catalog_cd = 0.0 or request->catalog_cd = o.catalog_cd)
+     join s where s.service_resource_cd = osrc.service_resource_cd
+         and (request->location_cd = 0.0 or s.location_cd = request->location_cd)
+;001         and (request->activity_type_mean <= " " or s.activity_type_cd
+;001         in (select cv.code_value from code_value cv
+;001                where cv.code_set = 106 and cv.cdf_meaning = cnvtupper(trim(request->activity_type_mean))))
+;001         and (request->activity_subtype_mean <= " " or s.activity_subtype_cd
+;001         in (select cv.code_value from code_value cv
+;001                where cv.code_set = 5801 and cv.cdf_meaning = cnvtupper(trim(request->activity_subtype_mean))))
+         and parser(pars_1)
+/*         and parser(org_string)                 ;004      006  */
+     join d10 where s.organization_id = request->organizations[d10.seq].organization_id   /*  006  */
+            or    num_orgs = 0                                                            /*  006  */
+            or    s.organization_id = 0.0                                                 /*  006  */
+     join c where c.code_set = 221
+         and c.code_value = s.service_resource_cd
+         and c.display_key = trim(cnvtupper(cnvtalphanum(request->display)))
+         and (request->active_flag = 1 or (c.active_ind = 1
+         and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+         and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+
+     detail
+              stat = alterlist(reply->qual, 1)
+              reply->qual[1]->service_resource_cd = s.service_resource_cd
+              reply->qual[1]->service_resource_disp = c.display
+              reply->qual[1]->service_resource_type_cd = s.service_resource_type_cd
+              reply->qual[1]->cdf_meaning = c.cdf_meaning
+              reply->qual[1]->active_ind = c.active_ind
+     with nocounter, maxqual(c,1),
+          orahint("index(accession_order_r xie3accession_order_r)")
+
+   else                                               /* 002 */
+     /***********************************/
+     /* Validate round robin accessions */
+     /***********************************/
+     select into "nl:"                                               /* 002 */
+       s.service_resource_cd,                                        /* 002 */
+       c.display,                                                    /* 002 */
+       c.cdf_meaning,                                                /* 002 */
+       s.service_resource_type_cd,                                   /* 002 */
+       c.active_ind                                                  /* 002 */
+     from accession acc,                                             /* 002 */
+          rr_accession_r rar,                                        /* 002 */
+;005      rr_resource_r rrr,                                      /* 002 */
+          rr_assay_r rrr,                                         /* 005 */
+          service_resource s,                                        /* 002 */
+          (dummyt d11 with seq = value(num_orgs)),                   /* 006 */
+          code_value c                                               /* 002 */
+     plan acc where acc.accession = trim(request->accession)         /* 002 */
+     join rar where rar.accession_id = acc.accession_id              /* 002 */
+     join rrr where rrr.round_robin_ref_id = rar.round_robin_ref_id          /* 002 */
+     join s where s.service_resource_cd = rrr.service_resource_cd    /* 002 */
+           and (request->location_cd = 0.0 or                        /* 002 */
+                s.location_cd = request->location_cd)                /* 002 */
+           and parser(pars_1)                                        /* 002 */
+/*           and parser(org_string)                       ;004          006 */
+     join d11 where s.organization_id = request->organizations[d11.seq].organization_id   /*  006  */
+            or    num_orgs = 0                                                            /*  006  */
+            or    s.organization_id = 0.0                                                 /*  006  */
+     join c where c.code_set = 221                                   /* 002 */
+              and c.code_value = s.service_resource_cd               /* 002 */
+              and c.display_key = trim(cnvtupper(cnvtalphanum(request->display)))   /* 002 */
+              and (request->active_flag = 1 or (c.active_ind = 1     /* 002 */
+              and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)        /* 002 */
+              and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))        /* 002 */
+     order by c.display_key, s.service_resource_cd                   /* 002 */
+
+     detail                                                          /* 002 */
+       stat = alterlist(reply->qual, 1)                              /* 002 */
+       reply->qual[1]->service_resource_cd = s.service_resource_cd   /* 002 */
+       reply->qual[1]->service_resource_disp = c.display             /* 002 */
+       reply->qual[1]->service_resource_type_cd = s.service_resource_type_cd        /* 002 */
+       reply->qual[1]->cdf_meaning = c.cdf_meaning                   /* 002 */
+       reply->qual[1]->active_ind = c.active_ind                     /* 002 */
+
+     with nocounter, maxqual(c,1)                                    /* 002 */
+   endif                                                             /* 002 */
+
+   go to EXIT_SCRIPT
+
+#VALIDATE_CATALOG_CD
+;set cnt_1 = 0
+set var9 = 0
+;find out what level flag is set on order_catalog table
+
+
+select into "nl:"
+        oc.resource_route_lvl
+from    order_catalog oc
+plan oc where   oc.catalog_cd = request->catalog_cd
+detail  var9 = oc.resource_route_lvl
+with    maxqual(oc,1)
+
+select case(var9)
+        of 1:
+                go to VALIDATE_label1
+        of 2:
+                go to VALIDATE_label2
+        else
+                go to EXIT_SCRIPT
+endcase
+
+#VALIDATE_label1
+select into "nl:"
+         s.service_resource_cd,
+         c.display,
+         c.cdf_meaning,
+         s.service_resource_type_cd,
+         c.active_ind
+
+from    orc_resource_list orl,
+        service_resource s,
+        (dummyt d12 with seq = value(num_orgs)),  /*  006  */
+        code_value c
+
+plan    orl where orl.catalog_cd = request->catalog_cd
+join    s where s.service_resource_cd = orl.service_resource_cd
+;001        and (request->activity_type_mean <= " " or s.activity_type_cd
+;001        in (select cv.code_value from code_value cv
+;001               where cv.code_set = 106 and cv.cdf_meaning = cnvtupper(trim(request->activity_type_mean))))
+;001        and (request->activity_subtype_mean <= " " or s.activity_subtype_cd
+;001        in (select cv.code_value from code_value cv
+;001               where cv.code_set = 5801 and cv.cdf_meaning = cnvtupper(trim(request->activity_subtype_mean))))
+        and parser(pars_1)
+/*        and parser(org_string)                  ;004                                       006  */
+join    d12 where s.organization_id = request->organizations[d12.seq].organization_id   /*  006   */
+            or    num_orgs = 0                                                          /*  006   */
+            or    s.organization_id = 0.0                                               /*  006   */
+join    c where c.code_set = 221 and c.code_value = s.service_resource_cd
+        and c.display_key = trim(cnvtupper(cnvtalphanum(request->display)))
+        and (request->active_flag = 1 or (c.active_ind = 1
+        and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+        and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+detail
+        stat = alterlist(reply->qual, 1)
+        reply->qual[1]->service_resource_cd = s.service_resource_cd
+        reply->qual[1]->service_resource_disp = c.display
+        reply->qual[1]->service_resource_type_cd = s.service_resource_type_cd
+        reply->qual[1]->cdf_meaning = c.cdf_meaning
+        reply->qual[1]->active_ind = c.active_ind
+
+with    nocounter,maxqual(c,1)
+
+go to EXIT_SCRIPT
+
+
+#VALIDATE_label2
+select into "nl:"
+         s.service_resource_cd,
+         c.display,
+         c.cdf_meaning,
+         s.service_resource_type_cd,
+         c.active_ind
+
+
+from    profile_task_r ptr,
+        assay_resource_list arl,
+        service_resource s,
+        (dummyt d13 with seq = value(num_orgs)),         /*  006  */
+        code_value c
+
+plan    ptr where ptr.catalog_cd = request->catalog_cd
+join    arl where arl.task_assay_cd = ptr.task_assay_cd
+join    s where s.service_resource_cd = arl.service_resource_cd
+;001        and (request->activity_type_mean <= " " or s.activity_type_cd
+;001        in (select cv.code_value from code_value cv
+;001               where cv.code_set = 106 and cv.cdf_meaning = cnvtupper(trim(request->activity_type_mean))))
+;001        and (request->activity_subtype_mean <= " " or s.activity_subtype_cd
+;001        in (select cv.code_value from code_value cv
+;001               where cv.code_set = 5801 and cv.cdf_meaning = cnvtupper(trim(request->activity_subtype_mean))))
+        and parser(pars_1)
+/*        and parser(org_string)                  ;004                                         006  */
+join    d13 where s.organization_id = request->organizations[d13.seq].organization_id      /*  006  */
+            or    num_orgs = 0                                                             /*  006  */
+            or    s.organization_id = 0.0                                                  /*  006  */
+join    c where c.code_set = 221 and c.code_value = s.service_resource_cd
+        and c.display_key = trim(cnvtupper(cnvtalphanum(request->display)))
+        and (request->active_flag = 1 or (c.active_ind = 1
+        and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+        and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+;order   c.display
+detail
+        stat = alterlist(reply->qual, 1)
+        reply->qual[1]->service_resource_cd = s.service_resource_cd
+        reply->qual[1]->service_resource_disp = c.display
+        reply->qual[1]->service_resource_type_cd = s.service_resource_type_cd
+        reply->qual[1]->cdf_meaning = c.cdf_meaning
+        reply->qual[1]->active_ind = c.active_ind
+with    nocounter,maxqual(c,1)
+
+go to EXIT_SCRIPT
+
+
+#VALIDATE_MULTIPLE_CATALOG_CDS
+
+
+/***************************************************************************/
+/*             find task_assays corresponding to catalog_cds               */
+/***************************************************************************/
+
+set exit_flag = 0
+set cntr_1 = 0
+
+record temp
+(
+1 task_assay_cds[*]
+        2 assay_cd     =   f8
+)
+
+
+
+if (value(size(request->task_assay_cds, 5)) > 0)
+        set stat = alterlist(temp->task_assay_cds, value(size(request->task_assay_cds, 5)))
+        for (i = 1 to value(size(request->task_assay_cds, 5)))
+;                call echo(buildstring("number", i)
+                set temp->task_assay_cds[i]->assay_cd = request->task_assay_cds[i]->assay_cd
+        endfor
+endif
+
+set cntr_1 = value(size(request->task_assay_cds, 5))
+
+if (value(size(request->catalog_cds, 5)) > 0) ;and (request->catalog_cds[1]->cat_cd > 0))
+;call echo("cat_cds")
+;call echo(request->catalog_cds[1]->cat_cd)
+;call echo("cat_cds")
+        select into "nl:"
+                ptr.task_assay_cd
+
+        from    profile_task_r ptr,
+                (dummyt d1 with seq = value(size(request->catalog_cds, 5)))
+
+        plan    d1
+        join    ptr where ptr.catalog_cd = request->catalog_cds[d1.seq]->cat_cd
+
+        detail
+                ;if task_assay_cd not in there, add it.
+                if (value(size(temp->task_assay_cds, 5)) > 0)
+                        for (i = 1 to value(size(temp->task_assay_cds, 5)))
+                                exit_flag = 0
+                                if (ptr.task_assay_cd = temp->task_assay_cds[i]->assay_cd)
+                                        ;exitfor
+                                        exit_flag = 1
+                                        i = value(size(temp->task_assay_cds, 5))
+                                endif
+                                if ((i = value(size(temp->task_assay_cds, 5)))
+                                                and (exit_flag = 0))
+                                        cntr_1 = cntr_1 + 1
+                                        stat = alterlist(temp->task_assay_cds, cntr_1)
+                                        temp->task_assay_cds[cntr_1]->assay_cd = ptr.task_assay_cd
+                                endif
+                        endfor
+                else
+                        cntr_1 = cntr_1 + 1
+                        stat = alterlist(temp->task_assay_cds, cntr_1)
+                        temp->task_assay_cds[cntr_1]->assay_cd = ptr.task_assay_cd
+                endif
+
+                ;call echo(ptr.task_assay_cd)
+
+        with    nocounter
+
+endif
+
+/*
+if (value(size(temp->task_assay_cds, 5)) > 0)
+        for (i = 1 to value(size(temp->task_assay_cds, 5)))
+                call echo(temp->task_assay_cds[i]->assay_cd)
+        endfor
+endif
+call echo(" ")
+call echo(" ")
+*/
+
+if (value(size(temp->task_assay_cds, 5)) > 0)
+        set cnt_1 = 0
+        set cnt_temp = 0
+        select into "nl:"
+                s.service_resource_cd,
+                c.display,
+                c.cdf_meaning,
+                s.service_resource_type_cd,
+                c.active_ind
+                ;apr.task_assay_cd
+
+        from    code_value c,
+                service_resource s,
+                assay_processing_r apr,
+                (dummyt d14 with seq = value(num_orgs)),                                  /*  006  */
+                (dummyt d2 with seq = value(size(temp->task_assay_cds, 5)))
+        plan    d2
+        join    apr where apr.task_assay_cd = temp->task_assay_cds[d2.seq]->assay_cd
+        join    s where s.service_resource_cd = apr.service_resource_cd
+;001                and (request->activity_type_mean <= " " or s.activity_type_cd
+;001                in (select cv.code_value from code_value cv
+;001                where cv.code_set = 106 and cv.cdf_meaning = cnvtupper(trim(request->activity_type_mean))))
+;001                and (request->activity_subtype_mean <= " " or s.activity_subtype_cd
+;001                in (select cv.code_value from code_value cv
+;001                where cv.code_set = 5801 and cv.cdf_meaning = cnvtupper(trim(request->activity_subtype_mean))))
+                and parser(pars_1)
+/*                and parser(org_string)                  ;004                                         006  */
+        join    d14  where s.organization_id = request->organizations[d14.seq].organization_id     /*  006  */
+                     or    num_orgs = 0                                                            /*  006  */
+                     or    s.organization_id = 0.0                                                 /*  006  */
+        join    c where c.code_set = 221 and c.code_value = s.service_resource_cd
+                and c.display_key = trim(cnvtupper(cnvtalphanum(request->display)))
+                and (request->active_flag = 1 or (c.active_ind = 1
+                and c.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                and c.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))
+        order by
+                s.service_resource_cd
+        head report
+                cnt_1 = 0
+        head s.service_resource_cd
+                cnt_temp = 0
+        detail
+                cnt_temp = cnt_temp + 1
+                ;call echo(cnt_temp)
+
+                if (cnt_temp = value(size(temp->task_assay_cds, 5)))
+                        cnt_1 = cnt_1 + 1
+                        if (mod(cnt_1,10) = 1)
+                                stat = alterlist(reply->qual,cnt_1+10)
+                        endif
+                        ;call echo(" ")
+                        ;call echo(s.service_resource_cd)
+                        ;call echo(" ")
+
+                        reply->qual[cnt_1]->service_resource_cd = s.service_resource_cd
+                        reply->qual[cnt_1]->service_resource_disp = c.display
+                        reply->qual[cnt_1]->service_resource_type_cd = s.service_resource_type_cd
+                        reply->qual[cnt_1]->cdf_meaning = c.cdf_meaning
+                        reply->qual[cnt_1]->active_ind = c.active_ind
+                endif
+        foot report
+                stat = alterlist(reply->qual, cnt_1)
+        with    nocounter
+endif
+
+#EXIT_SCRIPT
+
+set reply->status_data->status = "S"
+end go
+
+;Generated by GNU enscript 1.6.4.

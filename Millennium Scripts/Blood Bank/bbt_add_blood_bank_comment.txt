@@ -1,0 +1,375 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBT_PERSONNOTES/BBT_ADD_BLOOD_BANK_COMMENT.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_add_blood_bank_comment.prg
+        Object name:            bbt_add_blood_bank_comment
+        Request #:              225102
+
+        Product:                PathNet
+        Product Team:           Blood Bank Transfusion
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Add product notes for product_id
+
+        Tables read:            (none)
+
+        Tables updated:         blood_bank_comment
+
+        Executing from:         VB - bbt comment class
+
+        Special Notes:          ??
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 06/26/96 Jon Weekes           Initial Release                     *
+;    *001 08/01/01 Christi Ditmars      Internationalize Date added to new  *
+;    *                                  comments.                           *
+;    *002 12/29/03 jg7520               39495: Simplify multi-table select  *
+;                                       with a forupdate option to lock one *
+;                                       table at a time.                    *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_add_blood_bank_comment:dba go
+create program bbt_add_blood_bank_comment:dba
+
+/*
+record request
+(
+ 1  bb_comment_id           = f8
+ 1  person_id               = f8
+ 1  updt_cnt                = i4
+ 1  new_bb_comment_date     = c20
+ 1  new_bb_comment          = vc
+ 1  long_text_id            = f8
+ 1  long_text_updt_cnt      = i4        
+)
+*/
+
+record reply
+(
+ 1  status                      = c1
+ 1  process                     = vc
+ 1  message                     = vc
+ 1  bb_comment_id             = f8
+ 1  bb_comment                = vc
+ 1  updt_cnt                    = i4
+ 1  long_text_id            = f8
+ 1  long_text_updt_cnt      = i4        
+%i cclsource:status_block.inc
+)
+
+record cur_comment
+(
+ 1  cur_bb_comment_id       = f8
+ 1  cur_bb_comment          = vc
+ 1  cur_updt_cnt            = i4
+ 1  long_text_id            = f8
+ 1  long_text_updt_cnt      = i4        
+)
+
+record new_comment
+(
+ 1  new_username                = c20
+ 1  new_bb_comment            = vc
+)
+
+/*
+ * Initialize Global Variables
+ */
+    set reply->status_data->status = "F"
+    set new_pathnet_seq = 0.0
+    set new_bb_comment_id = 0.0
+    set new_long_text_id = 0.0
+    set reqinfo->commit_ind = 0
+    set cur_comment_cnt = 0
+    set count1 = 0
+    set new_comment_ind = " "
+    set gsub_dummy = " "
+    set gsub_status = " "
+    set gsub_process = fillstring(200, " ")
+    set gsub_message = fillstring(200, " ")
+    set dt_tm_text = fillstring(20, " ")
+    set nUpdFlg = 0
+
+#BEGIN_MAIN
+    /* Set reply->status_data->status to I */
+    set reply->status = "I"  ; Incomplete
+
+    /* Determine if existing note */
+    set cur_comment_cnt = 0
+    set new_comment_ind = " "
+
+    select into "nl:"
+        bbc.bb_comment_id,
+        bbc.updt_cnt
+    from    blood_bank_comment bbc
+    plan    bbc where bbc.person_id           = request->person_id
+                  and bbc.active_ind    = 1
+                  and bbc.long_text_id  > 0
+    detail  
+        cur_comment_cnt                     = cur_comment_cnt + 1
+        cur_comment->cur_bb_comment_id      = bbc.bb_comment_id
+        cur_comment->cur_updt_cnt           = bbc.updt_cnt
+        cur_comment->long_text_id           = bbc.long_text_id
+
+    with    nocounter, forupdate(bbc)
+
+    set nUpdFlg = curqual
+
+    if (nUpdFlg > 0)
+       select into "nl:"
+           lt.long_text_id,
+           lt.long_text,
+           lt.updt_cnt
+       from    long_text lt
+       plan    lt  where lt.long_text_id   = cur_comment->long_text_id
+                     and lt.active_ind     = 1
+                     and cur_comment->long_text_id > 0
+
+       detail  
+           cur_comment->cur_bb_comment         = lt.long_text
+           cur_comment->long_text_updt_cnt     = lt.updt_cnt
+
+       with    nocounter, forupdate(lt)
+
+       if (curqual = 0)
+          set nUpdFlg = 0
+       endif
+    endif
+
+    if (nUpdFlg = 0)
+        if (request->bb_comment_id = 0)
+            if (request->bb_comment_id = 0
+            and request->updt_cnt = 0)
+                set new_comment_ind = "Y"
+                go to ADD_BLOOD_BANK_COMMENT_CTRL
+            else
+                set reply->status = "F"
+                set reply->process = "update/archive bb_comment"
+                set reply->message = "existing bb_comment row found for create-new-note request"
+                go to EXIT_SCRIPT
+            endif                       
+        else
+            set reply->status = "F"
+            set reply->process = "update/archive bb_comment"
+            set reply->message = "existing bb_comment row to be updated/archived could not be found"
+            go to EXIT_SCRIPT
+        endif
+    else
+        if (cur_comment_cnt = 1)
+            if (cur_comment->cur_bb_comment_id = request->bb_comment_id
+            and cur_comment->long_text_id = request->long_text_id)
+                if (cur_comment->cur_updt_cnt = request->updt_cnt
+                and cur_comment->long_text_updt_cnt = request->long_text_updt_cnt)
+                    go to ADD_BLOOD_BANK_COMMENT_CTRL
+                else
+                    set reply->status = "F"
+                    set reply->process = "update/archive bb_comment"
+                    set reply->message = "bb_comment row has been modified by another user--resubmit changes"
+                    go to EXIT_SCRIPT
+                endif
+            else
+                set reply->status = "F"
+                set reply->process = "update/archive bb_comment"
+                set reply->message = "current active bb_comment not found--note not added"
+                go to EXIT_SCRIPT               
+            endif
+        else
+            if (cur_comment_cnt > 1)
+                set reply->status = "F"
+                set reply->process = "update/archive bb_comment"
+                set reply->message = "multiple active blood_bank_comment rows exist--new note could not be appended"
+            else
+                set reply->status = "F"
+                set reply->process = "update/archive bb_comment"
+                set reply->message = "Script error:  rows selected but detail not processed (cur_comment_cnt = 0)"
+            endif
+            go to EXIT_SCRIPT
+        endif
+    endif               ; endif curqual bb_comment = 0
+
+#ADD_BLOOD_BANK_COMMENT_CTRL
+    if (new_comment_ind != "Y")
+        call ARCHIVE_BB_COMMENT
+            (
+             /* bb_comment_id        */ request->bb_comment_id,
+             /* person_id            */ request->person_id,
+             /* bb_comment_updt_cnt  */ request->updt_cnt,
+             /* long_text_id         */ request->long_text_id,
+             /* long_text_updt_cnt   */ request->long_text_updt_cnt
+            )
+
+        if (gsub_status = "F")
+            set reply->status = gsub_status
+            set reply->process = gsub_process
+            set reply->message = gsub_message
+        endif
+    endif
+    if (reply->status != "F")
+        call CREATE_BB_COMMENT(gsub_dummy)
+
+        if (reply->status != "F")
+            /* Load reply */
+            set reply->bb_comment_id        = new_bb_comment_id
+            set reply->bb_comment           = new_comment->new_bb_comment
+            set reply->updt_cnt             = 0
+            set reply->long_text_id         = new_long_text_id
+            set reply->long_text_updt_cnt   = 0
+
+            set reply->status = "S"
+            set reply->process = "SUCCESS"
+            set reply->message = "bb_comment added"
+        endif
+    endif
+    go to EXIT_SCRIPT
+#END_MAIN
+
+%i cclsource:bbt_archive_blood_bank_comment.inc
+END             ; end subroutine ARCHIVE_BB_COMMENT
+
+%i cclsource:bbt_chg_long_text.inc
+END             ; end subroutine CHG_LONG_TEXT
+
+subroutine CREATE_BB_COMMENT(gsub_dummy2)
+
+    /* Retrieve username for insertion into bb_comment */
+
+    select into "nl:"
+        pnl.username
+    from
+        prsnl pnl
+    where   pnl.person_id   = reqinfo->updt_id
+
+    detail
+        new_comment->new_username    = pnl.username
+
+    with    nocounter
+
+    if (curqual = 0)
+        set reply->status = "F"
+        set reply->process = "get personnel username"
+        set reply->message = "get personnel username failed--note not added"
+    else
+
+        /* compile new bb_comment */
+        set dt_tm_text = format(cnvtdatetime(curdate, curtime), cclfmt->mediumdatetime)
+
+        if (new_comment_ind = "Y")
+            set new_comment->new_bb_comment
+                = concat
+                    (
+                     ">> ",    ; record seperator to help in any neccessary conversion
+                     ;trim(request->new_bb_comment_date), 
+                     trim(dt_tm_text),
+                     "  ", trim(new_comment->new_username), 
+                     "   ", trim(request->new_bb_comment)
+                    )
+        else
+            set new_comment->new_bb_comment 
+                = concat
+                    (
+                     ">> ",    ; record seperator to help in any neccessary conversion
+                     ;trim(request->new_bb_comment_date), 
+                     trim(dt_tm_text),
+                     "  ", trim(new_comment->new_username),
+                     "   ", trim(request->new_bb_comment),
+                     char(13), char(10), char(13), char(10),   ; carriage return, line feed to separate on display
+                     cur_comment->cur_bb_comment
+                    )   
+        endif
+                
+        Call ADD_BB_COMMENT
+            (
+             /* person_id   */ request->person_id,
+             /* bb_comment  */ new_comment->new_bb_comment
+            )
+        
+        if (gsub_status = "F")
+            set reply->status = gsub_status
+            set reply->process = gsub_process
+            set reply->message = gsub_message
+        endif           ; endif gsub_status = "F"
+    endif               ; endif curqual = 0 personnel
+END     ; end subroutine CREATE_BB_COMMENT
+
+%i cclsource:bbt_add_blood_bank_comment.inc
+END             ; end subroutine ADD_BB_COMMENT
+
+%i cclsource:bbt_add_long_text.inc
+END             ; end subroutine ADD_LONG_TEXT
+
+#EXIT_SCRIPT
+set count1 = count1 + 1
+if (count1 > size(reply->status_data->subeventstatus,5))
+    set stat = alter(reply->status_data->subeventstatus, count1+1)
+endif
+if (reply->status = "S")
+    set reqinfo->commit_ind = 1
+    set reply->status_data->status = "S"
+    set reply->status_data->subeventstatus[count1]->OperationName = "Success"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "S"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_add_blood_bank_comment"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "bb comment added" 
+else
+    set reqinfo->commit_ind = 0
+    set reply->status_data->status = reply->status
+    set reply->status_data->subeventstatus[count1]->OperationName = reply->process
+    set reply->status_data->subeventstatus[count1]->OperationStatus = reply->status
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_add_blood_bank_comment"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = reply->message
+endif
+
+;for (x = 1 to count1)
+;    call echo(reply->status_data->subeventstatus[count1]->OperationName)
+;    call echo(reply->status_data->subeventstatus[count1]->OperationStatus)
+;    call echo(reply->status_data->subeventstatus[count1]->TargetObjectName)
+;    call echo(reply->status_data->subeventstatus[count1]->TargetObjectValue)
+;endfor
+
+;call echo("record reply:")
+;call echo(reply->status)
+;call echo(reply->process)
+;call echo(reply->message)
+;call echo(reply->bb_comment_id)
+;call echo(reply->bb_comment)
+;call echo(reply->updt_cnt)
+;call echo(reply->long_text_id)
+;call echo(reply->long_text_updt_cnt)
+
+;call echo("record cur_comment")
+;call echo(cur_comment->cur_bb_comment_id)
+;call echo(cur_comment->cur_bb_comment)
+;call echo(cur_comment->cur_updt_cnt)
+
+;call echo("record new_comment")
+;call echo(new_comment->new_username)
+;call echo(new_comment->new_bb_comment)
+
+end go
+
+;Generated by GNU enscript 1.6.4.

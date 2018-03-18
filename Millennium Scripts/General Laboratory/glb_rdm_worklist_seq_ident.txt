@@ -1,0 +1,289 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_rdm_worklist_seq_ident/glb_rdm_worklist_seq_ident.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+	Source file name:       glb_rdm_worklist_seq_ident.prg
+	Object name:            glb_rdm_worklist_seq_ident
+
+	Product:                PathNet General Laboratory
+	Product Team:           GLB
+	HNA Version:            500
+	CCL Version:            
+	
+	Program purpose:        This program will  populate the new sequence identifer
+	                        columns (i.e. seq_ident_ind, seq_ident_start_nbr, seq_
+	                        ident_beg_range, seq_ident_end_range) on the Worklist table.
+
+	Tables read,            TABLE_NAME               METHOD (UNIQUE, RANGE, FULL)
+	and access method:      --------------------     -----------------------------
+	
+                          Worklist        	       Full
+                          Dm_info                  UNIQUE
+                           
+	Tables updated:         Worklist                 UPDATE
+	                        Dm_info                  INSERT, UPDATE
+	                        
+	Executing from:         Readme
+
+	Special Notes:          None
+	
+	Run Occurance:		(select ONE of the following)
+				-----------------------------
+				[X] 1. RUN ONCE
+				[ ] 2. RUN MANY
+
+	ReadMe Category:	(select ONE of the following)
+				-----------------------------
+				[ ] 1. Data Load
+				[X] 2. Data Conversion
+				[ ] 3. Data Migration
+
+	Execution Time:		(select ONE of the following)
+				------------------------------------
+				[ ] 1. Uptime before uptime schema.
+				[X] 2. Uptime after uptime schema.
+				[ ] 3. Downtime before downtime schema.
+				[ ] 4. Downtime after downtime schema.
+				[ ] 5. Uptime after all other components.
+	
+	Exec. Justification:   This readme can be run at anytime.
+      
+  Parent Script:         None
+
+	Check Script:          None
+
+	Data file for import:  pcs_rdm_import_demog_fields.csv
+	
+	Execution Duration:	(select ONE of the following)
+				----------------------------------
+				[X] 1. Fixed Time
+				[ ] 2. Driver Table: ___________________________
+
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 02/13/07 Paul Lessin          Initial Release                     *
+;~DE~*******************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ***************************
+
+drop program glb_rdm_worklist_seq_ident:dba go
+create program glb_rdm_worklist_seq_ident:dba
+
+%i cclsource:pathnet_ocd_subroutines.inc
+
+#START_SCRIPT
+set sREADME_NAME = "glb_rdm_worklist_seq_ident"
+call logscriptstart(sREADME_NAME)
+commit ;Required by Data Management.
+
+/*****************************************************
+* Structures and Includes
+*****************************************************/
+free record worklist_sequence
+record worklist_sequence(
+  1 qual[*]
+    2 worklist_id = f8
+    2 start_nbr   = i4
+    2 beg_seq     = i4
+    2 end_seq     = i4
+)
+
+/**************************************************************
+; Variables and Constants
+**************************************************************/ 
+declare lWklstCnt           = i4 with protect, noconstant(-1)
+declare dLastWklstId        = f8 with protect, noconstant(0.0)
+declare dEndWklstId         = f8 with protect, noconstant(0.0)
+declare lPriorSeqIdent      = i4 with protect, noconstant(0)
+declare nRestartSeqInd      = i2 with protect, noconstant(0)
+declare nStat               = i2 with protect, noconstant(0)   
+declare sErrorMsg           = vc with protect, noconstant(" ")
+declare lErrorCode          = i4 with protect, noconstant(0)  
+declare nFailed             = i2 with protect, noconstant(1)          
+
+declare lBATCH_CNT              = i4 with protect, constant(200)
+declare lMAX_SEQ                = i4 with protect, constant(999999999)
+declare sTEMPLATE               = vc with protect, constant("Template")
+declare sWKLST_README_DOMAIN    = vc with protect, constant("PATHNET README")
+declare sWKLST_README_INFO_NAME = vc with protect, constant("GLB_RDM_WORKLIST_SEQ_IDENT")
+/*************************************************************/    
+
+#script
+
+/**************************************************************
+ Get beginning worklist ID
+***************************************************************/
+select into "nl:"
+	dm.info_char
+from
+	dm_info dm
+plan dm
+where dm.info_domain = sWKLST_README_DOMAIN
+	and dm.info_name   = sWKLST_README_INFO_NAME
+detail
+	dLastWklstId = cnvtreal(dm.info_char)
+with nocounter, forupdate(dm)
+
+if (curqual = 0)
+	insert into dm_info dm 
+	set dm.info_domain  = sWKLST_README_DOMAIN,
+      dm.info_name    = sWKLST_README_INFO_NAME,
+      dm.info_char    = "0",
+      dm.updt_task    = reqinfo->updt_task,
+      dm.updt_dt_tm   = cnvtdatetime(curdate,curtime3),
+      dm.updt_cnt     = 0
+  with nocounter
+  
+	set lErrorCode = error(sErrorMsg, 0)
+	if (lErrorCode > 0)
+		call logstatus(concat("Execution failed inserting into dm_info - ", trim(sErrorMsg)), "F")
+		go to Exit_script
+  endif
+	commit
+endif
+
+
+/**************************************************************
+ Update worklists in batches 
+***************************************************************/
+set nStat = alterlist(worklist_sequence->qual, lBATCH_CNT)
+	
+while (lWklstCnt != 0)
+	;Use maxrec to get the upper limit of the batch instead of using a maxqual in
+	;the next Select, as that might not recall any worklists with orders/accessions
+	select into "nl:" w.worklist_id 
+	from worklist w
+	plan w where w.worklist_id > dLastWklstId
+	         and ((exists (select war.worklist_id
+	 	                       from worklist_accession_r war
+	 	                       where w.worklist_id = war.worklist_id
+	 	                         and trim(war.identifier) not in ("", sTEMPLATE)))
+             or (exists (select wor.worklist_id
+	 	                       from worklist_order_r wor
+	 	                       where w.worklist_id = wor.worklist_id
+	 	                         and trim(wor.identifier) not in ("", sTEMPLATE))))
+ 	order w.worklist_id
+ 	foot w.worklist_id
+ 		dEndWklstId = w.worklist_id
+	with nocounter, maxrec = value(lBATCH_CNT)
+
+	set lWklstCnt = 0
+	select into "nl:"
+		seq_ident = decode(war.identifier, cnvtint(war.identifier), wor.identifier, cnvtint(wor.identifier), 0),
+		sequence = decode(war.sequence, war.sequence, wor.sequence, wor.sequence)
+	from
+		worklist w,
+		dummyt d1,
+		dummyt d2,
+		worklist_order_r wor,
+		worklist_accession_r war
+	plan w where w.worklist_id > dLastWklstId
+	         and w.worklist_id <= dEndWklstId
+	join (d1 
+		join wor where w.worklist_id = wor.worklist_id
+		           and trim(wor.identifier) not in ("", sTEMPLATE))
+	orjoin (d2
+		join war where w.worklist_id = war.worklist_id
+		           and trim(war.identifier) not in ("", sTEMPLATE))
+	order w.worklist_id, seq_ident
+	head w.worklist_id
+		lPriorSeqIdent = -1
+		nRestartSeqInd = 0
+		
+		lWklstCnt = lWklstCnt + 1
+		worklist_sequence->qual[lWklstCnt].worklist_id = w.worklist_id
+		worklist_sequence->qual[lWklstCnt].beg_seq = seq_ident
+	detail
+	  if (lPriorSeqIdent = seq_ident)
+	  	nRestartSeqInd = 1
+	  endif
+	  lPriorSeqIdent = seq_ident
+	  
+		if (sequence = 1) 
+			worklist_sequence->qual[lWklstCnt].start_nbr = seq_ident
+		endif
+	foot w.worklist_id
+		if (nRestartSeqInd = 1)
+			worklist_sequence->qual[lWklstCnt].end_seq = seq_ident
+		else
+			worklist_sequence->qual[lWklstCnt].end_seq = lMAX_SEQ
+		endif		
+	with nocounter
+		
+	if (lWklstCnt > 0)
+		update into worklist w,
+	 		(dummyt d with seq = value(lWklstCnt))
+		set w.seq_ident_ind = 1,
+				w.seq_ident_start_nbr = worklist_sequence->qual[d.seq].start_nbr,
+				w.seq_ident_beg_range_nbr = worklist_sequence->qual[d.seq].beg_seq,
+				w.seq_ident_end_range_nbr = worklist_sequence->qual[d.seq].end_seq,
+				w.updt_task = reqinfo->updt_task,
+				w.updt_cnt    = w.updt_cnt + 1,
+				w.updt_dt_tm  = cnvtdatetime(curdate,curtime3)
+		plan d
+		join w where w.worklist_id = worklist_sequence->qual[d.seq].worklist_id
+		with nocounter
+
+		set lErrorCode = error(sErrorMsg, 0)
+		if (lErrorCode > 0)
+			call logstatus(concat("Execution failed updating worklist - ", trim(sErrorMsg)), "F")
+			go to Exit_script  
+		endif
+	
+		update into dm_info dm 
+		set dm.info_char   = cnvtstring(dEndWklstId),
+		    dm.updt_task = reqinfo->updt_task,
+		    dm.updt_dt_tm  = cnvtdatetime(curdate,curtime3),
+		    dm.updt_cnt    = dm.updt_cnt + 1
+		where dm.info_domain = sWKLST_README_DOMAIN
+		  and dm.info_name = sWKLST_README_INFO_NAME
+		with nocounter
+		
+		set lErrorCode = error(sErrorMsg, 0)
+		if (lErrorCode > 0)
+			call logstatus(concat("Execution failed updating dm_info - ", trim(sErrorMsg)), "F")
+			go to Exit_script
+		endif
+
+		commit
+		set dLastWklstId = dEndWklstId
+	endif
+endwhile
+
+set nFailed = 0
+
+#Exit_script
+	if (nFailed = 0)
+		call LogStatus("Execution Successful.", "S")
+	else
+		rollback
+	endif
+
+	free record worklist_sequence
+	call logscriptend(sREADME_NAME)
+end
+go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,467 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/RESULTENTRYFORBLOODBANK/BBT_GET_RESULT_COUNT.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+ 
+        Source file name:       BBT_GET_RESULT_COUNT.PRG
+        Object name:            bbt_get_result_count
+        Request #:              225202
+ 
+        Product:                Blood Bank Transfusion/Donor
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Get the count of the number of times a result was performed
+                                for a particular antigen, antibody.  Also return update counts
+                                to result entry.
+ 
+        Tables read:            PERSON_ANTIBODY, PERSON_ANITGEN,
+                                PERSON_ABORH, PERSON_ABORH_RESULT,
+                                SPECIAL_TESTING, SPECIAL_TESTING_RESULT,
+                                BLOOD_PRODUCT, ABO_TESTING
+ 
+        Tables updated:         N/A
+ 
+        Executing from:         Result Entry/Corrections
+ 
+        Special Notes:          N/A
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 10/17/96 Linda DeJong         Initial Release                     *
+;     002 01/10/02 Sasi Gandham         Add Order by for Head               *
+;     003 11/06/02 Christi Ditmars      Correction for CAPEP00011646        *
+;     004 06/16/03 Ronda Zheng          Add table_ind 6, 7, 8 to retrieve   *
+;                                       donor information                   *
+;     005 08/05/04 Ronda Zheng          Fixed for CAPEP49623.               *
+;     006 01/31/06 Jim Jensen           Add +0 so proper index is used.     *
+;     007 07/12/06 Ronda Zheng          Internationalize patient aborh failure*
+;                                       message. CR 1-708372511             *
+;    *008 01/12/09 Ronda zheng          Removed donor code.                 *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+        drop program bbt_get_result_count:dba go
+        create program bbt_get_result_count:dba
+ 
+/****************************************************************************
+*       Request record                                                      *
+*       table_ind =                                                         *
+*       1 means look at the person_antibody                                 *
+*       2 means look at the person_antigen                                  *
+*       3 means look at the person_aborh and person_aborh_result            *
+*       4 means look at the special_testing and special_testing_result      *
+*       5 means look at the blood_product and abo_testing                   *
+*****************************************************************************/
+        /*
+        record request
+        (
+         table_ind = i2
+         result_id = f8
+         orig_result_code_set_cd = f8
+         person_id = f8
+         product_id = f8
+         orig_abo_cd = f8
+         orig_rh_cd = f8
+         abo_testing_cd = f8
+         rh_testing_cd = f8
+        )
+        */
+ 
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+        record reply
+        (1  updt_cnt = i4
+         1  result_updt_cnt = i4
+         1  nbr_of_results  = i4
+%I CCLSOURCE:STATUS_BLOCK.INC
+        )
+
+
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+ 
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+record captions
+(
+  1  patient_aborh_failure     = vc
+)
+ 
+set captions->patient_aborh_failure = uar_i18ngetmessage(i18nHandle,
+  "patient_aborh_failure", "Unable to find person demographic ABO/Rh.")
+  
+/****************************************************************************
+*       Initialize Variables                                                *
+*****************************************************************************/
+        set err_cnt = 0
+        set store_special_testing_id = 0.0
+        set reply->status_data.status = "F"
+ 
+if (request->table_ind = 1)
+        select into "nl:"
+            pa.person_id,
+            pa.antibody_cd
+        from
+            person_antibody pa
+        where pa.person_id = request->person_id
+              and pa.antibody_cd = request->orig_result_code_set_cd
+              and pa.active_ind = 1
+        head report
+            reply->nbr_of_results = 0
+        detail
+            if (pa.seq > 0)
+                reply->nbr_of_results = reply->nbr_of_results + 1
+            endif
+        with nocounter
+        if (curqual = 0)
+            set err_cnt = err_cnt + 1
+            set reply->status_data->subeventstatus[err_cnt]->OperationName
+                = "select"
+            set reply->status_data->subeventstatus[err_cnt]->OperationStatus
+                = "F"
+            set reply->status_data->subeventstatus[err_cnt]->TargetObjectName
+                = "person_antibody"
+            set reply->status_data->subeventstatus[err_cnt]->TargetObjectValue
+                = "unable to find person antibody specified"
+            set reply->status_data.status = "F"
+            go to end_script
+        else
+            select into "nl:"
+                 par.person_id,
+                 par.antibody_cd,
+                 par.result_id,
+                 par.updt_cnt
+            from
+                person_antibody par
+            where   par.person_id   = request->person_id
+              and   par.antibody_cd = request->orig_result_code_set_cd
+              and   par.result_id = request->result_id
+              and   par.active_ind = 1
+            detail
+              reply->updt_cnt = par.updt_cnt
+            with nocounter
+             if (curqual = 0)
+                 set err_cnt = err_cnt + 1
+                 set reply->status_data->subeventstatus[err_cnt]->OperationName
+                     = "select"
+                 set reply->status_data->subeventstatus[err_cnt]->OperationStatus
+                     = "F"
+                 set reply->status_data->subeventstatus[err_cnt]->TargetObjectName
+                     = "person_antibody"
+                 set reply->status_data->subeventstatus[err_cnt]->TargetObjectValue
+                     = "unable to find person antibody result specified"
+                 set reply->status_data.status = "F"
+                 go to end_script
+             else
+                 set reply->status_data.status = "S"
+                 go to end_script
+             endif
+        endif
+endif
+if (request->table_ind = 2)
+    select into "nl:"
+        pa.person_id,
+        pa.antigen_cd
+    from
+        person_antigen pa
+    where pa.person_id = request->person_id
+          and pa.antigen_cd = request->orig_result_code_set_cd
+          and pa.active_ind = 1
+    head report
+        reply->nbr_of_results = 0
+    detail
+        if (pa.seq > 0)
+            reply->nbr_of_results = reply->nbr_of_results + 1
+        endif
+    with nocounter
+        if (curqual = 0)
+            set err_cnt = err_cnt + 1
+            set reply->status_data->subeventstatus[err_cnt]->OperationName
+                = "select"
+            set reply->status_data->subeventstatus[err_cnt]->OperationStatus
+                = "F"
+            set reply->status_data->subeventstatus[err_cnt]->TargetObjectName
+                = "person_antigen"
+            set reply->status_data->subeventstatus[err_cnt]->TargetObjectValue
+                = "unable to find person antigen specified"
+            set reply->status_data.status = "F"
+            go to end_script
+        else
+            select into "nl:"
+                par.person_id,
+                par.antigen_cd,
+                par.result_id,
+                par.updt_cnt
+            from
+                person_antigen par
+            where par.person_id = request->person_id
+              and par.antigen_cd = request->orig_result_code_set_cd
+              and par.result_id = request->result_id
+              and par.active_ind = 1
+            detail
+                reply->updt_cnt = par.updt_cnt
+            with nocounter
+           if (curqual = 0)
+              set err_cnt = err_cnt + 1
+              set reply->status_data->subeventstatus[err_cnt]->OperationName
+                 = "select"
+              set reply->status_data->subeventstatus[err_cnt]->OperationStatus
+                 = "F"
+              set reply->status_data->subeventstatus[err_cnt]->TargetObjectName
+                 = "person_antigen"
+              set reply->status_data->subeventstatus[err_cnt]->TargetObjectValue
+                 = "unable to find person antigen result specified"
+              set reply->status_data.status = "F"
+              go to end_script
+           else
+              set reply->status_data.status = "S"
+              go to end_script
+           endif
+     endif
+endif
+if (request->table_ind = 3)
+    select into "nl:"
+         pa.person_aborh_id,
+         pa.person_id,
+         pa.abo_cd,
+         pa.rh_cd,
+         pa.updt_cnt
+    from
+         person_aborh pa
+   where pa.person_id = request->person_id
+     and pa.active_ind = 1
+  detail
+     reply->nbr_of_results = 0
+     if (pa.abo_cd = request->orig_abo_cd
+         and pa.rh_cd  = request->orig_rh_cd)
+         reply->updt_cnt = pa.updt_cnt
+     else
+        ;ABORh has been updated
+        reply->updt_cnt = -1
+     endif
+  with nocounter
+        if (curqual = 0)
+            set err_cnt = err_cnt + 1
+            set reply->status_data->subeventstatus[err_cnt]->OperationName
+                = "select"
+            set reply->status_data->subeventstatus[err_cnt]->OperationStatus
+                = "F"
+            set reply->status_data->subeventstatus[err_cnt]->TargetObjectName
+                = "person_aborh"
+            set reply->status_data->subeventstatus[err_cnt]->TargetObjectValue
+                = captions->patient_aborh_failure
+            set reply->status_data.status = "F"
+            go to end_script
+        else
+            select into "nl:"
+                par.updt_cnt
+            from
+                person_aborh_result par
+             where par.result_id = request->result_id
+               and par.person_id = request->person_id
+               and par.active_ind = 1
+            detail
+               if (par.result_cd = request->orig_result_code_set_cd)
+                   reply->result_updt_cnt = par.updt_cnt
+               else
+                   ;Result has been updated
+                   reply->result_updt_cnt = -1
+               endif
+             with nocounter
+           if (curqual = 0)
+              set err_cnt = err_cnt + 1
+              set reply->status_data->subeventstatus[err_cnt]->OperationName
+                 = "select"
+              set reply->status_data->subeventstatus[err_cnt]->OperationStatus
+                 = "F"
+              set reply->status_data->subeventstatus[err_cnt]->TargetObjectName
+                 = "person_aborh_result"
+              set reply->status_data->subeventstatus[err_cnt]->TargetObjectValue
+                 = "unable to find person aborh result specified"
+              set reply->status_data.status = "F"
+              go to end_script
+           else
+              set reply->status_data.status = "S"
+              go to end_script
+           endif
+     endif
+endif
+if (request->table_ind = 4)
+        select into "nl:"
+            s.special_testing_id,
+            s.product_id,
+            s.special_testing_cd,
+            s.updt_cnt,
+            sr.special_testing_id,
+            sr.product_id
+        from
+            special_testing s,
+            special_testing_result sr
+        plan s
+            where s.product_id = request->product_id
+              and s.special_testing_cd = request->orig_result_code_set_cd
+              and s.active_ind = 1
+        join sr
+            where sr.product_id = request->product_id
+              and sr.special_testing_id = s.special_testing_id
+              and sr.active_ind = 1
+        order by s.special_testing_cd
+        head report
+              reply->nbr_of_results = 0
+        head s.special_testing_cd
+              reply->updt_cnt = s.updt_cnt
+        detail
+              store_special_testing_id = s.special_testing_id
+              if (sr.seq > 0)
+                   reply->nbr_of_results = reply->nbr_of_results + 1
+              endif
+        with nocounter
+        if (curqual = 0)
+            set err_cnt = err_cnt + 1
+            set reply->status_data->subeventstatus[err_cnt]->OperationName
+                = "select"
+            set reply->status_data->subeventstatus[err_cnt]->OperationStatus
+                = "F"
+            set reply->status_data->subeventstatus[err_cnt]->TargetObjectName
+                = "special_testing and special_testing_result"
+            set reply->status_data->subeventstatus[err_cnt]->TargetObjectValue
+                = "unable to find product special testing (antigen) specified"
+            set reply->status_data.status = "F"
+            go to end_script
+        else
+            select into "nl:"
+                sr.special_testing_id,
+                sr.product_id,
+                sr.updt_cnt
+            from
+                special_testing_result sr
+            where sr.special_testing_id = store_special_testing_id
+              and sr.product_id = request->product_id
+              and sr.result_id = request->result_id
+              and sr.active_ind = 1
+            with nocounter
+           if (curqual = 0)
+              set err_cnt = err_cnt + 1
+              set reply->status_data->subeventstatus[err_cnt]->OperationName
+                 = "select"
+              set reply->status_data->subeventstatus[err_cnt]->OperationStatus
+                 = "F"
+              set reply->status_data->subeventstatus[err_cnt]->TargetObjectName
+                 = "special_testing_result"
+              set reply->status_data->subeventstatus[err_cnt]->TargetObjectValue
+                 = "unable to find product special testing result specified"
+              set reply->status_data.status = "F"
+              go to end_script
+           else
+              set reply->status_data.status = "S"
+              go to end_script
+           endif
+     endif
+endif
+if (request->table_ind = 5)
+    select into "nl:"
+         bp.product_id,
+         bp.cur_abo_cd,
+         bp.cur_rh_cd,
+         bp.updt_cnt
+    from
+         blood_product bp
+   where bp.product_id = request->product_id
+     and bp.cur_abo_cd = request->orig_abo_cd
+     and bp.cur_rh_cd  = request->orig_rh_cd
+     and bp.active_ind = 1
+  detail
+      reply->updt_cnt = bp.updt_cnt
+      reply->nbr_of_results = 0
+  with nocounter
+        if (curqual = 0)
+            set err_cnt = err_cnt + 1
+            set reply->status_data->subeventstatus[err_cnt]->OperationName
+                = "select"
+            set reply->status_data->subeventstatus[err_cnt]->OperationStatus
+                = "F"
+            set reply->status_data->subeventstatus[err_cnt]->TargetObjectName
+                = "blood_product"
+            set reply->status_data->subeventstatus[err_cnt]->TargetObjectValue
+                = "unable to find blood product aborh specified"
+            set reply->status_data.status = "F"
+            go to end_script
+        else
+            select
+                if (request->abo_testing_cd = 0 and request->rh_testing_cd > 0)
+                    where a.product_id = request->product_id
+                      and a.rh_type_cd = request->rh_testing_cd
+                      and a.result_id = request->result_id
+                      and a.active_ind = 1
+                elseif (request->abo_testing_cd > 0 and request->rh_testing_cd = 0)
+                    where a.product_id = request->product_id
+                      and a.abo_group_cd = request->abo_testing_cd
+                      and a.result_id = request->result_id
+                      and a.active_ind = 1
+                else
+                    where a.product_id = request->product_id
+                      and a.abo_group_cd = request->abo_testing_cd
+                      and a.rh_type_cd = request->rh_testing_cd
+                      and a.result_id = request->result_id
+                      and a.active_ind = 1
+                endif
+            into "nl:"
+                a.updt_cnt
+            from
+                abo_testing a
+            detail
+               reply->result_updt_cnt = a.updt_cnt
+             with nocounter
+           if (curqual = 0)
+              set err_cnt = err_cnt + 1
+              set reply->status_data->subeventstatus[err_cnt]->OperationName
+                 = "select"
+              set reply->status_data->subeventstatus[err_cnt]->OperationStatus
+                 = "F"
+              set reply->status_data->subeventstatus[err_cnt]->TargetObjectName
+                 = "abo_testing"
+              set reply->status_data->subeventstatus[err_cnt]->TargetObjectValue
+                 = "unable to find product abo result specified"
+              set reply->status_data.status = "F"
+              go to end_script
+           else
+              set reply->status_data.status = "S"
+              go to end_script
+           endif
+     endif
+endif
+
+/****************************************************************************
+*       exit_script                                                         *
+*****************************************************************************/
+#END_SCRIPT
+end go
+
+;Generated by GNU enscript 1.6.4.

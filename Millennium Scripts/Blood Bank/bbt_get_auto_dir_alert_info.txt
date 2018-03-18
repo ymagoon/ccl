@@ -1,0 +1,458 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbautodirected/BBT_GET_AUTO_DIR_ALERT_INFO.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       BBT_GET_AUTO_DIR_ALERT_INFO
+        Object name:            BBT_GET_AUTO_DIR_ALERT_INFO
+        Request #:              225080
+
+        Product:                Transfusion
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Get information for the AutoDirected dll 
+
+        Tables read:            Auto_directed,product,blood_product,product_event,
+                                person_name_hist  
+
+        Tables updated:         None
+
+        Executing from:         AutoDirectedAlert.dll
+
+        Special Notes:          ??
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 08/12/96 Martin Olson         Initial Release                     *
+;     001 02/09/98 Badari Kopparapu     Modified to search for person_id in *
+;                                       auto_directed table > 0.0 and != NULL
+;     002 04/20/99 Doug Saus            Made product_disp a c40 instead of c15
+;     003 08/03/99 Badari Kopparapu     Modified to filter auto/dir products*
+;                                       that are destroyed, dispensed and   *
+;                                       transfused.                         *
+;     004 11/24/03 Jason Coy            Modified to return supplier prefix. *
+;     005 06/03/04 Christi Ditmars	    Modified to return locked_ind and   *
+;                                       applctx that locked it.             *
+;     006 11/01/05 Paul Lessin          Return historical name              *
+;     007 05/29/07 Matt Cummings        Modified to return                  *
+;                                       expected_usage_dt_tm and            *
+;                                       donated_by_relative_ind.            *
+;     008 03/11/09 Kiran Vankadaru      Populating the historical names when*
+;                                       person combine happens              *
+;     009 10/22/13 Gayatri Samala       fix for CR 1-6905702576 - Excluding *
+;										shipped products from allogenic blocking
+;										at crossmatch and dispense level and*
+;                                       from "autologous/directed products" alert
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+Drop Program BBT_GET_AUTO_DIR_ALERT_INFO:DBA Go
+Create Program BBT_GET_AUTO_DIR_ALERT_INFO:DBA
+
+/*
+Record request
+( 1 person_id          = f8
+  1 retrieve_data      = c1
+  1 facility_cd        = f8
+)
+*/
+
+Record Reply
+(  1  person_name               = c50                    ;name for the request person_id
+   1  products_present          = c1                     ;boolean flag if data found but not retreived
+   1  historical_demog_ind      = i2                     ;if historical data is stored
+   1  qual[*]                                            ;product, and blood product information
+     2  good_product_ind        = c1
+     2  product_id              = f8
+     2  product_cd              = f8
+     2  product_disp            = c40 ;002
+     2  supplier_prefix         = c5
+     2  product_nbr             = c20
+     2  product_sub_nbr         = C5
+     2  cur_expire_dt_tm        = dq8
+     2  cur_abo_cd              = f8
+     2  cur_abo_disp            = c15
+     2  cur_rh_cd               = f8
+     2  cur_rh_disp             = c15
+     2  nbr_of_states           = i4
+     2  locked_ind		= i2
+     2  locked_updt_applctx     = i4
+     2  historical_name         = c50
+     2  expected_usage_dt_tm    = dq8
+     2  donated_by_relative_ind = i2
+     2  qual2[*]                                          ;product event information for autologous or directed
+        3 product_event_id        = f8
+        3 event_type_cd           = f8
+        3 event_type_disp         = c15
+%i cclsource:status_block.inc
+)
+
+record products( 
+1  productlist[*]     
+   2  product_id      = f8
+)
+
+%i cclsource:bbt_getBBPreference.inc        ;for historic demographics 
+
+;Initialize varialbles and flags
+declare lBATCHSIZE           = i4 with protect, constant(200)  ;Batch size for Expand
+
+declare lIdx                 = i4 with protect, noconstant(0)  ;Indexes for EXPAND
+
+declare dCurrentNameTypeCd   = f8 with protect, noconstant(0.0)
+declare dCombineAddCd        = f8 with protect, noconstant(0.0)
+declare dActiveStatusCd    = f8 with protect, noconstant(0.0)
+declare lReplyCnt            = i4 with protect, noconstant(0)
+declare dCurrentPersonId    = f8 with protect, noconstant(0.0)
+
+;Slightly < one minute, expressed as a fraction of a day, used for rounding up
+declare dMINUTE            = f8  with protect, constant(1/1440.0)
+ 
+set dCurrentNameTypeCd = uar_get_code_by("MEANING", 213, "CURRENT")
+set dCombineAddCd      = uar_get_code_by("MEANING", 327, "ADD")
+set dActiveStatusCd    = uar_get_code_by("MEANING", 48, "ACTIVE")
+
+set reply->status_data->status = "F" 
+set reply->products_present = "F"
+set stat = alterlist(products->productlist, 10)
+
+set product_cnt = 0
+set count2 = 0
+set cnt = 0
+
+
+declare issued_event_type_cd = f8
+set issued_event_type_cd = uar_get_code_by("MEANING", 1610, "4")
+declare transfused_event_type_cd = f8
+set transfused_event_type_cd = uar_get_code_by("MEANING", 1610, "7")
+declare destroyed_event_type_cd = f8
+set destroyed_event_type_cd = uar_get_code_by("MEANING", 1610, "14")
+declare shipped_event_type_cd = f8
+set shipped_event_type_cd = uar_get_code_by("MEANING", 1610, "15")
+
+if (issued_event_type_cd = 0.0 or transfused_event_type_cd = 0.0 or destroyed_event_type_cd = 0.0 or shipped_event_type_cd = 0.0 
+	or dCurrentNameTypeCd = 0.0 or dCombineAddCd = 0.0 or dActiveStatusCd = 0.0)
+   if (issued_event_type_cd = 0.0)
+       set reply->status_data->subeventstatus[1].TargetObjectName = "get DISPENSED code value"
+   elseif (transfused_event_type_cd = 0.0)
+       set reply->status_data->subeventstatus[1].TargetObjectName = "get TRANSFUSED code value"
+   elseif (destroyed_event_type_cd = 0.0)
+       set reply->status_data->subeventstatus[1].TargetObjectName = "get DESTROYED code value"
+   elseif (shipped_event_type_cd = 0.0)
+       set reply->status_data->subeventstatus[1].TargetObjectName = "get SHIPPED code value"
+   elseif (dCurrentNameTypeCd = 0.0)
+       set reply->status_data->subeventstatus[1].TargetObjectName = "get CURRENT NAME code value"
+   elseif (dCombineAddCd = 0.0)
+       set reply->status_data->subeventstatus[1].TargetObjectName = "get COMBINE ADD code value"
+   elseif (dActiveStatusCd = 0.0)
+       set reply->status_data->subeventstatus[1].TargetObjectName = "get ACTIVE STATUS code value"
+   endif
+   set reply->status_data->status = "F"
+   set reply->status_data->subeventstatus[1].OperationName = "bbt_get_auto_dir_alert_info"
+   set reply->status_data->subeventstatus[1].OperationStatus = "F"
+   go to EXIT_PROGRAM
+endif
+
+    select into "nl:"
+          ad.product_id 
+    from 
+          auto_directed ad
+    where ad.person_id = request->person_id 
+      and ad.active_ind = 1  
+      and ad.person_id != NULL  
+      and ad.person_id > 0.0 
+
+   order by ad.product_id 
+
+   head ad.product_id  
+      product_cnt = product_cnt + 1 
+      if (mod(product_cnt, 10) = 1 and product_cnt != 1) 
+          stat = alterlist(products->productlist, product_cnt + 9) 
+       endif 
+       products->productlist[product_cnt]->product_id = ad.product_id 
+
+    foot report 
+       stat = alterlist(products->productlist, product_cnt)
+
+    with nocounter
+	
+    /* Get historical demographics indicator */
+    set reply->historical_demog_ind = BbtGetHistoricInfoPreference(request->facility_cd)
+    
+/************************************ if the call is to retrieve the autologous information then load it  **************/
+if (trim(request->retrieve_data) = "T") 
+     /*************************** load the patient information   *************************************************/
+     select into "nl:"
+        per.name_full_formatted 
+     from 
+        person per
+     where (per.person_id = request->person_id)
+     detail 
+        reply->person_name       = per.name_full_formatted
+     with nocounter
+     
+     /***********************     load all of the product information into the reply  *************************/
+
+     /**********    load the product states   ************************************************/
+     set lReplyCnt = size (reply->qual,5)
+     set count2 = 0
+     select into "nl:" 
+         pe.product_id,
+         pe.product_event_id,
+         pe.event_type_cd,
+         pe.event_status_flag,
+         pe.event_prsnl_id,
+         p.product_id,
+         p.product_nbr,
+         p.product_cd,
+         p.cur_expire_dt_tm,
+         bp.cur_abo_cd,
+         bp.cur_rh_cd,
+         bp.supplier_prefix              
+
+    from (dummyt d_p with seq = value(product_cnt)), 
+         product_event pe,
+         (dummyt d_ad with seq = value(1)),
+         auto_directed ad,
+         product pr,
+         blood_product bp
+
+    plan d_p
+    join (pr where pr.product_id = products->productlist[d_p.seq]->product_id 
+               and pr.product_id  > 0  
+               and pr.product_id  != NULL 
+          join bp where pr.product_id = bp.product_id)
+    join  pe where pe.product_id  = pr.product_id 
+               and pe.active_ind  = 1
+    join d_ad
+        join ad where ad.product_event_id = pe.product_event_id
+    order by pr.product_id, pe.product_event_id
+
+   head report
+        lReplyCnt = 0 
+        cnt = 0
+
+   head pr.product_id 
+       lReplyCnt = lReplyCnt + 1 
+       stat = alterlist(reply->qual, lReplyCnt)
+       reply->qual[lReplyCnt]->product_id = pe.product_id 
+       reply->qual[lReplyCnt]->product_cd = pr.product_cd
+       reply->qual[lReplyCnt]->supplier_prefix = bp.supplier_prefix  
+       reply->qual[lReplyCnt]->product_nbr = pr.product_nbr
+       reply->qual[lReplyCnt]->product_sub_nbr  = pr.product_sub_nbr 
+       reply->qual[lReplyCnt]->cur_expire_dt_tm = pr.cur_expire_dt_tm
+       reply->qual[lReplyCnt]->cur_abo_cd  = bp.cur_abo_cd
+       reply->qual[lReplyCnt]->cur_rh_cd   = bp.cur_rh_cd
+       reply->qual[lReplyCnt]->locked_ind = pr.locked_ind
+       ;If locked, get the applctx that locked it
+	 if (pr.locked_ind = 1)
+          reply->qual[lReplyCnt]->locked_updt_applctx = pr.updt_applctx
+       endif
+       good_product = "F" 
+       bad_product = "F"  
+       count2 = 0      
+  
+    head pe.product_event_id 
+         if (bad_product != "T")  
+            if ((pe.event_type_cd = destroyed_event_type_cd)  or
+                (pe.event_type_cd = transfused_event_type_cd) or
+                (pe.event_type_cd = issued_event_type_cd) or
+                (pe.event_type_cd = shipped_event_type_cd))
+                 bad_product = "T"  
+            else
+                 good_product = "T"
+                 count2 = count2 + 1
+                 stat = alterlist(reply->qual[lReplyCnt]->qual2, count2)
+                ;load product_event information                   
+                 reply->qual[lReplyCnt]->qual2[count2]->product_event_id = pe.product_event_id
+                 reply->qual[lReplyCnt]->qual2[count2]->event_type_cd = pe.event_type_cd
+                 ; if there is an auto_directed row associated with this product state
+                 if( ad.product_event_id > 0.0 )
+                   if( ad.person_id = request->person_id )
+                     ; if a valid expected usage reason is stored
+                     if( ad.expected_usage_dt_tm > 0 )
+                       reply->qual[lReplyCnt]->expected_usage_dt_tm = ad.expected_usage_dt_tm
+                     endif
+                     reply->qual[lReplyCnt]->donated_by_relative_ind = ad.donated_by_relative_ind
+                   endif
+                 endif
+            endif 
+         endif
+   foot pr.product_id   
+         if ((good_product = "T") and (bad_product = "F"))  
+             reply->qual[lReplyCnt]->nbr_of_states = count2
+             reply->qual[lReplyCnt]->good_product_ind  = "T"
+             cnt = cnt + 1 
+         else  
+             reply->qual[lReplyCnt]->good_product_ind = "F"
+             reply->qual[lReplyCnt]->nbr_of_states = 0
+         endif
+
+  with nocounter, outerjoin( d_ad )
+
+  ;Get historical names if history is stored
+  if (reply->historical_demog_ind = 1)
+     for (lIdx = 1 To lReplyCnt)
+        set dCurrentPersonId = request->person_id
+        select into "nl:"
+            pc.from_person_id
+        from person_combine_det pcd
+             , auto_directed ad
+             , person_combine pc
+        plan ad where ad.product_id = reply->qual[lIdx]->product_id
+        join pcd where pcd.entity_id = ad.product_event_id
+                 and pcd.entity_name = "AUTO_DIRECTED"
+        join pc where pc.person_combine_id = pcd.person_combine_id
+                 and pc.active_status_cd = dActiveStatusCd
+                 and pc.active_status_dt_tm >= ad.associated_dt_tm
+                 and pc.active_ind = 1
+ 
+        order by pc.active_status_dt_tm
+ 
+        Head Report
+            dCurrentPersonId = pc.from_person_id
+        with nocounter
+		
+        select into "nl:"
+            pnh.name_full
+        from auto_directed ad,
+             person_name_hist pnh
+ 
+        plan ad where ad.product_id = reply->qual[lIdx].product_id
+        join pnh where pnh.person_id = dCurrentPersonId     
+             and pnh.name_type_cd = dCurrentNameTypeCd
+             and pnh.transaction_dt_tm <= datetimeadd(ad.associated_dt_tm, dMINUTE)
+             and not exists (select
+                                 pcd.entity_id
+                             from person_combine_det pcd
+                             where pcd.entity_id = pnh.person_name_hist_id
+                             and pcd.entity_name = "PERSON_NAME_HIST"
+                             and pcd.combine_action_cd = dCombineAddCd)
+ 
+        order by pnh.transaction_dt_tm desc
+        Head Report
+            if (reply->qual[lIdx].good_product_ind = "T")
+                 reply->qual[lIdx].historical_name = pnh.name_full
+        endif
+        with nocounter
+     endfor
+  endif
+    /********************  wrap up information       **********************************************/
+
+  if (cnt = 0)
+       set reply->products_present = "F"
+       set reply->status_data.status = "Z"
+  else
+       set reply->products_present = "T"
+       set reply->status_data.status = "S"
+  endif
+
+/*******************************  the call is to see if there is any data to retrieve ********************************/ 
+else
+     /**********    load the product states   ************************************************/
+     set lReplyCnt = size (reply->qual,5)
+     set count2 = 0
+     select into "nl:" 
+         pe.product_id,
+         pe.product_event_id
+     from (dummyt d_p with seq = value(product_cnt)), 
+         product_event pe,
+         product pr,
+         blood_product bp
+
+    plan d_p
+    join (pr where pr.product_id = products->productlist[d_p.seq]->product_id 
+               and pr.product_id  > 0  
+               and pr.product_id  != NULL 
+          join bp where pr.product_id = bp.product_id)
+    join  pe where pe.product_id  = pr.product_id 
+               and pe.active_ind = 1
+    order by pr.product_id, pe.product_event_id
+
+    head report
+        lReplyCnt = 0 
+        cnt = 0
+   head pr.product_id 
+       lReplyCnt = lReplyCnt + 1 
+       stat = alterlist(reply->qual, lReplyCnt)
+       reply->qual[lReplyCnt]->product_id = pe.product_id 
+       reply->qual[lReplyCnt]->product_cd = pr.product_cd  
+       reply->qual[lReplyCnt]->product_nbr = pr.product_nbr
+       reply->qual[lReplyCnt]->product_sub_nbr  = pr.product_sub_nbr 
+       reply->qual[lReplyCnt]->locked_ind = pr.locked_ind
+       ;If locked, get the applctx that locked it
+       if (pr.locked_ind = 1)
+           reply->qual[lReplyCnt]->locked_updt_applctx = pr.updt_applctx
+       endif
+
+       good_product = "F" 
+       bad_product = "F"  
+       count2 = 0       
+
+    head pe.product_event_id      
+         if (bad_product != "T")  
+            if ((pe.event_type_cd = destroyed_event_type_cd)  or
+                (pe.event_type_cd = transfused_event_type_cd) or
+                (pe.event_type_cd = issued_event_type_cd) or
+                (pe.event_type_cd = shipped_event_type_cd))
+                 bad_product = "T"  
+            else
+                 good_product = "T"
+                 count2 = count2 + 1
+                 stat = alterlist(reply->qual[lReplyCnt]->qual2, count2)
+                ;load product_event information                   
+                 reply->qual[lReplyCnt]->qual2[count2]->product_event_id = pe.product_event_id
+            endif 
+         endif 
+
+   foot pr.product_id   
+        if ((good_product = "T") and (bad_product = "F"))  
+            reply->qual[lReplyCnt]->nbr_of_states = count2
+            reply->qual[lReplyCnt]->good_product_ind = "T"
+            cnt = cnt + 1 
+        else  
+            reply->qual[lReplyCnt]->good_product_ind = "F"
+            reply->qual[lReplyCnt]->nbr_of_states = 0
+        endif
+ with nocounter
+
+  if (cnt = 0)
+      set reply->products_present = "F"
+      set reply->status_data.status = "Z"
+  else
+      set reply->products_present = "T"
+      set reply->status_data.status = "S"
+  endif
+
+endif ;request->retrieve_data = true
+
+#EXIT_PROGRAM
+
+end go
+
+
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,180 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_rr_accessions/GLB_GET_RR_ACCESSIONS.PRG Turn on black mode
+
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_RR_ACCESSIONS.PRG
+        Object name:            GLB_GET_RR_ACCESSIONS
+        Request #:              
+
+        Product:                General Lab           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:      
+
+        Tables read:        	rr_result
+				rr_perform_result
+				accession
+                                                         
+        Tables updated:         n/a
+
+        Executing from:         General Lab Round Robin Inquiry
+
+        Special Notes:          This script will return the accessions that
+				have a perform dt/tm between the one passed in
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 01/18/99 Gary Runde           Initial Release                     *
+;     001 01/05/02 Sasi Gandham         Add Fields to Order By For Head     *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_RR_ACCESSIONS:dba go    
+      create program GLB_GET_RR_ACCESSIONS:dba
+     
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request                                      
+      (                   
+	1  display              = vc
+	1  start_dt_tm		= dq8
+	1  end_dt_tm		= dq8
+      ) 
+*/
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      ( 
+	1  qual[*]
+	   2  rr_group_id		= f8
+	   2  created_dt_tm		= dq8
+	   2  accessions[*]
+		3  accession		= vc
+		3  round_robin_ref_id 	= f8
+		3  accession_id		= f8
+%i cclsource:status_block.inc
+      )
+
+
+     #Script
+         set reply->status_data->status = "F"
+         set accn_cnt = 0
+         set qual_cnt = 0
+         set hSys = 0
+         set SysStat = 0
+         set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+         set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+         call uar_SysCreateHandle(hSys,SysStat)
+         set sText = fillstring(254, " ")
+
+      /********************************************************************/
+      /* Get the accession numbers                                        */
+      /********************************************************************/
+  
+      select into "nl:"
+	rg.created_dt_tm,
+	rg.rr_group_id,
+	ra.accession_id,
+	ra.rr_group_id,
+	a.accession,
+	a.accession_id	
+      from rr_group rg,
+	   round_robin_ref rf,
+	   rr_accession_r ra,
+	   accession a
+      plan rg where rg.created_dt_tm between cnvtdatetime(request->start_dt_tm) 
+		and cnvtdatetime(request->end_Dt_TM)
+      join ra where rg.rr_group_id = ra.rr_group_id 
+      join rf where rf.round_robin_ref_id = ra.round_robin_ref_id
+		and rf.display = request->display                
+      join a where  ra.accession_id = a.accession_id
+      order by cnvtdatetime(rg.created_Dt_tm) desc, rg.rr_group_id, ra.accession_id, a.accession
+      head report
+	qual_cnt = 0
+      head rg.rr_group_id
+	qual_cnt = qual_cnt + 1
+	if (mod(qual_cnt, 10) = 1)
+		stat = alterlist(reply->qual, qual_cnt + 10)
+	endif
+	reply->qual[qual_cnt].rr_group_id = rg.rr_group_id
+	reply->qual[qual_cnt].created_dt_tm = cnvtdatetime(rg.created_dt_Tm)
+      	accn_cnt = 0
+      head ra.accession_id
+	accn_cnt = accn_cnt + 1
+	if (mod(accn_cnt, 5) = 1)
+		stat = alterlist(reply->qual[qual_cnt].accessions, accn_cnt + 5)
+	endif
+	reply->qual[qual_cnt].accessions[accn_cnt].round_robin_ref_id = ra.round_robin_ref_id
+	reply->qual[qual_cnt].accessions[accn_cnt].accession_id = ra.accession_id	
+	reply->qual[qual_cnt].accessions[accn_cnt].accession = a.accession
+      detail
+	row +0
+      foot rg.rr_group_id
+	if (accn_cnt > 0) 
+		stat = alterlist(reply->qual[qual_cnt].accessions, accn_cnt)
+	endif
+      foot report
+	if (qual_cnt > 0) 
+		stat = alterlist(reply->qual, qual_cnt)
+	endif
+      with nocounter
+
+set error_check = ERROR(sErrorMsg,0)   ;get error message
+if (error_check != 0)
+     set reply->status_data->status = "F"
+     set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+     go to exit_script
+endif
+
+call echo(accn_cnt)
+set sText = build("Accn Count: ", accn_cnt)
+call uar_SysEvent(hSys, 3, "get_rr_accession accn_cnt", NULLTERM(sText))
+
+      /********************************************************************/
+      /* Exit Script                                                      */
+      /********************************************************************/
+      if (curqual = 0)
+         set reply->status_data->status = "Z"
+      else    
+         set reply->status_data->status = "S"
+      endif
+
+#exit_script
+call uar_SysDestroyHandle(hSys)
+end
+go
+
+;Generated by GNU enscript 1.6.4.

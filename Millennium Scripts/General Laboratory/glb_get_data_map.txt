@@ -1,0 +1,333 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_data_map/glb_get_data_map.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1998 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_data_map.prg
+        Object name:            glb_get_data_map
+        Request #:              250145
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            
+
+        Program purpose:        Load data map.
+
+        Tables read:            code_value
+                                data_map
+                                resource_group
+
+        Tables updated:         None
+        Executing from:         
+
+        Special Notes:          
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 01/20/98 Hal Patchen          Initial Release                     *
+;    *001 05/05/98 Hal Patchen          Verify subsection level data map    *
+;    *                                  is associated with route test site  *
+;    *002 05/28/08 Matt Schile          Moved reply to an include file      *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_DATA_MAP:dba go
+             create program GLB_GET_DATA_MAP:dba
+     
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  qual[*]
+            2  accession_id              = f8    ;Optional, used by calling app
+            2  order_id                  = f8    ;Optional, used by calling app
+            2  task_assay_cd             = f8
+            2  service_resource_cd       = f8
+            2  data_map_type_flag        = i2    ;1 = Check for QC map
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      if(not validate(reply, 0))
+        record reply
+        ( 
+%i cclsource:glb_get_data_map_reply.inc
+        )
+      endif
+      
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set CV_REQUIRED_RECS            = 1                           ;001
+         declare cv_cnt                  = i4                          ;001
+         set SERV_RES_TYPE_CODESET       = 223                         ;001
+         set SERV_RES_SUBSECTION_CDF     = "SUBSECTION"
+         declare serv_res_subsection_cd  = f8                          ;001
+         declare nbr_of_assays           = i4
+         declare q_cnt                   = i4
+         set reply->status_data.status = "F"
+
+      /***********************************************************************
+      * Load code values                                                     *
+      ***********************************************************************/
+         set cv_cnt = 0                                                ;001
+
+         select into "nl:"                                             ;001
+            cv.code_set,                                               ;001
+            cv.code_value                                              ;001
+         from                                                          ;001
+            code_value cv                                              ;001
+         where cv.code_set = SERV_RES_TYPE_CODESET                     ;001
+           and cv.cdf_meaning = SERV_RES_SUBSECTION_CDF                ;001
+           and cv.active_ind = 1                                       ;001
+           and cv.begin_effective_dt_tm <=                             ;001
+                                  cnvtdatetime(curdate, curtime3)      ;001
+           and cv.end_effective_dt_tm >=                               ;001
+                                  cnvtdatetime(curdate, curtime3)      ;001
+         detail                                                        ;001
+            if (cv.code_set = SERV_RES_TYPE_CODESET)                   ;001
+               case (cv.cdf_meaning)                                   ;001
+                 of SERV_RES_SUBSECTION_CDF:                           ;001
+                    serv_res_subsection_cd = cv.code_value             ;001
+                    cv_cnt = cv_cnt + 1                                ;001
+               endcase                                                 ;001
+            endif                                                      ;001
+         with nocounter                                                ;001
+
+         ;* Verify that all required code value records were read.
+         if (cv_cnt != CV_REQUIRED_RECS)                               ;001
+            set reply->status_data.subeventstatus[1].OperationName =   ;001
+               "SELECT"                                                ;001
+            set reply->status_data.subeventstatus[1].OperationStatus = ;001
+               "F"                                                     ;001
+            set reply->status_data.subeventstatus[1].TargetObjectName = ;001
+               "CODE_VALUE TABLE"                                      ;001
+            set reply->status_data.subeventstatus[1].TargetObjectValue = ;001
+               "Unable to load all required code values for script execution" ;001
+            go to Exit_Script                                          ;001
+         endif                                                         ;001
+
+      /***********************************************************************
+      * Load data maps                                                       *
+      ***********************************************************************/
+         set nbr_of_assays = size(request->qual, 5)
+         if (nbr_of_assays = 0)
+            set reply->status_data.status = "Z"
+            go to Exit_Script
+         endif
+
+         select into "nl:"
+            d.seq,
+            d_dm.seq,
+            dm_exists = decode(dm.seq, "Y", "N"),
+            dm.seq,
+;001            cv_dm.seq
+            d_rg.seq,                                                  ;001
+            rg_exists = decode(rg.seq, "Y", "N"),                      ;001
+            rg.seq                                                     ;001
+            /* selection fields:
+            d.seq,
+            d_dm.seq,
+            dm_exists = decode(dm.seq, "Y", "N"),
+            dm.service_resource_cd,
+            dm.task_assay_cd,
+            dm.data_map_type_flag,
+            dm.max_digits,
+            dm.min_decimal_places,
+            dm.min_digits,
+            dm.result_entry_format,
+;001            cv_dm.cdf_meaning
+            d_rg.seq,                                                  ;001
+            rg_exists = decode(rg.seq, "Y", "N"),                      ;001
+            rg.parent_service_resource_cd,                             ;001
+            rg.child_service_resource_cd,                              ;001
+            rg.resource_group_type_cd,                                 ;001
+            rg.root_service_resource_cd                                ;001
+            */
+
+         from
+            (dummyt d with seq = value(nbr_of_assays)),
+            (dummyt d_dm with seq = 1),
+            data_map dm,
+;001            code_value cv_dm
+            (dummyt d_rg with seq = 1),                                ;001
+            resource_group rg                                          ;001
+
+         plan d
+         join d_dm  where d_dm.seq = 1
+         join dm    where dm.task_assay_cd = request->qual[d.seq].task_assay_cd
+                      and dm.data_map_type_flag in (0, 1)
+                      and dm.active_ind = 1
+;001         join cv_dm where cv_dm.code_value = dm.service_resource_cd
+         join d_rg  where d_rg.seq = 1                                 ;001
+         join rg    where rg.parent_service_resource_cd =              ;001
+                            dm.service_resource_cd                     ;001
+                      and rg.child_service_resource_cd =               ;001
+                            request->qual[d.seq].service_resource_cd   ;001
+                      and rg.resource_group_type_cd =                  ;001
+                            serv_res_subsection_cd                     ;001
+                      and rg.root_service_resource_cd = 0.0            ;001
+
+         head report
+            q_cnt = 0
+            data_map_level = 0
+
+         head d.seq
+            cnt = d.seq
+            q_cnt = q_cnt + 1
+            if (mod(q_cnt,10) = 1)
+               stat = alterlist(reply->qual, q_cnt + 10)
+            endif
+            data_map_level = 0
+            reply->qual[q_cnt].accession_id =
+              request->qual[cnt].accession_id
+            reply->qual[q_cnt].order_id =
+              request->qual[cnt].order_id
+            reply->qual[q_cnt].task_assay_cd =
+              request->qual[cnt].task_assay_cd
+            reply->qual[q_cnt].service_resource_cd =
+              request->qual[cnt].service_resource_cd
+            reply->qual[q_cnt].data_map_ind = 0
+
+         detail
+            if (dm_exists = "Y")
+               ;* Check for exact match on QC data map
+               if (data_map_level <= 3
+               and request->qual[cnt].data_map_type_flag = 1
+               and dm.data_map_type_flag = 1
+               and dm.service_resource_cd > 0.0
+               and dm.service_resource_cd = 
+                                  request->qual[cnt].service_resource_cd)
+                  data_map_level = 4
+                  reply->qual[q_cnt].data_map_ind = 1
+                  reply->qual[q_cnt].used_service_resource_cd = 
+                    dm.service_resource_cd
+                  reply->qual[q_cnt].data_map_type_flag = 
+                    dm.data_map_type_flag
+                  reply->qual[q_cnt].max_digits = dm.max_digits
+                  reply->qual[q_cnt].min_digits = dm.min_digits
+                  reply->qual[q_cnt].min_decimal_places =
+                    dm.min_decimal_places
+                  reply->qual[q_cnt].result_entry_format =
+                    dm.result_entry_format
+               endif
+               ;* Check for exact match on data map
+               if (data_map_level <= 2
+               and dm.data_map_type_flag = 0
+               and dm.service_resource_cd > 0.0
+               and dm.service_resource_cd = 
+                                  request->qual[cnt].service_resource_cd)
+                  data_map_level = 3
+                  reply->qual[q_cnt].data_map_ind = 1
+                  reply->qual[q_cnt].used_service_resource_cd = 
+                    dm.service_resource_cd
+                  reply->qual[q_cnt].data_map_type_flag = 
+                    dm.data_map_type_flag
+                  reply->qual[q_cnt].max_digits = dm.max_digits
+                  reply->qual[q_cnt].min_digits = dm.min_digits
+                  reply->qual[q_cnt].min_decimal_places =
+                    dm.min_decimal_places
+                  reply->qual[q_cnt].result_entry_format =
+                    dm.result_entry_format
+               endif
+               ;* Check for subsection level data map
+               if (data_map_level <= 1
+               and dm.service_resource_cd > 0.0
+               and rg_exists = "Y"                                     ;001
+               and rg.parent_service_resource_cd =                     ;001
+                             dm.service_resource_cd                    ;001
+               and rg.child_service_resource_cd =                      ;001
+                             request->qual[cnt].service_resource_cd)   ;001
+;001               and cv_dm.cdf_meaning = SERV_RES_SUBSECTION_CDF)
+                  data_map_level = 2
+                  reply->qual[q_cnt].data_map_ind = 1
+                  reply->qual[q_cnt].used_service_resource_cd = 
+                    dm.service_resource_cd
+                  reply->qual[q_cnt].data_map_type_flag = 
+                    dm.data_map_type_flag
+                  reply->qual[q_cnt].max_digits = dm.max_digits
+                  reply->qual[q_cnt].min_digits = dm.min_digits
+                  reply->qual[q_cnt].min_decimal_places =
+                    dm.min_decimal_places
+                  reply->qual[q_cnt].result_entry_format =
+                    dm.result_entry_format
+               endif
+               ;* Check for default all resources level data map
+               if (data_map_level = 0
+               and dm.service_resource_cd = 0.0)
+                  data_map_level = 1
+                  reply->qual[q_cnt].data_map_ind = 1
+                  reply->qual[q_cnt].used_service_resource_cd = 
+                    dm.service_resource_cd
+                  reply->qual[q_cnt].data_map_type_flag = 
+                    dm.data_map_type_flag
+                  reply->qual[q_cnt].max_digits = dm.max_digits
+                  reply->qual[q_cnt].min_digits = dm.min_digits
+                  reply->qual[q_cnt].min_decimal_places =
+                    dm.min_decimal_places
+                  reply->qual[q_cnt].result_entry_format =
+                    dm.result_entry_format
+               endif
+            endif
+  
+         foot d.seq
+            row+0
+
+         foot report
+            stat = alterlist(reply->qual, q_cnt)
+
+         with 
+            nocounter,
+            outerjoin = d_dm,
+            dontcare = dm,
+;001            dontcare = cv_dm
+            outerjoin = d_rg,                                          ;001
+            dontcare = rg                                              ;001
+
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/
+      #Resize_Reply
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+         endif
+
+      #Exit_Script
+         end
+         go      
+
+;Generated by GNU enscript 1.6.4.

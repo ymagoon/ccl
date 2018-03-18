@@ -1,0 +1,876 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_transfus_log.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_rpt_transfus_log.prg
+        Object name:            bbt_rpt_transfus_log
+        Request #:              225190
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Report transfused units
+
+        Tables read:            transfusion, product, product_event, patient_dispense,
+                                person, prsnl, blood_product, derivative, person_aborh,
+                                encntr_alias, bbhist_product_event, bbhist_product,
+                                encntr_alias, code_value
+
+        Tables updated:         none
+
+        Executing from:         ReportSelection.exe
+                                operations
+
+        Special Notes:
+        Flow of script
+1) Declare record structure to store report data
+2) Load constants/captions
+3) Read data from activity tables and store into structure
+4) Read data from history tables and store into structure, flagging these products as from history
+5) Generate the report data
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 09/30/96 Brian Franke         Initial Release                     *
+;     001 03/08/97 Lisa Grayson         Send status value back in reply     *
+;     001 05/16/97 Jon Weekes           Added dummy, outerjoin and dontcare *
+;       for person_aborh so that persons with no blood type would be printed*
+;       on report.                                                          *
+;     004 06/12/97 Doug Saus            Modified to select owner and inventory
+;                                       areas                               *
+;     005 03/24/98 Matt Benson          Modified to retrieve Institution    *
+;                                       name from preferences               *
+;     006 06/22/98 Amy Therrien         Modified to sort by alias           *
+;     007 07/26/98 Jon Weekes           Additional modifications for persons*
+;                                       with no person_aborh row            *
+;     008 12/31/98 John Rieck           Added logic to print location name  *
+;                                       and address. Added the address_     *
+;                                       location_cd to request.  Added bbt_ *
+;                                       get_location_info.inc and bbt_print_*
+;                                       location_info.inc.                  *
+;     009 05/21/99 Jose Suarez          change cer_temp to cer_print        *
+;     010 08/19/99 Doug Saus            UAR changes                         *
+;     011 09/09/99 Badari Kopparapu     Modified to use bbt_ops_owninvloc.inc
+;                                       for processing owner area, inventory*
+;                                       area & location address from batch  *
+;                                       selection field in Ops Job Templates*
+;                                       Modified to use ops_date for computing
+;                                       the report date range. Also modified*
+;                                       to parse for SORT[..] from batch_selection
+;     012 09/09/99 Badari Kopparapu     Modified the report filename from   *
+;                                       bbt_trnsfus_log to bbt_transfus_log *
+;     013 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       removed bbt_ops_owninvloc.inc and   *
+;                                       added bbt_ops_parm_passed.inc       *
+;     006 08/09/00 Lawrence Dsouza      internationalized date and time     *
+;     015 02/27/01 Rob Peterson         Internationalize script             *
+;     016 12/21/01 Ronda Zheng          Changed the script to select the report*
+;                                       data into a structure first. Read from*
+;                                       live tables and fill out the structure, *
+;                                       then read from history tables and fill*
+;                                       out the structure                     *
+;     017 07/26/02 Jason Osborn			Unique RPT filename project			*
+;     018 11/21/03 Chris Noe            Replaced code value and code value  *
+;                                       extension selects with UAR calls.   *
+;     019 05/24/04 Jim Jensen           Extend ABORH fields to 7 characters *
+;                                       Add qualification on active_ind when*
+;                                       joining to encntr_alias table.      *
+;     020 06/29/04 David Fifer          Rearranged the report to handle a 25*
+;                                       character eurocode product number   *
+;                                       and set the maximum columns to 125. *
+;     021 05/17/05 Cedric Daniels       Fix (CAPEP00122471) to print the    *
+;                                       Transfusion Log report if you specify*
+;                                       to sort by physician.               *
+;	  022 07/10/12 Gayatri Samala       Fix to avoid duplicate products in  *
+;										the report, when encounters are combined*
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+DROP PROGRAM BBT_RPT_TRANSFUS_LOG:dba GO
+CREATE PROGRAM BBT_RPT_TRANSFUS_LOG:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+        /*
+        record request
+        (
+          1  beg_transfuse_dt_tm        = di8
+          1  end_transfuse_dt_tm        = di8
+          1  report_selection           = c1  1 - No physician, sort by patient
+                                              5 - No physician, sort by MRN
+                                              2 - No physician, sort by date
+                                              3 - All physicians
+                                              4 - Selected physician
+          1  physician_selection        = f8
+          1  printer_name               = vc
+          1  batch_selection            = c100
+          1  output_dist                = c100
+          1  ops_date                   = dq8
+          1  cur_owner_area_cd          = f8
+          1  cur_inv_area_cd            = f8
+          1  address_location_cd        = f8    ;008
+        )
+        */
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+        record reply
+        (
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+        )
+
+;Begin 014
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+ 
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+record captions
+(
+  1  rpt_title                  = vc
+  1  rpt_time                   = vc
+  1  rpt_as_of_date             = vc
+  1  begin_date                 = vc
+  1  ending_date                = vc
+  1  physician                  = vc
+  1  not_on_file                = vc
+  1  by_patient_name            = vc
+  1  by_med_rec_num             = vc
+  1  blood_bank_owner           = vc
+  1  inventory_area             = vc
+  1  by_transfusion_dt_tm       = vc
+  1  for_all_physicians         = vc
+  1  for_specific_physicians    = vc
+  1  patient_info               = vc
+  1  unit_info                  = vc
+  1  name                       = vc
+  1  alias                      = vc
+  1  abo_rh                     = vc
+  1  product_number             = vc
+  1  product_type               = vc
+  1  qty                        = vc
+  1  transfused                 = vc
+  1  rpt_id                     = vc
+  1  rpt_page                   = vc
+  1  printed                    = vc
+  1  end_of_report              = vc
+  1  all                        = vc
+  1  hist_note                  = vc
+  1  end_of_report              = vc
+)
+ 
+set captions->rpt_title = uar_i18ngetmessage(i18nHandle,
+  "rpt_title", "T R A N S F U S I O N  L O G")
+set captions->rpt_time = uar_i18ngetmessage(i18nHandle,
+  "rpt_time", "Time:")
+set captions->rpt_as_of_date = uar_i18ngetmessage(i18nHandle,
+  "rpt_as_of_date", "As of Date:")
+set captions->begin_date = uar_i18ngetmessage(i18nHandle,
+  "begin_date", "Beginning Date:")
+set captions->ending_date = uar_i18ngetmessage(i18nHandle,
+  "ending_date", "Ending Date:")
+set captions->physician = uar_i18ngetmessage(i18nHandle,
+  "physician", "Physician:")
+set captions->not_on_file = uar_i18ngetmessage(i18nHandle,
+  "not_on_file", "<Not on File>")
+set captions->by_patient_name = uar_i18ngetmessage(i18nHandle,
+  "by_patient_name", "(by Patient Name)")
+set captions->by_med_rec_num = uar_i18ngetmessage(i18nHandle,
+  "by_med_rec_num", "(by Medical Record Number)")
+set captions->blood_bank_owner = uar_i18ngetmessage(i18nHandle,
+  "blood_bank_owner", "Blood Bank Owner: ")
+set captions->inventory_area = uar_i18ngetmessage(i18nHandle,
+  "inventory_area", "Inventory Area:")
+set captions->by_transfusion_dt_tm = uar_i18ngetmessage(i18nHandle,
+  "by_transfusion_dt_tm", "(by Transfusion Date/Time)")
+set captions->for_all_physicians = uar_i18ngetmessage(i18nHandle,
+  "for_all_physicians", "(for All Physicians)")
+set captions->for_specific_physicians = uar_i18ngetmessage(i18nHandle,
+  "for_specific_physicians", "(for Specific Physician)")
+set captions->patient_info = uar_i18ngetmessage(i18nHandle,
+  "patient_info",
+  "------------------  PATIENT INFORMATION  -----------------")
+set captions->unit_info = uar_i18ngetmessage(i18nHandle,
+  "unit_info",
+  "----------------------  UNIT INFORMATION  ------------------------")
+set captions->name = uar_i18ngetmessage(i18nHandle,
+  "name", "NAME")
+set captions->alias = uar_i18ngetmessage(i18nHandle,
+  "alias", "ALIAS")
+set captions->abo_rh = uar_i18ngetmessage(i18nHandle,
+  "abo_rh", "ABO/Rh")
+set captions->product_number = uar_i18ngetmessage(i18nHandle,
+  "product_number", "PRODUCT NUMBER")
+set captions->product_type = uar_i18ngetmessage(i18nHandle,
+  "product_type", "PRODUCT TYPE")
+set captions->qty = uar_i18ngetmessage(i18nHandle,
+  "qty", "QTY")
+set captions->transfused = uar_i18ngetmessage(i18nHandle,
+  "transfused", "TRANSFUSED")
+set captions->rpt_id = uar_i18ngetmessage(i18nHandle,
+  "rpt_id", "Report ID: BBT_RPT_TRANSFUS_LOG")
+set captions->rpt_page = uar_i18ngetmessage(i18nHandle,
+  "rpt_page", "Page:")
+set captions->printed = uar_i18ngetmessage(i18nHandle,
+  "printed", "Printed:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+set captions->all = uar_i18ngetmessage(i18nHandle,
+  "all", "(All)")
+set captions->hist_note = uar_i18ngetmessage(i18nHandle,
+  "hist_note", "* - From product history upload.")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+
+/***********************************************
+*       Script                                 *
+************************************************/
+/* Variable declaration*/
+;016
+declare rpt_cnt = i2                with noconstant(0)
+declare rpt_filename = c32          with noconstant(fillstring(32, " "))
+declare mrn_code = f8               with noconstant(0.0)
+declare transfuse_code = f8         with noconstant(0.0)
+declare code_cnt = i4               with noconstant(1)
+declare prod_cnt = i4               with noconstant(0)
+declare aborh_index = i4            with noconstant(0)
+declare LINE = vc                   with noconstant(fillstring(125, "_"))	;020
+declare finish_flag = c1            with noconstant(fillstring(1, "N"))
+declare failed = c1                 with noconstant(fillstring(1, "F"))
+declare cur_owner_area_disp = c40   with noconstant(fillstring(40, " "))
+declare cur_inv_area_disp = c40     with noconstant(fillstring(40, " "))
+
+declare sort_patient = c1         with constant("1")
+declare sort_date = c1            with constant("2")
+declare sort_all_phys = c1        with constant("3")
+declare sort_sel_phys = c1        with constant("4")
+declare sort_mrn = c1             with constant("5")
+
+/* Determine if printing out of Ops */
+
+if (trim(request->batch_selection) > " ")
+  set begday = request->ops_date
+  set endday = request->ops_date
+  set temp_string = cnvtupper(trim(request->batch_selection))
+  CALL CHECK_OPT_DATE_PASSED("bbt_rpt_transfus_log")
+  if (reply->status_data->status != "F")
+        set request->beg_transfuse_dt_tm = begday
+        set request->end_transfuse_dt_tm = endday
+  endif
+
+  set sort_selection = fillstring(20," ")
+  call CHECK_SORT_OPT ("bbt_rpt_transfus_log")
+  if (sort_selection = "DATE")
+    set request->report_selection = sort_date
+  elseif (sort_selection = "PHYSICIAN")
+    set request->report_selection = sort_all_phys
+  elseif (sort_selection = "NAME")
+    set request->report_selection = sort_patient          ;by default sort by name
+  else
+    set request->report_selection = sort_patient          ;by default sort by name
+  endif
+ 
+  call CHECK_OWNER_CD ("bbt_rpt_transfus_log")
+  call CHECK_INVENTORY_CD ("bbt_rpt_transfus_log")
+  call CHECK_LOCATION_CD ("bbt_rpt_transfus_log")
+
+  set request->printer_name = trim(request->output_dist)
+endif
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+
+;008 %i cclsource:bbt_get_inst_name.inc
+%i cclsource:bbt_get_location_info.inc
+ 
+/* Retrieve display values for requested Owner Area and Inventory Area */
+if (request->cur_owner_area_cd = 0.0)
+  set cur_owner_area_disp = captions->all
+else
+  set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+endif
+if (request->cur_inv_area_cd = 0.0)
+  set cur_inv_area_disp = captions->all
+else
+  set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+endif
+
+;initialize status value to failed (LSJ 03/08/97)
+set reply->status_data->status = "F"
+
+;008 Changed code_value selects to uar_get functions
+
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(319, nullterm("MRN"), code_cnt, mrn_code)
+
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(1610, nullterm("7"), code_cnt, transfuse_code)
+
+if (mrn_code = 0.0 or transfuse_code = 0.0)
+  set failed = "T"
+  go to exit_script
+endif
+
+declare person_abo_disp        = c40    with noconstant(fillstring(40, " "))
+declare person_rh_disp         = c40    with noconstant(fillstring(40, " "))
+declare product_abo_disp       = c40    with noconstant(fillstring(40, " "))
+declare product_rh_disp        = c40    with noconstant(fillstring(40, " "))
+
+set reply->status_data->status = "F"
+set sErrorMsg = FILLSTRING(255," ")
+set nErrorStatus = ERROR(sErrorMsg,1)
+
+;begin 016
+/*********************************************
+* record structure to store report data      *
+*********************************************/
+Record trans_data
+(
+    1 products[*]                   ;ACTIVITY TABLE.FIELD               HISTORY TABLE.FIELD
+        2 history_ind = i2          ;0                                  1
+        2 physician_id = f8         ;patient_dispense.dispense_prov_id  bbhist_product_event.prsnl_id
+        2 physician_name = vc
+        2 person_id = f8
+        2 person_name = vc
+        2 person_alias = vc
+        2 person_alias_id = f8
+        2 person_aborh = vc         ;person_aborh.abo_cd/
+                                    ;person_aborh.rh_cd
+        2 product_id = f8
+        2 product_aborh = vc        ;blood_product.cur_abo_cd /         bbhist_product.abo_cd/bbhist_product.rh_cd
+                                    ;blood_product.cur_rh_cd
+        2 product_prefix = vc       ;blood_product.supplier_prefix      bbhist_product.supplier_prefix
+        2 product_nbr = c25         ;product.product_nbr                bbhist_product.product_nbr
+        2 product_sub_nbr = c5      ;product.product_sub_nbr            bbhist_product.product_sub_nbr
+        2 product_type = vc         ;product.product_cd                 bbhist_product.product_cd
+        2 qty = c4                  ;transfusion.cur_transfuse_qty      bbhist_product_event.qty
+        2 transfuse_dt_tm = dq8     ;product_event.event_dt_tm          bbhist_product_event.event_dt_tm
+)
+
+/*********************************************
+* select to read data from the live tables
+*********************************************/
+
+select into "nl:"
+     alias_exists = decode(ea.seq, "Y", "N")
+    ,pers_name = per.name_full_formatted
+    ,phys_name = prs.name_full_formatted
+    ,phys_id   = pd.dispense_prov_id
+    ,prod_type = uar_get_code_display(pr.product_cd)
+    ,pr.product_nbr
+    ,pr.product_sub_nbr
+    ,tr.cur_transfused_qty
+    ,pe.event_dt_tm
+    ,flag    = decode(bp.seq, "Y", "N")  ; used to determine if the product will have an ABORH
+
+from
+     transfusion tr
+    ,product pr
+    ,product_event pe
+    ,patient_dispense pd
+    ,person per
+    ,prsnl prs
+    ,(dummyt d_bp with seq = 1)
+    ,blood_product bp
+    ,(dummyt d_pa with seq = 1)
+    ,person_aborh pa
+    ,(dummyt d_ea with seq = 1)
+    ,encntr_alias ea
+
+plan pe
+    where pe.event_type_cd = transfuse_code
+      and (pe.event_dt_tm between cnvtdatetime(request->beg_transfuse_dt_tm)
+                              and cnvtdatetime(request->end_transfuse_dt_tm))
+      and pe.active_ind = 1
+join tr
+    where tr.product_event_id = pe.product_event_id
+      and tr.active_ind = 1
+join pr
+    where tr.product_id = pr.product_id
+      and ((   request->cur_owner_area_cd > 0.0
+           and request->cur_owner_area_cd = pr.cur_owner_area_cd)
+          or (request->cur_owner_area_cd = 0.0))
+      and ((request->cur_inv_area_cd > 0.0
+           and request->cur_inv_area_cd = pr.cur_inv_area_cd)
+          or (request->cur_inv_area_cd = 0.0))
+join pd
+    where pe.related_product_event_id = pd.product_event_id
+      and ((    request->report_selection = sort_sel_phys
+            and pd.dispense_prov_id = request->physician_selection)
+          or
+           (request->report_selection in (sort_patient, sort_date,
+                                          sort_all_phys, sort_mrn)))
+join prs
+    where pd.dispense_prov_id = prs.person_id
+join per
+    where pe.person_id = per.person_id
+
+join (d_bp where d_bp.seq = 1
+      join bp
+        where tr.product_id = bp.product_id)
+
+join (d_pa where d_pa.seq = 1
+      join pa
+        where pe.person_id = pa.person_id
+          and pa.active_ind = 1)
+
+join (d_ea where d_ea.seq = 1
+      join ea
+        where ea.encntr_id            = pe.encntr_id
+          and ea.encntr_alias_type_cd = mrn_code
+          and ea.active_ind           = 1 
+          ; add a check for active encounter
+          and ea.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+          and ea.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+
+head report
+  prod_cnt = 0
+ 
+detail
+  person_abo_disp   = (fillstring(40, " "))
+  person_rh_disp    = (fillstring(40, " "))
+  product_abo_disp  = (fillstring(40, " "))
+  product_rh_disp   = (fillstring(40, " "))
+  mrn               = fillstring(20, " ")
+ 
+  prod_cnt = prod_cnt + 1
+ 
+  if (mod(prod_cnt, 10) = 1)
+    stat = alterlist(trans_data->products, prod_cnt + 9)
+  endif
+  if (alias_exists = "Y")
+    mrn = cnvtalias(ea.alias, ea.alias_pool_cd)
+  else
+    mrn = captions->not_on_file
+  endif
+
+  trans_data->products[prod_cnt].history_ind     = 0
+  trans_data->products[prod_cnt].physician_id    = phys_id
+  trans_data->products[prod_cnt].physician_name  = phys_name
+  trans_data->products[prod_cnt].person_id       = per.person_id
+  trans_data->products[prod_cnt].person_name     = substring(1, 30, pers_name)
+  trans_data->products[prod_cnt].person_alias    = substring(1, 20, mrn)
+  trans_data->products[prod_cnt].person_alias_id = ea.encntr_alias_id
+ 
+  person_abo_disp = uar_get_code_display(pa.abo_cd)
+  person_rh_disp = uar_get_code_display(pa.rh_cd)
+  trans_data->products[prod_cnt].person_aborh    = concat(trim(person_abo_disp), " ", trim(person_rh_disp))
+  trans_data->products[prod_cnt].product_id      = pr.product_id
+
+  if (flag = "Y")
+    product_abo_disp = uar_get_code_display(bp.cur_abo_cd)
+    product_rh_disp = uar_get_code_display(bp.cur_rh_cd)
+    trans_data->products[prod_cnt].product_aborh = concat(trim(product_abo_disp), " ", trim(product_rh_disp))
+    trans_data->products[prod_cnt].product_prefix  = trim(bp.supplier_prefix)
+  endif
+ 
+  trans_data->products[prod_cnt].product_nbr     = trim(pr.product_nbr)
+  trans_data->products[prod_cnt].product_sub_nbr = trim(pr.product_sub_nbr)
+  trans_data->products[prod_cnt].product_type    =
+              substring(1, 15, uar_get_code_display(pr.product_cd))
+  trans_data->products[prod_cnt].qty             = trim(cnvtstring(tr.cur_transfused_qty,4,0,R))
+  trans_data->products[prod_cnt].transfuse_dt_tm = pe.event_dt_tm
+ 
+foot report
+  stat = alterlist(trans_data->products, prod_cnt)
+ 
+with nocounter
+    ,outerjoin(d_bp)
+    ,dontcare(bp)
+    ,outerjoin(d_pa)
+    ,dontcare(pa)
+    ,outerjoin(d_ea)
+    ,dontcare(ea)
+ 
+/**************************************
+* select to read from history tables  *
+***************************************/
+
+select into "nl:"
+     alias_exists = decode(ea.seq, "Y", "N")
+    ,pers_name = per.name_full_formatted
+    ,phys_name = prs.name_full_formatted
+    ,phys_id   = bbhpe.prsnl_id
+    ,prod_type = uar_get_code_display(bbhp.product_cd)
+    ,bbhp.product_nbr
+    ,bbhp.product_sub_nbr
+    ,bbhpe.qty
+    ,bbhpe.event_dt_tm
+
+from
+     bbhist_product_event bbhpe
+    ,bbhist_product bbhp
+    ,person per
+    ,prsnl prs
+    ,(dummyt d_pa with seq = 1)
+    ,person_aborh pa
+    ,(dummyt d_ea with seq = 1)
+    ,encntr_alias ea
+
+plan bbhpe
+    where bbhpe.event_type_cd = transfuse_code
+      and (bbhpe.event_dt_tm between cnvtdatetime(request->beg_transfuse_dt_tm)
+                                 and cnvtdatetime(request->end_transfuse_dt_tm))
+      and bbhpe.active_ind = 1
+      and ((    request->report_selection = sort_sel_phys
+            and bbhpe.prsnl_id = request->physician_selection)
+          or
+           (request->report_selection in (sort_patient, sort_date,
+                                          sort_all_phys, sort_mrn)))
+ 
+join bbhp
+    where bbhp.product_id = bbhpe.product_id
+      and ((   request->cur_owner_area_cd > 0.0
+           and request->cur_owner_area_cd = bbhp.owner_area_cd)
+          or (request->cur_owner_area_cd = 0.0))
+      and ((request->cur_inv_area_cd > 0.0
+           and request->cur_inv_area_cd = bbhp.inv_area_cd)
+          or (request->cur_inv_area_cd = 0.0))
+join prs
+    where bbhpe.prsnl_id = prs.person_id
+join per
+    where bbhpe.person_id = per.person_id
+
+join (d_pa where d_pa.seq = 1
+      join pa
+        where bbhpe.person_id = pa.person_id
+          and pa.active_ind = 1)
+
+join (d_ea where d_ea.seq = 1
+      join ea
+        where bbhpe.encntr_id         = ea.encntr_id
+          and ea.encntr_alias_type_cd = mrn_code
+          ; add a check for active encounter
+          and ea.active_ind = 1
+          and ea.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+          and ea.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+
+head report
+  stat = alterlist(trans_data->products, prod_cnt + 10)
+ 
+detail
+  person_abo_disp   = (fillstring(40, " "))
+  person_rh_disp    = (fillstring(40, " "))
+  product_abo_disp  = (fillstring(40, " "))
+  product_rh_disp   = (fillstring(40, " "))
+  mrn               = fillstring(20, " ")
+ 
+  prod_cnt = prod_cnt + 1
+  if (mod(prod_cnt, 10) = 1)
+    stat = alterlist(trans_data->products, prod_cnt + 9)
+  endif
+
+  if (alias_exists = "Y")
+    mrn = cnvtalias(ea.alias, ea.alias_pool_cd)
+  else
+    mrn = captions->not_on_file
+  endif
+ 
+  trans_data->products[prod_cnt].history_ind     = 1
+  trans_data->products[prod_cnt].physician_id    = phys_id
+  trans_data->products[prod_cnt].physician_name  = phys_name
+  trans_data->products[prod_cnt].person_id       = per.person_id
+  trans_data->products[prod_cnt].person_name     = substring(1, 30, pers_name)
+  trans_data->products[prod_cnt].person_alias    = mrn "####################"
+  trans_data->products[prod_cnt].person_alias_id = ea.encntr_alias_id
+  person_abo_disp = uar_get_code_display(pa.abo_cd)
+  person_rh_disp = uar_get_code_display(pa.rh_cd)
+  trans_data->products[prod_cnt].person_aborh    = concat(trim(person_abo_disp), " ", trim(person_rh_disp))
+ 
+  trans_data->products[prod_cnt].product_id      = bbhp.product_id
+
+  product_abo_disp = uar_get_code_display(bbhp.abo_cd)
+  product_rh_disp = uar_get_code_display(bbhp.rh_cd)
+  trans_data->products[prod_cnt].product_aborh   = concat(trim(product_abo_disp), " ", trim(product_rh_disp))
+ 
+  trans_data->products[prod_cnt].product_prefix  = trim(bbhp.supplier_prefix)
+  trans_data->products[prod_cnt].product_nbr     = trim(bbhp.product_nbr)
+  trans_data->products[prod_cnt].product_sub_nbr = trim(bbhp.product_sub_nbr)
+  trans_data->products[prod_cnt].product_type    =
+              substring(1, 15, uar_get_code_display(bbhp.product_cd))
+  trans_data->products[prod_cnt].qty             = trim(cnvtstring(bbhpe.qty,4,0,R))
+  trans_data->products[prod_cnt].transfuse_dt_tm = bbhpe.event_dt_tm
+
+foot report
+  stat = alterlist(trans_data->products, prod_cnt)
+
+with nocounter
+    ,outerjoin(d_pa)
+    ,dontcare(pa)
+    ,outerjoin(d_ea)
+    ,dontcare(ea)
+
+/**************************************/
+/* select to print report             */
+/**************************************/
+set BEG_DT_TM = cnvtdatetime(request->beg_transfuse_dt_tm)
+set END_DT_TM = cnvtdatetime(request->end_transfuse_dt_tm)
+
+set LINE = FILLSTRING(125, "_")		;020
+ 
+execute cpm_create_file_name_logical "bbt_transfus_log", "txt", "x"
+
+select
+    if (request->report_selection in (sort_all_phys, sort_sel_phys))
+        order by
+             trans_data->products[d.seq].physician_name
+            ,trans_data->products[d.seq].physician_id
+            ,trans_data->products[d.seq].person_name
+            ,trans_data->products[d.seq].person_id
+            ,trans_data->products[d.seq].person_alias
+            ,trans_data->products[d.seq].person_alias_id
+            ,cnvtdatetime(trans_data->products[d.seq].transfuse_dt_tm)
+            ,trans_data->products[d.seq].product_nbr
+    elseif (request->report_selection = sort_mrn)
+        order by
+             trans_data->products[d.seq].person_alias
+            ,trans_data->products[d.seq].person_alias_id
+            ,trans_data->products[d.seq].person_name
+            ,trans_data->products[d.seq].person_id
+            ,trans_data->products[d.seq].product_nbr
+            ,cnvtdatetime(trans_data->products[d.seq].transfuse_dt_tm)
+            ,trans_data->products[d.seq].physician_name
+            ,trans_data->products[d.seq].physician_id
+    elseif (request->report_selection = sort_date)
+        order by
+             cnvtdatetime(trans_data->products[d.seq].transfuse_dt_tm)
+            ,trans_data->products[d.seq].person_name
+            ,trans_data->products[d.seq].person_id
+            ,trans_data->products[d.seq].person_alias
+            ,trans_data->products[d.seq].person_alias_id
+            ,trans_data->products[d.seq].product_nbr
+            ,trans_data->products[d.seq].physician_name
+            ,trans_data->products[d.seq].physician_id
+    else /* DEFAULT SORT - if (request->report_selection = sort_patient) */
+        order by
+             trans_data->products[d.seq].person_name
+            ,trans_data->products[d.seq].person_id
+            ,trans_data->products[d.seq].person_alias
+            ,trans_data->products[d.seq].person_alias_id
+            ,cnvtdatetime(trans_data->products[d.seq].transfuse_dt_tm)
+            ,trans_data->products[d.seq].product_nbr
+            ,trans_data->products[d.seq].physician_name
+            ,trans_data->products[d.seq].physician_id
+    endif
+into cpm_cfn_info->file_name_logical
+     d.seq
+    ,physician_id = trans_data->products[d.seq].physician_id
+from
+    (dummyt d with seq = value(size(trans_data->products, 5)))
+plan d
+
+head report
+  if (request->report_selection in (sort_all_phys, sort_sel_phys))
+    first_time = "Y"
+  endif
+  product_display = fillstring(26, " ")		;020
+ 
+head page
+    /* put page header data here */
+      call center(captions->rpt_title,1,125)	;020
+      col 104, captions->rpt_time
+      col 118, CURTIME "@TIMENOSECONDS;;M"
+      row + 1
+      col 104, captions->rpt_as_of_date
+      col 118, CURDATE "@DATECONDENSED;;d"
+%i cclsource:bbt_print_location_info.inc
+      SAVE_ROW = row
+      row 1
+      if (request->report_selection = sort_patient or request->report_selection = sort_mrn )
+        if (request->report_selection = sort_patient)  ;006 AT4131
+          call center(captions->by_patient_name,1,125)		;020
+        else ;request->report_selection = sort_mrn
+          call center(captions->by_med_rec_num,1,125)		;020
+        endif
+ 
+        row SAVE_ROW
+        row + 1
+        col  1, captions->blood_bank_owner
+        col 19, cur_owner_area_disp
+        row + 1
+        col  1, captions->inventory_area
+        col 17, cur_inv_area_disp
+        row + 2
+        col  24, captions->begin_date
+        col  41, BEG_DT_TM "@DATETIMECONDENSED;;d"
+        col  80, captions->ending_date
+        col  94, END_DT_TM "@DATETIMECONDENSED;;d"
+      elseif (request->report_selection = sort_date )
+        call center(captions->by_transfusion_dt_tm,1,125)	;020
+ 
+        row SAVE_ROW
+        row + 2
+        col  24, captions->begin_date
+        COL  41, BEG_DT_TM "@DATETIMECONDENSED;;d"
+        col  80, captions->ending_date
+        COL  94, END_DT_TM "@DATETIMECONDENSED;;d"
+      elseif (request->report_selection = sort_all_phys
+              or request->report_selection = sort_sel_phys )
+        if (request->report_selection = "3")
+          call center(captions->for_all_physicians,1,125)		;020
+        else
+          call center(captions->for_specific_physicians,1,125)		;020
+        endif
+ 
+        row SAVE_ROW
+        row + 2
+        col  24, captions->begin_date
+        col  41, BEG_DT_TM "@DATETIMECONDENSED;;d"
+        col  80, captions->ending_date
+        col  94, END_DT_TM "@DATETIMECONDENSED;;d"
+        row + 2
+        col   1, captions->physician
+        if (trans_data->products[d.seq].physician_name > " ")
+          col 12, trans_data->products[d.seq].physician_name
+        else
+          col  12, captions->not_on_file
+        endif
+      endif
+
+      row + 3
+      col   0, captions->patient_info		;020
+      col  60, captions->unit_info
+      row + 1
+      col  12, captions->name				;020
+      col  36, captions->alias				;020
+      col  48, captions->abo_rh				;020
+      col  56, captions->abo_rh				;020
+      col  70, captions->product_number		;020
+      col  93, captions->product_type
+      col 109, captions->qty
+      col 115, captions->transfused
+      row + 1,
+      col   0, "---------------------------",		;020
+      col  28, "-------------------",				;020
+      col  48, "-------",							;020
+      col  56, "-------",							;020
+      col  64, "--------------------------",		;020
+      col  91, "-----------------",
+      col 109, "----",
+      col 114, "------------",
+      row + 1
+      hist_found = false
+ 
+head physician_id
+    /* may not need to do any processing here, just used to match up with the footer below */
+    /* if this is a report by physician (all or selected), break to a new page after each physician */
+    if (request->report_selection in (sort_all_phys, sort_sel_phys))
+      if (first_time = "Y")
+        first_time = "N"
+      else
+        break
+      endif
+    endif
+detail
+    /* put report data here */
+    /* need to denote each historical product with an * to the left of the product number */
+    col  0 trans_data->products[d.seq].person_name "###########################"	;020
+    col 28 trans_data->products[d.seq].person_alias "####################"			;020
+    col 48 trans_data->products[d.seq].person_aborh "#######"						;020
+    col 56 trans_data->products[d.seq].product_aborh "#######"						;020
+    if (trans_data->products[d.seq].history_ind = 0)
+      product_display = concat(trim(trans_data->products[d.seq].product_prefix),
+                               trim(trans_data->products[d.seq].product_nbr), " ",
+                               trim(trans_data->products[d.seq].product_sub_nbr))
+    else
+      product_display = concat("*", trim(trans_data->products[d.seq].product_prefix),
+                                     trim(trans_data->products[d.seq].product_nbr), " ",
+                                     trim(trans_data->products[d.seq].product_sub_nbr))
+      hist_found = true
+    endif
+    col  64, product_display "##########################"	;020
+    col  91 trans_data->products[d.seq].product_type
+    col 109 trans_data->products[d.seq].qty
+    col 114 trans_data->products[d.seq].transfuse_dt_tm "@DATETIMECONDENSED;;d"
+    row + 2
+    if (row > 56)
+      break
+    endif
+;foot physician_id
+
+foot page
+    /* if a historical product was printed on this page, need to print a footer with a note indicating
+       what the * means.  See TDD for message. */
+      row  57
+      col   1,  LINE,
+      row + 1
+      col   1, captions->rpt_id                                        ;014
+      col  58, captions->rpt_page                                      ;014
+      col  64, CURPAGE "###",
+      col 100, captions->printed                                       ;014
+      col 110, CURDATE "@DATECONDENSED;;d"
+      col 120, curtime "@TIMENOSECONDS;;M"
+      if (hist_found)
+        row + 1
+        col   1, captions->hist_note
+      endif
+
+foot report
+     row  60
+     call center(captions->end_of_report, 1, 125)
+ 
+with nocounter
+    ,nullreport
+    ,maxrow = 61
+    ,maxcol = 132
+    ,compress
+    ,nolandscape
+
+;end 016
+
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+
+if (request->batch_selection > " ")
+  set spool value(reply->rpt_list[rpt_cnt].rpt_filename) value(request->printer_name)
+endif
+
+#exit_script
+   set nErrorStatus = ERROR(sErrorMsg, 0)
+   if (nErrorStatus != 0)
+     set reply->status_data->status = "F"
+   else
+     if (failed = "T")
+       set reply->status_data->status = "F"
+     else
+       set reply->status_data->status = "S"
+     endif
+   endif
+   free record captions
+   free record trans_data
+
+END
+GO
+
+;Generated by GNU enscript 1.6.4.

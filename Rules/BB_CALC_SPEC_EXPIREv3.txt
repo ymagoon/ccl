@@ -1,0 +1,442 @@
+drop program bb_calc_spec_expire go
+create program bb_calc_spec_expire
+ 
+free set requestin
+free set specreplyin225067
+ 
+/*****************************************************************************/
+/* Request record                                                            */
+/*****************************************************************************/
+ 
+record requestin
+(
+   1 alert_ind            = c1    ; "Y" = processing for an alert, otherwise will return data
+   1 PersonList[*]
+     2 person_id          = f8
+     2 filter_encntr_id   = f8
+     2 encntr_facility_cd = f8    ; Use only when want to calculate by a specific facility (eg. encntr combines).
+   1 facility_cd          = f8
+   1 app_key              = c10   ; pass as "AVAILSPECS", if script is called from Available Specimens
+)
+ 
+/*****************************************************************************/
+/* Reply record used to store data from BBT_GET_AVAIL_FLEX_SPECS             */
+/*****************************************************************************/
+record specreplyin225067
+(
+   1 historical_demog_ind              = i2
+   1 PersonList[*]
+     2 alert_flag                      = c1    ; Set when request->alert_ind = 1 ("Y" = avail specimen found)
+     2 person_id                       = f8
+     2 new_sample_dt_tm                = dq8
+     2 name_full_formatted             = c40
+     2 Specimen[*]
+       3 specimen_id                   = f8
+       3 encntr_id                     = f8
+       3 override_id                   = f8
+       3 override_cd                   = f8
+       3 override_disp                 = vc
+       3 override_mean                 = c12
+       3 drawn_dt_tm                   = dq8
+       3 unformatted_accession         = c20
+       3 accession                     = c20
+       3 expire_dt_tm                  = dq8
+       3 flex_on_ind                   = i2      ; 0 = no (not as much info is populated), 1 = yes
+       3 flex_max                      = i4
+       3 flex_days_hrs_mean            = c12
+       3 historical_name               = c40
+       3 encntr_facility_cd            = f8
+       3 testing_facility_cd           = f8
+       3 Orders[*]
+         4 order_id                    = f8
+         4 order_mnemonic              = vc
+         4 status                      = c40    ; Display of orders table dept_status_cd
+         4 Products[*]
+           5 product_nbr_display       = vc
+           5 product_id                = f8
+           5 product_event_id          = f8
+           5 product_type_cd           = f8
+           5 product_type_disp         = vc
+           5 locked_ind                = i2
+           5 crossmatch_expire_dt_tm   = dq8
+           5 updt_applctx              = f8
+         4 order_status_cd             = f8
+         4 order_status_disp           = vc
+         4 order_Status_mean           = c12
+         4 catalog_cd                  = f8
+         4 catalog_disp                = vc
+         4 catalog_mean                = c12
+         4 phase_group_cd              = f8
+         4 phase_group_disp            = vc
+         4 phase_group_mean            = c12
+       3 max_expire_dt_tm 			   = dq8
+       3 max_expire_flag  			   = i2
+       3 is_expired_flag               = i2
+%i cclsource:status_block.inc
+)
+
+/*****************************************************************************/
+/* Temp Record used to store valid specimens after invalid orders excluded   */
+/*****************************************************************************/
+/*
+record valid_orders
+(
+   1 PersonList[1]
+     2 person_id                       = f8
+     2 name_full_formatted             = c40
+     2 is_valid						   = i2
+     2 Specimen[*]
+       3 specimen_id                   = f8
+       3 encntr_id                     = f8
+       3 unformatted_accession         = c20
+       3 accession                     = c20
+       3 expire_dt_tm                  = dq8
+       3 Orders[*]
+         4 order_id                    = f8
+         4 catalog_cd                  = f8
+       3 is_expired_flag               = i2
+)
+ 
+/*****************************************************************************/
+/* Variable Declaration                                                      */
+/*****************************************************************************/
+ 
+declare plist_cnt					   = i2
+declare slist_cnt 					   = i2
+declare olist_cnt					   = i2
+declare opt_valid_abo				   = i2
+declare opt_valid_absc				   = i2
+declare opt_valid_xm				   = i2
+declare opt_valid_tot				   = i2
+declare valid_abo					   = i2
+declare valid_absc					   = i2
+declare valid_xm					   = i2
+declare facility_cd 				   = f8
+declare accession_id				   = f8
+declare j_idx						   = i2
+declare l_idx 						   = i2
+declare log_type					   = i2
+ 
+declare ACTIVITY_TYPE_CS               = i4   with protect, constant(106)
+ 
+declare BB_ACTIVITY_TYPE_CDF           = c12  with protect, constant("BB")
+declare bb_activity_type_cd            = f8   with protect, noconstant(0.0)
+ 
+declare BB_ORDERABLE_PROC_CS           = i4   with protect, constant(1635)
+ 
+declare ABO_ORDER_CDF           	   = vc  with protect, constant("PATIENT ABO")
+declare abo_order_cd             	   = f8   with protect, noconstant(0.0)
+ 
+declare ABSC_C_ORDER_CDF         	   = vc  with protect, constant("ABSC CI")
+declare absc_c_order_cd                = f8   with protect, noconstant(0.0)
+ 
+declare ABSC_ORDER_CDF          	   = vc  with protect, constant("ABNTIBDY SCRN")
+declare absc_order_cd            	   = f8   with protect, noconstant(0.0)
+ 
+declare XM_ORDER_CDF             	   = vc  with protect, constant("XM")
+declare xm_order_cd              	   = f8  with protect, noconstant(0.0)
+ 
+set abo_order_cd = uar_get_code_by("MEANING", BB_ORDERABLE_PROC_CS, nullterm(ABO_ORDER_CDF))
+set absc_c_order_cd = uar_get_code_by("MEANING", BB_ORDERABLE_PROC_CS, nullterm(ABSC_C_ORDER_CDF))
+set absc_order_cd = uar_get_code_by("MEANING", BB_ORDERABLE_PROC_CS, nullterm(ABSC_ORDER_CDF))
+set xm_order_cd = uar_get_code_by("MEANING", BB_ORDERABLE_PROC_CS, nullterm(XM_ORDER_CDF))
+ 
+set bb_activity_type_cd = uar_get_code_by("MEANING", ACTIVITY_TYPE_CS, nullterm(BB_ACTIVITY_TYPE_CDF))
+
+/*****************************************************************************/
+/* Validate OPS_PARAM Parameters                                             */
+/*****************************************************************************/
+
+if ($1 = 1)
+	set opt_valid_abo = 1
+elseif ($1 > 1 or $1 <0)
+	set log_type = 4
+	go to EXIT_SCRIPT
+endif
+ 
+if ($2 = 1)
+	set opt_valid_absc = 1
+elseif ($2 > 1 or $2 <0)
+	set log_type = 5
+	go to EXIT_SCRIPT
+endif
+ 
+if ($3 = 1)
+	set opt_valid_xm = 1
+elseif ($3 > 1 or $3 <0)
+	set log_type = 6
+	go to EXIT_SCRIPT
+endif
+ 
+;total is used to determine whether valid specimen based on pattern and data returned in select below
+set opt_valid_tot = opt_valid_abo + opt_valid_absc + opt_valid_xm
+
+/*****************************************************************************/
+/* Acquire Patient Facility Location                                         */
+/*****************************************************************************/
+ 
+select into "nl:"
+	e.loc_facility_cd
+from
+	encounter e
+where e.encntr_id = link_encntrid
+	and e.active_ind = 1
+	and e.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime)
+	and e.end_effective_dt_tm >= cnvtdatetime(curdate,curtime)
+ 
+detail
+	facility_cd = e.loc_facility_cd
+WITH  NOCOUNTER
+ 
+/*****************************************************************************/
+/* Populate Requestin Structure                                              */
+/*****************************************************************************/
+ 
+set stat = alterlist(requestin->PersonList,1)
+set requestin->alert_ind = "N"                       ; "Y" = processing for an alert, otherwise will return data
+set requestin->PersonList[1].person_id = link_personid
+set requestin->PersonList[1].filter_encntr_id = 0
+set requestin->PersonList[1].encntr_facility_cd = 0  ; Use only when want to calculate by a specific facility (eg. encntr combines).
+set requestin->facility_cd = facility_cd
+set requestin->app_key = ""                          ; pass as "AVAILSPECS", if script is called from Available Specimens
+ 
+execute bbt_get_avail_flex_specs with REPLACE("REQUEST","REQUESTIN"),
+                                REPLACE("REPLY","SPECREPLYIN225067")
+;call echorecord(SPECREPLYIN225067)
+ 
+/*****************************************************************************/
+/* Initial Record Count Validation                                           */
+/*****************************************************************************/
+
+set slist_cnt = 0 ;size(specreplyin225067->PersonList[1].Specimen,5)
+
+if (size(specreplyin225067->PersonList[1].Specimen,5) < 1)
+	set log_type = 3 ;return true (100)
+	go to EXIT_SCRIPT
+endif
+
+if (specreplyin225067->status_data.status = "Z")
+	set log_type = 7 ;return false (0)
+	go to EXIT_SCRIPT
+
+elseif (specreplyin225067->status_data.status = "F")
+	set log_type = 1 ;return a fail (-1)
+	go to EXIT_SCRIPT
+endif
+
+set plist_cnt = size(specreplyin225067->PersonList,5)
+
+set log_type = -1
+ 
+/*	
+	If specimen only has one order need to ensure that it is not a product order with "No Special Processing" or .Hx order.
+	If it is, the specimen should not be considered valid.
+	If specimen contains > 1 order, ensure that at least one of the orders is a true order a specimen would be collected for.
+*/
+
+for (l_idx = 1 to size(specreplyin225067->PersonList[1].Specimen,5)) ;cycles through bbt_get_avail_flex_specs specimens
+
+	set olist_cnt = 0 ;size(specreplyin225067->PersonList[1].Specimen[l_idx].Orders,5)
+	set valid_abo = 0
+	set valid_absc = 0
+	set valid_xm = 0
+ 
+	for (j_idx = 1 to size(specreplyin225067->PersonList[1].Specimen[l_idx].Orders,5)) ;cycles through list of orders for each specimen
+ 		select 
+			IF (opt_valid_abo = 1 and opt_valid_absc = 1 and opt_valid_xm = 0) ;joins if at least ABORh and ABSC are required
+				Plan oc where oc.activity_type_cd = bb_activity_type_cd
+ 					and oc.active_ind = 1
+ 					and oc.catalog_cd = specreplyin225067->PersonList[1].Specimen[l_idx].Orders[j_idx].catalog_cd
+ 				Join cv where cv.code_set = 200
+ 					and cv.code_value = oc.catalog_cd
+ 				Join cve where cve.code_set = 200
+ 					and cve.code_value = cv.code_value
+ 					;will return one value for each code_value_extension - potential optimization point
+ 					and not cve.field_name = "SPEC EXPIR EXCL"
+ 					and not cve.field_value = "EXCLUDE"
+ 				Join sd where sd.catalog_cd = cve.code_value
+ 					and sd.bb_processing_cd in (abo_order_cd, absc_c_order_cd, absc_order_cd)			
+			ELSEIF (opt_valid_abo = 1 and opt_valid_absc = 0 and opt_valid_xm = 0) ;joins if at least ABORh is required
+				Plan oc where oc.activity_type_cd = bb_activity_type_cd
+ 					and oc.active_ind = 1
+ 					and oc.catalog_cd = specreplyin225067->PersonList[1].Specimen[l_idx].Orders[j_idx].catalog_cd
+ 				Join cv where cv.code_set = 200
+ 					and cv.code_value = oc.catalog_cd
+ 				Join cve where cve.code_set = 200
+ 					and cve.code_value = cv.code_value
+ 					and not cve.field_name = "SPEC EXPIR EXCL"
+ 					and not cve.field_value = "EXCLUDE"
+ 				Join sd where sd.catalog_cd = cve.code_value
+ 					and sd.bb_processing_cd in (abo_order_cd)		
+			ELSEIF (opt_valid_abo = 0 and opt_valid_absc = 1  and opt_valid_xm = 0) ;joins if at least ABSC is required
+				Plan oc where oc.activity_type_cd = bb_activity_type_cd
+ 					and oc.active_ind = 1
+ 					and oc.catalog_cd = specreplyin225067->PersonList[1].Specimen[l_idx].Orders[j_idx].catalog_cd
+ 				Join cv where cv.code_set = 200
+ 					and cv.code_value = oc.catalog_cd
+ 				Join cve where cve.code_set = 200
+ 					and cve.code_value = cv.code_value
+ 					and not cve.field_name = "SPEC EXPIR EXCL"
+ 					and not cve.field_value = "EXCLUDE"
+ 				Join sd where sd.catalog_cd = cve.code_value
+ 					and sd.bb_processing_cd in (absc_c_order_cd, absc_order_cd)
+ 			ELSEIF (opt_valid_abo = 0 and opt_valid_absc = 0  and opt_valid_xm = 0) ;joins if no specimens required
+ 				;no parameters entered
+ 				Plan oc where oc.activity_type_cd = bb_activity_type_cd
+ 					and oc.active_ind = 1
+ 					and oc.catalog_cd = specreplyin225067->PersonList[1].Specimen[l_idx].Orders[j_idx].catalog_cd ;
+ 				Join cv where cv.code_set = 200
+ 					and cv.code_value = oc.catalog_cd
+ 				Join cve where cve.code_set = 200
+ 					and cve.code_value = cv.code_value
+ 					and cve.field_name = "SPEC EXPIR EXCL"
+ 					and cve.field_value = "EXCLUDE"
+ 				Join sd where sd.catalog_cd = cve.code_value 		
+			ELSEIF (opt_valid_abo = 1 and opt_valid_absc = 1 and opt_valid_xm = 1) ;joins if ABORh, ABSC and XM required
+				Plan oc where oc.activity_type_cd = bb_activity_type_cd
+ 					and oc.active_ind = 1
+ 					and oc.catalog_cd = specreplyin225067->PersonList[1].Specimen[l_idx].Orders[j_idx].catalog_cd
+ 				Join cv where cv.code_set = 200
+ 					and cv.code_value = oc.catalog_cd
+ 				Join cve where cve.code_set = 200
+ 					and cve.code_value = cv.code_value
+ 					and not cve.field_name = "SPEC EXPIR EXCL"
+ 					and not cve.field_value = "EXCLUDE"
+ 				Join sd where sd.catalog_cd = cve.code_value
+ 					and sd.bb_processing_cd in (abo_order_cd, absc_c_order_cd, absc_order_cd, xm_order_cd)
+ 			
+			ENDIF
+ 
+		into "nl:"
+			cv.code_value
+			
+		from
+			code_value cv
+			, order_catalog oc
+			, code_value_extension cve
+			, service_directory sd
+		
+		detail 
+			;if (opt_valid_tot > 0 and curqual > 0)
+				olist_cnt = olist_cnt + 1
+				
+				if (sd.bb_processing_cd = abo_order_cd)
+					valid_abo = 1
+				elseif (sd.bb_processing_cd = absc_c_order_cd or sd.bb_processing_cd = absc_order_cd)
+					valid_absc = 1
+				elseif (sd.bb_processing_cd = xm_order_cd)
+					valid_xm = 1
+				endif
+			
+			;elseif (opt_valid_tot = 0 and curqual = 0)
+			;	olist_cnt = olist_cnt + 1
+			;endif
+			
+		with maxrec = 1
+
+	endfor
+ 
+ 	if (opt_valid_tot = 3 and valid_abo = 1 and valid_absc = 1 and valid_xm = 1) ;if ABORh, ABSC and XM required
+ 		if (olist_cnt >= 3)
+			set slist_cnt = slist_cnt + 1
+		endif
+ 	elseif (opt_valid_tot = 2 and (valid_abo = 1 and valid_absc = 1)) ;if ABORh and ABSC are required
+ 		if (olist_cnt >= 2)
+			set slist_cnt = slist_cnt + 1
+		endif
+ 	elseif (opt_valid_tot = 1 and (valid_abo = 1 or valid_absc = 1)) ;if ABORh or ABSC are required
+ 		if (olist_cnt >= 1)
+			set slist_cnt = slist_cnt + 1
+		endif
+	elseif (opt_valid_tot = 0) ;if OPT_PARAM not defined
+ 		if (olist_cnt > 0)
+			set slist_cnt = slist_cnt + 1
+		endif
+	endif
+ 
+endfor
+ 
+;if valid specimens exist return TRUE
+if (slist_cnt > 0)
+	;get accession_id to assign to log variables so they can be used by other templates
+	select
+		oar.accession_id
+	from
+		accession_order_r oar
+	where oar.order_id = specreplyin225067->PersonList[1].Specimen[1].Orders[1].order_id
+ 
+	detail
+		accession_id = oar.accession_id
+	with nocounter
+ 
+ ;logs not currently accurate
+	set log_accessionid = accession_id
+	set log_orderid = specreplyin225067->PersonList[1].Specimen[1].Orders[1].order_id
+	set log_encntrid = specreplyin225067->PersonList[1].Specimen[1].encntr_id
+	set log_personid = specreplyin225067->PersonList[1].person_id
+ 
+	;set log_message = build(log_accessionid,log_orderid,log_encntrid,log_personid)
+	set log_message = build(slist_cnt," valid specimen found ", opt_valid_tot)
+	set retval = 0
+else
+;if no specimens valid then return FALSE
+	set log_type = 3
+	go to EXIT_SCRIPT
+endif
+ 
+/*
+;old code - may want to use similar code above to actually get the expiration date in the log file
+ 
+		if (slist_cnt = 1)
+			;one valid specimen - own separate if statement so log_message output can have correct verbage
+			set log_message = build(slist_cnt," specimen valid with an expiration date of: ",
+			datetimezoneformat(SPECREPLYIN225067->PersonList[1].Specimen[1].expire_dt_tm,curtimezoneapp,"MM/dd/yy hh:mm:ss ZZZ"))
+			set retval = 0
+ 
+		elseif (slist_cnt > 1)
+			;if more than one valid specimen exists then get the largest expiration date to output in EKS_MONITOR report
+			set MaxExpireDtTm = SPECREPLYIN225067->PersonList[1].Specimen[1].expire_dt_tm
+			for (l_idx = 2 to slist_cnt)
+				if (SPECREPLYIN225067->PersonList[1].Specimen[l_idx].expire_dt_tm > MaxExpireDtTm)
+					set MaxExpireDtTm = SPECREPLYIN225067->PersonList[1].Specimen[l_idx].expire_dt_tm
+				endif
+			endfor
+ 
+			set log_message = build(slist_cnt," specimens valid with a maximum expiration date of: ",
+			datetimezoneformat(MaxExpireDtTm,curtimezoneapp,"MM/dd/yy hh:mm:ss ZZZ"))
+			set retval = 0
+ 
+		endif
+*/
+
+#EXIT_SCRIPT
+ 
+if (log_type = 1)
+	;return error and log error handler from script - this should only execute if database is corrupted somehow
+	set log_message = build(" bbt_get_avail_flex_specs failed to execute because: ", trim(specreplyin225067->status_data.
+	subeventstatus[1].TargetObjectValue))
+	set retval = -1
+elseif (log_type = 2)
+	set log_message = " bb_calc_spec_expire failed to populate person record structure. No valid person found. "
+	set retval = -1
+elseif (log_type = 3)
+	;if no specimens are returned the template returns false
+	set retval = 100
+	set log_message = build(" No valid specimen found.",size(specreplyin225067->PersonList[1].Specimen,5),slist_cnt, 
+	olist_cnt)
+elseif (log_type = 4)
+	set retval = -1
+	set log_message = build($1," is not a valid OPT_PARAM for ABORh parameter. Valid Parameters are 1 or 0. ")
+elseif (log_type = 5)
+	set retval = -1
+	set log_message = build($2," is not a valid OPT_PARAM for Antibody Screen parameter. Valid Parameters are 1 or 0. ")
+elseif (log_type = 6)
+	set retval = -1
+	set log_message = build($3," is not a valid OPT_PARAM for Crossmatch parameter. Valid Parameters are 1 or 0. ")
+endif
+
+end
+go
+ 
+;bb_calc_spec_expire go
+ 

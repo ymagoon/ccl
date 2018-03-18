@@ -1,0 +1,2209 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_gl_reeval_results/pfmt_gl_reeval_results.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1999 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+        Source file name:       pfmt_gl_reeval_results.prg
+        Object name:            pfmt_gl_reeval_results
+        Request #:              n/a
+ 
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Retrieve all orders for list of accessions and
+                                reevaluate lab result flags and reference ranges
+                                for situations such as a person's age or sex
+                                changes, the container collection is modified,
+                                etc.
+ 
+        Tables read:            orders,
+                                accession_order_r,
+                                order_laboratory
+ 
+        Tables updated:         None
+ 
+        Executing from:         CRM Process server request 114001
+ 
+        Special Notes:
+ 
+******************************************************************************/
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 07/23/99 Kurt Gugler          Initial Release                     *
+;    *001 02/03/00 Chris Heil           Changes to prevent memory leaks.    *
+;    *002 02/09/00 Chris Heil           Do not write "Z" from get orders    *
+;                                       as error message.                   *
+;    *003 04/28/00 DT3705               Modify script to call SetReplyOut   *
+;                                       when drawn_dt_tm is changed.        *
+;                                       Feature: 11127                      *
+;    *003 05/15/00 DT3705               Added result comment when coll_dt_tm*
+;                                       is changed.  Feature: 11127.        *
+;    *004 07/20/00 DT3705               Set request->drawn_dt_tm to the     *
+;                                       correct order when order coll dt/tm *
+;                                       is modified. Feature: 11127         *
+;    *005 08/21/00 DT3705               Call glb_get_ref_ranges when        *
+;                                       drawn_dt_tm has changed.  This is   *
+;                                       necessary because age_in_minute is  *
+;                                       stored on the top level and         *
+;                                       therefore it's the same for all     *
+;                                       assay_cd's.                         *
+;                                       Feature: 11127.                     *
+;    *006 08/29/00 DT3705               Sort containers by accession        *
+;                                       container nbr before they are       *
+;                                       assigned to temp_req.               *
+;                                       Feature: 11127                      *
+;    *007 08/30/00 DT3705               Add fields in CD record structure.  *
+;                                       Feature: 11127                      *
+;    *008 10/02/00 DT3705               Feature: 13682                      *
+;                                       Service resource is set to the      *
+;                                       verified row's service_resource_cd  *
+;                                       when sex-age change occurs.         *
+;    *009 01/19/01 KS4936               add in logic from                   *
+;                                       glb_get_person_accn                 *
+;    *010 01/29/01 sd4221               Improve error logging               *
+;                                       Feature :- 15673                    *
+;                                       Minor fix to 009                    *
+;    *011 04/12/01 Gary Runde           Exit script if                      *
+;                                       glb_get_orders_by_accn fails or     *
+;                                       if accn is not GLB act_type         *
+;    *012 01/21/02 Gary Runde           Evaluate reference ranges correctly *
+;    *013 07/12/02 Sara Grice           Replace UAR calls with a call to    *
+;                                       GetCodeValueByMeaning.              *
+;                                       Feature: 27004                      *
+;    *014 02/03/03 Gary Runde           Use performing resource not routed  *
+;    *015 11/14/03 Amy Henry            Add glb_format_result.inc to prevent*
+;                                       rounding in the comment section     *
+;    *016 03/05/04 Amy Henry            Add alpha/freetext result types     *
+;                                       so drawn_dt_tm is filled out        *
+;                                       in the setreplyout                  *
+;    *017 04/01/04 Amy Henry            Resolve issue with the concat on    *
+;                                       existing comments that have a       *
+;                                       leading space                       *
+;    *018 11/01/04 Kevin Power          Allow Helix orders to be processed  *
+;    *019 01/19/06 Nick Smith           Add handling for scientific notation*
+;    *020 09/18/08 Oliver Barbara       Add ability to reevaluate ranges for*
+;                                       performed results.                  *
+;    *021 04/28/09 Deshmukh Rahul       Added unknown age indicator for the *
+;                                       patient with null birthdate         *
+;    *    09/28/12 Pradeep Reddy        Fix for the CR 1-319109315          *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program PFMT_GL_REEVAL_RESULTS:dba go
+create program PFMT_GL_REEVAL_RESULTS:dba
+ 
+/***********************************************************************
+ *   declare variables for error trapping and logging.                 *
+ ***********************************************************************/
+%i cclsource:glb_script_logging.inc
+%i cclsource:i18n_uar.inc
+%i cclsource:pcs_code.inc
+%i cclsource:pcs_preference_manager.inc
+ 
+  ;* Declare UAR for formatting values in scientific notation
+  execute accrtl_sci_note
+ 
+  set i18nhandle=0
+  set h=uar_i18nlocalizationinit(i18nhandle,curprog,"",curcclrev)
+  record captions
+  (
+    1 ref_range_change = vc
+    1 coll_dt_tm_change = vc
+    1 coll_dt_tm_modified = vc
+    1 prev_coll_dt_tm = vc
+    1 not_applied_range = vc
+    1 not_defined_str = vc
+    1 within_range = vc
+  )
+  set captions->ref_range_change = uar_i18ngetmessage(i18nhandle,"t1","reference range change")
+  set captions->coll_dt_tm_change = uar_i18ngetmessage(i18nhandle,"t2","coll_dt_tm change")
+  set captions->coll_dt_tm_modified = uar_i18ngetmessage(i18nhandle,"t3","collection date/time has been modified to: ")
+  set captions->prev_coll_dt_tm = uar_i18ngetmessage(i18nhandle,"t4","previous collection date/time: ")
+  set captions->not_applied_range = uar_i18ngetmessage(i18nhandle,"not_applied_range","not applied")
+  set captions->within_range      = uar_i18ngetmessage(i18nhandle,"within_range","within range")
+  set captions->not_defined_str   = uar_i18ngetmessage(i18nhandle,"not_defined_str","not defined")
+ 
+ 
+  set log_program_name = "pfmt_gl_reeval_results"
+  declare rr_accn_cnt = i4                                                 ;003
+  declare rr_cont_cnt = i4                             ;003
+  declare my_validate = i2               ;005--debug
+  declare temp_age_in_min = i4                         ;007
+  declare dFormatedNumRawVal = f8 with protect, noconstant(0.0)
+  call log_message("pfmt_gl_reeval_results: start here.",log_level_debug)    ;003
+ 
+  /***********************************************************************
+   *   print date and time to log file.                                  *
+   ***********************************************************************/
+  select into "nl:"
+    currentdate = cnvtdatetime(curdate,curtime3)
+  detail
+    stext = fillstring(254, " ")
+    stext = concat("started at ", format(currentdate, "dd-mmm-yyyy-hhmm;;d"))
+    call log_message(stext,log_level_debug)
+  with nocounter
+ 
+  if (requestin->reply->status_data->status = "F")
+    set reqinfo->commit_ind = 0
+    call log_message("requestin->reply->status_data->status = f",log_level_info) ;010
+    go to EXIT_SCRIPT
+   endif
+ 
+  /***********************************************************************
+  * initialize variables                                                 *
+  ***********************************************************************/
+ 
+  declare normal_low_changed_ind  = i2 with public, noconstant(0)
+  declare normal_high_changed_ind = i2 with public, noconstant(0)
+  declare critical_cd_changed_ind = i2 with public, noconstant(0)
+  declare ref_ranges_reply_cnt    = i4 with public, noconstant(0)
+  declare cdf_meaning             = c12 with public, noconstant(fillstring(12," "))
+  declare current_result_comment  = vc with public, noconstant(" ")
+  declare new_result_comment      = vc with public, noconstant(" ")
+  declare new_normal_low_str      = vc with public, noconstant(" ")
+  declare new_normal_high_str     = vc with public, noconstant(" ")
+  declare old_normal_low_str      = vc with public, noconstant(" ")
+  declare old_normal_high_str     = vc with public, noconstant(" ")
+  declare reply_nbr_of_assays     = i4 with public, noconstant(0)
+ 
+  declare drawn_dt_tm_chg_ind     = i2 with public, noconstant(0)
+  declare cur_coll_date = vc with public, noconstant("")
+  declare old_coll_date = vc with public, noconstant("")
+ 
+  declare nMinDigits              = i4 with protect, noconstant(0)
+  declare nMaxDigits              = i4 with protect, noconstant(0)
+  declare nMinDecPlaces           = i4 with protect, noconstant(0)
+  declare nLessGreatFlag          = i4 with protect, noconstant(0)
+  declare nSciNotationInd         = i2 with protect, noconstant(0)
+  declare sFormattedResultString  = vc with protect, noconstant("")
+ 
+  declare old_person_id           = f8 with public, noconstant(0.0)
+  declare new_person_id           = f8 with public, noconstant(0.0)
+  declare old_sex_cd              = f8 with public, noconstant(0.0)
+  declare new_sex_cd              = f8 with public, noconstant(0.0)
+  declare old_birth_dt_tm         = f8 with public, noconstant(0.0)
+  declare new_birth_dt_tm         = f8 with public, noconstant(0.0)
+ 
+  declare contributor_system_cd   = f8 with public, noconstant(0.0)
+  declare cerner_prsnl_id         = f8 with public, noconstant(0.0)
+ 
+  declare from_pfmt_gl_reeval_results = i2 with protect, constant(1)
+ 
+  ;Lookback and encounter preferences
+  declare reeval_lookback_pref      = i4 with public, noconstant(0)
+  declare reeval_beg_encntr_pref    = i2 with public, noconstant(0)
+  declare reeval_curr_encntr_pref   = i2 with public, noconstant(0)
+  declare reeval_recent_encntr_pref = i2 with public, noconstant(0)
+  declare curr_person_id            = f8 with public, noconstant(0.0)
+ 
+  declare reeval_performed_pref   = i2 with public, noconstant(0)
+  declare nStatus                 = i2 with protect, noconstant(0)
+  declare lIndex                  = i4 with protect, noconstant(0)
+  declare perform_result_idx      = i4 with public, noconstant(0)
+  declare comment_type_cd         = f8 with public, noconstant(0.0)
+  declare gen_lab_cat_type_cd     = f8 with public, noconstant(0.0)
+  declare fac_type_cd             = f8 with public, noconstant(0.0)
+  declare encounter_fac           = f8 with public, noconstant(0.0)
+  declare prev_encounter_fac      = f8 with public, noconstant(0.0)
+  declare prev_service_res        = f8 with public, noconstant(0.0)
+  declare last_result_id          = f8 with public, noconstant(0.0) ; used for preference
+  declare cur_result_id           = f8 with public, noconstant(0.0)
+  declare prev_result_id          = f8 with public, noconstant(0.0) ; used for repeat results
+ 
+  declare prev_message            = vc with public, noconstant("")
+  declare time_stamp              = vc with public, noconstant("")
+  declare change_reason           = vc with public, noconstant("")
+  declare multi_change            = vc with public, noconstant("")
+  declare pos                     = i4 with protect, noconstant(0)
+  declare eidx                    = i4 with protect, noconstant(0) 
+  ; For consistency in comments, we will use the time the script starts as a time start
+  set time_stamp = format(cnvtdatetime(curdate, curtime3), "@MEDIUMDATETIME")
+ 
+  set multi_change = uar_i18ngetmessage(i18nhandle,"MultipleChanges",
+     "The system applied range changes to multiple performed results and result flags may have changed based on the new ranges.")
+ 
+  set q_cnt = 0
+  set repl_status = "S"
+  set canceled_cd = 0.0                                             ;009
+ 
+  free set acc_list
+  record acc_list
+  (
+    1 qual[*]
+      2 accession_nbr = c20
+      2 person_id = f8
+  )
+ 
+  /***********************************************************************
+  * record cd - code values                                              *
+  ***********************************************************************/
+ 
+  record cd
+  (
+    1 txt_result_type_cd = f8
+    1 alp_result_type_cd = f8  ; also used for afc
+    1 num_result_type_cd = f8
+    1 interp_result_type_cd = f8
+    1 date_result_type_cd = f8
+    1 freetxt_result_type_cd = f8
+    1 cal_result_type_cd = f8
+    1 perform_status_cd = f8  ; used for afc
+    1 verify_status_cd = f8   ; also used for afc
+    1 correct_status_cd = f8
+    1 auto_verf_status_cd = f8
+    1 in_review_status_cd = f8
+    1 corr_in_review_status_cd = f8
+    1 alp_review_cd = f8
+    1 num_review_cd = f8
+    1 num_low_cd = f8
+    1 num_high_cd = f8
+    1 num_normal_cd = f8
+    1 num_critical_cd = f8
+    1 alp_normal_cd = f8
+    1 alp_critical_cd = f8
+    1 alp_abnormal_cd = f8
+    1 na_cd = f8
+    1 delta_type1_cd = f8         ;007
+    1 delta_type2_cd = f8         ;007
+    1 delta_type3_cd = f8         ;007
+    1 delta_type4_cd = f8         ;007
+    1 delta_type_alpha_cd = f8      ;007
+    1 glb_activity_type_cd = f8           ;011
+    1 res_comment_cd = f8
+    1 res_note_cd = f8
+    1 hlx_activity_type_cd = f8
+    1 encntr_can_cd = f8
+  )
+ 
+  set code_set = 0
+  set code_value = 0.0
+  set cdf_meaning = fillstring(12," ")
+  set stat = 0
+  set code_cnt = 1
+ 
+  set code_set = 89
+  set cdf_meaning = "POWERCHART"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set contributor_system_cd = code_value
+ 
+  select into "nl:"
+    cs.prsnl_person_id
+  from
+    contributor_system cs
+  plan cs
+    where cs.contributor_system_cd = contributor_system_cd
+  detail
+    cerner_prsnl_id = cs.prsnl_person_id
+  with nocounter
+ 
+  call log_message (build("cerner_prsnl_id--->",cerner_prsnl_id), log_level_debug)
+ 
+  set code_set = 236            ;007
+  set cdf_meaning = "TYPE_1"          ;007
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->delta_type1_cd = code_value       ;007
+ 
+  set code_set = 236            ;007
+  set cdf_meaning = "TYPE_2"          ;007
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->delta_type2_cd = code_value       ;007
+ 
+  set code_set = 236            ;007
+  set cdf_meaning = "TYPE_3"          ;007
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->delta_type3_cd = code_value       ;007
+ 
+  set code_set = 236            ;007
+  set cdf_meaning = "TYPE_4"          ;007
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->delta_type4_cd = code_value       ;007
+ 
+  set code_set = 236            ;007
+  set cdf_meaning = "TYPE_ALPHA"          ;007
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->delta_type_alpha_cd = code_value      ;007
+ 
+  set code_set = 289
+  set cdf_meaning = "1"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->txt_result_type_cd = code_value                                ;// 289 1
+ 
+  set code_set = 289
+  set cdf_meaning = "2"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->alp_result_type_cd = code_value                                ;// 289 2
+ 
+  set code_set = 289
+  set cdf_meaning = "3"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->num_result_type_cd = code_value                                ;// 289 3
+ 
+  set code_set = 289
+  set cdf_meaning = "4"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->interp_result_type_cd = code_value                             ;// 289 4
+ 
+  set code_set = 289
+  set cdf_meaning = "6"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->date_result_type_cd = code_value                               ;// 289 6
+ 
+  set code_set = 289
+  set cdf_meaning = "7"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->freetxt_result_type_cd = code_value                            ;// 289 7
+ 
+  set code_set = 289
+  set cdf_meaning = "8"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->cal_result_type_cd = code_value                                ;// 289 8
+ 
+  set code_set = 1901
+  set cdf_meaning = "PERFORMED"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->perform_status_cd = code_value                                 ;// 1901 performed
+ 
+  set code_set = 1901
+  set cdf_meaning = "VERIFIED"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->verify_status_cd = code_value                                  ;// 1901 verified
+ 
+  set code_set = 1901
+  set cdf_meaning = "AUTOVERIFIED"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->auto_verf_status_cd = code_value                               ;// 1901 autoverified
+ 
+  call log_message(build("auto_verf_status_cd = ", cd->auto_verf_status_cd),log_level_debug)
+ 
+  set code_set = 1901
+  set cdf_meaning = "CORRECTED"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->correct_status_cd = code_value                                 ;// 1901 corrected
+ 
+  set code_set = 1901
+  set cdf_meaning = "INREVIEW"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->in_review_status_cd = code_value
+ 
+  set code_set = 1901
+  set cdf_meaning = "CORRINREV"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->corr_in_review_status_cd = code_value
+ 
+  set code_set = 1902
+  set cdf_meaning = "ALP_REVIEW"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->alp_review_cd = code_value                                     ;// 1902 alp_review
+ 
+  set code_set = 1902
+  set cdf_meaning = "REVIEW"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->num_review_cd = code_value                                     ;// 1902 num_review
+ 
+  set code_set = 1902
+  set cdf_meaning = "NORMAL_LOW"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->num_low_cd = code_value                                        ;// 1902 normal_low
+ 
+  set code_set = 1902
+  set cdf_meaning = "NORMAL_HIGH"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->num_high_cd = code_value                                       ;// 1902 normal_high
+ 
+  set code_set = 1902
+  set cdf_meaning = "WITHIN_RANGE"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->num_normal_cd = code_value                                     ;// 1902 within_range
+ 
+  set code_set = 1902
+  set cdf_meaning = "CRITICAL"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->num_critical_cd = code_value                                   ;// 1902 critical
+ 
+  set code_set = 1902
+  set cdf_meaning = "ALP_NORMAL"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->alp_normal_cd = code_value                                     ;// 1902 alp_normal
+ 
+  set code_set = 1902
+  set cdf_meaning = "ALP_CRITICAL"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->alp_critical_cd = code_value                                   ;// 1902 alp_critical
+ 
+  set code_set = 1902
+  set cdf_meaning = "ALP_ABNORMAL"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->alp_abnormal_cd = code_value                                   ;// 1902 alp_abnormal
+ 
+  set code_set = 1902
+  set cdf_meaning = "NOT_APPLIED"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->na_cd = code_value                                             ;// 1902 not_applied
+ 
+  set code_set = 6004                                             ;009
+  set cdf_meaning = "CANCELED"                                    ;009
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set canceled_cd = code_value          ;010
+ 
+  ;// 106 glb                                                                          ;011
+  set code_set = 106                                                                   ;011
+  set cdf_meaning = "GLB"                                                              ;011
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->glb_activity_type_cd = code_value                                            ;011
+ 
+  set code_set = 14
+  set cdf_meaning = "RES COMMENT"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->res_comment_cd = code_value               ;// 14 RES COMMENT
+ 
+  set code_set = 14
+  set cdf_meaning = "RES NOTE"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->res_note_cd = code_value
+ 
+  ;// 106 hlx
+  set code_set = 106
+  set cdf_meaning = "HLX"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->hlx_activity_type_cd = code_value
+ 
+  set code_set = 6000
+  set cdf_meaning = "GENERAL LAB"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set gen_lab_cat_type_cd = code_value
+ 
+  set code_set = 222
+  set cdf_meaning = "FACILITY"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set fac_type_cd = code_value
+ 
+  set code_set = 261
+  set cdf_meaning = "CANCELLED"
+  set code_value = GetCodeValueByMeaning(code_set, cdf_meaning)
+  set cd->encntr_can_cd = code_value
+ 
+ 
+  /***********************************************************************
+  * script                                                               *
+  ***********************************************************************/
+#BEGIN_SCRIPT
+ 
+  set reqinfo->commit_ind = 0
+  ;check to see if this came from the modifycollections application
+  if (validate(requestin->reply->accessions[1]->accession, " ") > " ")
+    set accncnt = size(requestin->reply->accessions,5)
+    set stat = alterlist(acc_list->qual, accncnt)
+    for (q_cnt = 1 to accncnt)
+      set found_order_to_process = 0
+      ;check to make sure the order_id exists in the reply                                              ;011
+      if (validate(requestin->reply->accessions[q_cnt]->containers[1]->orders[1].order_id, 0.0) > 0.0)  ;011
+         ;check the activity type to see if this is an accession we can evaluate.
+         select into "nl:"                                                                              ;011
+           o.activity_type_cd                                                                           ;011
+         from orders o                                                                                  ;011
+         plan o                                                                                         ;011
+           where o.order_id = requestin->reply->accessions[q_cnt]->containers[1]->orders[1].order_id    ;011
+             and o.activity_type_cd in (cd->glb_activity_type_cd, cd->hlx_activity_type_cd)
+         detail                                                                                         ;011
+           found_order_to_process = 1
+         with nocounter                                                                                 ;011
+      endif                                                                                             ;011
+      if (found_order_to_process = 1)
+         call log_message("accession found to process",log_level_debug)
+         set acc_list->qual[q_cnt].accession_nbr = requestin->reply->accessions[q_cnt].accession
+         set acc_list->qual[q_cnt].person_id = requestin->reply->accessions[q_cnt].person_id
+      else                                                                                              ;011
+         call log_message("accession found to not process.",log_level_debug)
+      endif                                                                                             ;011
+    endfor
+    set accncnt = 0
+    go to CONTINUE_SCRIPT
+  elseif (validate(requestin->request->o_person_id, 0.0) > 0.0)
+ 
+    CALL LOG_MESSAGE("PM_POST_TRANSACTION executed",LOG_LEVEL_DEBUG)
+    SET old_person_id = requestin->request->o_person_id
+    CALL LOG_MESSAGE(BUILD("Old Person ID: ",CNVTSTRING(old_person_id,32,2)),LOG_LEVEL_DEBUG)
+    SET new_person_id = requestin->request->n_person_id
+    CALL LOG_MESSAGE(BUILD("New Person ID: ",CNVTSTRING(new_person_id,32,2)),LOG_LEVEL_DEBUG)
+    SET old_sex_cd = requestin->request->o_person_sex_cd
+    CALL LOG_MESSAGE(BUILD("Old Sex CD: ",CNVTSTRING(old_sex_cd,32,2)),LOG_LEVEL_DEBUG)
+    SET new_sex_cd = requestin->request->n_person_sex_cd
+    CALL LOG_MESSAGE(BUILD("New Sex CD: ",CNVTSTRING(new_sex_cd,32,2)),LOG_LEVEL_DEBUG)
+    SET old_birth_dt_tm = requestin->request->o_birth_dt_tm
+    CALL LOG_MESSAGE(BUILD("Old Birth Dt-Tm: ",FORMAT(old_birth_dt_tm, "dd-mmm-yyyy-hhmm;;d")),LOG_LEVEL_DEBUG)
+    SET new_birth_dt_tm = requestin->request->n_birth_dt_tm
+    CALL LOG_MESSAGE(BUILD("New Birth Dt-Tm: ",FORMAT(new_birth_dt_tm, "dd-mmm-yyyy-hhmm;;d")),LOG_LEVEL_DEBUG)
+    if (old_person_id > 0 and old_person_id = new_person_id)
+      if (old_sex_cd != new_sex_cd or old_birth_dt_tm != new_birth_dt_tm)
+        go to GET_ACCNS
+      else
+        go to EXIT_SCRIPT
+      endif
+    endif
+  else
+    go to EXIT_SCRIPT
+  endif
+ 
+#GET_ACCNS
+  select into "nl:"
+    o.order_id,
+    ol.order_id,                ;009
+    aor.accession
+  from
+    orders o,
+    code_value c,                                                ;009
+    order_laboratory ol,
+    accession_order_r aor
+  plan o
+    where o.person_id = requestin->request->o_person_id
+    and o.order_status_cd != canceled_cd      ;010
+;010    and o.order_status_cd != code_value                        ;009
+  join
+    c where c.code_value = o.activity_type_cd                    ;009
+    and c.cdf_meaning in ("GLB", "HLX")
+  join ol
+    where o.order_id = ol.order_id
+  join aor
+    where o.order_id = aor.order_id
+  order by aor.accession
+  head aor.accession
+    q_cnt = q_cnt + 1
+    stat = alterlist(acc_list->qual, q_cnt)
+    acc_list->qual[q_cnt].accession_nbr = aor.accession
+    acc_list->qual[q_cnt].person_id = requestin->request->o_person_id
+  with nocounter
+ 
+#CONTINUE_SCRIPT
+ 
+    call log_message("at the CONTINUE_SCRIPT prompt",log_level_debug)
+/* validate context to see if we have another order */
+  if (validate(context->avail,"N") = "Y")
+    call log_message("context exists",log_level_debug)
+    set accncnt = context->accncnt
+    if (accncnt = 1)
+       free set context
+    else
+       set context->accncnt = accncnt - 1
+    endif
+  else
+    set accncnt = size(acc_list->qual, 5 )
+    if ((accncnt = 0) or (acc_list->qual[1]->accession_nbr < " "))
+      call log_message("no accessions to process",log_level_debug)
+      set reqinfo->commit_ind = 0
+      go to EXIT_SCRIPT
+    endif
+    if (accncnt > 1)
+      record context
+      (
+        1 avail   = c1
+        1 accncnt = i2
+      )
+      set context->avail = "Y"
+      set context->accncnt = accncnt - 1
+    endif
+  endif
+   /***********************************************************************
+  * Get current active encounter and recent encounter for the person_id                               *
+  ***********************************************************************/
+  if(curr_person_id != acc_list->qual[accncnt].person_id)
+     set curr_person_id = acc_list->qual[accncnt].person_id
+     set q_cnt = 0
+     ;Encounter list for holding multiple active encounters and latest discharged encounter of the person if any 
+     free set encntr_list
+	 record encntr_list
+	 (
+		1  recent_encntr_id           = f8
+		1  qual[*]
+		   2  active_encntr_id        = f8
+	 )
+  
+	 select into "nl:"
+	   e.encntr_id
+	 from
+	   encounter e
+	 plan e
+	   where e.person_id = acc_list->qual[accncnt].person_id and e.active_ind = 1 and e.encntr_status_cd != cd->encntr_can_cd
+	 order by e.disch_dt_tm
+	 detail
+	  if (e.disch_dt_tm = null or e.disch_dt_tm > cnvtdatetime(curdate,curtime3))
+	      q_cnt = q_cnt + 1
+          stat = alterlist(encntr_list->qual, q_cnt)
+          encntr_list->qual[q_cnt].active_encntr_id = e.encntr_id
+	  else
+	    encntr_list->recent_encntr_id = e.encntr_id  
+	  endif
+	  with nocounter
+  endif
+ 
+ 
+  /***********************************************************************
+  * call the glb_get_orders_by_accn script                               *
+  ***********************************************************************/
+ 
+#GET_ORDERS
+ 
+    free set request
+    record request
+    (
+%i cclsource:glb_req_get_orders_by_accn.inc
+    )
+ 
+    free set reply
+    record reply
+    (
+%i cclsource:glb_reply_get_orders_by_accn.inc
+%i cclsource:status_block.inc
+    )
+ 
+    free set orders_reply
+    record orders_reply
+    (
+%i cclsource:glb_reply_get_orders_by_accn.inc
+    )
+ 
+    set request->accession = acc_list->qual[accncnt]->accession_nbr
+    set request->instr_service_resource_cd = 0.0
+    call log_message("execute glb_get_orders_by_accn",log_level_debug)
+ 
+    execute glb_get_orders_by_accn
+ 
+    call error_message(0)
+ 
+    if (reply->status_data->status != "S")
+      set repl_status = reply->status_data->status
+      call log_message(build("    --> get_orders_by_accn (",request->accession, ") - failed! status:",   ;002
+                       repl_status), log_level_info)                                                    ;002
+      if(validate(context->avail,"N") = "Y")                 ;011
+        go to CONTINUE_SCRIPT
+      else                                                   ;011
+        go to EXIT_SCRIPT                                    ;011
+      endif                                                  ;011
+    endif
+ 
+    /***********************************************************************
+    * unload reply from glb_get_orders_by_accn script                      *
+    ***********************************************************************/
+ 
+    set orders_reply->person_id = reply->person_id
+    set orders_reply->encntr_id = reply->encntr_id
+    set orders_reply->accession_id = reply->accession_id
+    set orders_reply->encntr_reg_dt_tm = reply->encntr_reg_dt_tm
+    set orders_reply->encntr_disch_dt_tm = reply->encntr_disch_dt_tm
+    set nbr_of_orders = size(reply->qual, 5)
+    set stat = alterlist(orders_reply->qual, nbr_of_orders)
+    for (oidx = 1 to nbr_of_orders)
+      set orders_reply->qual[oidx]->cs_order_id =
+        reply->qual[oidx]->cs_order_id
+      set orders_reply->qual[oidx]->order_id =
+        reply->qual[oidx]->order_id
+      set orders_reply->qual[oidx]->catalog_cd =
+        reply->qual[oidx]->catalog_cd
+      set orders_reply->qual[oidx]->catalog_type_cd =
+        reply->qual[oidx]->catalog_type_cd
+      set nbr_of_conts = size(reply->qual[oidx]->container_serv_res, 5)
+      set stat = alterlist(orders_reply->qual[oidx]->container_serv_res, nbr_of_conts)
+      for (cidx = 1 to nbr_of_conts)
+        set orders_reply->qual[oidx]->container_serv_res[cidx]->container_id =
+          reply->qual[oidx]->container_serv_res[cidx]->container_id
+        set orders_reply->qual[oidx]->container_serv_res[cidx]->specimen_type_cd =
+          reply->qual[oidx]->container_serv_res[cidx]->specimen_type_cd
+        set orders_reply->qual[oidx]->container_serv_res[cidx]->drawn_dt_tm =
+          reply->qual[oidx]->container_serv_res[cidx]->drawn_dt_tm
+        set orders_reply->qual[oidx]->container_serv_res[cidx]->service_resource_cd =
+          reply->qual[oidx]->container_serv_res[cidx]->service_resource_cd
+        set nbr_of_assays = size(reply->qual[oidx]->container_serv_res[cidx]->assays, 5)
+        set stat = alterlist(orders_reply->qual[oidx]->container_serv_res[cidx]->assays, nbr_of_assays)
+        for (aidx = 1 to nbr_of_assays)
+          set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->task_assay_cd =
+            reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->task_assay_cd
+          set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->event_cd =
+            reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->event_cd
+          set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->default_result_type_cd =
+            reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->default_result_type_cd
+          set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->data_map_ind =
+            reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->data_map_ind
+          set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->max_digits =
+            reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->max_digits
+          set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->min_decimal_places =
+            reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->min_decimal_places
+          set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->min_digits =
+            reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->min_digits
+          set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->prev_result_type_cd =
+            reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->prev_result_type_cd
+          set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->prev_result_value_numeric =
+            reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->prev_result_value_numeric
+          set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->prev_less_great_flag =
+            reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->prev_less_great_flag
+          set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->sci_notation_ind =
+            reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->sci_notation_ind
+          set nbr_of_rslts = size(reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results, 5)
+          set stat = alterlist(orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results, nbr_of_rslts )
+          for (ridx = 1 to nbr_of_rslts)
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_result_id =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_result_id
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_id =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_id
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_cd =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_cd
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_cd =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_cd
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->review_cd =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->review_cd
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->delta_cd =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->delta_cd
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->linear_cd =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->linear_cd
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->feasible_cd =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->feasible_cd
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_range_flag =
+                reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_range_flag
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_low =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_low
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_high =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_high
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_alpha =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_alpha
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_range_flag =
+                reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_range_flag
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->units_cd  =
+                reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->units_cd
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_high  =
+                reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_high
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_low  =
+                reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_low
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->reference_range_factor_id =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->reference_range_factor_id
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->nomenclature_id =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->nomenclature_id
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->equation_id =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->equation_id
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_value_numeric =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_value_numeric
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_value_alpha =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_value_alpha
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_value_dt_tm =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_value_dt_tm
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->numeric_raw_value =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->numeric_raw_value
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->rtf_text =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->rtf_text
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->ascii_text =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->ascii_text
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->less_great_flag =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->less_great_flag
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_comment_ind =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_comment_ind
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->service_resource_cd =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->service_resource_cd
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_personnel_id =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_personnel_id
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_dt_tm =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_dt_tm
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_result_updt_cnt =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_result_updt_cnt
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_updt_cnt =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_updt_cnt
+            set orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->repeat_nbr =
+              reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->repeat_nbr
+          endfor
+        endfor
+      endfor
+    endfor
+ 
+    call log_message(build("accession processing = ", request->accession),log_level_debug)
+    call log_message(build("person id = ", orders_reply->person_id),log_level_debug)
+    call log_message(build("order id = ", orders_reply->qual[1]->order_id),log_level_debug)
+    call log_message(build("container id = ", orders_reply->qual[1]->container_serv_res[1]->container_id),log_level_debug)
+    call log_message(build("result type cd = ",
+      orders_reply->qual[1]->container_serv_res[1]->assays[1]->results[1]->result_type_cd),log_level_debug)
+ 
+ 
+  /***********************************************************************
+  * call the glb_get_patient_info script                                 *
+  ***********************************************************************/
+ 
+    free set request
+    free set reply
+ 
+    record request
+    (
+%i cclsource:glb_req_get_patient_info.inc
+    )
+ 
+    record reply
+    (
+%i cclsource:glb_reply_get_patient_info.inc
+%i cclsource:status_block.inc
+    )
+ 
+    free set patient_reply
+ 
+    record patient_reply
+    (
+%i cclsource:glb_reply_get_patient_info.inc
+    )
+ 
+    set request->order_id = 0.0
+    set request->encntr_id = orders_reply->encntr_id
+    set request->last_action_sequence = 0
+    set request->person_id = orders_reply->person_id
+ 
+    call log_message("execute glb_get_patient_info",log_level_debug)
+ 
+    execute glb_get_patient_info
+    call error_message(0)
+ 
+    ;check the status from the glb_get_ref_ranges script
+    if (reply->status_data.status = "F")
+      call log_message("Failure status returned from glb_get_ref_ranges.", log_level_audit)
+      if(validate(context->avail,"N") = "Y")
+        go to CONTINUE_SCRIPT
+      else
+        go to EXIT_SCRIPT
+      endif
+    endif
+ 
+    set patient_reply->birth_dt_tm = reply->birth_dt_tm
+    set patient_reply->sex_cd = reply->sex_cd
+    set patient_reply->species_cd = reply->species_cd
+    call log_message(build("person processing = ", request->person_id),log_level_debug)
+    call log_message(build("person sex = ", reply->sex_cd),log_level_debug)
+    call log_message(build("person birth date/time = ", reply->birth_dt_tm),log_level_debug)
+ 
+ 
+    /***********************************************************************
+    * call the glb_get_ref_ranges script                                   *
+    ***********************************************************************/
+ 
+    declare nbr_results = i4 with public, noconstant(0)
+    declare ridx        = i4 with public, noconstant(0)
+ 
+    ;fill out the request to glb_get_ref_ranges...Loop through all of the orders, containers, assays, results
+    ;so to pass in the perform_dt_tm of each result to glb_get_ref_ranges.  Pass in perform_result_id
+    ;for the order_key so that we know which one matches up in the reply from glb_get_ref_ranges.
+    set nbr_of_orders = size(orders_reply->qual,5)
+ 
+    call log_message(build("nbr_of_orders = ", nbr_of_orders),log_level_debug)
+    ;orders loop
+    for (oidx = 1 to nbr_of_orders)
+ 
+      free set request
+      free set reply
+ 
+      record request
+      (
+%i cclsource:glb_req_get_ref_ranges.inc
+      )
+ 
+      record reply
+      (
+%i cclsource:glb_reply_get_ref_ranges.inc
+%i cclsource:status_block.inc
+      )
+ 
+ 
+      call log_message(build("oidx = ", oidx),log_level_debug)
+ 
+      set nbr_of_conts = size(orders_reply->qual[oidx]->container_serv_res, 5)
+      ;containers loop
+      for (cidx = 1 to nbr_of_conts)
+ 
+        set ref_cnt = 0
+        call log_message(build("cidx = ", cidx),log_level_debug)
+ 
+        ;check for change to drawn date/time
+        ;this subroutine fills out the drawn_dt_tm_chg_ind and the
+        ;cur_coll_date and old_coll_date if the date/time did change
+        call IsContDrawnDtTmChanged(orders_reply->qual[oidx]->container_serv_res[cidx]->container_id)
+        call log_message(build("drawn_dt_tm_chg_ind = ", drawn_dt_tm_chg_ind),log_level_debug)
+ 
+        ;put each call to the glb_get_ref_ranges script inside the
+        ;loop of containers so to get the correct drawn_dt_tm of each orders container.
+        set request->species_cd = patient_reply->species_cd
+        set request->sex_cd = patient_reply->sex_cd
+        ;check for null birthdate/time.
+        ;if birthdate/time is null, pass unknown age indicator.
+        if (patient_reply->birth_dt_tm = null)
+          set request->unknown_age_ind = 1
+          set request->age_in_minutes = -1
+        else
+          set request->age_in_minutes =
+                       (cnvtmin(orders_reply->qual[oidx]->container_serv_res[cidx]->drawn_dt_tm) -
+                       (cnvtmin(patient_reply->birth_dt_tm)))
+        endif
+        set request->patient_condition_cd = 0.0
+        set request->mdi_nomen_ind = 0
+ 
+        call log_message(build("drawn_dt_tm = ",
+                    format(orders_reply->qual[oidx]->container_serv_res[cidx]->drawn_dt_tm, ";;Q")),log_level_debug)
+ 
+        set nbr_of_assays = size(orders_reply->qual[oidx]->container_serv_res[cidx]->assays, 5)
+ 
+        ;assays loop
+        for (aidx = 1 to nbr_of_assays)
+ 
+          call log_message(build("aidx = ", aidx),log_level_debug)
+ 
+          set nbr_results = size(orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx].results, 5)
+ 
+          ;results loop
+ 
+          ;if (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd in
+               ;(cd->correct_status_cd, cd->verify_status_cd, cd->auto_verf_status_cd))
+ 
+            for (ridx = 1 to nbr_results)
+ 
+              call log_message(build("ridx = ", ridx),log_level_debug)
+ 
+              ;Only examine the results that are of type numeric, calculation, alpha, text, freetext, interp.
+ 
+              if (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd in
+                   (cd->alp_result_type_cd, cd->txt_result_type_cd, cd->freetxt_result_type_cd,
+                     cd->num_result_type_cd, cd->cal_result_type_cd, cd->interp_result_type_cd))
+ 
+                call log_message("found result for reeval",log_level_debug)
+ 
+                set ref_cnt = ref_cnt + 1
+                if (ref_cnt > size(request->assays, 5))
+                  set stat = alterlist( request->assays, ref_cnt + 10 )
+                endif
+ 
+                set request->assays[ref_cnt]->task_assay_cd =
+                     orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->task_assay_cd
+                set request->assays[ref_cnt]->service_resource_cd =
+                     orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->service_resource_cd
+                set request->assays[ref_cnt]->order_key =
+                     orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_result_id
+                set request->assays[ref_cnt]->reeval_effective_dt_tm =
+                     orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_dt_tm
+                set request->assays[ref_cnt]->specimen_type_cd =    ;NS8983
+                     orders_reply->qual[oidx]->container_serv_res[cidx]->specimen_type_cd
+              endif             ;if numeric or calc
+            endfor           ;results loop
+          ;endif              ;results if check statement
+        endfor            ;assays loop
+ 
+        if (ref_cnt > 0)
+          call log_message(build("calling glb_get_ref_ranges with ref_cnt = ", ref_cnt),log_level_debug)
+ 
+          set stat = alterlist( request->assays, ref_cnt)
+ 
+          execute glb_get_ref_ranges
+ 
+          call error_message(0)
+ 
+          ;check the status from the glb_get_ref_ranges script
+          if (reply->status_data.status = "F")
+            call log_message("Failure status returned from glb_get_ref_ranges.", log_level_audit)
+            if(validate(context->avail,"N") = "Y")
+              go to CONTINUE_SCRIPT
+            else
+              go to EXIT_SCRIPT
+            endif
+          endif
+        endif
+ 
+        /* init vars to prevent RT errors */
+        set reqordcnt = 0
+        set reqassaycnt = 0
+ 
+        ;Check to see if reference range information returned from glb_get_ref_ranges
+        set ref_ranges_reply_cnt = value(size(reply->qual, 5))
+        if (ref_ranges_reply_cnt = 0)
+          call log_message("No reference range information returned from glb_get_ref_ranges.", log_level_audit)
+ 
+          ;This check was added in case a numeric dta is ever created without reference range information.
+          ;This will ensure the SetReplyOut will get called to update the new collected date and time and
+          ;add the comment for ModifyCollections.
+          if (drawn_dt_tm_chg_ind = 1 and ref_cnt > 0)
+            call SetReplyOut(0)
+          endif
+        else
+ 
+          call log_message(build("ref_ranges_reply_cnt = ", ref_ranges_reply_cnt),log_level_debug)
+ 
+          /***********************************************************************
+          * look through the entire order to see if any of the reference range   *
+          * factors are different and, if so, re-evaluate the reference ranges.  *
+          ***********************************************************************/
+          set reqordcnt = 0
+          set reqassaycnt = 0
+          ;check for null birthdate/time.
+          if (patient_reply->birth_dt_tm = null)
+            set  temp_age_in_min = -1
+          else
+            set temp_age_in_min = cnvtmin(orders_reply->qual[oidx]->container_serv_res[cidx]
+                                                        ->drawn_dt_tm) - cnvtmin(patient_reply->birth_dt_tm)
+          endif
+ 
+          set reply_nbr_of_assays = size(orders_reply->qual[oidx]->container_serv_res[cidx]->assays, 5)
+ 
+          call log_message(build("reply_nbr_of_assays = ", reply_nbr_of_assays),log_level_debug)
+ 
+          ;loop through assays to examine reference ranges returned
+          for (aidx = 1 to reply_nbr_of_assays)
+ 
+            call log_message(build("aidx2 = ", aidx),log_level_debug)
+ 
+            set nbr_of_rslts = size(orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results, 5)
+ 
+            ;loop through results to re-evaluate
+            for (ridx = 1 to nbr_of_rslts)
+ 
+              call log_message(build("ridx2 = ", ridx),log_level_debug)
+ 
+ 
+                 ; Only retrieve the facility of the preforming resource and load the
+                 ; preferences if the resource is different from the previous result's
+              if(orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->
+                    results[ridx]->service_resource_cd != prev_service_res)
+ 
+                 set prev_service_res = orders_reply->qual[oidx]->container_serv_res[cidx]->
+                                     assays[aidx]->results[ridx]->service_resource_cd
+ 
+                    ; Get the facility of the perform location
+                 select into "nl:"
+                    l.location_cd
+                 from
+                    service_resource sr,
+                    location l
+                  plan sr
+                    where sr.service_resource_cd =
+                       orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->
+                       results[ridx]->service_resource_cd
+                  join l
+                    where l.organization_id = sr.organization_id
+                      and l.location_type_cd = fac_type_cd
+                      and l.active_ind = 1
+                  detail
+                    encounter_fac = l.location_cd
+                  with nocounter
+ 
+ 
+                     ; Load preferences if the facility is different from the previous result's
+                  if(encounter_fac != prev_encounter_fac)
+ 
+                     set prev_encounter_fac = encounter_fac
+ 
+                        ; Default value of pref is "off"
+                     set reeval_performed_pref = 0
+                     set reeval_lookback_pref = 0
+                     set reeval_beg_encntr_pref = 0
+                     set reeval_curr_encntr_pref = 0
+                     set reeval_recent_encntr_pref = 0
+                        ; Load the facility-level preferences. It will default to system-level
+                        ; if the facility level pref is not defined.
+                     set nStatus = LoadPreferences("system", trim(cnvtstring(encounter_fac,32,2)) ,
+                                                   "", "", "module", "general lab")
+ 
+                     if (nStatus = 1)
+                         set lIndex = FindPreference("reeval ref range of perform results")
+ 
+                         if(GetPreferenceValue(lIndex) = "Yes")
+                            set reeval_performed_pref = 1
+                         endif
+ 
+                         set lIndex = 0
+                         set lIndex = FindPreference("reeval ref range from current encounter only")
+                         if(GetPreferenceValue(lIndex) = "Yes")
+                            set reeval_curr_encntr_pref = 1
+                            set lIndex = 0
+                            set lIndex = FindPreference("reeval ref range from most recent encounter")
+                            if(GetPreferenceValue(lIndex) = "Yes")
+                              set reeval_recent_encntr_pref = 1
+                            endif
+                         else
+                             set lIndex = 0
+                             set lIndex = FindPreference("lookback days for ref range reeval")
+                             set reeval_lookback_pref = cnvtint(GetPreferenceValue(lIndex))
+                             if(reeval_lookback_pref > 0)
+                                set lIndex = 0
+                                set lIndex = FindPreference("reeval ref range from beginning of the encounter")
+                                if(GetPreferenceValue(lIndex) = "Yes")
+                                   set reeval_beg_encntr_pref = 1
+                                endif
+                             endif
+                         endif
+                     endif
+                  endif
+ 
+              endif
+              set allow_result_for_reeval = 0
+              if(reeval_curr_encntr_pref = 1) ;Preference for current active encounter
+                 if(size(encntr_list->qual, 5) > 0)
+                    set pos = locateval(eidx, 1, size(encntr_list->qual, 5), orders_reply->encntr_id,
+                                                                     encntr_list->qual[eidx].active_encntr_id)
+                    if(pos > 0)
+                       set allow_result_for_reeval = 1
+                    endif
+                 elseif(reeval_recent_encntr_pref = 1) ;Preference for most recent encounter
+                       if(encntr_list->recent_encntr_id = orders_reply->encntr_id)
+                          set allow_result_for_reeval = 1
+                       endif
+                 endif
+              elseif(reeval_lookback_pref > 0 and reeval_lookback_pref <= 9999)  ;Preference for lookback days
+                     if(DATETIMEDIFF(cnvtdatetime(curdate, curtime3),orders_reply->qual[oidx]->container_serv_res[cidx]->
+                                                              assays[aidx]->results[ridx].perform_dt_tm)<=reeval_lookback_pref)
+                        set allow_result_for_reeval = 1
+                     elseif(reeval_beg_encntr_pref = 1);Preference for beginning of the encounter
+                           if(DATETIMEDIFF(cnvtdatetime(curdate, curtime3),orders_reply->encntr_disch_dt_tm)<= reeval_lookback_pref
+                               and
+                               orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx].perform_dt_tm >=
+                                                                                             orders_reply->encntr_reg_dt_tm)
+                               set allow_result_for_reeval = 1
+                           endif
+                     endif
+              else
+                  set allow_result_for_reeval = 1 ; No preference is configured for reeval
+              endif
+ 
+ 
+              if(allow_result_for_reeval = 1)
+              ;Only examine the results that are of type numeric or calculation
+              if  (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd in
+                  (cd->num_result_type_cd, cd->cal_result_type_cd)
+               and
+                     (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd in
+                     (cd->correct_status_cd, cd->verify_status_cd, cd->auto_verf_status_cd,cd->corr_in_review_status_cd)
+                   or
+                     (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd in
+                     (cd->perform_status_cd, cd->in_review_status_cd)
+                     and
+                     orders_reply->qual[oidx]->catalog_type_cd = gen_lab_cat_type_cd
+                     and
+                     (reeval_performed_pref = 1 or drawn_dt_tm_chg_ind = 1))))
+ 
+                call log_message("found numeric or calc result",log_level_debug)
+ 
+                set fidx = 1
+                while (fidx <= ref_ranges_reply_cnt)
+ 
+                  call log_message(build("reply from get_ref_ranges fidx = ", fidx),log_level_debug)
+ 
+                  ;007 - we need to find whether task_assay_cd in reply (glb_get_ref_ranges) contains the assay
+                  ;007 - in orders_reply.  we only want to re-evaluate assay_cd that has the same specimen_age_in_minute.
+                  ;007 - for the reason that if the assay and the age_in_min are the same then the assay_cd is in the cont
+                  ;007 - that the user had modified.  for example: cont a contains gl na and gl k with the drawn_dt_tm of
+                  ;007 -  08/08/00 and cont b contains gl k with the drawn_dt_tm of 08/08.  then user modified cont b
+                  ;007 - so now its collection date is 06/06.  since both container contains gl k assay, we need to
+                  ;007 - compare the drawn dt/tm for each glb_get_ref_ranges iteration.
+                  ;Check to make sure the order_key from the reply matches this results perform_result_id
+                  ;to ensure we are evaluating the correct results reference range information.
+                  if ((orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->task_assay_cd =
+                             reply->qual[fidx]->task_assay_cd) and
+                     (temp_age_in_min = request->age_in_minutes) and
+                     (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]
+                             ->perform_result_id = reply->qual[fidx]->order_key))
+ 
+                    call log_message("Found matching assay, order_key and age" ,log_level_debug)
+                    call log_message(build("processing task_assay_cd = ", reply->qual[fidx]->task_assay_cd),log_level_debug)
+ 
+                    ;we found the task_assay_cd from the glb_Get_ref_ranges script that matches the aidx task_assay_cd
+                    ;and the ridx result we are currently evaluating
+ 
+                    ;call subroutine to determine if the reference range information
+                    ;has changed for this result
+                    ;The normal_low_changed_ind and normal_high_changed_ind are set if the reference range values have
+                    ;changed and the critical_cd_changed_ind is set if the critical_cd has changed for this result
+                    set normal_low_changed_ind  = 0
+                    set normal_high_changed_ind = 0
+                    set critical_cd_changed_ind = 0
+ 
+                    set nMinDigits      = orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->min_digits
+                    set nMaxDigits      = orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->max_digits
+                    set nMinDecPlaces   = orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->min_decimal_places
+                    set nLessGreatFlag  = orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->
+                                          results[ridx]->less_great_flag
+                    set nSciNotationInd = orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->sci_notation_ind
+                    set sFormattedResultString = UAR_AccFormatResultStringSciNote(nMinDigits, nMaxDigits, nMinDecPlaces,
+                                                   orders_reply->qual[oidx]->container_serv_res[cidx]->
+                                                   assays[aidx]->results[ridx]->numeric_raw_value,
+                                                   0, nSciNotationInd)
+                    set dFormatedNumRawVal = CnvtReal(Trim(sFormattedResultString))
+ 
+                    call log_message("call the EvaluateReferenceRangeChanged sub" ,log_level_debug)
+ 
+                    if ((EvaluateReferenceRangeChanged(0) = 1) or (drawn_dt_tm_chg_ind = 1))
+                      ;call SetReplyOut if any of the values have changed
+                     call SetReplyOut(0)
+                    endif
+ 
+                    set fidx = ref_ranges_reply_cnt + 1
+                  endif              ;matching assay, age, perform_result_id
+                  set fidx = fidx + 1
+                endwhile           ;while (fidx <= ref_ranges_reply_cnt) -- Loop through reply of glb_get_ref_ranges
+              else
+                ;check for alpha/freetext and fill out setreplyout to fill out the drawn_dt_tm
+                if ((orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd in
+                    (cd->alp_result_type_cd, cd->txt_result_type_cd, cd->freetxt_result_type_cd, cd->interp_result_type_cd)) and
+                 (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd in
+                    (cd->correct_status_cd, cd->verify_status_cd, cd->auto_verf_status_cd)))
+                        if (drawn_dt_tm_chg_ind = 1)
+                            call SetReplyOut(0)
+                        endif
+                endif            ;check for alpha/txt/freetext
+              endif              ;Check for numeric or calculation
+             endif              ;allow result for reeval
+            endfor             ;for (ridx... results
+          endfor             ;for (aidx... assays
+        endif              ;if (ref_ranges_reply_cnt = 0) glb_get_ref_ranges returned data
+      endfor             ;for (cidx... containers
+    endfor             ;for (oidx... orders
+ 
+    free set request
+    free set reply
+    free set orders_reply
+    free set patient_reply
+ 
+    ;commit changes to call req250074 if anything exists in the orders structure.
+    if (size(replyout->hreq250074->orders, 5) > 0)
+      set reqinfo->commit_ind = 1
+    endif
+ 
+    call log_message(build("commit ind: ", reqinfo->commit_ind),log_level_debug)
+ 
+    if ( reqinfo->commit_ind = 0 )                                                                   ;001
+      if ( validate(context->avail, "N") = "Y")
+        go to CONTINUE_SCRIPT
+      endif
+    endif                                                                                            ;001
+ 
+subroutine SetReplyOut(none1)
+ 
+  call log_message("called into SetReplyOut",log_level_debug)
+ 
+  set replyout->hreq250074->event_dt_tm = cnvtdatetime(curdate, curtime3)
+  set replyout->hreq250074->event_personnel_id = cerner_prsnl_id
+  set verf_prsn_ind = 0
+ 
+  set replyout->action_flag = 0
+  set temp_cnt = 0
+  set order_cnt = size(replyout->hreq250074->orders, 5)
+ 
+  if (order_cnt = 0)
+    set reqordcnt = 1
+    call log_message(build("reqordcnt before call to SetReplyOrder (1) = ", reqordcnt),log_level_debug)
+    call SetReplyOrder(0)
+  else
+    for (reqordcnt = 1 to order_cnt)
+      if (replyout->hreq250074->orders[reqordcnt]->order_id = orders_reply->qual[oidx]->order_id)
+        set reqassaycnt = size(replyout->hreq250074->orders[reqordcnt]->assays, 5)
+        set reqassaycnt = reqassaycnt + 1
+        set temp_cnt = reqordcnt
+      endif
+    endfor
+    if (temp_cnt > 0)
+      set reqordcnt = temp_cnt
+    endif
+    if (reqordcnt > order_cnt)
+      set reqordcnt = size(replyout->hreq250074->orders, 5)
+      set reqordcnt = reqordcnt + 1
+      call log_message(build("reqordcnt before call to SetReplyOrder (2) = ", reqordcnt),log_level_debug)
+      call SetReplyOrder(0)
+    endif
+  endif
+ 
+  set replyout->hreq250074->orders[reqordcnt]->catalog_type_cd =
+    orders_reply->qual[oidx]->catalog_type_cd
+ 
+  set stat = alterlist(replyout->hreq250074->orders[reqordcnt]->assays, reqassaycnt)
+  set replyout->hreq250074->orders[reqordcnt]->assays_cnt = reqassaycnt
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_id =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_id
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->task_assay_cd =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->task_assay_cd
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->event_cd =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->event_cd
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->container_id =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->container_id
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->drawn_dt_tm =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->drawn_dt_tm
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->service_resource_cd =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->service_resource_cd
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->interface_flag = 0
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->perform_result_id =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_result_id
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->perform_personnel_id =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_personnel_id
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->perform_dt_tm =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_dt_tm
+  if (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd in
+    (cd->correct_status_cd,cd->verify_status_cd,cd->auto_verf_status_cd,cd->corr_in_review_status_cd))
+ 
+    call log_message("Found autoverify, verify,corrected in-review or correct, set status_cd = correct",log_level_debug)
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->perform_ind = 0
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->repeat_ind = 0
+ 
+    if (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd != cd->
+    corr_in_review_status_cd)
+        set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_status_cd = cd->correct_status_cd
+    else
+    	 set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_status_cd =
+              orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd
+    endif
+ 
+ 
+ 
+    ;set the result_status_disp to be "reference range change" always since this code will not get
+    ;executed if no change has occurred
+       if ((orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd in
+                      (cd->num_result_type_cd, cd->cal_result_type_cd)))
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_status_disp = captions->ref_range_change
+    endif
+ 
+    if (verf_prsn_ind = 0)
+      set replyout->hreq250074->event_personnel_id =
+        (FindVerfId ((orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_result_id),
+                     (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_id)))
+      set verf_prsn_ind = 1
+    endif
+ 
+  elseif (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd in
+         (cd->perform_status_cd, cd->in_review_status_cd) and (reeval_performed_pref = 1 or drawn_dt_tm_chg_ind = 1))
+ 
+      call log_message("Found performed or in-review, leave status the same",log_level_debug)
+      set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->perform_ind = 1
+      set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->repeat_ind = 0
+ 
+      set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->repeat_nbr =
+              orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->repeat_nbr
+ 
+      set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_status_cd =
+              orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd
+ 
+       ;set the result_status_disp to be "reference range change" always since this code will not get
+       ;executed if no change has occurred
+      if ((orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd in
+                      (cd->num_result_type_cd, cd->cal_result_type_cd)))
+         set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_status_disp = captions->ref_range_change
+      endif
+ 
+      if (verf_prsn_ind = 0)
+         set replyout->hreq250074->event_personnel_id =
+             (FindVerfId ((orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_result_id),
+                 (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_id)))
+         set verf_prsn_ind = 1
+      endif
+ 
+         ; Set the interface flag so that performed results resulted by instruments remain in
+         ; the queue.
+      select into "nl:"
+      from
+         perform_result pr
+      where
+         pr.perform_result_id = replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->perform_result_id
+      detail
+         replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->interface_flag = pr.interface_flag
+      with nocounter
+ 
+  endif
+ 
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_type_cd =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->nomenclature_id =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->nomenclature_id
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_value_numeric =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_value_numeric
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->max_digits =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->max_digits
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->min_decimal_places =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->min_decimal_places
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->min_digits =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->min_digits
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->numeric_raw_value =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->numeric_raw_value
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->less_great_flag =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->less_great_flag
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_value_alpha =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_value_alpha
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->review_cd =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->review_cd
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->delta_cd =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->delta_cd
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->linear_cd =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->linear_cd
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->feasible_cd =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->feasible_cd
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_value_dt_tm =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_value_dt_tm
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->rtf_text =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->rtf_text
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->ascii_text =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->ascii_text
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->equation_id =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->equation_id
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_updt_cnt =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_updt_cnt
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->perform_result_updt_cnt =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->perform_result_updt_cnt
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->components_cnt = 0
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_comment_cnt = 0
+ 
+    ; For performed/in-review results, we must alter the result_updt_cnt for repeated
+    ; results so that the update does not fail
+  if(orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd in
+         (cd->perform_status_cd, cd->in_review_status_cd) and (reeval_performed_pref = 1 or drawn_dt_tm_chg_ind = 1))
+ 
+     set cur_result_id =
+          replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_id
+ 
+     if(cur_result_id != last_result_id)
+        set perform_result_idx = 0
+        set last_result_id = cur_result_id
+     else
+        set perform_result_idx = perform_result_idx + 1
+     endif
+ 
+     set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_updt_cnt =
+          replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_updt_cnt +
+            perform_result_idx
+  endif
+ 
+  if ((orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd in
+                      (cd->alp_result_type_cd, cd->txt_result_type_cd, cd->freetxt_result_type_cd)))
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_range_flag =
+      orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_range_flag
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_range_flag =
+      orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_range_flag
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_low =
+      orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_low
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_high =
+      orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_high
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_alpha =
+      orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_alpha
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_high =
+      orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_high
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_low =
+      orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_low
+   set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->reference_range_factor_id =
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->reference_range_factor_id
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->units_cd =
+      orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->units_cd
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_cd =
+        orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->normal_cd
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_cd =
+        orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_cd
+     /**********************************************
+     * Add comment if the drawn date/time changed  *
+     ***********************************************/
+     if (drawn_dt_tm_chg_ind = 1)
+        ;set the comment.
+        set new_result_comment = " "
+        set current_result_comment = " "
+        set new_result_comment = uar_i18nbuildmessage(i18nhandle,
+           "ChgCollDateComment",
+          "Collection date/time has been modified to: %1.  Previous collection date/time: %2.", "ss",
+          nullterm(cur_coll_date), nullterm(old_coll_date))
+      endif
+  endif
+ 
+  /*************************************************************************
+  * call ChgRange subroutine to reevaluate the reference range flags       *
+  * and to fill out the new_result_comment variable                        *
+  /************************************************************************/
+if ((orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd in
+                      (cd->num_result_type_cd, cd->cal_result_type_cd)))
+  set new_result_comment = " "
+  set current_result_comment = " "
+ 
+  call log_message("Call the ChgRange subroutine",log_level_debug)
+ 
+  if ((orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd in
+                      (cd->num_result_type_cd, cd->cal_result_type_cd)))
+    call ChgRange(0)
+  endif
+ 
+  call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+ endif
+  /************************************************
+  * Update the comment information                *
+  *************************************************/
+ 
+  ; set comment type to non-chartable for "PERFORMED" results,
+  ; and to chartable for all others
+  if(orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->
+      result_status_cd in (cd->perform_status_cd, cd->in_review_status_cd))
+      set comment_type_cd = cd->res_note_cd
+  else
+      set comment_type_cd = cd->res_comment_cd
+  endif
+ 
+ 
+  if (new_result_comment > " ")
+    ;Get existing comments
+    select into "nl:"
+      rc.result_id,
+      lt.long_text_id
+    from
+      result_comment rc,
+      long_text lt
+    plan rc
+      where rc.result_id = orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]
+                                            ->results[ridx]->result_id
+        and rc.comment_type_cd = comment_type_cd
+    join lt
+      where lt.long_text_id = rc.long_text_id
+ 
+    order rc.result_id, rc.action_sequence desc
+ 
+    head rc.result_id
+      current_result_comment = lt.long_text
+    with nocounter
+ 
+    if (size(trim(current_result_comment)) > 0)
+      set new_result_comment = concat(current_result_comment, " ", new_result_comment)
+    else
+      set new_result_comment = trim(new_result_comment, 3)
+    endif
+ 
+    call log_message(build("after concat with old the new_result_comment = ", new_result_comment),log_level_debug)
+ 
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_comment_cnt = 1
+    set stat = alterlist(replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_comment, 1)
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]
+           ->result_comment[1]->comment_type_cd = comment_type_cd
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]
+           ->result_comment[1]->comment_text = new_result_comment
+    set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]
+           ->result_comment[1]->comment_prsnl_id = 0.0 /*system*/
+  endif
+ 
+ 
+  ; Update notify flag triggers in replyout
+  call SetNotifyTriggers(0)
+ 
+end
+ 
+declare FindVerfId(arg_perform_result_id, arg_result_id) = f8
+subroutine FindVerfId(arg_perform_result_id, arg_result_id)
+  call log_message("called into FindVerfId",log_level_debug)
+  call log_message(build("arg_perform_result_id = ", arg_perform_result_id),log_level_debug)
+  call log_message(build("arg_result_id = ", arg_result_id),log_level_debug)
+  set cur_prsn_id = 0.0
+  select into "nl:"
+    re.event_personnel_id
+  from result_event re
+  plan re
+  where re.result_id = arg_result_id
+    and re.perform_result_id = arg_perform_result_id
+    and (re.event_type_cd = cd->verify_status_cd
+         or
+         re.event_type_cd = cd->correct_status_cd
+         or
+         re.event_type_cd = cd->auto_verf_status_cd
+         or
+         re.event_type_cd = cd->corr_in_review_status_cd
+         or
+        (re.event_type_cd in
+          (cd->perform_status_cd, cd->in_review_status_cd) and (reeval_performed_pref = 1 or drawn_dt_tm_chg_ind = 1)))
+  detail
+    cur_prsn_id = re.event_personnel_id
+  with nocounter
+  call log_message(build("cur_prsn_id = ", cur_prsn_id),log_level_debug)
+  return(cur_prsn_id)
+end
+ 
+subroutine SetReplyOrder(none2)
+  call log_message("called into SetReplyOrder",log_level_debug)
+  call log_message(build("reqordcnt = ", reqordcnt),log_level_debug)
+  set reqassaycnt = 1
+  set stat = alterlist(replyout->hreq250074->orders, reqordcnt)
+  set replyout->hreq250074->orders[reqordcnt]->complete_ind = 0
+  set replyout->hreq250074->orders[reqordcnt]->cs_order_id = orders_reply->qual[oidx]->cs_order_id
+  set replyout->hreq250074->orders[reqordcnt]->order_id = orders_reply->qual[oidx]->order_id
+  set replyout->hreq250074->orders[reqordcnt]->catalog_cd = orders_reply->qual[oidx]->catalog_cd
+  set replyout->hreq250074->orders[reqordcnt]->person_id = orders_reply->person_id
+  set replyout->hreq250074->orders[reqordcnt]->encntr_id = orders_reply->encntr_id
+  set replyout->hreq250074->orders[reqordcnt]->accession_id = orders_reply->accession_id
+  set replyout->hreq250074->orders[reqordcnt]->accession = acc_list->qual[accncnt]->accession_nbr
+end
+ 
+subroutine ChgRange(none3)
+  declare old_normal_flag_disp = vc with public, noconstant(" ")
+  declare new_normal_flag_disp = vc with public, noconstant(" ")
+  declare old_critical_flag_disp = vc with public, noconstant(" ")
+  declare new_critical_flag_disp = vc with public, noconstant(" ")
+ 
+  call log_message("called into ChgRange",log_level_debug)
+  set normal_flag = reply->qual[fidx]->normal_ind
+  set critical_flag = reply->qual[fidx]->critical_ind
+  set review_flag = reply->qual[fidx]->review_ind
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_range_flag = normal_flag
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_range_flag = critical_flag
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_low =
+    reply->qual[fidx]->normal_low
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_high =
+    reply->qual[fidx]->normal_high
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_low =
+    reply->qual[fidx]->critical_low
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_high =
+    reply->qual[fidx]->critical_high
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->reference_range_factor_id =
+    reply->qual[fidx]->reference_range_factor_id
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->units_cd =
+    reply->qual[fidx]->units_cd
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_cd = cd->na_cd
+  set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_cd = cd->na_cd
+ 
+  /**********************************************
+  * Add comment if the drawn date/time changed  *
+  ***********************************************/
+  if (drawn_dt_tm_chg_ind = 1 and (not
+      orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd in
+         (cd->perform_status_cd, cd->in_review_status_cd)))
+    ;set the comment.
+    set new_result_comment = uar_i18nbuildmessage(i18nhandle,
+         "ChgCollDateComment",
+         "Collection date/time has been modified to: %1.  Previous collection date/time: %2.", "ss",
+         nullterm(cur_coll_date), nullterm(old_coll_date))
+  endif
+ 
+ 
+  /********************************************
+  * Evaluate the normal ranges                *
+  * for numeric and calculation procedures    *
+  *********************************************/
+ 
+  if (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd =
+    cd->num_result_type_cd
+      or
+    orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_type_cd =
+    cd->cal_result_type_cd)
+ 
+    case(normal_flag)
+      of 1:
+        if (Round(dFormatedNumRawVal,nMinDecPlaces+1) < Round(reply->qual[fidx]->normal_low,nMinDecPlaces+1))
+          set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_cd = cd->num_low_cd
+        else
+          set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_cd = cd->num_normal_cd
+        endif
+      of 2:
+        if (dFormatedNumRawVal > reply->qual[fidx]->normal_high)
+          set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_cd = cd->num_high_cd
+        else
+          set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_cd = cd->num_normal_cd
+        endif
+      of 3:
+        if (Round(dFormatedNumRawVal,nMinDecPlaces+1) < Round(reply->qual[fidx]->normal_low,nMinDecPlaces+1))
+          set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_cd = cd->num_low_cd
+        else
+          if (dFormatedNumRawVal > reply->qual[fidx]->normal_high)
+            set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_cd = cd->num_high_cd
+          else
+            set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_cd = cd->num_normal_cd
+          endif
+        endif
+      else
+        set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_cd = cd->na_cd
+    endcase
+ 
+    /********************************************
+    * Create the new result_comment             *
+    * for numeric and calculation procedures    *
+    *********************************************/
+ 
+    ;only evaluate the normal information if either the normal high or low has changed
+    if ((normal_low_changed_ind = 1) or (normal_high_changed_ind = 1))
+      call log_message(build("normal_low_changed_ind = ", normal_low_changed_ind),log_level_debug)
+      call log_message(build("normal_high_changed_ind = ", normal_high_changed_ind),log_level_debug)
+ 
+ 
+      ;create the new result comment to append to the end of the existing result comment
+      ;Check for age change or sex change or both from the PM application.
+      if ((old_person_id > 0) and (old_person_id = new_person_id))
+        if ((old_sex_cd != new_sex_cd) and (old_birth_dt_tm != new_birth_dt_tm))
+          set new_result_comment = concat(new_result_comment, "  ",
+               uar_i18nbuildmessage(i18nhandle,"Comment1",
+               "Reference range changed due to change in patient's age and gender at %1.", "s",
+               nullterm(time_stamp)))
+               call log_message("From PM normal change due to age and gender",log_level_debug)
+        elseif ((old_sex_cd != new_sex_cd) and (old_birth_dt_tm = new_birth_dt_tm))
+          set new_result_comment = concat(new_result_comment, "  ",
+               uar_i18nbuildmessage(i18nhandle,"Comment2",
+               "Reference range changed due to change in patient's gender at %1.", "s",
+               nullterm(time_stamp)))
+               call log_message("From PM normal change due to gender",log_level_debug)
+        elseif ((old_sex_cd = new_sex_cd) and (old_birth_dt_tm != new_birth_dt_tm))
+          set new_result_comment = concat(new_result_comment, "  ",
+               uar_i18nbuildmessage(i18nhandle,"Comment3",
+               "Reference range changed due to change in patient's age at %1.", "s",
+               nullterm(time_stamp)))
+               call log_message("From PM normal change due to age",log_level_debug)
+        endif
+      elseif (validate(requestin->reply->accessions[1]->accession, " ") > " ")
+        ;this is from ModifyCollections so the age has changed
+        call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+        set new_result_comment = concat(new_result_comment, "  ",
+             uar_i18nbuildmessage(i18nhandle,"Comment4",
+             "Reference range changed due to change in patient's age at %1.", "s",
+             nullterm(time_stamp)))
+             call log_message("From ModifyCollections normal change",log_level_debug)
+        call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+      endif
+ 
+         ; We need to retain this part of the message in case we need to use it for
+         ; repeat results
+      set change_reason = new_result_comment
+ 
+      ;add comment to show that the normal low changed.
+      if (normal_low_changed_ind = 1)
+        call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+        call log_message(build("mindecimal = ", nmindecplaces), log_level_debug)
+ 
+        ;check to see if old normal low is defined
+        if (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]
+                        ->results[ridx]->normal_range_flag in (0, 2))
+          set old_normal_low_str = captions->not_defined_str
+        else
+          set old_normal_low_str = UAR_AccFormatResultStringSciNote(nMinDigits, nMaxDigits, nMinDecPlaces,
+                                                                    orders_reply->qual[oidx]->container_serv_res[cidx]->
+                                                                    assays[aidx]->results[ridx]->normal_low,
+                                                                    0, nSciNotationInd)
+        endif
+ 
+        ;check to see if new normal low is defined
+        if (normal_flag in (0, 2))
+          set new_normal_low_str = captions->not_defined_str
+        else
+          set new_normal_low_str = UAR_AccFormatResultStringSciNote(nMinDigits, nMaxDigits, nMinDecPlaces,
+                                                                    reply->qual[fidx]->normal_low, 0, nSciNotationInd)
+        endif
+ 
+        set new_result_comment = concat(new_result_comment, "  ",
+                 uar_i18nbuildmessage(i18nhandle,"Comment5",
+                     "Normal Low changed from %1 to %2.", "ss",
+                     nullterm(old_normal_low_str),
+                     nullterm(new_normal_low_str)))
+        call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+      endif
+ 
+      ;add comment to show that the normal high changed.
+      if (normal_high_changed_ind = 1)
+        call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+ 
+        ;check to see if old normal high is defined
+        if (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]
+                        ->results[ridx]->normal_range_flag in (0, 1))
+          set old_normal_high_str = captions->not_defined_str
+        else
+          set old_normal_high_str = UAR_AccFormatResultStringSciNote(nMinDigits, nMaxDigits, nMinDecPlaces,
+                                                                     orders_reply->qual[oidx]->container_serv_res[cidx]->
+                                                                     assays[aidx]->results[ridx]->normal_high,
+                                                                     0, nSciNotationInd)
+        endif
+ 
+        ;check to see if new normal high is defined
+        if (normal_flag in (0, 1))
+          set new_normal_high_str = captions->not_defined_str
+        else
+          set new_normal_high_str = UAR_AccFormatResultStringSciNote(nMinDigits, nMaxDigits, nMinDecPlaces,
+                                                                     reply->qual[fidx]->normal_high, 0, nSciNotationInd)
+        endif
+ 
+        set new_result_comment = concat(new_result_comment, "  ",
+                 uar_i18nbuildmessage(i18nhandle,"Comment6",
+                     "Normal High changed from %1 to %2.", "ss",
+                     nullterm(old_normal_high_str),
+                     nullterm(new_normal_high_str)))
+        call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+      endif
+ 
+      ;Check for change of normal_cd
+      if (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]
+                        ->results[ridx]->normal_cd =
+             replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->normal_cd)
+        call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+        set new_result_comment = concat(new_result_comment, "  ",
+                 uar_i18ngetmessage(i18nhandle,"Comment7", "Result flag not changed."))
+        call log_message("No change to normal result flag.",log_level_debug)
+        call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+      else
+ 
+        call log_message("Change to normal result flag.",log_level_debug)
+ 
+        ;set the normal flag to be "not-applied" if no normal flag
+        ;present or set to display of flag
+ 
+        if (orders_reply->qual[oidx]->container_serv_res[cidx]
+               ->assays[aidx]->results[ridx]->normal_cd = cd->num_normal_cd)
+          set old_normal_flag_disp = captions->within_range
+        elseif (orders_reply->qual[oidx]->container_serv_res[cidx]
+               ->assays[aidx]->results[ridx]->normal_cd = cd->na_cd)
+          set old_normal_flag_disp = captions->not_applied_range
+        else
+          set old_normal_flag_disp =
+               uar_get_code_display(orders_reply->qual[oidx]->container_serv_res[cidx]
+                    ->assays[aidx]->results[ridx]->normal_cd)
+        endif
+ 
+        ;set the normal flag to be "not-applied" if no normal flag
+        ;present or set to display of flag
+        if (replyout->hreq250074->orders[reqordcnt]
+               ->assays[reqassaycnt]->normal_cd = cd->num_normal_cd)
+          set new_normal_flag_disp = captions->within_range
+        elseif (replyout->hreq250074->orders[reqordcnt]
+               ->assays[reqassaycnt]->normal_cd = cd->na_cd)
+          set new_normal_flag_disp = captions->not_applied_range
+        else
+          set new_normal_flag_disp =
+               uar_get_code_display(replyout->hreq250074->orders[reqordcnt]
+                    ->assays[reqassaycnt]->normal_cd)
+        endif
+ 
+        call log_message(build("old_normal_flag_disp = ", old_normal_flag_disp),log_level_debug)
+        call log_message(build("new_normal_flag_disp = ", new_normal_flag_disp),log_level_debug)
+ 
+        call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+        set new_result_comment = concat(new_result_comment, "  ",
+                 uar_i18nbuildmessage(i18nhandle,"Comment8",
+                     "Result flag changed from %1 to %2.", "ss",
+                     nullterm(old_normal_flag_disp), nullterm(new_normal_flag_disp)))
+        call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+      endif
+ 
+    endif
+ 
+    /********************************************
+    * Evaluate the critical ranges              *
+    * for numeric and calculation procedures    *
+    *********************************************/
+ 
+    case(critical_flag)
+      of 1:
+        if (Round(dFormatedNumRawVal,nMinDecPlaces+1) < Round(reply->qual[fidx]->critical_low,nMinDecPlaces+1))
+          set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_cd = cd->num_critical_cd
+        else
+          set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_cd = cd->num_normal_cd
+        endif
+      of 2:
+        if (dFormatedNumRawVal > reply->qual[fidx]->critical_high)
+          set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_cd = cd->num_critical_cd
+        else
+          set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_cd = cd->num_normal_cd
+        endif
+      of 3:
+        if (Round(dFormatedNumRawVal,nMinDecPlaces+1) < Round(reply->qual[fidx]->critical_low,nMinDecPlaces+1))
+          set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_cd = cd->num_critical_cd
+        else
+          if (dFormatedNumRawVal > reply->qual[fidx]->critical_high)
+            set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_cd = cd->num_critical_cd
+          else
+            set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_cd = cd->num_normal_cd
+          endif
+        endif
+      else
+        set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->critical_cd = cd->na_cd
+    endcase
+ 
+    /********************************************
+    * Create the new result_comment             *
+    * for numeric and calculation procedures    *
+    *********************************************/
+ 
+    ;only evaluate the critical information if the critical_cd is going to change
+    if (critical_cd_changed_ind = 1)
+      call log_message(build("critical_cd_changed_ind = ", critical_cd_changed_ind),log_level_debug)
+ 
+      ;create the new result comment to append to the end of the existing result comment
+      ;Check for age change or sex change or both from the PM application.
+      if (old_person_id > 0 and old_person_id = new_person_id)
+        if (old_sex_cd != new_sex_cd and old_birth_dt_tm != new_birth_dt_tm)
+          set new_result_comment = concat(new_result_comment, "  ",
+                  uar_i18nbuildmessage(i18nhandle,"CritComment1",
+                        "Critical flag changed due to change of age and gender at %1.", "s",
+                        nullterm(time_stamp)))
+          call log_message("From PM critical change due to age and gender",log_level_debug)
+        elseif (old_sex_cd != new_sex_cd and old_birth_dt_tm = new_birth_dt_tm)
+          set new_result_comment = concat(new_result_comment, "  ",
+                  uar_i18nbuildmessage(i18nhandle,"CritComment2",
+                        "Critical flag changed due to change of gender at %1.", "s",
+                        nullterm(time_stamp)))
+          call log_message("From PM critical change due to gender",log_level_debug)
+        elseif (old_sex_cd = new_sex_cd and old_birth_dt_tm != new_birth_dt_tm)
+          set new_result_comment = concat(new_result_comment, "  ",
+                  uar_i18nbuildmessage(i18nhandle,"CritComment3",
+                        "Critical flag changed due to change of age at %1.", "s",
+                        nullterm(time_stamp)))
+          call log_message("From PM critical change due to age",log_level_debug)
+        endif
+      elseif (validate(requestin->reply->accessions[1]->accession, " ") > " ")
+        ;this is from ModifyCollections so the age has changed
+        call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+          set new_result_comment = concat(new_result_comment, "  ",
+                  uar_i18nbuildmessage(i18nhandle,"CritComment4",
+                        "Critical flag changed due to change of age at %1.", "s",
+                        nullterm(time_stamp)))
+          call log_message("From ModifyCollections critical change due to age",log_level_debug)
+        call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+      endif
+ 
+      ;set the critical flag to be "not-applied" if no critical flag
+      ;present or set to display of critical flag
+ 
+      if (orders_reply->qual[oidx]->container_serv_res[cidx]
+             ->assays[aidx]->results[ridx]->critical_cd = cd->num_normal_cd)
+        set old_critical_flag_disp = captions->within_range
+      elseif (orders_reply->qual[oidx]->container_serv_res[cidx]
+             ->assays[aidx]->results[ridx]->critical_cd = cd->na_cd)
+        set old_critical_flag_disp = captions->not_applied_range
+      else
+        set old_critical_flag_disp =
+             uar_get_code_display(orders_reply->qual[oidx]->container_serv_res[cidx]
+                  ->assays[aidx]->results[ridx]->critical_cd)
+      endif
+ 
+      ;set the normal flag to be "not-applied" if no normal flag
+      ;present or set to display of flag
+ 
+      if (replyout->hreq250074->orders[reqordcnt]
+             ->assays[reqassaycnt]->critical_cd = cd->num_normal_cd)
+        set new_critical_flag_disp = captions->within_range
+      elseif (replyout->hreq250074->orders[reqordcnt]
+             ->assays[reqassaycnt]->critical_cd = cd->na_cd)
+        set new_critical_flag_disp = captions->not_applied_range
+      else
+        set new_critical_flag_disp =
+             uar_get_code_display(replyout->hreq250074->orders[reqordcnt]
+                  ->assays[reqassaycnt]->critical_cd)
+      endif
+ 
+      call log_message(build("old_critical_flag_disp = ", old_critical_flag_disp),log_level_debug)
+      call log_message(build("new_critical_flag_disp = ", new_critical_flag_disp),log_level_debug)
+ 
+      call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+      set new_result_comment = concat(new_result_comment, "  ",
+               uar_i18nbuildmessage(i18nhandle,"CritComment5",
+                   "Critical flag changed from %1 to %2.", "ss",
+                   nullterm(old_critical_flag_disp), nullterm(new_critical_flag_disp)))
+      call log_message(build("new_result_comment = ", new_result_comment),log_level_debug)
+ 
+    endif
+ 
+ 
+       ; For performed/in-review results, we need to consider that repeated results
+       ; could have different kinds of change occur
+    if(orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->result_status_cd in
+         (cd->perform_status_cd, cd->in_review_status_cd) and (reeval_performed_pref = 1 or drawn_dt_tm_chg_ind = 1))
+ 
+       if(prev_result_id = replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_id )
+ 
+             ; We have several different comments for the same result so we need to
+             ; mention that there have been multiple different kinds of change
+          if(trim(prev_message) != trim(new_result_comment))
+             set new_result_comment = concat(change_reason, " ", multi_change)
+          endif
+       endif
+ 
+       set prev_result_id = replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->result_id
+       set prev_message = trim(new_result_comment)
+    endif
+ 
+  endif
+ 
+end
+ 
+declare EvaluateReferenceRangeChanged( none1 ) = i2
+subroutine EvaluateReferenceRangeChanged( none1 )
+  ;this subroutine is used to determine whether the
+  ;reference range information for the current result has changed.
+  ;This subroutine will return a one if the reference
+  ;range information changed and a zero if no information has changed
+  ;The range changed indicators will be filled out in this subroutine:
+ 
+  call log_message("in the EvaluateReferenceRangeChanged sub" ,log_level_debug)
+ 
+  declare nRefRangeChgInd = i2 with public, noconstant(0)
+  declare new_critical_cd = f8 with public, noconstant(0.0)
+ 
+  set new_critical_cd = 0.0
+ 
+  ;Check the normal low reference data
+  if (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]
+          ->results[ridx]->normal_low != reply->qual[fidx]->normal_low)
+    set normal_low_changed_ind = 1
+    set nRefRangeChgInd = 1
+    call log_message("normal_low changed" ,log_level_debug)
+  endif
+ 
+  ;Check the normal high reference data
+  if (orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]
+          ->results[ridx]->normal_high != reply->qual[fidx]->normal_high)
+    set normal_high_changed_ind = 1
+    set nRefRangeChgInd = 1
+    call log_message("normal_high changed" ,log_level_debug)
+  endif
+ 
+  ;Evaluate and retrieve the new critical cd
+  call log_message(build("critical_ind = ", reply->qual[fidx]->critical_ind),log_level_debug)
+  case(reply->qual[fidx]->critical_ind)
+ 
+    of 1:
+      if (Round(dFormatedNumRawVal,nMinDecPlaces+1) < Round(reply->qual[fidx]->critical_low,nMinDecPlaces+1))
+        set new_critical_cd = cd->num_critical_cd
+      else
+        set new_critical_cd = cd->num_normal_cd
+      endif
+    of 2:
+      if (dFormatedNumRawVal > reply->qual[fidx]->critical_high)
+        set new_critical_cd = cd->num_critical_cd
+      else
+        set new_critical_cd = cd->num_normal_cd
+      endif
+    of 3:
+ 
+      if (Round(dFormatedNumRawVal,nMinDecPlaces+1) < Round(reply->qual[fidx]->critical_low,nMinDecPlaces+1))
+        set new_critical_cd = cd->num_critical_cd
+      else
+        if (dFormatedNumRawVal > reply->qual[fidx]->critical_high)
+          set new_critical_cd = cd->num_critical_cd
+        else
+          set new_critical_cd = cd->num_normal_cd
+        endif
+      endif
+    else
+      set new_critical_cd = cd->na_cd
+  endcase
+ 
+  ;Check to see if the new_critical_cd matches the old, if not update reference range information
+  call log_message(build("new_critical_cd = ", new_critical_cd),log_level_debug)
+  call log_message(build("old_critical_cd = ",
+             orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_cd),log_level_debug)
+  if (new_critical_cd != orders_reply->qual[oidx]->container_serv_res[cidx]->assays[aidx]->results[ridx]->critical_cd)
+    set critical_cd_changed_ind = 1
+    set nRefRangeChgInd = 1
+    call log_message("critical_cd changed" ,log_level_debug)
+  endif
+ 
+  set new_critical_cd = 0.0
+ 
+  call log_message(build("nRefRangeChgInd = ", nRefRangeChgInd),log_level_debug)
+  return (nRefRangeChgInd)
+ 
+end
+ 
+declare IsContDrawnDtTmChanged(cont_id_1) = i2
+subroutine IsContDrawnDtTmChanged(cont_id_1)
+  ;this subroutine returns '1' when container drawn_dt_tm has been modified; otherwise, the subroutine */      ;003
+  ;returns '0'.                                                                                        */      ;003
+ 
+  declare my_validate     = i4 with public, noconstant(0)
+  declare rr_accn_cnt     = i4 with public, noconstant(0)
+  declare max_rr_cont_cnt = i4 with public, noconstant(0)
+  declare rr_cont_cnt     = i4 with public, noconstant(0)
+  declare max_rr_accn_cnt = i4 with public, noconstant(0)
+ 
+  set drawn_dt_tm_chg_ind = 0
+ 
+  ;check to make sure this came from ModifyCollections.
+  if (validate(requestin->reply->accessions[1]->accession, "99999") = "99999")
+    return (0)
+  endif
+ 
+  set max_rr_accn_cnt = size(requestin->reply->accessions,5)                                                  ;003
+ 
+  call log_message(build("max_rr_accn_cnt=", max_rr_accn_cnt), log_level_debug)                               ;003
+ 
+  for (rr_accn_cnt = 1 to max_rr_accn_cnt)                                                                    ;003
+     set max_rr_cont_cnt = size(requestin->reply->accessions[rr_accn_cnt]->containers, 5)                     ;003
+     call log_message(build("max_rr_cont_cnt=", max_rr_cont_cnt), log_level_debug)                            ;003
+ 
+     for (rr_cont_cnt = 1 to max_rr_cont_cnt)                                                                 ;003
+        if (requestin->reply->accessions[rr_accn_cnt]->containers[rr_cont_cnt]->container_id = cont_id_1)     ;003
+ 
+           set my_validate = validate(requestin->reply->accessions[rr_accn_cnt]     ;005--debug
+                                           ->containers[rr_cont_cnt]->drawn_dt_tm_upd_ind,99)           ;005--debug
+ 
+           if (my_validate != 99) ;mod coll, not pmhnareg, calls this script.   ;005
+             if (requestin->reply->accessions[rr_accn_cnt]->containers[rr_cont_cnt]->drawn_dt_tm_upd_ind = 1) ;003
+                call log_message("pfmt_gl_reeval_results: drawn_dt_tm has been modified", log_level_debug)    ;003
+                set drawn_dt_tm_chg_ind = 1
+ 
+                ;set strings to hold the old and new collection date and time.
+                set cur_coll_date = nullterm(format(requestin->reply->accessions[rr_accn_cnt]->containers[rr_cont_cnt]
+                                                          ->collected_dt_tm,"@MEDIUMDATETIME"))
+                set old_coll_date = nullterm(format(requestin->reply->accessions[rr_accn_cnt]->containers[rr_cont_cnt]
+                                                          ->old_collected_dt_tm,"@MEDIUMDATETIME"))
+ 
+                call log_message (build("old_coll_date--->",old_coll_date), log_level_debug)
+                call log_message (build("cur_coll_date--->",cur_coll_date), log_level_debug)
+ 
+             else                 ;006
+                call log_message("pfmt_gl_reeval_results: drawn_dt_tm was not modified", log_level_debug)     ;006
+                set drawn_dt_tm_chg_ind = 0
+             endif                  ;005
+           endif                                                                                              ;003
+ 
+           set rr_cont_cnt = max_rr_cont_cnt + 1
+           set rr_accn_cnt = max_rr_accn_cnt + 1
+ 
+        endif                                                                                                 ;003
+     endfor                                                                                                   ;003
+  endfor                                                                                                      ;003
+ 
+end
+ 
+; Subroutine that adds notify flag trigger info to assays in ReplyOut struct
+subroutine SetNotifyTriggers(none4)
+ 
+  declare ref_idx    = i2 with public, noconstant(0)
+  declare trig_idx   = i2 with public, noconstant(0)
+ 
+  set ref_cnt = size(reply->qual, 5)
+  for(ref_idx = 1 to ref_cnt)
+ 
+        ; Determine if the assay has any notify triggers and add the trigger info
+    if(replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->TASK_ASSAY_CD = reply->qual[ref_idx]->TASK_ASSAY_CD)
+      set trig_cnt = size(reply->qual[ref_idx]->notify_triggers, 5)
+      set stat = alterlist(replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->notify_triggers, trig_cnt)
+      for(trig_idx = 1 to trig_cnt)
+        set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->notify_triggers[trig_idx]->sequence =
+                  reply->qual[ref_idx]->notify_triggers[trig_idx]->sequence
+ 
+        set replyout->hreq250074->orders[reqordcnt]->assays[reqassaycnt]->notify_triggers[trig_idx]->trigger_name
+                  reply->qual[ref_idx]->notify_triggers[trig_idx]->trigger_name
+      endfor
+    endif
+  endfor
+end                                                                                                           ;003
+ 
+ 
+#EXIT_SCRIPT
+    call log_message("ending pfmt_gl_reeval_results . . .",log_level_debug)
+ 
+call uar_sysdestroyhandle(hsys)
+free set cd
+ 
+end go
+ 
+ 
+ 
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,1203 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/bbt_rpt_pat_typ_com_xml/bbt_rpt_pat_typ_com_xml.prg Turn on black mode
+
+/*~BB~***************************************************************************
+  *                                                                             *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &               *
+  *                              Technology, Inc.                               *
+  *       Revision      (c) 1984-2001 Cerner Corporation                        *
+  *                                                                             *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.                *
+  *  This material contains the valuable properties and trade secrets of        *
+  *  Cerner Corporation of Kansas City, Missouri, United States of              *
+  *  America (Cerner), embodying substantial creative efforts and               *
+  *  confidential information, ideas and expressions, no part of which          *
+  *  may be reproduced or transmitted in any form or by any means, or           *
+  *  retained in any storage or retrieval system without the express            *
+  *  written permission of Cerner.                                              *
+  *                                                                             *
+  *  Cerner is a registered mark of Cerner Corporation.                         *
+  *                                                                             *
+  ~BE~***************************************************************************/
+/********************************************************************************
+ 
+        Source file name:       bbt_rpt_pat_typ_com_xml.prg
+        Object name:            bbt_rpt_pat_typ_com_xml
+        Request #:              225012
+ 
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+ 
+        Program purpose:        Export file containing patient ABO/Rh, antibodies,
+                                antigens, comments, phenotype, transfusion requirements,
+                                birth date and time, gender, and person_id.  This file
+                                can be used as an export into a client specific database
+                                for HNAM downtimes.
+ 
+        Tables read:            dm_info, code_value, person_alias, person, person_aborh,
+                                person_rh_phenotype, bb_rh_phenotype, nomenclature,
+                                blood_bank_comment, person_antibody, person_antigen,
+                                person_trans_req, transfusion_requirements
+ 
+        Tables updated:         DM_INFO
+ 
+        Executing from:         CCL, Ops
+ 
+        Special Notes:          none
+ 
+******************************************************************************/
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 03/03/10 Sachin Yadav          Copied from ptc_type_com_file and  *
+;    									 converted to xml format.
+;    *001 08/16/11 Archita S             Fix for the ST feature 303365      *
+;    *001 07/04/12 Satish Joshi         Modified the script to execute the  *
+;                                       EKS_GET_SOURCE and return the export*
+;                                       file content                        *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop   program bbt_rpt_pat_typ_com_xml:dba go
+create program bbt_rpt_pat_typ_com_xml:dba
+ 
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+/*
+record request
+(
+    ;* filled out by ops
+    1  batch_selection     = c100
+    1  output_dist         = c100
+    1  ops_date            = dq8
+ 
+    ;* filled out by bbt_generate_ptc_export
+    1  report_flag         = c1
+    1  beg_dt_tm           = dq8
+    1  end_dt_tm           = dq8
+    1  update_end_date_ind = i2
+    1  facility_cd         = f8
+)
+*/
+ 
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+ 
+declare    CnvtEndDtTmOps(endDtTmOps = q8) = q8 ;Declaring before if statement since used in If statement.
+declare dtCur         = q8 with noconstant (cnvtdatetime(curdate, curtime3))
+ 
+if (validate(reply->file_name, "ZZZ") = "ZZZ")
+ 
+    /* not from interactive, so define constants and variables */
+    record reply
+    (
+        1 file_name  = vc
+        1 rpt_list[*]
+          2 rpt_filename = vc
+		  2 data_blob                 = gvc
+		  2 data_blob_size            = i4
+ 
+%i cclsource:status_block.inc
+    )
+ 
+    declare REPORT_TYPE_ALL    = c1 with constant ("A")
+    declare REPORT_TYPE_NEW    = c1 with constant ("N")
+    declare REPORT_TYPE_DATE   = c1 with constant ("D")
+    declare DEFAULT_START_DATE = q8 with constant (cnvtdatetime("01-JAN-1800 00:00:00.00"))
+    declare DM_DOMAIN          = vc with constant ("PATHNET_BBT")
+    declare DM_NAME            = vc with noconstant ("LAST_PTC_XML_DT_TM")   
+    declare dtEnd         = q8
+    declare FACILITY_ALL       = c3 with constant("ALL")
+    declare dtLastEndRpt  = q8 with noconstant (cnvtdatetime(DEFAULT_START_DATE))
+    declare sErrMsg       = c132 with noconstant(fillstring(132, " "))
+    declare iErrCode      = i4   with noconstant(Error(sErrMsg, 1))
+    declare iStatusBlkCnt = i4   with noconstant(0)
+    declare iStat         = i2   with noconstant(0)
+    declare dtUTCDate     = q8
+    declare cDateFormatted = vc with noconstant(fillstring(20, " "))
+
+	declare personId = vc with noconstant(fillstring(20, " "))
+	declare FullNameNoNull = vc with noconstant(fillstring(200, " "))
+	declare phenotypeNoNull = vc with noconstant(fillstring(100, " "))
+	declare ABORhNoNull = vc with noconstant(fillstring(20, " "))
+  
+    declare i18nHandle    = i4   with noconstant(0)
+ 	set dtEnd = CnvtEndDtTmOps(dtCur)
+%i cclsource:i18n_uar.inc
+    set iStat = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+else
+    /* make sure file_name is blank to start */
+    set reply->file_name = ""
+    
+    set dtEnd = cnvtdatetime(request->end_dt_tm)
+endif
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+ 
+%i cclsource:bbt_GetBBPreference.inc
+%i cclsource:bbt_read_report_file.inc
+ 
+/** DECLARES
+*/
+declare ALIAS_TYPE_CS = i4  with constant(4)
+declare MRN_MEAN      = c12 with constant("MRN")
+ 
+declare TRANS_REQ_ROW = vc  with constant("TRQ")
+declare PHENO_TYP_ROW = vc  with constant("PH")
+declare COMMENT_ROW   = vc  with constant("COM")
+declare ANTIGEN_ROW   = vc  with constant("AG")
+declare ANTIBODY_ROW  = vc  with constant("AB")
+declare ABORH_ROW     = vc  with constant("ABO")
+declare MRN_ROW       = vc  with constant("MRN")
+ 
+declare dtBegin       = q8 with noconstant(cnvtdatetime(DEFAULT_START_DATE))
+declare sRptType      = c1 with noconstant(REPORT_TYPE_ALL)
+declare iUpdEndDtInd  = i2 with noconstant(0)
+declare dMrnTypeCd    = f8 with noconstant(0.0)
+declare DM_LOOP_INCREMENT  = vc  with constant ("PTC_LOOP_INCREMENT")
+ 
+declare i      = i4 with noconstant(1)
+declare iFound = i2 with noconstant(0)
+ 
+declare iDone         = i2   with noconstant(0)
+declare iPersonCnt    = i4   with noconstant(0)
+declare iIncrement    = i4   with noconstant(0)
+declare iSeqVar       = i4   with noconstant(0)
+declare i1stRptDone   = i2   with noconstant(0)   ; First time in the report, used in head report
+declare iPersonRowAdd = i2   with noconstant(0)   ; Used for row control on the nth instance of the select
+ 
+declare facility_disp = vc with protect,noconstant("")
+ 
+record recTempPersons
+(
+    1 iPersonCnt    = i4
+    1 Persons[*]
+        2 dPersonId = f8
+        2 sPersonIND = vc
+)
+ 
+record recPersons
+(
+    1 iPersonCnt    = i4
+    1 Persons[*]
+        2 dPersonId  = f8
+        2 sPersonIND = vc
+)
+ 
+record recCaptions1
+(
+    1 report_type = vc
+    1 begin_date  = vc
+    1 end_date    = vc
+    1 all_ind     = vc
+    1 new_ind     = vc
+    1 date_ind    = vc
+    1 inactive_type = vc ;001
+    1 facility     = vc
+)
+ 
+set recCaptions1->report_type =
+    uar_i18ngetmessage(i18nHandle, "RPT_TYPE", "EXPORT TYPE:")
+set recCaptions1->begin_date =
+    uar_i18ngetmessage(i18nHandle, "BEG_DATE", "BEGIN DATE:")
+set recCaptions1->end_date =
+    uar_i18ngetmessage(i18nHandle, "END_DATE", "END DATE:")
+set recCaptions1->all_ind =
+    uar_i18ngetmessage(i18nHandle, "ALL_INDICATOR", "A")
+set recCaptions1->new_ind =
+    uar_i18ngetmessage(i18nHandle, "NEW_INDICATOR", "N")
+set recCaptions1->date_ind =
+    uar_i18ngetmessage(i18nHandle, "DATE_RANGE_INDICATOR", "D")
+set recCaptions1->inactive_type =
+    uar_i18ngetmessage(i18nHandle, "INACTIVE_TYPE", "(INACTIVE)")
+set recCaptions1->facility = uar_i18ngetmessage(i18nHandle,
+   "facility", "FACILITY:")
+ 
+/** FUNCTION - AddToStatusBlock(sStatus, sOpName, sOpsStatus, sTargetObjName, sTargetObjValue) = null
+    Add the given information to the status block
+    PARAMS
+        Items to match structure members of the status block
+*/
+declare    AddToStatusBlock(sStatus=vc, sOpName=vc, sOpStatus=vc, sTargetObjName=vc, sTargetObjValue=vc) = null
+subroutine AddToStatusBlock(sStatus, sOpName, sOpStatus, sTargetObjName, sTargetObjValue)
+ 
+    if (sStatus > "")
+        set reply->status_data->status = sStatus
+    endif
+    set iStatusBlkCnt = iStatusBlkCnt + 1
+    if (iStatusBlkCnt > 1)
+        set iStat = alter(reply->status_data->subeventstatus, iStatusBlkCnt)
+    endif
+    set reply->status_data->subeventstatus[iStatusBlkCnt].OperationName     = sOpName
+    set reply->status_data->subeventstatus[iStatusBlkCnt].OperationStatus   = sOpStatus
+    set reply->status_data->subeventstatus[iStatusBlkCnt].TargetObjectName  = sTargetObjName
+    set reply->status_data->subeventstatus[iStatusBlkCnt].TargetObjectValue = sTargetObjValue
+ 
+end /* subroutine AddToStatusBlock */
+ 
+/** FUNCTION - CheckForError(sStatus, sOpName, sOpStatus, sTargetObjName) = i2
+    Check for a CCL error and add each to the Status Block
+    PARAMS
+        Items to match structure members of the status block to use in case of an error.
+    RETURNS
+        1   => Error(s) found
+        0   => No errors
+*/
+declare    CheckForError(sStatus=vc, sOpName=vc, sOpStatus=vc, sTargetObjName=vc) = i2
+subroutine CheckForError(sStatus, sOpName, sOpStatus, sTargetObjName)
+ 
+    set iErrCode = Error(sErrMsg, 0)
+    if (iErrCode > 0)
+        while (iErrCode)
+            call AddToStatusBlock(sStatus, sOpName, sOpStatus, sTargetObjName, sErrMsg)
+            set iErrCode = Error(sErrMsg, 0)
+        endwhile
+        return (1)
+    endif
+    return (0)
+ 
+end /* subroutine CheckForError */
+ 
+/** FUNCTION - FormatDtTm(dtValue=q8) = vc
+        Format the given date/time value for display.
+    PARAM
+        dtValue : Date value to be formated.
+    RETURN
+        String value of the formated date/time
+*/
+declare    FormatDtTm(dtValue = q8) = vc
+subroutine FormatDtTm(dtValue)
+ 
+        return (concat(format(dtValue, cclfmt->MEDIUMDATE4YR), " ",
+                   format(dtValue, cclfmt->TIMENOSECONDS)))
+ 
+end /* subroutine FormatDtTm */
+ 
+/** FUNCTION - CnvtBeginDtTmOps(beginDtTmOps=q8) = q8
+        Append seconds and milliseconds of ":00.00" to the given date/time.
+    PARAM
+        beginDtTmOps : Date value to be converted.
+    RETURN
+        Converted date value.
+*/
+declare    CnvtBeginDtTmOps(beginDtTmOps = q8) = q8
+subroutine CnvtBeginDtTmOps(beginDtTmOps)
+        return (cnvtdatetime(concat(format(cnvtdatetime(beginDtTmOps),
+                              "DD/MMM/YYYY HH:MM;;D"),":00.00")))
+end /* subroutine CnvtBeginDtTmOps */
+ 
+/** FUNCTION - CnvtEndDtTmOps(endDtTmOps=q8) = q8
+        Append seconds and milliseconds of ":59.99" to the given date/time.
+    PARAM
+        endDtTmOps : Date value to be converted.
+    RETURN
+        Converted date value.
+*/
+ 
+subroutine CnvtEndDtTmOps(endDtTmOps)
+        return (cnvtdatetime(concat(format(cnvtdatetime(endDtTmOps),
+                              "DD/MMM/YYYY HH:MM;;D"),":59.99")))
+end /* subroutine CnvtEndDtTmOps */
+ 
+/** FUNCTION - ReadLastReportDtTm(iLock) = i2
+    Read the DM_INFO table for the last report date/time.
+    PARAMS
+        iLock : 0 => Do no lock row, store the value in the dtLastEndRpt variable.
+                1 => Lock row, do not store the value.
+    RETURN
+         >=0 : success, number of rows found
+        -1   : failed
+*/
+declare    ReadLastReportDtTm(iLock = i2) = i2
+subroutine ReadLastReportDtTm(iLock)
+ 
+    if (iLock)
+        select into "nl:"
+            dm.info_date
+        from
+            dm_info dm
+        plan dm
+            where dm.info_domain = DM_DOMAIN
+              and dm.info_name   = DM_NAME
+              and dm.info_number = request->facility_cd
+        detail
+            dtLastEndRpt = dm.info_date
+        with nocounter
+            ,forupdate(dm)
+    else
+        select into "nl:"
+            dm.info_date
+        from
+            dm_info dm
+        plan dm
+            where dm.info_domain = DM_DOMAIN
+              and dm.info_name   = DM_NAME
+              and dm.info_number = request->facility_cd
+        detail
+            dtLastEndRpt     = dm.info_date
+        with nocounter
+    endif
+ 
+    if (CheckForError ("F", "SELECT", "F", "DM_INFO"))
+        return (-1)
+    else
+        return (curqual)
+    endif
+ 
+end /* subroutine ReadLastReportDtTm */
+ 
+/** FUNCTION - GetDaysFromBatchSelection(sSearchString)
+    Read the batch selection field to determine the "DAYS[" param
+    PARAMS
+        sSearchString : string to search
+    RETURN
+        0 if the value is invalid
+        the value otherwise
+*/
+declare    GetDaysFromBatchSelection(sSearchString=vc) = i2
+subroutine GetDaysFromBatchSelection(sSearchString)
+ 
+declare iStartPos = i2 with noconstant(0)
+declare iEndPos   = i2 with noconstant(0)
+declare iValue    = i2 with noconstant(-1)
+    set iStartPos = cnvtint(value(findstring("DAYS[",sSearchString)))
+    if (iStartPos > 0)
+        set iStartPos = iStartPos + 5   /* adjust for "DAYS[" */
+        set iEndPos = cnvtint(value(findstring("]", sSearchString, iStartPos)))
+        if (iEndPos > iStartPos)
+            set iValue  =  cnvtint(trim(substring(iStartPos, iEndPos - iStartPos, sSearchString)))
+        endif
+    endif
+    return (iValue)
+ 
+end /* subroutine GetDaysFromBatchSelection
+ 
+/** FUNCTION - DetermineDateRangeOPS
+    Determine the date range when running the script from OPS.
+*/
+declare    DetermineDateRangeOPS() = null
+subroutine DetermineDateRangeOPS(null)
+ 
+declare iDays = i2 with noconstant(1)
+ 
+    /* determine the start dt tm */
+    if (textlen(trim(request->batch_selection)) = 0)
+        set dtBegin     = cnvtdatetime(DEFAULT_START_DATE)
+        set sRptType    = REPORT_TYPE_ALL
+    else
+        set iDays = GetDaysFromBatchSelection(cnvtupper(request->batch_selection))
+        if (iDays < 0)
+            set dtBegin     = cnvtdatetime(DEFAULT_START_DATE)
+            set sRptType    = REPORT_TYPE_ALL
+        elseif (iDays = 0)
+            if (ReadLastReportDtTm(0) >= 0)
+                if (dtLastEndRpt = 0)
+                    set dtBegin     = cnvtdatetime(DEFAULT_START_DATE)
+                    set sRptType    = REPORT_TYPE_ALL
+                else
+                    set dtBegin     = CnvtBeginDtTmOps(dtLastEndRpt)
+                    set sRptType    = REPORT_TYPE_NEW
+                endif
+            else
+                set dtBegin     = cnvtdatetime(DEFAULT_START_DATE)
+                set sRptType    = REPORT_TYPE_ALL
+            endif
+        else
+            set dtBegin     = datetimeadd(dtCur, -iDays)
+            set dtBegin     = cnvtdatetime(cnvtdate(dtBegin), 0)
+            set sRptType    = REPORT_TYPE_DATE
+        endif
+    endif
+ 
+    set iUpdEndDtInd = 1
+ 
+end /* subroutine DetermineDateRangeOPS */
+ 
+/** SUBROUTINE FindChangedData()
+    Routine to find any changed data and store off person id's
+    RETURN
+        0 : Data was not found
+        1 : Data was found
+        2 : Error
+*/
+declare    FindChangedData() = i2
+subroutine FindChangedData(null)
+ 
+declare recIdx = i4 with protect,noconstant(-1)
+ 
+/* select to build person list with data that has been modified. */
+select into "nl:"
+    person_id = decode(par.seq, par.person_id
+                      ,pab.seq, pab.person_id
+                      ,pan.seq, pan.person_id
+                      ,bb.seq,  bb.person_id
+                      ,prh.seq, prh.person_id
+                      ,ptr.seq, ptr.person_id
+                      ,pa.seq,  pa.person_id
+                      ,0.0)
+    ,person_ind = decode(par.seq, "par"
+                        ,pab.seq, "pab"
+                        ,pan.seq, "pan"
+                        ,bb.seq,  "bb"
+                        ,prh.seq, "prh"
+                        ,ptr.seq, "ptr"
+                        ,pa.seq,  "pa"
+                        ,"NONE")
+ 
+from
+    (dummyt d1 with seq = 1)
+    ,person_aborh_result    par
+    ,person_antibody        pab
+    ,person_antigen         pan
+    ,blood_bank_comment     bb
+    ,person_rh_pheno_result prh
+    ,person_trans_req       ptr
+    ,person_aborh           pa
+ 
+plan  (d1
+    join (par
+        where par.person_id    + 0 != NULL
+          and par.person_id    + 0 > 0
+          and par.updt_dt_tm   >= cnvtdatetime(dtBegin)
+          and par.updt_dt_tm   <= cnvtdatetime(dtEnd))
+    orjoin (pab
+        where pab.person_id    + 0 != NULL
+          and pab.person_id    + 0 > 0
+          and pab.updt_dt_tm   >= cnvtdatetime(dtBegin)
+          and pab.updt_dt_tm   <= cnvtdatetime(dtEnd))
+    orjoin (pan
+        where pan.person_id    + 0 != NULL
+          and pan.person_id    + 0 > 0
+          and pan.updt_dt_tm   >= cnvtdatetime(dtBegin)
+          and pan.updt_dt_tm   <= cnvtdatetime(dtEnd))
+    orjoin (bb
+        where bb.person_id     + 0 != NULL
+          and bb.person_id     + 0 > 0
+          and bb.updt_dt_tm    >= cnvtdatetime(dtBegin)
+          and bb.updt_dt_tm    <= cnvtdatetime(dtEnd))
+    orjoin (prh
+        where prh.person_id    + 0 != NULL
+          and prh.person_id    + 0 > 0
+          and prh.updt_dt_tm   >= cnvtdatetime(dtBegin)
+          and prh.updt_dt_tm   <= cnvtdatetime(dtEnd))
+    orjoin (ptr
+        where ptr.person_id    + 0 != NULL
+          and ptr.person_id    + 0 > 0
+          and ptr.updt_dt_tm   >= cnvtdatetime(dtBegin)
+          and ptr.updt_dt_tm   <= cnvtdatetime(dtEnd))
+    orjoin (pa
+        where pa.person_id     + 0 != NULL
+          and pa.person_id     + 0 > 0
+          and pa.updt_dt_tm    >= cnvtdatetime(dtBegin)
+          and pa.updt_dt_tm    <= cnvtdatetime(dtEnd))
+        )
+ 
+order by
+    person_id
+ 
+head report
+    recTempPersons->iPersonCnt = 0
+ 
+head person_id
+    recTempPersons->iPersonCnt = recTempPersons->iPersonCnt + 1
+    if (size(recTempPersons->Persons,5) < recTempPersons->iPersonCnt)
+        iStat = alterlist(recTempPersons->Persons, recTempPersons->iPersonCnt + 4999)
+    endif
+    recTempPersons->Persons[recTempPersons->iPersonCnt]->dPersonId  = person_id
+    recTempPersons->Persons[recTempPersons->iPersonCnt]->sPersonIND = person_ind
+ 
+foot report
+    iStat = alterlist(recTempPersons->Persons, recTempPersons->iPersonCnt)
+ 
+with nocounter
+ 
+if (CheckForError ("F", "SELECT", "F", "FINDDATA"))
+    return (2)
+elseif (recTempPersons->iPersonCnt < 1)
+    return (0)
+endif
+ 
+;If the request specifies a transfusion service that must be filtered on.
+if( request->facility_cd > 0 )
+	
+    ;Get the encounter facilities for this transfusion facility.
+    set stat = BbtGetEncounterLocations( request->facility_cd, PREF_LEVEL_BB )
+ 
+    if(stat = -1)
+      call AddToStatusBlock("F", "BbtGetEncounterLocations", "F", "request->facility_cd",
+                            "Failed to retrieve patient encounter locations.")
+      go to EXIT_SCRIPT
+    endif
+ 
+    ;Find all the encounters for each patient that occurred at the filter
+    ;transfusion facility, or one of its encounter facilities.
+    select into "nl:"
+      e.person_id,
+      e.loc_facility_cd
+    from
+        (dummyt d_p with seq = value( recTempPersons->iPersonCnt )),
+        (dummyt d_f with seq = value( size(EncounterLocations->Locs,5) )),
+        encounter e
+    plan d_p
+    join d_f
+    join e where e.person_id = recTempPersons->Persons[d_p.seq].dPersonId
+                 and
+                 e.loc_facility_cd > 0
+                 and
+                 (
+                   e.loc_facility_cd = EncounterLocations->Locs[d_f.seq].EncFacilityCd
+                   or
+                   e.loc_facility_cd = (request->facility_cd)
+                 )
+    group by e.person_id,e.loc_facility_cd
+    head report
+        ;Initialize persons list.
+        recPersons->iPersonCnt = 0
+    detail
+        ;Add a person to the list.
+        recPersons->iPersonCnt = recPersons->iPersonCnt + 1
+        if( size(recPersons->Persons,5) < recPersons->iPersonCnt )
+            ;Extend list by 500 elements.
+            iStat = alterlist(recPersons->Persons,recPersons->iPersonCnt+500)
+        endif
+        recPersons->Persons[recPersons->iPersonCnt].dPersonId = recTempPersons->Persons[d_p.seq].dPersonId
+        recPersons->Persons[recPersons->iPersonCnt].sPersonIND = recTempPersons->Persons[d_p.seq].sPersonIND
+    foot report
+        ;Resize the persons list to remove unused elements.
+        iStat = alterlist(recPersons->Persons,recPersons->iPersonCnt)
+    with nocounter
+ 
+;The request did not specify a transfusion service facility to filter on.
+else
+ 
+    ;Move person data from temp structure.
+    set stat = alterlist(recPersons->Persons,recTempPersons->iPersonCnt)
+    for(recIdx = 1 to recTempPersons->iPersonCnt)
+        set recPersons->Persons[recIdx].dPersonId = recTempPersons->Persons[recIdx].dPersonId
+        set recPersons->Persons[recIdx].sPersonIND = recTempPersons->Persons[recIdx].sPersonIND
+    endfor
+    set recPersons->iPersonCnt = recTempPersons->iPersonCnt
+ 
+endif
+ 
+free record recTempPersons
+
+if (recPersons->iPersonCnt < 1)
+    return (0)
+endif
+ 
+return(1)
+ 
+end /* subroutine FindChangedData */
+ 
+/** SUBROUTINE AddReportListItem(sType, sItem, dItem)
+    Verifies that the given item does not exists in the list, then adds it
+*/
+declare    AddReportListItem(sType = vc, sItem = vc, dItem = f8) = null
+subroutine AddReportListItem(sType, sItem, dItem)
+ 
+        set i = 1                     ;001 -- 02/27/02
+        set iFound = 0                ;001 -- 02/27/02
+ 
+    while (i <= recPersonData->iLstItemCnt
+      and  iFound = 0)
+ 
+        if (recPersonData->lstItems[i].sItemType  = sType
+        and recPersonData->lstItems[i].dItemValue = dItem)
+            set iFound = 1
+        endif
+        set i = i + 1
+ 
+    endwhile
+ 
+    if (iFound = 0)
+        set recPersonData->iLstItemCnt = recPersonData->iLstItemCnt + 1
+        if (mod(recPersonData->iLstItemCnt, 10) = 1)
+            set iStat = alterlist(recPersonData->lstItems, recPersonData->iLstItemCnt + 9)
+        endif
+        set recPersonData->lstItems[recPersonData->iLstItemCnt].sItemType  = sType
+        set recPersonData->lstItems[recPersonData->iLstItemCnt].sItemDisp  = sItem
+        set recPersonData->lstItems[recPersonData->iLstItemCnt].dItemValue = dItem
+    endif
+ 
+end /* subroutine DupCheckItem */
+ 
+/** SUBROUTINE GenerateReport()
+    Routine to generate report based on stored person id's
+    RETURN
+        0 : Error
+        1 : Success
+*/
+declare    GenerateReport() = i2
+subroutine GenerateReport(null)
+ 
+declare sFileName = vc with noconstant("")
+declare sLine     = vc with noconstant("")
+ 
+set iStat            = uar_get_meaning_by_codeset(ALIAS_TYPE_CS, MRN_MEAN, 1, dMrnTypeCd)
+set logical D          value(trim(logical("CER_PRINT")))
+set sFileName        = concat("d:bbpte", format(dtCur, "YYMMDDHHMMSSCC;;d"), ".xml")
+set reply->file_name = concat("cer_print:bbpte", format(dtCur, "YYMMDDHHMMSSCC;;d"), ".xml")
+ 
+select into "nl:"
+    dm.info_date
+from
+    dm_info dm
+plan dm
+    where dm.info_domain = DM_DOMAIN
+      and dm.info_name   = DM_LOOP_INCREMENT
+detail
+    iIncrement = cnvtint(trim(dm.info_char))
+with nocounter
+ 
+if (iIncrement < 500)  /*  Make sure iIncrement hasn't been set too low  */
+   set iIncrement = 500
+endif
+ 
+set iPersonCnt = recPersons->iPersonCnt
+ 
+if (iPersonCnt < iIncrement)
+   set iIncrement = iPersonCnt
+   set iPersonCnt = 0
+else
+   set iPersonCnt = iPersonCnt - iIncrement
+endif
+ 
+;If the report needs to be filter on a transfusion service facility.
+if(request->facility_cd > 0)
+    set facility_disp = uar_get_code_display(request->facility_cd)
+    ;set DM_NAME = concat(DM_NAME,trim(cnvtstring(request->facility_cd)))
+endif
+ 
+while (iDone = 0)
+ 
+   free record recPersonData
+   record recPersonData
+   (
+       1 sFullName     = vc
+       1 sMrnList      = vc
+       1 dtBirth       = dq8
+       1 birth_tz      = i4
+       1 sGender       = vc
+       1 dPersonId     = f8
+       1 sABORH        = vc
+       1 sPhenotype    = vc
+       1 sComment      = vc
+       1 iLstItemCnt   = i4
+       1 lstItems[*]
+           2 sItemType  = vc
+           2 sItemDisp  = vc
+           2 dItemValue = f8
+   )
+ 
+   select into value(sFileName)
+       d_flag = decode(trq.seq, TRANS_REQ_ROW
+                      ,nom.seq, PHENO_TYP_ROW
+                      ,bb.seq,  COMMENT_ROW
+                      ,pan.seq, ANTIGEN_ROW
+                      ,pab.seq, ANTIBODY_ROW
+                      ,pa.seq,  ABORH_ROW
+                      ,pra.seq, MRN_ROW
+                      ,         "")
+ 
+   from
+       (dummyt                  d_per with seq = value(iIncrement))
+      ,(dummyt                  d with seq = 1)
+      ,person                   per
+      ,person_alias             pra
+      ,person_aborh             pa
+      ,blood_bank_comment       bb
+      ,long_text                lt
+      ,person_antibody          pab
+      ,person_antigen           pan
+      ,person_rh_phenotype      prh
+      ,bb_rh_phenotype          brh
+      ,nomenclature             nom
+      ,person_trans_req         ptr
+      ,transfusion_requirements trq
+ 
+   plan d_per
+   join per
+       where per.person_id   = recPersons->Persons[d_per.seq + iSeqVar]->dPersonId
+         and per.person_id   > 0
+ 
+   join d
+ 
+   join (pra
+       where pra.person_id             = per.person_id
+         and pra.person_alias_type_cd  = dMrnTypeCd
+         and pra.active_ind            = 1)
+ 
+   orjoin (pa
+       where pa.active_ind  = 1
+         and pa.person_id   = per.person_id)
+ 
+   orjoin (bb
+       where bb.active_ind       = 1
+         and bb.person_id        = per.person_id
+       join  lt
+           where lt.long_text_id = bb.long_text_id)
+ 
+   orjoin (pab
+       where pab.person_id   = per.person_id
+         and pab.active_ind  = 1)
+ 
+   orjoin (pan
+       where pan.person_id    = per.person_id
+         and pan.active_ind   = 1)
+ 
+   orjoin (prh
+       where prh.person_id           = per.person_id
+         and prh.active_ind          = 1
+       join brh
+           where prh.rh_phenotype_id = brh.rh_phenotype_id
+       join nom
+           where nom.nomenclature_id = brh.w_nomenclature_id
+              or nom.nomenclature_id = brh.fr_nomenclature_id)
+ 
+   orjoin (ptr
+       where ptr.person_id          = per.person_id
+         and ptr.active_ind         = 1
+       join trq
+           where ptr.requirement_cd = trq.requirement_cd)
+ 
+   order by
+       per.person_id
+ 
+   head report
+       /* print report information at the top of the file */
+       col 0 "<?xml version='1.0' encoding='UTF-8'?>",row + 1
+       col 0 "<ptc>",row + 1
+       col 1 "<export_criteria>", row + 1
+      
+       iPersonRowAdd = 0
+       if (i1stRptDone = 0)
+          case (sRptType)
+              of REPORT_TYPE_ALL:
+                  sLine = concat(recCaptions1->report_type, recCaptions1->all_ind, ", ")
+                  col 2 "<report_type>", recCaptions1->all_ind, "</report_type>", row + 1
+              of REPORT_TYPE_NEW:
+                  sLine = concat(recCaptions1->report_type, recCaptions1->new_ind, ", ")
+                  col 2 "<report_type>", recCaptions1->new_ind, "</report_type>", row + 1
+              of REPORT_TYPE_DATE:
+                  sLine = concat(recCaptions1->report_type, recCaptions1->date_ind, ", ")
+                  col 2 "<report_type>", recCaptions1->date_ind, "</report_type>", row + 1
+          endcase
+          sLine = concat(sLine, " ", recCaptions1->begin_date , FormatDtTm(dtBegin), ", ",
+                                     recCaptions1->end_date   , FormatDtTm(dtEnd))
+
+          col 2 "<begin_date>", dtBegin, "</begin_date>", row + 1
+          col 2 "<end_date>", dtEnd, "</end_date>", row + 1
+          sLine = ""
+          i1stRptDone = 1
+          iPersonRowAdd = 1          
+
+          ;If the report needs to be filter on a transfusion service facility.
+          if(request->facility_cd > 0)
+              col 2, "<facility>",facility_disp, "</facility>", row + 1
+          elseif(request->facility_cd = 0)
+          	  col 2, "<facility>",FACILITY_ALL, "</facility>", row + 1
+          endif        
+
+          col 2 "<last_run>", dtLastEndRpt, "</last_run>", row + 1
+
+       endif
+       col 1 "</export_criteria>", row + 1
+ 
+   head per.person_id
+       /* verify that the report structure is initialized for each person */
+       recPersonData->sFullName   = ""
+       recPersonData->sMrnList    = ""
+       recPersonData->dtBirth     = 0
+       recPersonData->birth_tz    = 0
+       recPersonData->sGender     = ""
+       recPersonData->dPersonId   = 0.0
+       recPersonData->sABORH      = ""
+       recPersonData->sPhenotype  = ""
+       recPersonData->sComment    = ""
+       recPersonData->iLstItemCnt = 0
+       iStat = alterlist(recPersonData->lstItems, 0)
+ 
+       /* fill out person level information */
+       if (per.active_ind = 0)
+         recPersonData->sFullName = concat(trim(per.name_full_formatted),
+             "  ",trim(recCaptions1->inactive_type))
+       else
+         recPersonData->sFullName   = trim(per.name_full_formatted)
+       endif
+       recPersonData->dtBirth     = per.birth_dt_tm
+       recPersonData->birth_tz    = validate(per.birth_tz,0)
+       recPersonData->sGender     = trim(uar_get_code_display(per.sex_cd))
+       if (trim(recPersonData->sGender) > "")
+       		recPersonData->sGender = concat("<![CDATA[",recPersonData->sGender,"]]>")
+       endif
+       recPersonData->dPersonId   = per.person_id
+;010 - begin
+;       if (iPersonRowAdd = 1)
+;          row + 1   ;001 -- 02/27/02
+;       else
+          iPersonRowAdd = 1
+;       endif
+;010 - end
+   detail
+ 
+       case (d_flag)
+ 
+           of ABORH_ROW:
+            /* ABORH */
+               recPersonData->sABORH =
+                   concat(trim(uar_get_code_display(pa.abo_cd)), " ", trim(uar_get_code_display(pa.rh_cd)))
+ 
+           of TRANS_REQ_ROW:
+               /* transfusion requirement */
+               call AddReportListItem(d_flag
+                                     ,trim(uar_get_code_display(trq.requirement_cd))
+                                     ,trq.requirement_cd)
+ 
+           of PHENO_TYP_ROW:
+               /* phenotype */
+               if (nom.nomenclature_id = brh.fr_nomenclature_id)
+                   /* fisher display */
+                   recPersonData->sPhenotype =
+                       concat(trim(nom.short_string), " ", trim(recPersonData->sPhenotype,3))
+               elseif (nom.nomenclature_id = brh.w_nomenclature_id)
+                   /* wiener display */
+                   recPersonData->sPhenotype =
+                       concat(trim(recPersonData->sPhenotype,3), " ", trim(nom.short_string))
+               endif
+ 
+           of COMMENT_ROW:
+               /* comment */
+               recPersonData->sComment = trim(lt.long_text,3)
+ 
+           of ANTIGEN_ROW:
+               /* antigen */
+               call AddReportListItem(d_flag
+                                     ,trim(uar_get_code_display(pan.antigen_cd))
+                                     ,pan.antigen_cd)
+ 
+           of ANTIBODY_ROW:
+               /* antibody */
+               call AddReportListItem(d_flag
+                                     ,trim(uar_get_code_display(pab.antibody_cd))
+                                     ,pab.antibody_cd)
+ 
+           of MRN_ROW:
+               /* mrn */
+               call AddReportListItem(d_flag
+                                        ,trim(cnvtalias(pra.alias, pra.alias_pool_cd))
+                                     ,pra.person_alias_id)
+       endcase
+ 
+   foot per.person_id
+;010 - begin
+;   personId = "           "
+   personId = trim(cnvtstring(recPersonData->dPersonId,19,0))
+   if (recPersonData->sFullName = NULL)
+     FullNameNoNull = " "
+   else
+     FullNameNoNull = concat("<![CDATA[",trim(recPersonData->sFullName),"]]>")
+   endif
+   if (recPersonData->sPhenotype = NULL)
+     phenotypeNoNull = " "
+   else
+     phenotypeNoNull = concat("<![CDATA[",trim(recPersonData->sPhenotype),"]]>")
+   endif
+   if (recPersonData->sABORH = NULL)
+     ABORhNoNull = " "
+   else
+     ABORhNoNull = concat("<![CDATA[",trim(recPersonData->sABORH),"]]>")
+   endif
+    if (curutc = 1)
+      cDateFormatted = concat(
+        format(datetimezone(recPersonData->dtBirth, recPersonData->birth_tz), "@MEDIUMDATE4YR;4;q"),
+        " ",
+        format(datetimezone(recPersonData->dtBirth, recPersonData->birth_tz), "@TIMENOSECONDS;4;q")
+        )
+    else
+      cDateFormatted = FormatDtTm(recPersonData->dtBirth)
+    endif
+    for (i = 1 to recPersonData->iLstItemCnt)
+        if (recPersonData->lstItems[i].sItemType = MRN_ROW)
+               if (recPersonData->sMrnList > "")
+                   recPersonData->sMrnList = concat(recPersonData->sMrnList, ",",
+                                                 recPersonData->lstItems[i].sItemDisp)
+               else
+                   recPersonData->sMrnList = recPersonData->lstItems[i].sItemDisp
+               endif
+        endif
+    endfor
+       col 2   "<person>",row + 1
+       col 4     "<ptc_time>",dtCur,"</ptc_time>",row + 1
+       col 4     "<person_id>",personId,"</person_id>",row + 1
+       col 4     "<name>",FullNameNoNull,"</name>",row + 1
+       col 4     "<dob>",cDateFormatted,"</dob>",row + 1
+       col 4     "<gender>",recPersonData->sGender,"</gender>",row + 1
+       col 4     "<ABORh>",ABORhNoNull,"</ABORh>",row + 1
+       col 4     "<phenotype>",phenotypeNoNull,"</phenotype>",row + 1
+       for (i = 1 to recPersonData->iLstItemCnt)
+           if (recPersonData->lstItems[i].sItemType = MRN_ROW)
+               col 4 "<mrns>",row + 1
+               col 6   "<ptc_time>",dtCur,"</ptc_time>",row + 1
+               col 6   "<person_id>",personId,"</person_id>",row + 1
+               col 6   "<mrn>","<![CDATA[",recPersonData->lstItems[i].sItemDisp,"]]>","</mrn>",row + 1
+               col 4 "</mrns>",row + 1
+           endif
+       endfor
+       for (i = 1 to recPersonData->iLstItemCnt)
+           if (recPersonData->lstItems[i].sItemType = TRANS_REQ_ROW)
+               col 4 "<transReqs>",row + 1
+               col 6   "<ptc_time>",dtCur,"</ptc_time>",row + 1
+               col 6   "<person_id>",personId,"</person_id>",row + 1
+               col 6   "<transReq>","<![CDATA[",recPersonData->lstItems[i].sItemDisp,"]]>","</transReq>",row + 1
+               col 4 "</transReqs>",row + 1
+           endif
+       endfor
+       for (i = 1 to recPersonData->iLstItemCnt)
+           if (recPersonData->lstItems[i].sItemType = ANTIBODY_ROW)
+               col 4 "<antibodies>",row + 1
+               col 6   "<ptc_time>",dtCur,"</ptc_time>",row + 1
+               col 6   "<person_id>",personId,"</person_id>",row + 1
+               col 6   "<antibody>","<![CDATA[",recPersonData->lstItems[i].sItemDisp,"]]>","</antibody>",row + 1
+               col 4 "</antibodies>",row + 1
+           endif
+       endfor
+       for (i = 1 to recPersonData->iLstItemCnt)
+           if (recPersonData->lstItems[i].sItemType = ANTIGEN_ROW)
+              col 4 "<antigens>",row + 1
+              col 6   "<ptc_time>",dtCur,"</ptc_time>",row + 1
+              col 6   "<person_id>",personId,"</person_id>",row + 1
+              col 6   "<antigen>","<![CDATA[",recPersonData->lstItems[i].sItemDisp,"]]>","</antigen>",row + 1
+              col 4 "</antigens>", row + 1
+           endif
+       endfor       
+       col 4 "<comments>",
+         if (recPersonData->sComment > "")
+           col 15       "<![CDATA[",recPersonData->sComment,"]]>", row + 1
+         endif,"</comments>",row + 1
+       col 2 "</person>",row + 1
+        
+
+ foot report
+   if (iPersonCnt = 0)   	 
+     col 0 "</ptc>",row + 1
+   endif
+
+   with
+       nocounter
+       ,format=stream
+       ,formfeed=none
+       ,maxcol=100000
+       ,maxrow=1                     ;001 -- 02/27/02
+       ,outerjoin(d)
+       ,append
+ 
+   set iSeqVar = iSeqVar + iIncrement
+ 
+   if (iPersonCnt = 0)
+      set iDone = 1
+   elseif (iPersonCnt < iIncrement)
+      set iIncrement = iPersonCnt
+      set iPersonCnt = 0
+   else
+      set iPersonCnt = iPersonCnt - iIncrement
+   endif
+ 
+ 
+ 
+endwhile
+ 
+ 
+if (CheckForError ("F", "SELECT", "F", "REPORT"))
+    return (0)
+else
+    return (1)
+endif
+ 
+end /* subroutine GenerateReport */
+ 
+/** SUROUTINE UpdateDMInfo(0)
+    Update the dm_info row with our end date/time (if needed)
+    RETURN
+        0 : Failed
+        1 : Success
+*/
+declare    UpdateDMInfo() = I2
+subroutine UpdateDMInfo(null)
+ 
+ 
+    set iStat = ReadLastReportDtTm(1)
+    if (iStat >= 1)
+ 
+        update
+        into
+            dm_info dm
+        set
+            dm.info_date    =   if (iUpdEndDtInd and datetimediff(dtEnd, dtLastEndRpt) >= 0)
+                                    if (datetimediff(dtEnd, CnvtEndDtTmOps(dtCur)) > 0)
+                                    	cnvtdatetime(CnvtEndDtTmOps(dtCur))
+                                    else
+                                    	cnvtdatetime(dtEnd)
+                                    endif
+                                else
+                                    dm.info_date
+                                endif
+           ,dm.info_char    = sRptType
+           ,dm.updt_dt_tm   = cnvtdatetime(curdate,curtime3)
+           ,dm.updt_id      = reqinfo->updt_id
+           ,dm.updt_cnt     = dm.updt_cnt + 1
+           ,dm.updt_task    = reqinfo->updt_task
+           ,dm.updt_applctx = 0
+        plan dm
+            where dm.info_domain = DM_DOMAIN
+              and dm.info_name   = DM_NAME
+              and dm.info_number = request->facility_cd              
+        with nocounter
+ 
+        if (CheckForError("F", "UPDATE", "F", "DM_INFO"))
+            call AddToStatusBlock("F", "UPDATE", "F", "DM_INFO", "Failed to update DM_INFO row")
+            return (0)
+        endif
+ 
+    elseif (iStat = 0)
+ 
+        insert
+        into
+            dm_info dm
+        set
+            dm.info_domain  = DM_DOMAIN
+           ,dm.info_name    = DM_NAME
+           ,dm.info_date    =   if (iUpdEndDtInd)
+                                    if (datetimediff(dtEnd, CnvtEndDtTmOps(dtCur)) > 0)
+                                    	cnvtdatetime(CnvtEndDtTmOps(dtCur))
+                                    else
+                                    	cnvtdatetime(dtEnd)
+                                    endif
+                                else
+                                    null
+                                endif
+           ,dm.info_char    = sRptType
+           ,dm.updt_dt_tm   = cnvtdatetime(curdate,curtime3)
+           ,dm.updt_id      = reqinfo->updt_id
+           ,dm.updt_cnt     = 0
+           ,dm.updt_task    = reqinfo->updt_task
+           ,dm.updt_applctx = 0
+           ,dm.info_number  = request->facility_cd
+        plan dm
+        with nocounter
+ 
+        if (CheckForError("F", "INSERT", "F", "DM_INFO"))
+            call AddToStatusBlock("F", "INSERT", "F", "DM_INFO", "Failed to insert DM_INFO row")
+            return (0)
+        endif
+ 
+    else
+        call AddToStatusBlock("F", "SELECT", "F", "DM_INFO", "Failed to lock DM_INFO row")
+        return (0)
+    endif
+    return (1)
+ 
+end /* subroutine UpdateDMInfo */
+ 
+/** BEGIN main program
+Determine if we are running through OPS
+*/
+
+if (textlen(trim(request->batch_selection)) = 0)
+    /* we are running through interactive or ReportSelection*/
+    call echo("Interactive")
+    set dtBegin      = cnvtdatetime(request->beg_dt_tm)
+    set dtEnd        = cnvtdatetime(request->end_dt_tm)
+    if (textlen(trim(request->report_flag)) > 0)
+	    set sRptType     = request->report_flag
+	endif    
+    set iUpdEndDtInd = request->update_end_date_ind
+    if( request->facility_cd > 0)
+		set DM_NAME = concat(DM_NAME,trim(cnvtstring(request->facility_cd,19,0)))
+    endif
+else
+    /* we are running through OPS */
+    call echo("OPS")
+    ;This must be set to the value of the batch selection string since
+    ;temp_string is used in CHECK_FACILITY_CD (it acts as a parameter to a
+    ;function).
+    set temp_string = cnvtupper(trim(request->batch_selection))
+    call CHECK_FACILITY_CD("bbt_rpt_pat_typ_com_xml")
+    if( request->facility_cd > 0)
+		set DM_NAME = concat(DM_NAME,trim(cnvtstring(request->facility_cd,19,0)))
+    endif
+    call DetermineDateRangeOPS(null)
+endif
+ 
+/* validate data */
+if (   dtBegin     < dtEnd
+   and (  sRptType = REPORT_TYPE_ALL
+       or sRptType = REPORT_TYPE_NEW
+       or sRptType = REPORT_TYPE_DATE))
+ 
+    set iStat = FindChangedData(null)
+    if (iStat = 1)
+        if (GenerateReport(null))
+            if (UpdateDMInfo(null))
+           		if (textlen(trim(request->batch_selection)) = 0)
+           			call ReadExportFile(reply->file_name)
+           			if (EKSREPLY->status_data[1].status = "S")
+		                call AddToStatusBlock("S", "SCRIPT", "S", "SCRIPT", "Success")
+					else
+						call AddToStatusBlock("F", "SCRIPT", "F", "BBT_RPT_PAT_TYP_COM_XML", "Error reading report")
+					endif
+				 else
+		                call AddToStatusBlock("S", "SCRIPT", "S", "SCRIPT", "Success")
+				 endif
+            else
+                call AddToStatusBlock("F", "UPDATE", "F", "DM_INFO", "Failed updating DM_INFO")
+            endif
+        else
+            call AddToStatusBlock("F", "SCRIPT", "F", "BBT_RPT_PAT_TYP_COM_XML", "Error generating export")
+        endif
+    elseif (iStat = 0)
+        if (UpdateDMInfo(null))
+            call AddToStatusBlock("Z", "SCRIPT", "Z", "BBT_RPT_PAT_TYP_COM_XML", "No export items found")
+        else
+            call AddToStatusBlock("F", "UPDATE", "F", "DM_INFO", "Failed updating DM_INFO")
+        endif
+    else
+        call AddToStatusBlock("F", "SCRIPT", "F", "BBT_RPT_PAT_TYP_COM_XML", "Error loading data")
+    endif
+else
+    call AddToStatusBlock("F", "DATA", "F", "VALIDATION", "Export data not valid")
+    call AddToStatusBlock("F", "DATA", "F", "BEGINDTTM",  format(dtBegin, ";;q"))
+    call AddToStatusBlock("F", "DATA", "F", "ENDDTTM",    format(dtEnd, ";;q"))
+    call AddToStatusBlock("F", "DATA", "F", "RPTTYPE",    sRptType)
+endif
+ 
+#EXIT_SCRIPT
+
+set stat = alterlist(reply->rpt_list, 1)
+set reply->rpt_list[1].rpt_filename = reply->file_name
+if (textlen(trim(request->batch_selection)) = 0)
+	if (EKSREPLY->status_data[1].status = "S")
+	  set reply->rpt_list[1]->data_blob = EKSREPLY->data_blob
+	  set reply->rpt_list[1]->data_blob_size =EKSREPLY->data_blob_size
+	endif
+endif
+ 
+if (reply->status_data->status = "S")
+    set reqinfo->commit_ind = 1
+endif
+ 
+free set recPersons
+free set recPersonData
+free set recCaptions1
+ 
+end go /*program*/
+
+;Generated by GNU enscript 1.6.4.

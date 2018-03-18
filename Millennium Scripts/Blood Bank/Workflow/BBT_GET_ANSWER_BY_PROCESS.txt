@@ -1,0 +1,366 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBT_COMMONDATAMODEL_SCRIPTS/BBT_GET_ANSWER_BY_PROCESS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       BBT_GET_ANSWER_BY_PROCESS
+        Object name:            BBT_GET_ANSWER_BY_PROCESS
+        Request #:              225
+
+        Product:                PATHNET
+        Product Team:           BLOOD BANK
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Retrieve the answers for specified processes
+
+        Tables read:            ANSWERS
+                                QUESTION
+                                CODE_VALUE
+        Tables updated:         NA
+        Executing from:         all applications
+
+        Special Notes:          NA
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 05/03/96 Teresa Davis         Initial Release                     *
+;     001 03/18/98 Mike Goings          Update proc array to accept the # of*
+;                                       processes instead of at most 10     *
+;     002 08/17/98 Mike Goings          Retrieve only active questions      *
+;     003 12/01/98 Emily Zhou           Script Tunning                      *
+;     004 08/29/07 Jason Coy            Update to return oe_format_id and   *
+;                                       catalog_type_cd from order_catalog  *
+;                                       table when computer xm prefs are    *
+;                                       being returned.                     *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program bbt_get_answer_by_process:dba go
+create program bbt_get_answer_by_process:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+/*
+record request
+(
+   1 module_mean           = C15  ;table 1660
+   1 process_qual[x]
+     2 process_mean          = C15  ;table 1662
+)
+*/
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+record reply
+(
+     1 process_qual[2]
+       2 process_cd         = f8
+       2 process_disp       = c40
+       2 process_desc       = c60
+       2 process_mean       = c12 
+       2 nbr_of_question    = i4
+       2 question_qual[1]
+         3 question_cd        = f8
+         3 question_disp      = c40
+         3 question_desc      = c60
+         3 question_mean      = c12 
+         3 response_flag      = i2
+         3 code_set           = i4
+         3 answer             = vc
+         3 code_value         = f8
+         3 oe_format_id       = f8
+         3 catalog_type_cd    = f8
+%I CCLSOURCE:STATUS_BLOCK.INC
+)
+
+
+/****************************************************************************
+*       Declare Variables                                                   *
+*****************************************************************************/
+declare SCRIPT_NAME                   = c25  with constant("bbt_get_answer_by_process")
+
+; Error message declarations.
+declare errmsg                        = c132 with protect, noconstant(fillstring(132," "))
+declare error_check                   = i2   with protect, noconstant(error(errmsg,1))
+declare uar_error                     = vc   with protect, noconstant("")
+
+; Questions code set 1661   
+declare QUESTIONS_CS                  = i4   with protect, constant(1661) 
+declare COMP_XM_ORDRBLE_PROMPT_MEAN   = c12  with protect, constant("ORDBL COMPXM")  ;Computer XM orderable preference (CS 1661).
+declare comp_xm_ordrble_prompt_cd     = f8   with protect, noconstant(0.0)
+
+declare ordbl_compXM_idx_hold         = i4   with protect, noconstant(0)             ;Location in reply of ORDBL COMPXM question.
+declare bbtCompXM_idx_hold            = i4   with protect, noconstant(0)             ;Location in reply of BBTCOMPXM process.
+
+/****************************************************************************
+*       Initialize Variables                                                *
+*****************************************************************************/
+set reply->status_data->status = "F"
+set count1 = 0
+set count2 = 0
+set max2 = 1
+set number_of_process = size(request->process_qual,5)
+set mod_cd = 0.0
+set proc_cd[value(number_of_process)] = 0  ;001
+/****************************************************************************
+*       Retrieve process and module codes
+****************************************************************************/
+;set cdf_meaning = fillstring(12, " ")
+set code_cnt = 1
+set code_set = 1660
+set cdf_meaning = request->module_mean
+set mod_cd = 0.0
+set stat = uar_get_meaning_by_codeset(code_set, cdf_meaning, code_cnt, mod_cd)
+
+/*
+      select into "nl:"
+          c.code_value
+      from code_value c
+      where c.code_set = 1660
+        and c.cdf_meaning = request->module_mean
+        and c.active_ind = 1                                    ; 002
+      detail
+         mod_cd = c.code_value
+      with nocounter
+
+      if (curqual = 0)
+         go to Resize_Reply
+      endif
+*/
+      select into "nl:"
+          c.code_value
+      from code_value c,
+           (dummyt d with seq = value(number_of_process))
+      plan d
+      join c where c.code_set = 1662
+               and c.cdf_meaning = request->process_qual[d.seq]->process_mean
+               and c.active_ind = 1                                     ; 002
+      head report
+         count1 = 0
+      detail
+          count1 = count1 + 1
+          proc_cd[count1] = c.code_value        
+      with nocounter
+
+      if (curqual = 0)
+         go to Resize_Reply
+      endif
+
+/*****************************************************************************/                    
+/* Retrieve questions code values.                                           */
+/*****************************************************************************/
+set comp_xm_ordrble_prompt_cd = uar_get_code_by("MEANING", QUESTIONS_CS, nullterm(COMP_XM_ORDRBLE_PROMPT_MEAN))
+if (comp_xm_ordrble_prompt_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve question code with meaning of ", trim(COMP_XM_ORDRBLE_PROMPT_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+
+/****************************************************************************
+*       Retrieve answer if available                                        *
+****************************************************************************/
+      select into "nl:"
+         d1.seq,
+         q.process_cd,
+         q.response_flag,
+         q.active_ind,
+         q.code_set,
+         d2.seq,
+         answer_yn = decode(a.seq, "Y", "N"),
+         a.answer,
+         a.active_ind,
+         d3.seq,
+         c.cdf_meaning,
+         c.active_ind
+      from (dummyt d1 with seq = value(number_of_process)),
+           question q,
+           (dummyt d2 with seq = 1),
+           answer a,
+           (dummyt d3 with seq = 1),
+           code_value c
+      plan d1
+      join q where q.module_cd = mod_cd
+               and q.process_cd = proc_cd[d1.seq]
+               and q.active_ind = 1
+      join d2
+      join a where a.question_cd = q.question_cd
+               and a.module_cd = q.module_cd
+               and a.process_cd = q.process_cd
+               and a.active_ind = 1
+      join d3
+      join c where ((c.code_set = q.code_set and q.code_set > 0 and q.response_flag = 0)
+                     or (c.code_set = 1659 and q.response_flag = 1))
+               and trim(cnvtstring(c.code_value)) = trim(a.answer)
+               and c.active_ind = 1
+      order
+         q.process_cd
+
+      head report
+         count1 = 0
+         max2 = 1
+      head q.process_cd
+        if (q.active_ind = 1)
+         count2 = 0
+         count1 = count1 + 1
+         if (mod(count1, 2) = 1 and count1 != 1)
+             stat = alter(reply->process_qual, count1 + 1)
+         endif
+         reply->process_qual[count1]->process_cd = q.process_cd
+        endif
+      detail
+       if (q.active_ind = 1
+          and a.active_ind = 1)
+         count2 = count2 + 1
+         if (count2 > max2)
+            max2 = count2
+            stat = alter(reply->process_qual->question_qual, max2)
+         endif
+         reply->process_qual[count1]->nbr_of_question = count2
+         reply->process_qual[count1]->question_qual[count2]->question_cd = q.question_cd
+         reply->process_qual[count1]->question_qual[count2]->response_flag = q.response_flag
+         reply->process_qual[count1]->question_qual[count2]->code_set = q.code_set
+         if (answer_yn = "Y")
+            ; *if the response_flag = 1 (means a valid response from table 1659 was used)
+            ; * if the response_flag = 0 (means a code set will be used, see question.code_set for the table #)
+            ; * if the response_flag = 2 (question will prompt for a numeric value)
+            ; * if the response_flag = 3 (question will prompt for a alphanumeric value)
+            ; * if the response_flag = 4 (question will display as an option button - with value 0 (false) or 1 (true))
+            if (q.response_flag = 0 or q.response_flag = 1)
+               reply->process_qual[count1]->question_qual[count2]->answer      = c.cdf_meaning
+               reply->process_qual[count1]->question_qual[count2]->code_value  = c.code_value
+            else
+               reply->process_qual[count1]->question_qual[count2]->answer      = trim(a.answer)
+               reply->process_qual[count1]->question_qual[count2]->code_value  = 0
+            endif
+         else
+            reply->process_qual[count1]->question_qual[count2]->answer      = " "
+            reply->process_qual[count1]->question_qual[count2]->code_value  = 0
+         endif
+ 
+         if (q.question_cd = comp_xm_ordrble_prompt_cd)          
+             ; Store indexes of location in reply
+             bbtCompXM_idx_hold    = count1
+             ordbl_compXM_idx_hold = count2
+         endif
+       endif
+      foot q.process_cd
+         row+0
+
+      with nocounter,
+           outerjoin = d1,
+           outerjoin = d2,
+           outerjoin = d3,
+           dontcare = c,
+           dontcare = a
+           
+/****************************************************************************
+*       Retrieve orderable info if necessary                                *
+****************************************************************************/           
+if (comp_xm_ordrble_prompt_cd > 0.0) 
+    ; Obtaining answer to preference question "What orderable should be used for computer crossmatch?",
+    ; Determine if found answer.
+    if (ordbl_compXM_idx_hold > 0)
+        if (reply->process_qual[bbtCompXM_idx_hold].question_qual[ordbl_compXM_idx_hold].code_value > 0)
+            ; Found answer, find orderable info.    
+            select into "nl:"
+                oc.oe_format_id,
+                oc.catalog_type_cd
+ 
+            from order_catalog oc    
+    
+            where oc.catalog_cd = reply->process_qual[bbtCompXM_idx_hold].question_qual[ordbl_compXM_idx_hold].code_value        
+
+            detail
+                reply->process_qual[bbtCompXM_idx_hold].question_qual[ordbl_compXM_idx_hold].oe_format_id = oc.oe_format_id
+                reply->process_qual[bbtCompXM_idx_hold].question_qual[ordbl_compXM_idx_hold].catalog_type_cd = oc.catalog_type_cd
+
+            with nocounter
+                        
+            ; Check for any CCL errors.
+            set error_check = error(errmsg,0)
+            if (error_check != 0)
+                call ErrorHandler("F", "Select order_catalog", errmsg)
+            endif                        
+            
+            ; Ensure qualified.
+            if (curqual = 0)
+                call ErrorHandler("F", "Select order_catalog", "Failed to qualify on order_catalog table.")            
+            endif
+        endif       
+    endif
+endif
+
+go to Resize_Reply
+
+/*****************************************************************************/
+/* ErrorHandler subroutine                                                   */
+/*****************************************************************************/
+declare ErrorHandler(OperationStatus = c1,
+                     TargetObjectName = c25,
+                     TargetObjectValue = vc) = NULL
+ 
+subroutine ErrorHandler(OperationStatus,
+                        TargetObjectName,
+                        TargetObjectValue)
+   declare error_cnt = i2 with private, noconstant(0)
+ 
+   set error_cnt = size(reply->status_data.subeventstatus, 5)
+   if (error_cnt > 1
+   or (error_cnt = 1 and reply->status_data.subeventstatus[error_cnt].OperationStatus != ""))
+      set error_cnt = error_cnt + 1
+      set stat = alter(reply->status_data.subeventstatus, error_cnt)
+   endif
+ 
+   set reply->status_data.status = "F"
+   set reply->status_data.subeventstatus[error_cnt].OperationName = SCRIPT_NAME
+   set reply->status_data.subeventstatus[error_cnt].OperationStatus = OperationStatus
+   set reply->status_data.subeventstatus[error_cnt].TargetObjectName = TargetObjectName
+   set reply->status_data.subeventstatus[error_cnt].TargetObjectValue = TargetObjectValue
+ 
+   go to EXIT_SCRIPT
+end
+
+#Resize_Reply
+
+   if (curqual > 0)
+     set stat = alter(reply->process_qual, count1)
+     set reply->status_data->status = "S"   
+   else
+     set stat = alter(reply->process_qual, 1)
+     set reply->status_data->status = "Z"
+   endif
+
+#EXIT_SCRIPT
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

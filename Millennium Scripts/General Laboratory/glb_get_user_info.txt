@@ -1,0 +1,182 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_user_info/glb_get_user_info.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2000 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_user_info.prg
+        Object name:            glb_get_user_info
+        Request #:              250201
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load user information.
+
+        Tables read:            code_value
+                                organization
+                                prsnl
+                                prsnl_org_reltn
+
+        Tables updated:         None
+        Executing from:         PathNet General Lab applications
+
+        Special Notes:          
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 05/24/00 Hal Patchen          Initial Release                     *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_USER_INFO:dba go    
+             create program GLB_GET_USER_INFO:dba
+     
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  username                     = vc
+      )
+      */
+
+	  record organization
+	  ( 
+	    1 qual[*]
+	      2 organization_id     = f8
+	      2 confid_level_cd     = f8
+	      2 confid_level        = i4
+	  )
+  
+      execute sac_get_user_organizations with replace (reply, organization)
+      
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      ( 
+         1  person_id                    = f8
+         1  username                     = vc
+         1  name_full_formatted          = vc
+         1  position_cd                  = f8
+         1  position_disp                = vc
+         1  org_reltn_cnt                = i4
+         1  org_reltn[*]
+            2  organization_id           = f8
+            2  org_name                  = vc
+            2  confid_level_cd           = f8
+            2  confid_level_disp         = vc
+            2  confid_level              = i4
+%i cclsource:status_block.inc
+      )
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set reply->status_data.status = "F"
+         declare nOrgCnt = i4 with protect, noconstant(0)
+         declare nCnt = i4 with protect, noconstant(0)
+         declare nCnt2 = i4 with protect, noconstant(0)
+      /***********************************************************************
+      * Select user information                                              *
+      ***********************************************************************/
+        set nOrgCnt = size(organization->qual, 5)
+
+      
+        select into "nl:"
+        from 
+          prsnl p
+        where p.person_id = reqinfo->updt_id
+        detail
+          reply->person_id = reqinfo->updt_id
+          reply->username = p.username
+          reply->name_full_formatted = p.name_full_formatted
+          reply->position_cd = reqinfo->position_cd
+          reply->org_reltn_cnt = nOrgCnt 
+        with nocounter
+        
+      if (nOrgCnt > 0)  
+      	declare lBatchSize = i4 with protect, constant(40)
+    		declare lOrigSize = i4 with protect, constant(nOrgCnt)
+      	declare lNbrBatches = i4 with protect, constant(ceil(lOrigSize/cnvtreal(lBatchSize)))
+      	declare lNewSize = i4 with protect, constant(lBatchSize * lNbrBatches)
+      	
+      	if (lNewSize > lOrigSize)
+        	select into "nl:"
+        	from (dummyt d with seq = (lNewSize - lOrigSize))
+        	head report
+        	  stat = alterlist(organization->qual, lNewSize)
+        	detail
+        	  organization->qual[d.seq + lOrigSize].organization_id =
+        	                 organization->qual[lOrigSize].organization_id
+        	with nocounter
+        endif
+      	
+        select into "nl:"        
+        from 
+          (dummyt d with seq = lNbrBatches),
+          organization o
+        plan d
+        join o
+          where expand(nCnt, (((d.seq - 1) * lBatchSize) + 1), (d.seq * lBatchSize), 
+                        o.organization_id, organization->qual[nCnt].organization_id)
+    		head report
+          stat = alterlist(reply->org_reltn, nOrgCnt)
+		
+        detail
+          nIdx = locateval(nCnt, 1, nOrgCnt, o.organization_id, organization->qual[nCnt].organization_id)
+          reply->org_reltn[nIdx].organization_id = organization->qual[nIdx].organization_id
+          reply->org_reltn[nIdx].confid_level_cd = organization->qual[nIdx].confid_level_cd
+          if (organization->qual[nIdx].confid_level_cd = 0.0)
+            reply->org_reltn[nIdx].confid_level = 99999
+          else
+            reply->org_reltn[nIdx].confid_level = organization->qual[nIdx].confid_level
+          endif
+          reply->org_reltn[nIdx].org_name = o.org_name
+        with nocounter
+      endif   
+      /***********************************************************************
+      * Set reply status                                                     *
+      ***********************************************************************/
+         if (size(organization->qual, 5) > 0)
+            set reply->status_data.status = "S"    ;Successful
+         elseif (reply->person_id = 0.0)
+            set reply->status_data.status = "F"    
+         else
+            set reply->status_data.status = "Z"    ;Zero
+         endif
+
+      #Exit_Script
+         end
+         go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,311 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_upd_worklist_status/glb_upd_worklist_status.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_upd_worklist_status.prg
+        Object name:            glb_upd_worklist_status
+        Request #:              250164
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Complete a worklist, pause a worklist, stop a
+                                worklist, or resume a worklist
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 08/19/10 Ryan Manuel          Initial Release                     *
+;    *001 09/16/10 Ryan Manuel          Changes to support scenarios that   *
+;                                       arise when deleting accesssions off *
+;                                       of an automatic worklist            *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program glb_upd_worklist_status:dba go
+create program glb_upd_worklist_status:dba 
+
+%i cclsource:glb_script_logging.inc
+%i cclsource:glb_worklist_status.inc
+
+  /***********************************************************************
+  * Request Record                                                       *
+  ***********************************************************************/
+  /*
+  record REQUEST 
+  (
+    1 worklist_id = f8   
+    1 event_type_flag = i2  0 - No specific event, status change check only.  
+                            4 - Pending event along with a status change check
+                            7 - Manual complete event
+                            8 - Pause event
+                            9 - Resume event
+  ) 
+  */
+
+if (not validate(reply, 0))  
+  record reply
+  (
+%i cclsource:glb_upd_worklist_status_rep.inc
+  )
+endif
+
+  set LOG_PROGRAM_NAME = "glb_upd_worklist_status"
+  
+  CALL log_message ("entering glb_upd_worklist_status...", LOG_LEVEL_DEBUG)
+  
+  ; This needs to be kept in sync with what is in pfmt_250074
+  ; This is not put in an include file since in one place it needs to be with persist and in another it is not
+  free set worklists_to_check
+  record worklists_to_check
+  (
+    1 worklists[*]
+      2 worklist_id = f8
+      2 worklist_current_status_cd = f8
+      2 worklist_new_status_cd = f8
+      2 worklist_event_type_flag = i2
+  )
+  
+  free set CD
+  record CD
+  (    
+    1 perform_status_cd = f8
+    1 in_review_status_cd = f8
+    1 worklist_building_status_cd = f8
+    1 worklist_pending_status_cd = f8
+    1 worklist_in_process_status_cd = f8
+    1 worklist_complete_status_cd = f8
+    1 worklist_paused_status_cd = f8
+  ) 
+  
+  declare nSTATUS_CHANGE_ONLY_EVENT_TYPE_FLAG = i2 with protect, constant(0)
+  declare nPENDING_EVENT_TYPE_FLAG = i2 with protect, constant(4)
+  declare nMANUAL_COMPLETE_EVENT_TYPE_FLAG = i2 with protect, constant(7)
+  declare nPAUSE_EVENT_TYPE_FLAG = i2 with protect, constant(8)
+  declare nRESUME_EVENT_TYPE_FLAG = i2 with protect, constant(9)
+  declare lCodeSet = i4 with public, noconstant(0)
+  declare dCodeValue = f8 with public, noconstant(0.0)
+  declare sCDFMeaning = c12 with public, noconstant(fillstring(12, ' '))
+  declare dCurrentStatusCd = f8 with protect, noconstant(0.0)
+  declare dNewStatusCd = f8 with protect, noconstant(0.0)
+  
+  set lCodeSet = 1901
+  set dCodeValue = 0.0
+  set sCDFMeaning = "PERFORMED"
+  set stat = uar_get_meaning_by_codeset(lCodeSet, nullterm(sCDFMeaning), 1, dCodeValue)
+  set CD->perform_status_cd = dCodeValue                  ;// 1901 PERFORMED
+  
+  set lCodeSet = 1901
+  set dCodeValue = 0.0 
+  set sCDFMeaning = "INREVIEW" 
+  set stat = uar_get_meaning_by_codeset(lCodeSet, nullterm(sCDFMeaning), 1, dCodeValue)
+  set CD->in_review_status_cd = dCodeValue                ;// 1901 INREVIEW
+  
+  set lCodeSet = 90
+  set sCDFMeaning = "BUILDING"
+  set dCodeValue = 0.0
+  set stat = uar_get_meaning_by_codeset(lCodeSet, nullterm(sCDFMeaning), 1, dCodeValue)
+  set CD->worklist_building_status_cd = dCodeValue        ;// 90 WORKLIST STATUS
+  
+  set lCodeSet = 90
+  set sCDFMeaning = "PENDING"
+  set dCodeValue = 0.0
+  set stat = uar_get_meaning_by_codeset(lCodeSet, nullterm(sCDFMeaning), 1, dCodeValue)
+  set CD->worklist_pending_status_cd = dCodeValue        ;// 90 WORKLIST STATUS
+  
+  set lCodeSet = 90
+  set sCDFMeaning = "INPROCESS"
+  set dCodeValue = 0.0
+  set stat = uar_get_meaning_by_codeset(lCodeSet, nullterm(sCDFMeaning), 1, dCodeValue) 
+  set CD->worklist_in_process_status_cd = dCodeValue     ;// 90 WORKLIST STATUS
+  
+  set lCodeSet = 90
+  set sCDFMeaning = "COMPLETE"
+  set dCodeValue = 0.0
+  set stat = uar_get_meaning_by_codeset(lCodeSet, nullterm(sCDFMeaning), 1, dCodeValue)
+  set CD->worklist_complete_status_cd = dCodeValue       ;// 90 WORKLIST STATUS
+  
+  set lCodeSet = 90
+  set sCDFMeaning = "PAUSED"
+  set dCodeValue = 0.0
+  set stat = uar_get_meaning_by_codeset(lCodeSet, nullterm(sCDFMeaning), 1, dCodeValue)
+  set CD->worklist_paused_status_cd = dCodeValue         ;// 90 WORKLIST STATUS
+  
+  if (CD->perform_status_cd = 0.0 or
+      CD->in_review_status_cd = 0.0 or
+      CD->worklist_building_status_cd = 0.0 or
+      CD->worklist_complete_status_cd = 0.0 or
+      CD->worklist_in_process_status_cd = 0.0 or
+      CD->worklist_paused_status_cd = 0.0 or
+      CD->worklist_pending_status_cd = 0.0)
+    set reply->status_data->subeventstatus[1]->operationname =
+       "select"
+    set reply->status_data->subeventstatus[1]->operationstatus =
+       "F"
+    set reply->status_data->subeventstatus[1]->targetobjectname =
+       "code_value"
+    set reply->status_data->subeventstatus[1]->targetObjectValue =
+       "error retrieving code values"
+    set reqinfo->commit_ind = 0
+    go to exit_script
+  endif
+  
+  set reply->status_data.status = "F"
+  
+  select into "nl:"
+  from worklist w
+  plan w where w.worklist_id = request->worklist_id
+  detail
+    dCurrentStatusCd = w.status_cd
+  with forupdatewait(w), time = 15, nocounter
+  
+  if (error_message(1) > 0)
+    call log_message("Error - Failed to select for update on the worklist table", log_level_audit)
+    set reqinfo->commit_ind = 0
+    go to exit_script
+  endif
+  
+  if (request->event_type_flag = nPAUSE_EVENT_TYPE_FLAG)
+    if (dCurrentStatusCd != CD->worklist_building_status_cd)
+      set reqinfo->commit_ind = 0
+      go to concurrent_modification
+    endif
+    
+    set dNewStatusCd = CD->worklist_paused_status_cd
+  elseif (request->event_type_flag = nRESUME_EVENT_TYPE_FLAG)
+    if (dCurrentStatusCd != CD->worklist_paused_status_cd)
+      set reqinfo->commit_ind = 0
+      go to concurrent_modification
+    endif
+    
+    set dNewStatusCd = CD->worklist_building_status_cd
+  elseif (request->event_type_flag = nPENDING_EVENT_TYPE_FLAG)
+    if (not (dCurrentStatusCd in (CD->worklist_building_status_cd, CD->worklist_paused_status_cd)))
+      set reqinfo->commit_ind = 0
+      go to concurrent_modification
+    endif  
+    
+    set dNewStatusCd = CD->worklist_pending_status_cd
+    
+    set stat = alterlist(worklists_to_check->worklists, 1)
+    set worklists_to_check->worklists[1].worklist_id = request->worklist_id
+    set worklists_to_check->worklists[1].worklist_current_status_cd = dNewStatusCd
+    set worklists_to_check->worklists[1].worklist_new_status_cd = dNewStatusCd
+  elseif (request->event_type_flag = nMANUAL_COMPLETE_EVENT_TYPE_FLAG)
+    if (not (dCurrentStatusCd in (CD->worklist_pending_status_cd, CD->worklist_in_process_status_cd)))
+      set reqinfo->commit_ind = 0
+      go to concurrent_modification
+    endif
+    
+    set dNewStatusCd = CD->worklist_complete_status_cd 
+  elseif (request->event_type_flag = nSTATUS_CHANGE_ONLY_EVENT_TYPE_FLAG)
+    set stat = alterlist(worklists_to_check->worklists, 1)
+    set worklists_to_check->worklists[1].worklist_id = request->worklist_id
+    set worklists_to_check->worklists[1].worklist_current_status_cd = dCurrentStatusCd
+    set worklists_to_check->worklists[1].worklist_new_status_cd = dCurrentStatusCd
+  else
+    set reply->status_data->subeventstatus[1]->operationname =
+       "event_type_flag"
+    set reply->status_data->subeventstatus[1]->operationstatus =
+       "F"
+    set reply->status_data->subeventstatus[1]->targetobjectname =
+       "parameter"
+    set reply->status_data->subeventstatus[1]->targetObjectValue =
+       "invalid event_type_flag"
+    set reqinfo->commit_ind = 0
+    go to exit_script
+  endif
+  
+  if (request->event_type_flag != nSTATUS_CHANGE_ONLY_EVENT_TYPE_FLAG)  
+    update into worklist w
+    set w.status_cd = dNewStatusCd,
+        w.updt_applctx = reqinfo->updt_applctx,
+        w.updt_cnt = w.updt_cnt + 1,
+        w.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+        w.updt_id = reqinfo->updt_id,
+        w.updt_task = reqinfo->updt_task
+    plan w where w.worklist_id = request->worklist_id
+    
+    if (error_message(1) > 0)
+      call log_message("Error - Failed to update worklist status", log_level_audit)
+      set reqinfo->commit_ind = 0
+      go to exit_script
+    endif
+    
+    insert into worklist_event we
+    set we.worklist_event_id      = seq(pathnet_seq, nextval),
+        we.worklist_id            = request->worklist_id,
+        we.event_dt_tm            = cnvtdatetime(curdate, curtime3),
+        we.event_prsnl_id         = reqinfo->updt_id,
+        we.event_type_flag        = request->event_type_flag,
+        we.updt_dt_tm             = cnvtdatetime(curdate, curtime3),
+        we.updt_id                = reqinfo->updt_id,
+        we.updt_task              = reqinfo->updt_task,
+        we.updt_cnt               = 0,
+        we.updt_applctx           = reqinfo->updt_applctx
+    with nocounter 
+        
+    if (error_message(1) > 0)
+      call log_message("Error - Failed to insert worklist event", log_level_audit)
+      set reqinfo->commit_ind = 0
+      go to exit_script
+    endif
+  endif
+  
+  if (size(worklists_to_check->worklists, 5) > 0)
+    if (CheckWorklists(0) = 0)
+      set reqinfo->commit_ind = 0
+      go to exit_script
+    endif
+  endif
+  
+  set reply->status_data.status = "S"
+  set reqinfo->commit_ind = 1
+  
+  go to exit_script
+#concurrent_modification
+  set reply->status_data->subeventstatus[1]->operationname =
+     "worklist"
+  set reply->status_data->subeventstatus[1]->operationstatus =
+     "F"
+  set reply->status_data->subeventstatus[1]->targetobjectname =
+     "table"
+  set reply->status_data->subeventstatus[1]->targetObjectValue =
+     "concurrent modification"
+  set reply->fail_reason_flag = 1
+  go to exit_script
+#exit_script
+  call log_message ("glb_upd_worklist_status finished...", LOG_LEVEL_DEBUG)     
+  
+  call uar_SysDestroyHandle(hSys)                                    
+  
+end go
+
+;Generated by GNU enscript 1.6.4.

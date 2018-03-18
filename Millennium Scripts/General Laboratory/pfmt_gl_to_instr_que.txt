@@ -1,0 +1,300 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_gl_to_instr_que/pfmt_gl_to_instr_que.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       pfmt_gl_to_instr_que.prg
+        Object name:            pfmt_gl_to_instr_que
+        Request #:              ??????
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Post instrument performed results to the
+                                instr_accn_queue table for Result Entry
+                                processing.
+
+        Tables read:            instr_accn_queue
+
+        Tables updated:         instr_accn_queue
+
+        Executing from:         Process Server
+
+        Special Notes:          Triggered from Request 250074.
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 03/25/97 Jeff Fry             Initial Release                     *
+;    *001 08/24/99 Gary Runde           Add error logging to msgview        *
+;    *002 05/16/02 Sasi Gandham         Add order by q.service_resource_cd  *
+;                                       to have a proper break on head and  *
+;                                       User UARs                           *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program pfmt_gl_to_instr_que:dba go
+create program pfmt_gl_to_instr_que:dba
+
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC                                  ;001
+SET LOG_PROGRAM_NAME = "pfmt_gl_to_instr_que"                        ;001
+
+declare PERFORMED_CDF          = c12 with public, constant("PERFORMED")
+declare VERIFIED_CDF           = c12 with public, constant("VERIFIED")
+declare PERFORMED_CD           = f8 with public, noconstant(0.0)
+declare VERIFIED_CD            = f8 with public, noconstant(0.0)
+declare RESULT_STATUS_CODESET  = i4 with public, constant(1901)
+
+/***********************************************************************
+ *   Print date and time to log file.                                  *
+ ***********************************************************************/
+  select into "nl:"                                                ;001
+    currentdate = cnvtdatetime(curdate,curtime3)                   ;001
+  detail                                                           ;001
+    sText = fillstring(254, " ")                                   ;001
+    sText = CONCAT("{{Script::PFMT_GL_TO_INSTR_QUE}} Started at ",         ;001
+                   format(currentdate, "dd-mmm-yyyy-hhmm;;d"))     ;001
+    call uar_SysEvent(hSys, 4, "ScriptBegin", NULLTERM(sText))     ;001
+  with nocounter                                                   ;001
+
+call LOG_MESSAGE( build("Starting GL to Instrument Queue (",
+                  format(curdate, "MM/DD/YY;;D")," ", 
+                  format(curtime, " HHMM;;M"),")" ), LOG_LEVEL_DEBUG)  ;001
+
+
+/**** Main Processing ****/
+
+record q_rec
+(
+  1  que_found = i2
+  1  max_seq   = i4
+  1  accn_hold = vc
+  1  curr_req  = vc
+)
+
+if ( requestin->reply->status_data->status = "F" )
+   ;If the Update Lab Results script
+   ; failed, then don't write.
+     set reqinfo->commit_ind = 0
+     call LOG_MESSAGE ("Requestin failure", LOG_LEVEL_DEBUG)               ;001
+     go to EXIT_SCRIPT
+endif
+
+set stat = uar_get_meaning_by_codeset(RESULT_STATUS_CODESET, PERFORMED_CDF, 1, PERFORMED_CD)
+if (PERFORMED_CD = 0.0)
+  call LOG_MESSAGE("PERFORMED_CD UAR Failed", LOG_LEVEL_DEBUG)
+  go to EXIT_SCRIPT  
+endif
+set stat = uar_get_meaning_by_codeset(RESULT_STATUS_CODESET, VERIFIED_CDF, 1, VERIFIED_CD)
+if (VERIFIED_CD = 0.0)
+  call LOG_MESSAGE("VERIFIED_CD UAR Failed", LOG_LEVEL_DEBUG)
+  go to EXIT_SCRIPT  
+endif
+
+if ( requestin->reply->interface_flag = 1 )
+   ;This came from an instrument.  Check
+   ; to see if accession should be queued.
+     call LOG_MESSAGE ("  --> Instrument Request", LOG_LEVEL_DEBUG)                             ;001
+     go to INSTR_REQ
+else
+   ;This didn't come from an instrument.
+   ; Check to see if a queue record needs
+   ; to be deleted.
+     call LOG_MESSAGE ("  --> Non-Instrument Request", LOG_LEVEL_DEBUG)                         ;001
+     go to NON_INSTR_REQ
+endif
+
+
+#INSTR_REQ
+if (requestin->request->orders[1]->assays[1]->result_status_cd != PERFORMED_CD)
+   ;This is not a Perform request.
+     call LOG_MESSAGE ("  Not A Perform Request -> Exiting", LOG_LEVEL_DEBUG)                   ;001
+     call LOG_MESSAGE (build("  --> result_status_cd = ",
+                requestin->request->orders[1]->assays[1]->result_status_cd), LOG_LEVEL_DEBUG)   ;001
+     go to EXIT_SCRIPT
+endif
+
+set q_rec->que_found = 0
+set q_rec->max_seq   = 0
+set q_rec->accn_hold = " "
+set q_rec->curr_req  = " "
+
+set nbr_of_orders = size(requestin->request->orders, 5)
+for (oidx = 1 to nbr_of_orders)
+  ;Process each accession once.
+  if ( q_rec->accn_hold != requestin->request->orders[oidx]->accession )
+    call LOG_MESSAGE ( build( "  Processing Accession:", 
+         requestin->request->orders[oidx]->accession ), LOG_LEVEL_DEBUG)                        ;001
+    set nbr_of_assays = size(requestin->request->orders[oidx]->assays, 5)
+    if ( nbr_of_assays > 0 )
+       call LOG_MESSAGE ( build( "  Processing Resource:",
+            requestin->request->orders[oidx]->assays[1]->service_resource_cd ), LOG_LEVEL_DEBUG) ;001
+        select into "nl:"
+          q.service_resource_cd
+         ,q.sequence
+         ,q.accession
+       from instr_accn_queue q
+       where q.service_resource_cd = 
+             requestin->request->orders[oidx]->assays[1]->service_resource_cd
+       order by q.service_resource_cd
+
+       head q.service_resource_cd
+         q_rec->que_found = 0
+
+       detail
+         if ( q.accession = requestin->request->orders[oidx]->accession )
+            q_rec->que_found = 1
+         endif
+
+       foot q.service_resource_cd
+         q_rec->max_seq = max( q.sequence )
+
+       with nocounter
+
+       call LOG_MESSAGE( build( "  --> max_seq = ", q_rec->max_seq), LOG_LEVEL_DEBUG)              ;001
+       
+       if ( q_rec->que_found = 1 )
+          call LOG_MESSAGE( "  --> Record Already In Queue -> Skipping" , LOG_LEVEL_DEBUG)         ;001
+       else
+          call LOG_MESSAGE( "  --> Attempting To Insert Into Queue", LOG_LEVEL_DEBUG)              ;001
+          insert into instr_accn_queue set
+            service_resource_cd =
+              requestin->request->orders[oidx]->assays[1]->service_resource_cd,
+            sequence = q_rec->max_seq + 1,
+            accession = 
+              requestin->request->orders[oidx]->accession
+          with nocounter
+
+          if ( curqual = 0 )
+             call LOG_MESSAGE( "  Failure Writing Record To Queue", LOG_LEVEL_DEBUG)               ;001
+          else
+             call LOG_MESSAGE( "  Record Inserted Into Queue" , LOG_LEVEL_DEBUG)                   ;001
+             set reqinfo->commit_ind = 1
+          endif
+       endif
+    else
+       call LOG_MESSAGE( build("  No Assays For OrderID = ",
+          requestin->request->orders[oidx]->order_id), LOG_LEVEL_DEBUG)                            ;001
+    endif
+  endif
+  set q_rec->accn_hold = requestin->request->orders[oidx]->accession
+  CALL ERROR_MESSAGE(0)                                                                            ;001
+endfor
+
+go to COMMIT_ROLLBACK
+
+
+#NON_INSTR_REQ
+
+set q_rec->que_found = 0
+set q_rec->max_seq   = 0
+set q_rec->accn_hold = " "
+set q_rec->curr_req  = " "
+
+
+set nbr_of_orders = size(requestin->request->orders, 5)
+for (oidx = 1 to nbr_of_orders)
+  if ( requestin->request->orders[oidx]->assays[1]->result_status_cd = 
+          VERIFIED_CD 
+       and requestin->request->orders[oidx]->complete_ind = 1)
+     set q_rec->curr_req = VERIFIED_CDF
+  else
+     set q_rec->curr_req = PERFORMED_CDF
+  endif
+  call LOG_MESSAGE( build("  --> Current Request :", q_rec->curr_req), LOG_LEVEL_DEBUG)           ;001
+
+  call LOG_MESSAGE ( build( "  Checking Queue For Accession :", 
+       requestin->request->orders[oidx]->accession ), LOG_LEVEL_DEBUG)                            ;001
+  set nbr_of_assays = size(requestin->request->orders[oidx]->assays, 5)
+  if ( nbr_of_assays > 0 )
+     call LOG_MESSAGE ( build( "  Checking Queue For Resource :",
+          requestin->request->orders[oidx]->assays[1]->
+                   service_resource_cd ), LOG_LEVEL_DEBUG)                                        ;001
+     select into "nl:"
+        q.service_resource_cd
+       ,q.accession
+     from instr_accn_queue q
+     where q.service_resource_cd = 
+           requestin->request->orders[oidx]->assays[1]->service_resource_cd
+     and   q.accession = 
+           requestin->request->orders[oidx]->accession
+
+     with nocounter
+
+     if ( curqual > 0 )
+        call LOG_MESSAGE( "  --> Record Found In Queue -> Deleting" , LOG_LEVEL_DEBUG)            ;001
+        delete from instr_accn_queue
+        where service_resource_cd =
+            requestin->request->orders[oidx]->assays[1]
+                     ->service_resource_cd
+        and   accession =
+            requestin->request->orders[oidx]->accession
+        with nocounter
+
+        if ( curqual = 0 )
+           call LOG_MESSAGE( "  Error Deleting Record From Queue", LOG_LEVEL_DEBUG)              ;001
+        else
+           call LOG_MESSAGE( "  Record Deleted From Queue", LOG_LEVEL_DEBUG)                     ;001
+           set reqinfo->commit_ind = 1
+        endif
+     else
+        call LOG_MESSAGE( "  --> Record Not In Queue", LOG_LEVEL_DEBUG)                          ;001
+     endif
+  else
+     call LOG_MESSAGE( build("  No Assays For OrderID = ",
+        requestin->request->orders[oidx]->order_id), LOG_LEVEL_DEBUG)                            ;001
+  endif
+  CALL ERROR_MESSAGE(0)                                                                          ;001
+endfor
+
+go to COMMIT_ROLLBACK
+
+
+#COMMIT_ROLLBACK
+if ( nbr_of_orders = 0 )
+   call LOG_MESSAGE( "  No Orders To Process", LOG_LEVEL_DEBUG)                                  ;001
+   set reqinfo->commit_ind = 0
+endif
+
+if ( reqinfo->commit_ind = 0 )
+   rollback
+else
+   commit
+endif
+
+
+#EXIT_SCRIPT
+call LOG_MESSAGE ( build("Ending GL to Instrument Queue (",
+                  format(curdate, "MM/DD/YY;;D")," ", 
+                  format(curtime, " HHMM;;M"),")" ), LOG_LEVEL_DEBUG)                            ;001
+call uar_SysDestroyHandle(hSys)   ;001
+
+end go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,1386 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_result_corr.prg Turn on black mode
+
+/*BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2005 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Author:                 Jon Weekes
+        Date Written:           11/06/95
+
+        Source file name:       bbt_rpt_result_corr.prg
+        Object name:            bbt_rpt_result_corr
+        Request #:              225234
+
+        Product:                Transfusion
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:
+ 
+        Tables read:            result, perform_result, result_event, orders, bb_order_cell, product_event, product,
+                                discrete_task_assay, accession_order_r, code_value, long_text, result_comment, data_map
+                                resource_group
+ 
+        Tables updated:         n/a
+        Executing from:
+ 
+        Special Notes:          ?
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 11/06/96 Jon Weekes           Initial Release
+;    *000 03/07/97 Jon Weekes           Modified to retrieve alias from
+;                                       encntr_alias instead of
+;                                       person_alias
+;    *001 03/24/98 Matt Benson          Modified to retrieve Institution    *
+;                                       name from preferences               *
+;     002 12/22/98 Jose Suarez          Added logic to print the location name                                *
+;                                       and address.  Added the address_location_cd to request.               *
+;                                       Added bbt_get_location_info.inc                                       *
+;                                       Added bbt_print_location_info.inc                                     *
+;     003 05/21/99 Jose Suarez          change cer_temp to cer_print          *
+;     004 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       added bbt_ops_parm_passed.inc       *
+;     005 01/14/00 Doug Saus            Performance tweaks
+;     006 01/24/00 Doug Saus            Changed results to display based
+;                                       on result_type_cd on perform_result table
+;                                       and added support of date/time assay
+;     007 02/20/01 Wally Wester         Correction to get report to print when *
+;                                       requested from daily operations.  Added*
+;                                       functionality for "facility" log by    *
+;                                       adding service_resource_cd in request. *
+;     008 02/26/01 Chris Noe            Internationalize Date/Time and text *
+;     009 02/25/02 Jim Jensen           Changing join r_pr, forcing the     *
+;                                       script to access the PERFORM_RESULT *
+;                                       table by perform_result_id rather   *
+;                                       service_resource_cd, thus keeping   *
+;                                       the script from timing out.         *
+;     010 07/26/02 Jason Osborn         Unique RPT filename project         *
+;     011 04/22/04 Ronda Zheng          Fixed defect CAPEP00032058, 35817, 46868, 74008, 74016,     *
+;                                       93147. Print out product number for crossmatch procedures.  *
+;                                       Print out report address. Print out current result comments *
+;                                       and notes. Append the result flags. Read data_map, format   *
+;                                       text result and print out a blank page when there is no data*
+;     012 05/13/04 Jim Jensen           Add CNVTALIAS for mrn display.      *
+;                                       Add CNVTACC for the accession.      *
+;     013 07/20/04 David Fifer          Fix spacing issue so cell_product   *
+;                                       variable will hold a 25 character   *
+;                                       eurocode prod # and set the maximum *
+;                                       columns to 125.                     *
+;     014 09/16/04 Ronda Zheng          Put back the changes made in mode 011.
+;     015 09/21/04 Jim Jensen           Fix Products printing on all order  *
+;                                       procedrues and cells not printing on*
+;                                       result detail rows.                 *
+;     016 10/20/04 Jim Jensen           Update for Clinical Validation      *
+;     017 12/09/04 Jason Osborn         Remove "########" delimiting from   *
+;                                       _id fields.                         *
+;     018 02/21/05 Cedric Daniels       Added a CHECKQUEUE to see if there  * 
+;                                       was a valid printer queue available * 
+;     019 10/11/05 Jason Coy            Updated report to display the       *
+;                                       front end username.                 *
+;     020 05/09/06 Jason Osborn         Show all prod nbrs corrected on XM's*
+;     021 04/05/07 Jason Osborn         Enhance Service Resource Security.  *
+;     032 04/26/11 Archita S            Fixed errant character printing by  *
+;                                       third party printers                * 
+;     033 07/16/13 Gayatri Samala       Fix for CR 1-7027895211,to populate *
+;										reply structure by qualifying on    *
+;										primary accession for the order     *
+;~DE~************************************************************************
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_rpt_result_corr:dba go
+create program bbt_rpt_result_corr:dba
+
+/*
+record request
+(
+ 1  beg_dt_tm           = dq8
+ 1  end_dt_tm           = dq8
+ 1  batch_selection     = c100
+ 1  output_dist         = c100
+ 1  ops_date            = dq8
+ 1  address_location_cd = f8
+ 1  qual[*]                                       
+  2  service_resource_cd  = f8                
+)
+*/
+
+record ord_r_rec
+(
+ 1  ord_r[*]
+     2  order_id        = f8
+     2  result_id       = f8
+     2  task_assay_cd   = f8
+     2  person_id       = f8
+     2  encntr_id       = f8
+     2  patient_name    = c25
+     2  encntr_alias    = c20
+     2  accession       = c20
+     2  order_mnemonic  = c20
+     2  detail_mnemonic = c18
+     2  cell_product    = c26
+     2  xm_order_ind    = i2
+     2  xm_product_id   = f8
+)
+
+record r_rec
+(
+ 1  r[*]
+     2  result_id           = f8
+     2  perform_result_id   = f8
+     2  task_assay_cd       = f8
+     2  result_status_cd    = f8
+     2  result              = vc
+     2  result_dt_tm        = dq8
+     2  result_username     = c10
+     2  comment_text        = vc
+     2  note_text           = vc
+     2  numeric_result_ind  = i2
+     2  service_resource_cd = f8
+     2  less_great_flag     = i2
+     2  numeric_result      = f8
+     2  result_flag_str     = vc
+)
+
+record result
+(
+ 1  resultlist[*]
+     2  result_corrected_ind    = c1
+     2  result                  = vc
+     2  result_dt_tm            = dq8
+     2  result_username         = c10
+     2  long_text_id            = f8
+     2  long_text               = vc
+     2  comment_text            = vc
+     2  note_text               = vc
+     2  result_status_cd        = f8
+)
+
+record ops_params                                        
+(                                                       
+  1  qual[*]                                             
+   2  param      = c100                                  
+)                                                        
+
+record reply
+(
+   1 rpt_list[*]
+      2 rpt_filename  = vc
+%i cclsource:status_block.inc
+)
+
+%i cclsource:bbt_get_username.inc
+
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+%i cclsource:aps_uar_rtf.inc   ;* For converting rtf to ascii
+%i cclsource:bbt_rpt_subs.inc
+ 
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+
+
+/*****************************************************************************
+* Service Resource Security                     .                            *
+*****************************************************************************/
+%i cclsource:pcs_resource_security.inc
+%i cclsource:bb_get_serv_res_access.inc
+declare nSecurityInd = i2 with protect, noconstant(CONST_SECURITY_ON)    ;Init security ON
+declare nReturnStat  = i2 with protect, noconstant(CONST_RETURN_INVALID) ;Init to invalid return
+declare first_service_resource  = vc with protect, noconstant(fillstring(50, " "))
+record captions
+(
+  1  patient_result		 = vc
+  1  beg_date			 = vc
+  1  end_date			 = vc
+  1  patient_name		 = vc
+  1  mrn                 = vc
+  1  ordered_procedure 	 = vc
+  1  results	         = vc
+  1  accession			 = vc
+  1  detail_procedure	 = vc
+  1  cell_product		 = vc
+  1  corrected 			 = vc
+  1  report_id			 = vc
+  1  page_no			 = vc
+  1  printed			 = vc
+  1  rpt_by				 = vc
+  1  end_of_report		 = vc
+  1  testing_site		 = vc
+  1  comment             = vc
+  1  note                = vc
+  1  not_on_file         = vc
+)
+ 
+set captions->patient_result = uar_i18ngetmessage(i18nHandle,
+  "patient_result",
+  "P A T I E N T   R E S U L T   C O R R E C T I O N   R E P O R T")
+set captions->beg_date = uar_i18ngetmessage(i18nHandle,
+  "beg_date", "Beginning Date:")
+set captions->end_date = uar_i18ngetmessage(i18nHandle,
+  "end_date", "Ending Date:")
+set captions->patient_name = uar_i18ngetmessage(i18nHandle,
+  "patient_name", "PATIENT NAME")
+set captions->mrn = uar_i18ngetmessage(i18nHandle,
+  "mrn", "MRN")
+set captions->ordered_procedure = uar_i18ngetmessage(i18nHandle,
+  "ordered_procedure", "ORDERED PROCEDURE  ")
+set captions->results = uar_i18ngetmessage(i18nHandle,
+  "results", "RESULTS:")
+set captions->accession = uar_i18ngetmessage(i18nHandle,
+  "accession", "ACCESSION")
+set captions->detail_procedure = uar_i18ngetmessage(i18nHandle,
+  "detail_procedure", "  DETAIL PROCEDURE")
+set captions->cell_product = uar_i18ngetmessage(i18nHandle,
+  "cell_product", "       CELL/PRODUCT")
+set captions->corrected = uar_i18ngetmessage(i18nHandle,
+  "corrected", "  CORRECTED(*) / PREVIOUS       DATE   TIME    ID")		;013
+set captions->report_id = uar_i18ngetmessage(i18nHandle,
+  "report_id", "Report ID: BBT_RPT_RESULT_CORR")
+set captions->page_no = uar_i18ngetmessage(i18nHandle,
+  "page_no", "Page:")
+set captions->printed = uar_i18ngetmessage(i18nHandle,
+  "printed", "Printed:")
+set captions->rpt_by = uar_i18ngetmessage(i18nHandle,
+  "rpt_by", "By:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+set captions->testing_site = uar_i18ngetmessage(i18nHandle,
+  "testing_site", "Testing Site: ")
+set captions->not_on_file = uar_i18ngetmessage(i18nHandle,
+  "not_on_file", "<Not on File>")
+set captions->comment = uar_i18ngetmessage(i18nHandle,
+  "comment", "Comment:  ")
+set captions->note = uar_i18ngetmessage(i18nHandle,
+  "note", "Note:  ")
+;End 008
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+                 
+declare commenttype_codeset     = i4
+declare chartabletype_cd        = f8
+declare notetype_cd             = f8
+
+declare rpt_cnt                 = i2 
+declare ISQUEUE                 = i2 
+
+declare dOldProductID           = f8 with noconstant(0.0)
+
+declare reportByUsername = vc with protect, noconstant("")
+
+set reportByUsername = GET_USERNAME(reqinfo->updt_id)
+
+/* Set Constants */
+    set result_status_code_set      = 1901
+    set corrected_cdf_meaning       = "CORRECTED"
+    set old_corrected_cdf_meaning   = "OLDCORRECTED"
+    set verified_cdf_meaning        = "VERIFIED"
+    set old_verified_cdf_meaning    = "OLDVERIFIED"
+    set sCorrected_InReview_cdf     = "CORRINREV"
+    set sOldCorrected_InReview_cdf  = "OLDCORRINREV"
+    set alias_type_code_set         = 319
+    set mrn_alias_cdf_meaning       = "MRN"
+    set activity_type_code_set      = 106
+    set bb_activity_cdf_meaning     = "BB"
+    set product_state_code_set      = 1610
+    set in_progress_cdf_meaning     = "16"
+    set commenttype_codeset         = 14
+ 
+/* Initialize global variables */
+    set count1                  = 0
+    set detail_cnt              = 0
+    set report_complete_ind     = "N"
+    set corrected_status_cd     = 0.0
+    set old_corrected_status_cd = 0.0
+    set verified_status_cd      = 0.0
+    set old_verified_status_cd  = 0.0
+    set dCorrInReview_cd        = 0.0
+    set dOldCorrInReview_cd     = 0.0
+    set mrn_alias_type_cd       = 0.0
+    set bb_activity_type_cd     = 0.0
+    set in_progress_event_type_cd = 0.0
+    set line                    = fillstring(125,"_")	
+    set result_cnt              = 0
+    set rslt                    = 0
+    set rslt_row                = 0
+    set name_full_formatted     = fillstring(25, " ")
+    set alias                   = fillstring(20, " ")
+    set accession               = fillstring(20, " ")
+    set order_mnemonic          = fillstring(20, " ")
+    set mnemonic                = fillstring(15, " ")
+    set cell_product            = fillstring(26, " ")
+    set first_service_resource  = fillstring(50, " ")
+    set ops_ind                 = "N"
+    set ops_cnvt_dt_tm          = cnvtdatetime(curdate, curtime3)
+    set chartabletype_cd        = 0.0
+    set notetype_cd             = 0.0
+
+    set ord_r_cnt = 0
+    set r_cnt = 0
+    set rpt_cnt = 0
+
+/* Initialize subroutine global variables */
+    set gsub_code_value = 0.0
+
+/* Select corrected_status_cd */
+set corrected_status_cd = 0.0
+
+call GET_CODE_VALUE(result_status_code_set, corrected_cdf_meaning)
+
+if (gsub_code_value = 0.0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1 + 1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get corrected status"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get corrected status code_value"
+    go to EXIT_SCRIPT
+else
+    set corrected_status_cd = gsub_code_value
+endif
+
+/* Select old_corrected_status_cd */
+set old_corrected_status_cd = 0.0
+
+call GET_CODE_VALUE(result_status_code_set, old_corrected_cdf_meaning)
+
+if (gsub_code_value = 0.0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1 + 1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get old_corrected status"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get old_corrected status code_value"
+    go to EXIT_SCRIPT
+else
+    set old_corrected_status_cd = gsub_code_value
+endif
+
+/* Select verified_status_cd */
+set verified_status_cd = 0.0
+
+call GET_CODE_VALUE(result_status_code_set, verified_cdf_meaning)
+
+if (gsub_code_value = 0.0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1 + 1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get verified status code_value"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get verified status code_value"
+    go to EXIT_SCRIPT
+else
+    set verified_status_cd = gsub_code_value
+endif
+
+/* Select old verified_status_cd */
+set old_verified_status_cd = 0.0
+
+call GET_CODE_VALUE(result_status_code_set, old_verified_cdf_meaning)
+
+if (gsub_code_value = 0.0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1 + 1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get old_verified status code_value"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get old_verified status code_value"
+    go to EXIT_SCRIPT
+else
+    set old_verified_status_cd = gsub_code_value
+endif
+
+/* Select dCorrInReview_cd */
+set dCorrInReview_cd = 0.0
+call GET_CODE_VALUE(result_status_code_set, nullterm(sCorrected_InReview_cdf))
+if (gsub_code_value = 0.0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1 + 1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get Corr-InReview status"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get Corr-InReview status code_value"
+    go to EXIT_SCRIPT
+else
+    set dCorrInReview_cd = gsub_code_value
+endif
+
+/* Select dOldCorrInReview_cd */
+set dOldCorrInReview_cd = 0.0
+call GET_CODE_VALUE(result_status_code_set, nullterm(sOldCorrected_InReview_cdf))
+if (gsub_code_value = 0.0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1 + 1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get OldCorr-InReview status"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get OldCorr-InReview status code_value"
+    go to EXIT_SCRIPT
+else
+    set dOldCorrInReview_cd = gsub_code_value
+endif
+
+/* Select mrn_alias_type_cd */
+set mrn_alias_type_cd = 0.0
+
+call GET_CODE_VALUE(alias_type_code_set, mrn_alias_cdf_meaning)
+
+if (gsub_code_value = 0.0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1 + 1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get mrn_alias_type_cd"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue
+        = "could not get mrn alias type code_value"
+    go to EXIT_SCRIPT
+else
+    set mrn_alias_type_cd = gsub_code_value
+endif
+
+/* Select bb_activity_type_cd */
+set bb_activity_type_cd = 0.0
+
+call GET_CODE_VALUE(activity_type_code_set, bb_activity_cdf_meaning)
+
+if (gsub_code_value = 0.0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1 + 1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get bb_activity_type_cd"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue
+        = "could not get mrn alias type code_value"
+    go to EXIT_SCRIPT
+else
+    set bb_activity_type_cd = gsub_code_value
+endif
+
+/* Select in_progress_event_type_cd */
+set in_progress_event_type_cd = 0.0
+
+call GET_CODE_VALUE(product_state_code_set, in_progress_cdf_meaning)
+
+if (gsub_code_value = 0.0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1 + 1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get in_progress state"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue
+        = "could not get in_progress product state code_value"
+    go to EXIT_SCRIPT
+else
+    set in_progress_event_type_cd = gsub_code_value
+endif
+
+;get code value for chartable and nonchartable result comments
+set stat = uar_get_meaning_by_codeset(commenttype_codeset,"RES COMMENT",1,chartabletype_cd)
+set stat = uar_get_meaning_by_codeset(commenttype_codeset,"RES NOTE",1,notetype_cd)
+
+if (chartabletype_cd = 0.0 or notetype_cd = 0.0)
+   set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1 + 1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get result comment or note"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_prod_rslt_cor"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue
+        = "could not get result chartable or non-chartable comment type code_value"
+    go to EXIT_SCRIPT
+endif
+
+
+
+/* Determine if running from OPS and set beg/end_dt_tm from ops_date accordingly  */   
+set nSecurityInd = CONST_SECURITY_ON
+if (size(trim(request->batch_selection), 1) > 0)
+    set nSecurityInd = CONST_SECURITY_OFF ;Call is from Ops, turn security OFF.                                     
+    set ops_ind     = "Y"                                                          
+    set begday = request->ops_date                                                
+    set endday = request->ops_date                                                
+    set temp_string = cnvtupper(trim(request->batch_selection))                   
+    CALL CHECK_OPT_DATE_PASSED("bbt_rpt_result_corr")                              
+    if (reply->status_data->status != "F")                                       
+       set request->beg_dt_tm = begday                                            
+       set request->end_dt_tm = endday                                            
+    endif
+    call CHECK_LOCATION_CD ("bbt_rpt_result_corr")                               
+    call CHECK_SVC_OPT ("bbt_rpt_result_corr")                                   
+endif                                                                              
+%i cclsource:bbt_get_location_info.inc   
+
+if (InitServResRoutine(nSecurityInd) = CONST_RETURN_INVALID)
+   set reply->status_data.status = "F"
+   set reply->status_data.subeventstatus[1].OperationName = "bbt_rpt_result_corr"
+   set reply->status_data.subeventstatus[1].OperationStatus = "F"
+   set reply->status_data.subeventstatus[1].TargetObjectName = "InitServResRoutine()"
+   set reply->status_data.subeventstatus[1].TargetObjectValue = "Invalid Status Returned."
+   go to exit_script
+endif
+
+set nReturnStat = DetermineServResAccess(request->qual[1]->service_resource_cd)
+
+if (nReturnStat = CONST_RETURN_INVALID)
+   set reply->status_data.status = "F"
+   set reply->status_data.subeventstatus[1].OperationName = "bbt_rpt_result_corr"
+   set reply->status_data.subeventstatus[1].OperationStatus = "F"
+   set reply->status_data.subeventstatus[1].TargetObjectName = "DetermineServResAccess()"
+   set reply->status_data.subeventstatus[1].TargetObjectValue = "Invalid Service Resource"
+   go to exit_script
+elseif (nReturnStat = CONST_RETURN_NO_SECURITY)
+   set reply->status_data.status = "F"
+   set reply->status_data.subeventstatus[1].OperationName = "bbt_rpt_result_corr"
+   set reply->status_data.subeventstatus[1].OperationStatus = "F"
+   set reply->status_data.subeventstatus[1].TargetObjectName = "DetermineServResAccess()"
+   set reply->status_data.subeventstatus[1].TargetObjectValue = "No security access for specified Service Resource"
+   go to exit_script
+endif                                                               
+               
+set first_service_resource = uar_get_code_display(request->qual[1]->service_resource_cd)
+                                   
+;005 Reordered query, replaced join to dta with uar, took out redundant qualifications.
+select into "nl:"
+    per.person_id
+    , dta_mnemonic             = uar_get_code_display(r.task_assay_cd)
+    , sort_name_full_formatted = substring(1, 50, per.name_full_formatted) "##########################"
+    , alias_exists             = decode(d_ea.seq, "Y", "N")
+    , r.order_id
+    , aor.accession_id
+    , sort_accession           = aor.accession "####################"
+    , o.order_mnemonic
+    , r.result_id
+    , r_result_status_disp     = uar_get_code_display(r.result_status_cd) "###############"
+    , r.bb_result_id
+    , r_pr.perform_result_id
+    , pr_result_status_disp    = uar_get_code_display(r_pr.result_status_cd) "###############"
+    , r_re.event_sequence
+    , product_nbr              = decode(p_boc.product_id, p_boc.product_nbr, cv_boc.code_value, cv_boc.display,
+                                        p_pe.product_id, p_pe.product_nbr, " ") "####################"
+    , product_sub_nbr          = decode(p_boc.product_id, p_boc.product_sub_nbr, cv_boc.code_value, " ",
+                                        p_pe.product_id, p_pe.product_sub_nbr, " ") "#####"
+    , supplier_prefix          = decode(bp_boc.seq, bp_boc.supplier_prefix, bp_pe.seq, bp_pe.supplier_prefix, "     ")
+    , product_exists           = decode(pe.seq, "PE_Y", boc.seq, "BOC_Y", "N")
+    , order_type               = uar_get_code_meaning(sd.bb_processing_cd)
+
+from
+    result r
+    , (dummyt d_ts with seq = value(size(testsites->qual, 5)))
+    , perform_result r_pr
+    , result_event r_re
+    , order_catalog oc
+    , accession_order_r aor
+    , orders o
+    , service_directory sd
+    , person per
+    , (dummyt d_ea with seq = 1)
+    , encntr_alias ea
+    , (dummyt d with seq = 1)
+    , bb_order_cell boc
+    , (dummyt d_boc with seq = 1)
+    , product p_boc
+    , (dummyt d_bp_boc with seq = 1)
+    , blood_product bp_boc
+    , code_value cv_boc
+    , (dummyt d_pe with seq = 1)
+    , product_event pe
+    , product p_pe
+    , (dummyt d_bp_pe with seq = 1)
+    , blood_product bp_pe
+
+plan    r_re    where    r_re.event_dt_tm          >= cnvtdatetime(request->beg_dt_tm)
+                  and    r_re.event_dt_tm          <= cnvtdatetime(request->end_dt_tm)
+                  and    r_re.event_type_cd             in (corrected_status_cd, dCorrInReview_cd)
+
+join    r       where   r.result_id                     = r_re.result_id
+
+join    oc      where   oc.catalog_cd                   = r.catalog_cd
+                          and oc.activity_type_cd       = bb_activity_type_cd
+
+join    o       where   o.order_id                      = r.order_id
+                          and o.person_id               != NULL
+                          and o.person_id               > 0.0
+
+join    sd      where   sd.catalog_cd                   = o.catalog_cd
+
+join    d_ts
+   join    r_pr    where   r_pr.perform_result_id = r_re.perform_result_id 
+                     and r_pr.service_resource_cd = testsites->qual[d_ts.seq]->service_resource_cd
+
+join    aor     where   aor.order_id                    = r.order_id and aor.primary_flag = 0
+
+join    per     where   per.person_id              = o.person_id
+
+join    (d_ea where   d_ea.seq               = 1
+    join    ea    where   ea.encntr_id     = o.encntr_id
+                            and ea.encntr_alias_type_cd = mrn_alias_type_cd
+                            and ea.active_ind       = 1)
+
+join    (d_pe where d_pe.seq = 1
+    join  pe     where   pe.order_id             = r.order_id
+                              and pe.bb_result_id           = r.bb_result_id
+                              and pe.event_type_cd          = in_progress_event_type_cd
+                join  p_pe   where   p_pe.product_id        = pe.product_id
+                    join (d_bp_pe where d_bp_pe.seq = 1
+                        join bp_pe where bp_pe.product_id = p_pe.product_id))
+ 
+join  (d    where   d.seq                           = 1
+    join  (boc     where  r.bb_result_id                  != 0.0
+                              and r.bb_result_id            != NULL
+                              and boc.order_id              = r.order_id
+                              and boc.bb_result_id          = r.bb_result_id
+        join    (d_boc  where   d_boc.seq               = 1
+            join    (p_boc  where  p_boc.product_id  = boc.product_id
+                                      and boc.product_id    != NULL
+                                      and boc.product_id    > 0.0
+                        join (d_bp_boc where d_bp_boc.seq = 1
+                            join bp_boc where bp_boc.product_id = p_boc.product_id))
+            orjoin  (cv_boc where   boc.cell_cd             != 0.0
+                                      and boc.cell_cd       != NULL
+                                      and cv_boc.code_value = boc.cell_cd
+                                      and cv_boc.active_ind = 1
+                                      and cv_boc.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                                      and cv_boc.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)))))
+
+order by    r.result_id
+
+head report
+    stat = alterlist(ord_r_rec->ord_r, 20)
+    encntr_alias = fillstring(20, " ")
+
+head r.result_id
+    ord_r_cnt = ord_r_cnt + 1
+    if (mod(ord_r_cnt, 20) = 1 and ord_r_cnt != 1)
+        stat = alterlist(ord_r_rec->ord_r, ord_r_cnt + 19)
+    endif
+    ord_r_rec->ord_r[ord_r_cnt]->order_id           = o.order_id
+    ord_r_rec->ord_r[ord_r_cnt]->result_id          = r.result_id
+    ord_r_rec->ord_r[ord_r_cnt]->task_assay_cd      = r.task_assay_cd
+    ord_r_rec->ord_r[ord_r_cnt]->person_id          = o.person_id
+    ord_r_rec->ord_r[ord_r_cnt]->encntr_id          = o.encntr_id
+    ord_r_rec->ord_r[ord_r_cnt]->patient_name       = sort_name_full_formatted
+    if ((alias_exists = "Y") and (ea.encntr_alias_id > 0))
+        encntr_alias = cnvtalias(ea.alias, ea.alias_pool_cd)
+    else
+        encntr_alias = captions->not_on_file
+    endif
+    ord_r_rec->ord_r[ord_r_cnt]->encntr_alias       = encntr_alias
+    ord_r_rec->ord_r[ord_r_cnt]->accession          = cnvtacc(sort_accession)
+    ord_r_rec->ord_r[ord_r_cnt]->order_mnemonic     = substring(1, 20, o.order_mnemonic)
+    ord_r_rec->ord_r[ord_r_cnt]->detail_mnemonic    = dta_mnemonic 
+    if (product_exists in ("PE_Y", "BOC_Y"))
+        ord_r_rec->ord_r[ord_r_cnt]->cell_product   = concat(trim(supplier_prefix, 3), trim(product_nbr, 3),	
+                                                             " ", trim(product_sub_nbr, 3))						
+    else
+        ord_r_rec->ord_r[ord_r_cnt]->cell_product   = fillstring(26, " ")
+    endif
+    if (order_type = "XM")
+        ord_r_rec->ord_r[ord_r_cnt].xm_order_ind   = 1
+        ord_r_rec->ord_r[ord_r_cnt].xm_product_id  = pe.product_id
+    else
+        ord_r_rec->ord_r[ord_r_cnt].xm_order_ind   = 0
+    endif
+    
+foot report
+    stat = alterlist(ord_r_rec->ord_r, ord_r_cnt)
+
+with    nocounter, outerjoin(d_ea), dontcare(ea), outerjoin(d_pe), dontcare(pe), outerjoin(d),
+         dontcare(bp_boc), dontcare(bp_pe)     
+ 
+select into "nl:"
+    table_ind = decode(re.seq, "4re    ", lt.seq, "3lt    ", cv_rcs.seq, "2cv_rcs", pr.seq, "1pr    ", "xxxxxx")
+    , result_type_mean = uar_get_code_meaning(pr.result_type_cd)
+    , alpha_result = trim(substring(1, 13, pr.result_value_alpha)) 
+    , text_results = pr.ascii_text
+    , date_result = format(pr.result_value_dt_tm, "@DATECONDENSED;;d")
+    , date_time_result = format(pr.result_value_dt_tm, "@DATETIMECONDENSED;;d") 
+    , result_code_set_disp = trim(substring(1, 13, uar_get_code_display(pr.result_code_set_cd)))
+    , result_id = ord_r_rec->ord_r[d.seq]->result_id
+    , pr.perform_result_id
+    , norm_display = uar_get_code_display(pr.normal_cd)
+    , crit_display = uar_get_code_display(pr.critical_cd)
+    , notify_disp = uar_get_code_display(pr.notify_cd)
+    , revw_display = uar_get_code_display(pr.review_cd)
+    , delta_display = uar_get_code_display(pr.delta_cd)
+
+from
+    (dummyt d with seq = value(ord_r_cnt))
+    , perform_result pr
+    , (dummyt d_pr with seq = 1)
+    , (dummyt d_re with seq = 1)
+    , code_value cv_rcs
+    , long_text lt
+    , result_event re
+    , prsnl pnl
+
+plan    d
+join    pr      where   pr.result_id                        = ord_r_rec->ord_r[d.seq]->result_id
+                  and   pr.result_status_cd in (corrected_status_cd,
+                                                old_corrected_status_cd,
+                                                old_verified_status_cd,
+                                                dCorrInReview_cd,
+                                                dOldCorrInReview_cd)
+    join    d_pr   where   d_pr.seq                         = 1
+    orjoin  (d_re   where   d_re.seq                        = 1
+        join    (cv_rcs  where   cv_rcs.code_value          = pr.result_code_set_cd
+                                      and pr.result_code_set_cd != 0
+                                      and pr.result_code_set_cd != NULL
+                                      and cv_rcs.active_ind  = 1
+                                      and cv_rcs.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                                      and cv_rcs.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+        orjoin  (lt where   lt.long_text_id         = pr.long_text_id
+                              and pr.long_text_id   != NULL
+                              and pr.long_text_id   > 0)
+        orjoin  (re      where   re.result_id            = pr.result_id
+                           and re.perform_result_id      = pr.perform_result_id
+                           and (re.event_type_cd = pr.result_status_cd 
+                                               or (pr.result_status_cd = old_corrected_status_cd and 
+                                                   re.event_type_cd    = corrected_status_cd)
+                                               or (pr.result_status_cd = old_verified_status_cd and
+                                                   re.event_type_cd    = verified_status_cd)
+                                               or (pr.result_status_cd = dOldCorrInReview_cd and
+                                                   re.event_type_cd    = dCorrInReview_cd))
+            join    pnl     where   pnl.person_id           = re.event_personnel_id))
+
+order by    pr.result_id, pr.perform_result_id, table_ind
+
+head report
+    ; Initialize size of r_rec->r (results) to twice ord_r->ord_r_rec's (1 for verified, 1 for corrected)
+    stat = alterlist(r_rec->r, ord_r_cnt * 2)
+
+%i cclsource:bbt_remove_rtf.inc
+
+head pr.perform_result_id
+    r_cnt = r_cnt + 1
+    if (mod(r_cnt, 10) = 1 and r_cnt != 10)
+        ; Increment r_rec->r by 10
+        stat = alterlist(r_rec->r, r_cnt + 9)
+    endif
+    r_rec->r[r_cnt]->result_id              = pr.result_id
+    r_rec->r[r_cnt]->perform_result_id      = pr.perform_result_id
+    r_rec->r[r_cnt]->result_status_cd       = pr.result_status_cd
+    r_rec->r[r_cnt]->service_resource_cd    = pr.service_resource_cd
+    r_rec->r[r_cnt]->task_assay_cd          = ord_r_rec->ord_r[d.seq]->task_assay_cd
+    resultflagstr = bldresultflagstr(norm_display, crit_display, revw_display, delta_display,
+                    "N", "N", "N", notify_disp)
+    if (size(trim(resultflagstr), 3) > 0)
+        ;append the result flag to the result
+        r_rec->r[r_cnt]->result_flag_str = resultflagstr
+    endif
+ 
+head table_ind
+    if (table_ind = "1pr    ")
+        IF (result_type_mean IN ("1", "7"))
+           IF (pr.long_text_id = 0)
+            r_rec->r[r_cnt]->result                  = text_results
+          ENDIF
+        ELSEIF (result_type_mean = "2"
+           OR result_type_mean = "4")
+            r_rec->r[r_cnt]->result                  = alpha_result
+        ELSEIF (result_type_mean IN ("3", "8"))
+            r_rec->r[r_cnt]->numeric_result_ind      = 1
+            r_rec->r[r_cnt]->numeric_result          = pr.result_value_numeric
+            r_rec->r[r_cnt]->less_great_flag         = pr.less_great_flag
+        ELSEIF (result_type_mean = "6")
+            r_rec->r[r_cnt]->result                  = date_result
+        ELSEIF (result_type_mean = "11")                                ;date time result
+            r_rec->r[r_cnt]->result                  = date_time_result
+        ELSEIF (result_type_mean = "9")
+            r_rec->r[r_cnt]->result                  = result_code_set_disp
+        ELSE
+            r_rec->r[r_cnt]->result                  = "<blank>"
+        ENDIF
+        
+    elseif (table_ind = "2cv_rcs"
+            and cnvtint(pr.result_code_set_cd) > 0)
+        r_rec->r[r_cnt]->result                  = cv_rcs.display
+    elseif (table_ind = "3lt    "
+            and cnvtint(pr.long_text_id) > 0)
+        r_rec->r[r_cnt]->result                  = trim(lt.long_text)
+    elseif (table_ind = "4re    ")
+        r_rec->r[r_cnt]->result_dt_tm    = re.event_dt_tm
+        r_rec->r[r_cnt]->result_username = pnl.username
+    endif
+
+foot    pr.perform_result_id
+    if (trim(r_rec->r[r_cnt]->result) <= "")
+        r_rec->r[r_cnt]->result = "result unknown"
+    endif
+ 
+foot report
+    stat = alterlist(r_rec->r, r_cnt)
+
+with    nocounter
+
+/* get the data map */
+select into "nl:"
+    dm.task_assay_cd
+    , dm.service_resource_cd
+    , data_map_exists = decode(dm.seq, "Y", "N")
+    , rg_exists = decode(rg.seq, "Y", "N")
+ 
+from
+   (dummyt d with seq = value(r_cnt))
+    , (dummyt d_dm with seq = 1)
+    , data_map dm
+    , (dummyt d_rg with seq = 1)
+    , resource_group rg
+ 
+plan d where d.seq <= r_cnt
+         and r_rec->r[d.seq].result_id > 0.0
+         and r_rec->r[d.seq].numeric_result_ind = 1
+join d_dm where   d_dm.seq = 1
+join dm   where dm.task_assay_cd      = r_rec->r[d.seq]->task_assay_cd
+            and dm.data_map_type_flag = 0
+            and dm.active_ind         = 1
+join d_rg where d_rg.seq = 1
+join rg   where rg.parent_service_resource_cd = dm.service_resource_cd
+            and rg.child_service_resource_cd  = r_rec->r[d.seq]->service_resource_cd
+            and rg.resource_group_type_cd     = dServResSubsectionCd
+            and rg.root_service_resource_cd+0 = 0.0
+order by    d.seq, d_dm.seq
+
+head d.seq
+        arg_min_digits     = 1
+        arg_max_digits     = 8
+        arg_min_dec_places = 0
+        data_map_level = 0
+
+head d_dm.seq
+       if (data_map_exists = "Y")  /* Data_Map found, now we'll check to see if we can use it */
+          if (data_map_level <= 2 and dm.service_resource_cd > 0 and
+              dm.service_resource_cd = r_rec->r[d.seq]->service_resource_cd)  ;Exact match found
+              data_map_level = 3
+             arg_min_digits = dm.min_digits
+             arg_max_digits = dm.max_digits
+             arg_min_dec_places = dm.min_decimal_places
+          endif
+ 
+          if (data_map_level <= 1 and dm.service_resource_cd > 0.0
+             and rg_exists = "Y" and rg.parent_service_resource_cd = dm.service_resource_cd
+             and rg.child_service_resource_cd = r_rec->r[d.seq]->service_resource_cd)
+             data_map_level = 2
+             arg_min_digits = dm.min_digits
+             arg_max_digits = dm.max_digits
+             arg_min_dec_places = dm.min_decimal_places
+          endif
+ 
+          if (data_map_level = 0 and dm.service_resource_cd = 0)
+             data_map_level = 1
+             arg_min_digits = dm.min_digits
+             arg_max_digits = dm.max_digits
+             arg_min_dec_places = dm.min_decimal_places
+          endif
+       endif
+ 
+foot d.seq
+           arg_less_great_flag  = r_rec->r[d.seq]->less_great_flag
+           arg_raw_value        = r_rec->r[d.seq]->numeric_result
+           numeric_result       = fillstring(17, " ")
+           numeric_result       = uar_fmt_result(arg_min_digits, arg_max_digits,
+                                    arg_min_dec_places, arg_less_great_flag, arg_raw_value)
+           r_rec->r[d.seq]->result = trim(numeric_result)
+ 
+with nocounter
+     , outerjoin(d_dm)
+     , outerjoin(d_rg)
+
+/* get the current chartable and non-chartable comments for each result */
+select into "nl:"
+    rc.result_id
+  , rc.action_sequence
+  , lt.long_text_id
+  , lt_long_text = substring(1, 32000, lt.long_text)
+from
+   (dummyt d1 with seq = value(r_cnt))
+ ,  result_comment rc
+ , long_text lt
+plan d1 where d1.seq <= r_cnt
+join rc
+  where rc.result_id = r_rec->r[d1.seq]->result_id
+    and (rc.comment_type_cd = chartabletype_cd
+         or rc.comment_type_cd = notetype_cd)
+join lt
+  where rc.long_text_id = lt.long_text_id
+    and lt.long_text_id > 0
+order rc.result_id, rc.comment_type_cd, rc.action_sequence DESC
+head report
+  row
+head rc.result_id
+  row
+head rc.comment_type_cd
+  if (rc.comment_type_cd = chartabletype_cd)
+      r_rec->r[d1.seq]->comment_text = lt_long_text
+  elseif (rc.comment_type_cd = notetype_cd)
+      r_rec->r[d1.seq]->note_text = lt_long_text
+  endif
+with nocounter
+ 
+set select_ok_ind = 0
+
+set dOldProductID = 0.0
+
+execute cpm_create_file_name_logical "bbt_result_cor", "txt", "x"
+
+select into cpm_cfn_info->file_name_logical
+    person_id = ord_r_rec->ord_r[d_or.seq]->person_id
+    , encntr_id = ord_r_rec->ord_r[d_or.seq]->encntr_id
+    , patient_name = ord_r_rec->ord_r[d_or.seq]->patient_name
+    , encntr_alias = ord_r_rec->ord_r[d_or.seq]->encntr_alias
+    , order_id = ord_r_rec->ord_r[d_or.seq]->order_id
+    , accession = ord_r_rec->ord_r[d_or.seq]->accession
+    , result_id = ord_r_rec->ord_r[d_or.seq]->result_id
+    , perform_result_id = r_rec->r[d_r.seq]->perform_result_id
+    , test_site = uar_get_code_display(r_rec->r[d_r.seq].service_resource_cd)
+
+from
+    (dummyt d_or with seq = value(ord_r_cnt))
+    , (dummyt d_r with seq = value(r_cnt))
+
+plan    d_or    where   ord_r_rec->ord_r[d_or.seq]->result_id > 0.0
+join    d_r     where   r_rec->r[d_r.seq]->result_id    = ord_r_rec->ord_r[d_or.seq]->result_id
+
+order   test_site, patient_name, person_id, encntr_id, accession, order_id, result_id, perform_result_id desc
+
+head report
+    rpt_row = 0
+    rslt_row   = 0
+    beg_dt_tm   = cnvtdatetime(request->beg_dt_tm)
+    end_dt_tm   = cnvtdatetime(request->end_dt_tm)
+    rslt_ln     = 0
+    rslt_ln_cnt = 0
+    rslt_ln_len = 0
+    rslt_text   = fillstring(54, " ")
+    long_text_page_wrap_ind = "N"
+    detail_cnt = 0
+    report_complete_ind = "N"
+    select_ok_ind = 0                                                            
+    status_disp = fillstring(21, " ")
+    first_page = "Y"
+
+head page
+    call center(captions->patient_result,1,125)
+ 
+%i cclsource:bbt_print_location_info.inc
+
+    new_page = "Y"
+    rpt_row = row
+    row rpt_row,    col  34, captions->beg_date										
+                    col  50, beg_dt_tm "@SHORTDATE;;d"		;"mm/dd/yy;;d" 
+                    col  59, beg_dt_tm "@TIMENOSECONDS;;m"	;"hh:mm;;m"		 
+                    col  73, captions->end_date										
+                    col  86, end_dt_tm "@SHORTDATE;;d"		;"mm/dd/yy;;d"  
+                    col  95, end_dt_tm "@TIMENOSECONDS;;m"  ;"hh:mm;;m"		 
+ 
+    rpt_row = rpt_row + 1
+    row rpt_row,    col 1, captions->testing_site	
+    				if(textlen(trim(test_site)) = 0)
+    					col 15, first_service_resource
+    				else								
+    			    	col 15, test_site
+    			    endif
+    rpt_row = rpt_row + 2
+    row rpt_row,    col 001,    captions->patient_name							
+ 
+    rpt_row = rpt_row + 1
+    row rpt_row,    col 002,    captions->mrn
+                    col 027,    captions->ordered_procedure
+                    col 075,    captions->results
+
+    rpt_row = rpt_row + 1
+    row rpt_row,    col 003,    captions->accession								
+                    col 027,    captions->detail_procedure						
+                    col 048,    captions->cell_product							
+                    col 075,    captions->corrected								
+
+    rpt_row = rpt_row + 1
+    row rpt_row,    col 001,    "-------------------------"
+                    col 027,    "--------------------"
+                    col 048,    "--------------------------"
+                    col 075,    "---------------------------------------------------"	
+
+head test_site
+   if (first_page = "N")
+      break
+   else
+      first_page = "N"
+   endif
+ 
+head person_id
+    new_person = "Y"
+    pr_patient_name = ord_r_rec->ord_r[d_or.seq]->patient_name
+    pr_encntr_alias = ord_r_rec->ord_r[d_or.seq]->encntr_alias
+    rslt_row = rslt_row + 2
+
+head accession
+    new_accession = "Y"
+    pr_accession = ord_r_rec->ord_r[d_or.seq]->accession
+    if (new_person != "Y")
+        rslt_row = rslt_row + 1
+    endif
+
+head order_id
+    new_order = "Y"
+    dOldProductID = 0.0
+    pr_order_mnemonic = ord_r_rec->ord_r[d_or.seq]->order_mnemonic
+    if (new_accession != "Y")
+        rslt_row = rslt_row + 1
+    endif
+
+head result_id
+    new_result = "Y"
+    result_cnt = 0
+    stat = alterlist(result->resultlist, 5)
+    rslt_row = rslt_row + 1
+    pr_detail_mnemonic = ord_r_rec->ord_r[d_or.seq]->detail_mnemonic
+    pr_cell_product = ord_r_rec->ord_r[d_or.seq]->cell_product
+
+head perform_result_id
+    if (r_rec->r[d_r.seq]->result_id > 0)
+        result_cnt = result_cnt + 1
+        if (mod(result_cnt, 5) = 1 and result_cnt != 1)
+            stat = alterlist(result->resultlist, result_cnt + 4)
+        endif
+        if (new_result != "Y"
+        or (new_result = "Y"
+                and result_cnt > 1))
+            rslt_row = rslt_row + 1
+        endif
+        if (trim(r_rec->r[d_r.seq]->result_flag_str) > "")
+            result->resultlist[result_cnt]->result = concat(r_rec->r[d_r.seq]->result, " ", r_rec->r[d_r.seq]->result_flag_str)
+        else
+            result->resultlist[result_cnt]->result = r_rec->r[d_r.seq]->result
+        endif
+        result->resultlist[result_cnt]->comment_text = r_rec->r[d_r.seq]->comment_text
+        result->resultlist[result_cnt]->note_text = r_rec->r[d_r.seq]->note_text
+        if (r_rec->r[d_r.seq]->result_status_cd = corrected_status_cd)
+            result->resultlist[result_cnt]->result_corrected_ind    = "*"
+        else
+            result->resultlist[result_cnt]->result_corrected_ind    = " "
+        endif
+        if (size(trim(result->resultlist[result_cnt]->result, 1)) > 30)
+            rslt_row = rslt_row + 1
+        endif
+        if (size(trim(result->resultlist[result_cnt]->result, 1)) > 54)
+            rslt_row = rslt_row + 1
+        endif
+        result->resultlist[result_cnt]->result_dt_tm = cnvtdatetime(r_rec->r[d_r.seq]->result_dt_tm)
+        result->resultlist[result_cnt]->result_username = r_rec->r[d_r.seq]->result_username
+        result->resultlist[result_cnt].result_status_cd = r_rec->r[d_r.seq].result_status_cd
+     endif
+
+foot result_id
+    ; ** Check for sufficient space at bottom of page to print all data for result
+    if (rpt_row + rslt_row + 1 >= 58)
+        break
+    endif
+
+    if (new_page = "Y")
+        new_page = "N"
+        ;If a page break happens on a new product on the same crossmatch order,
+        ;the new product row will overlay the dash line printed in the head new page.
+        ;This if check was added to force a new line for that condition.
+        if ("N" in (new_person, new_accession, new_order) 
+         and ord_r_rec->ord_r[d_or.seq].xm_product_id != dOldProductID
+         and ord_r_rec->ord_r[d_or.seq].xm_order_ind = 1)
+           rpt_row = rpt_row + 1
+        endif
+    else
+        rpt_row = rpt_row + 1
+    endif
+
+    ; ** Print patient data
+    if (new_person = "Y")
+        rpt_row = rpt_row + 1
+        row rpt_row,    col 001,    pr_patient_name
+
+        rpt_row = rpt_row + 1
+        row rpt_row,    col 002,    pr_encntr_alias
+    endif
+
+    ; ** Print accession data
+    if (new_accession = "Y")
+        rpt_row = rpt_row + 1
+        row rpt_row,    col 003,    pr_accession
+    endif
+    new_person = "N"
+
+    ; ** Print Ordered Procedure data
+    if (new_order = "Y")
+        new_order = "N"
+        if (new_accession != "Y")
+            rpt_row = rpt_row + 1
+        endif
+        ;Print it this time to cover all orders
+        row rpt_row,    col 027,    pr_order_mnemonic
+    endif
+    if (ord_r_rec->ord_r[d_or.seq].xm_product_id != dOldProductID)
+       if (ord_r_rec->ord_r[d_or.seq].xm_order_ind = 1)
+          ;Print it this time to cover new products on the same crossmatch order
+          row rpt_row,    col 027,    pr_order_mnemonic
+          row rpt_row,    col 048,    pr_cell_product
+       endif
+       dOldProductID = ord_r_rec->ord_r[d_or.seq].xm_product_id
+    endif
+    new_accession = "N"
+
+    ; ** Print Detailed Procedure data
+    if (new_result = "Y")
+        new_result = "N"
+        rpt_row = rpt_row + 1
+        row rpt_row,    col 029,    pr_detail_mnemonic
+        if (ord_r_rec->ord_r[d_or.seq].xm_order_ind = 0)
+            row rpt_row,    col 048,    pr_cell_product
+        endif
+    endif
+
+    for (rslt = 1 to cnvtint(result_cnt))
+        if (rslt != 1)
+             rpt_row = rpt_row + 1
+        endif
+        row rpt_row,    col 075,    result->resultlist[rslt]->result_corrected_ind
+        rslt_len = cnvtint(size(trim(result->resultlist[rslt]->result, 1)))
+        rslt_ln_cnt = cnvtint(rslt_len / 54)
+        if (rslt_ln_cnt < 1)
+            rslt_ln_cnt = 1
+        endif
+ 
+        if (rslt_ln_cnt <= 1)
+            if (rpt_row >= 58)
+               break
+            endif
+            row rpt_row,    col 077,    result->resultlist[rslt]->result
+        else
+            ;Text results. Need to be formatted.
+          first_row = "Y"
+          call rtf_to_text(trim(result->resultlist[rslt]->result), 1, 54)
+          for (q_cnt = 1 to size(tmptext->qual,5))
+            if (rpt_row >= 58)
+               break
+               if (first_row = "Y")
+                 rpt_row = rpt_row + 1
+               endif
+            endif
+ 
+            if (first_row = "Y")
+              first_row = "N"
+            else
+              rpt_row = rpt_row + 1
+            endif
+            row rpt_row
+            col 77 tmptext->qual[q_cnt].text
+            if (q_cnt = size(tmptext->qual,5))
+                ;Last row of the text results. Determine if there is enough space to print out
+                ;Date/time and user name.
+                if (size(tmptext->qual[q_cnt].text) > 30)
+                    rpt_row = rpt_row + 1
+                endif
+            endif
+          endfor
+        endif
+ 
+        if (result->resultlist[rslt].result_status_cd = dCorrInReview_cd)
+            status_disp = concat("<<< ", trim(uar_get_code_display(dCorrInReview_cd)), " >>>")
+            row rpt_row, col 105, status_disp
+        else        
+            row rpt_row, col 105,    result->resultlist[rslt]->result_dt_tm "@SHORTDATE;;d"		;"mm/dd/yy;;d" 
+                         col 114,    result->resultlist[rslt]->result_dt_tm "@TIMENOSECONDS;;m"	;"hh:mm;;m"		
+                         col 120,    result->resultlist[rslt]->result_username "##########"							
+        endif
+ 
+        /* print out comments */
+        if (trim(result->resultlist[rslt]->comment_text) > "")
+          first_row = "Y"
+          call rtf_to_text(result->resultlist[rslt]->comment_text, 1, 91)
+          for (q_cnt = 1 to size(tmptext->qual,5))
+            if (rpt_row >= 58)
+               break
+            endif
+            rpt_row = rpt_row + 1
+            row rpt_row
+            if (first_row = "Y")
+              first_row = "N"
+              col 30 captions->comment
+            endif
+            col 40 tmptext->qual[q_cnt].text
+          endfor
+        endif
+ 
+        /* print out notes */
+        if (trim(result->resultlist[rslt]->note_text) > "")
+          first_row = "Y"
+          call rtf_to_text(result->resultlist[rslt]->note_text, 1, 91)
+          for (q_cnt = 1 to size(tmptext->qual,5))
+            if (rpt_row >= 58)
+               break
+            endif
+            rpt_row = rpt_row + 1
+            row rpt_row
+            if (first_row = "Y")
+                first_row = "N"
+                col 30 captions->note
+            endif
+            col 40 tmptext->qual[q_cnt].text
+          endfor
+        endif
+    endfor
+
+    if (long_text_page_wrap_ind = "Y")
+        long_text_page_wrap_ind = "N"
+        rpt_row = rpt_row + 1
+    endif
+
+    rslt_row   = 0
+    detail_cnt = detail_cnt + 1         ; used to determine if any records were found and reported
+
+foot page
+    row 59,     col 001,    line
+    row + 1,    col 001,    captions->report_id											
+                col 060,    captions->page_no											
+                col 067,    curpage "###"
+                col 103,    captions->printed											
+                col 112,    curdate "@SHORTDATE;;d"			;"mm/dd/yy;;d"    
+                col 121,    curtime "@TIMENOSECONDS;;m"		;"hh:mm;;m"       
+    row + 1,    col 108,    captions->rpt_by											
+                col 112,    reportByUsername "##############"												
+ 
+foot report
+    row  62,    col 053, captions->end_of_report									
+    report_complete_ind = "Y"
+    select_ok_ind = 1
+ 
+with    maxrow = 63, nullreport,
+       compress, nolandscape 
+
+set count1 = count1 + 1
+if (count1 > 1)
+    set stat = alterlist(reply->status_data->subeventstatus, count1 + 1)
+endif
+set reply->status_data->subeventstatus[count1]->OperationName = "print rslt corr rpt"
+if (report_complete_ind = "Y"
+and curqual > 0)
+    if (detail_cnt > 0)
+        set reply->status_data->status = "S"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "S"
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr"
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue
+            = "SUCCESS"
+    else
+        set reply->status_data->status = "S"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "Z"
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr"
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue
+            = "no data found for specified date range"
+    endif
+else
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue
+        = "SCRIPT ERROR:  Report ended abnormally"
+endif
+
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+
+if (select_ok_ind = 1)
+    set reply->status_data->status = "S"
+endif
+go to EXIT_SCRIPT
+
+subroutine GET_CODE_VALUE(sub_code_set, sub_cdf_meaning)
+    /*
+     * Retrieve code_value using passed code_set and meaning
+     */
+    set gsub_code_value = 0.0
+    set cdf_meaning = fillstring(12," ")
+    set cdf_meaning = sub_cdf_meaning
+    set code_value = 0.0
+    set stat = uar_get_meaning_by_codeset(sub_code_set,cdf_meaning,1,code_value)
+    if (stat = 0 and code_value > 0)
+        set gsub_code_value = code_value
+    endif
+
+END     ; end subroutine GET_CODE_VALUE
+
+#EXIT_SCRIPT
+
+free set testsites
+
+if (ops_ind = "Y")
+        set ISQUEUE =  CHECKQUEUE(request->output_dist) 
+        if (ISQUEUE = 1 )  
+                if (rpt_cnt > 0)  
+                set spool value(reply->rpt_list[rpt_cnt].rpt_filename) value(request->output_dist) 
+        endif 
+    else 
+        set reply->status_data->status = "F" 
+        set reply->status_data->subeventstatus[count1]->OperationName = "get valid printer queue" 
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "F" 
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_result_corr" 
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not find a valid printer queue"     
+    endif        
+endif 
+ 
+end go
+
+;Generated by GNU enscript 1.6.4.

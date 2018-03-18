@@ -1,0 +1,220 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_chk_cyclic_equation/glb_chk_cyclic_equation.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_CHK_CYCLIC_EQUATION.PRG
+        Object name:            GLB_CHK_CYCLIC_EQUATION
+        Request #:              250038
+
+        Product:                GLB
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        check if there is cyclic equation
+
+
+        Tables read:            EQUATION
+                                EQUATION_COMPONENT
+
+        Tables updated:         -
+        Executing from:         GLB  EQUATION TOOL
+
+        Special Notes:          -
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 09/22/2003 Fone Ji      Initial Release                           *
+;
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+
+drop program glb_chk_cyclic_equation:dba go
+create program glb_chk_cyclic_equation:dba
+
+/*
+record request
+(  1 task_assay_cd =f8
+   1 components[*]
+    2 included_task_assay_cd = f8
+)
+*/
+
+
+record reply
+(
+	1 cycling = i2               ;1--cyclic equation exists; 0--cyclic equation doesn't exist
+%i cclsource:status_block.inc
+)
+
+
+Record tmpTree
+(
+	1 treeList[*]
+	  	2 child_task_assay  = f8
+
+)
+
+/******Initialize Variables*******/
+#script
+declare failed=c1
+declare sErrorMsg=vc
+declare error_check=f8
+set failed = "F"
+set reply->status_data->status = "F"
+set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+set error_check = ERROR(sErrorMsg,1)
+
+declare children_cnt = i4 with NoConstant(size(request->components, 5))
+declare seg_start =i4
+declare seg_end =i4
+declare depth = i4
+declare iCount = i4
+declare depth_cnt = i4
+declare parent_cnt=i4
+
+set depth = 30
+set depth_cnt=0
+
+set reply->cycling=0
+
+/******Process Request******/
+if (request->task_assay_cd=0)
+	go to exit_script
+endif
+
+if (children_cnt=0)
+ 	go to exit_script
+endif
+
+
+set stat = alterlist (tmpTree->treeList, children_cnt)
+for (iCount = 1 to children_cnt)
+	set tmpTree->treeList[iCount].child_task_assay = request->components[iCount].included_assay_cd
+endfor
+
+
+set seg_start = 0
+set seg_end = children_cnt
+
+
+;check if any child is same as the passed-in parent
+while( children_cnt > 0  and depth_cnt < depth and reply->cycling=0)
+
+	;take the previous generation of children as parents
+	;for next generation of children
+	set parent_cnt = children_cnt
+	set children_cnt=0
+	set depth_cnt = depth_cnt + 1
+
+	SELECT INTO "nl:"
+
+	FROM	(DUMMYT  d with seq = parent_cnt),
+			equation e,
+			equation_component ec
+	PLAN d
+	WHERE   (d.seq + seg_start) <= seg_end
+	JOIN e
+	WHERE tmpTree->treeList[d.seq + seg_start].child_task_assay = e.task_assay_cd
+		  and e.task_assay_cd>0
+		  and e.active_ind  = 1
+	JOIN ec
+	WHERE e.equation_id = ec.equation_id
+		  and ec.included_assay_cd>0
+	ORDER BY ec.included_assay_cd
+
+	HEAD ec.included_assay_cd
+
+		/**compare each child with the passed-in parent**/
+		if (request->task_assay_cd = ec.included_assay_cd )
+			reply->cycling=1
+			call CANCEL(1)
+	    endif
+
+		children_cnt=children_cnt+1
+		if ((seg_end+children_cnt) >= size(tmpTree->treeList,5))
+			stat = alterlist(tmpTree->treeList, seg_end+children_cnt+10)
+		endif
+
+		tmpTree->treeList[seg_end+children_cnt]->child_task_assay = ec.included_assay_cd
+
+	WITH nocounter
+
+	set seg_start = seg_end
+	set seg_end = seg_end + children_cnt
+
+endwhile
+
+
+	free record tmpTree
+
+	/***get error message***/
+	set error_check = ERROR(sErrorMsg,0)
+    if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        set failed = "T"
+        go to exit_script
+    endif
+
+	if(reply->cycling=1)
+		go to cyclic_exists
+	endif
+
+    go to exit_script
+
+	/***execute if cyclic equation is found***/
+	#cyclic_exists
+    set failed = "Z"
+    go to exit_script
+
+	/***script exit***/
+	#exit_script
+    if (failed = "F")
+       set reply->status_data->status = "S"
+    elseif (failed = "Z")
+       set reply->status_data->status = "Z"
+    else
+       set reply->status_data->status = "F"
+    endif
+END
+GO
+
+
+
+
+
+
+
+
+
+;Generated by GNU enscript 1.6.4.

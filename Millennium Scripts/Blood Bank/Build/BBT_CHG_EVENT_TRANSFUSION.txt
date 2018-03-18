@@ -1,0 +1,727 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Finaldisposition/BBT_CHG_EVENT_TRANSFUSION.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1994 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), Corporation.                                      *
+      *                                                                      *
+  ~BE~************************************************************************
+      *                   PathNet Blood Bank Transfusion                     *
+      *                           V500 Script                                *
+      *                    CHG_BLOOD_PRODUCT_TRANSFUSE                       *
+      *                                                                      *
+      * PURPOSE:          Change an attribute of a blood product             *
+      * LAST UPDATED BY:  RP6285                                             *
+      * DATE CREATED:     06-12-96                                           *
+      * LAST MODIFIED:    10-01-01                                           *
+      * TABLES USED:      product_event, transfusion, assign/crossmatch,     *
+      *                   pn_recovery, pn_recovery_child, pn_recovery_detail *
+      * PASSED IN:        record structure "request"                         *
+      * PASSED OUT:       record structure "reply"                           *
+      * ACTION#:          225037                                             *
+      * REQUEST#:         225048                                             *
+      * APPLICATION#:     225012           ;FINAL DISPOSITION                *
+      * SPECIAL NOTES:    This uses bbt_ops_batch_transf_flex.inc which is   *
+	  * 	located in the \SCRIPT\BBT_OPERATIONS project                    *
+      ************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *001 12/10/98 Shellie Ninemire     Performance Changes:                *
+;                                       Added UAR calls for code_value joins*
+;    *002 10/01/01 Rob Peterson         Added Product Recovery Logic        *
+;    *003 12/29/03 jg7520             39495: Expand SELECT with forupdate to*
+;                                     be a series of single table selects.  *  
+;	 *004 04/06/11 AG017309				Clear device interface flag 		*
+;	 *005 04/25/11 AG017309			Handle Flex for interface transactions	*
+;    *006 03/26/13 GS022503         fix for CR 1-6678619378 (Final Disposition
+;                                   can add multiple transfused product events
+;									for a unit.)                             *
+;~DE~************************************************************************
+
+        drop program bbt_chg_event_transfusion:dba go
+        create program bbt_chg_event_transfusion:dba
+
+%I cclsource:glb_script_logging.inc
+%I cclsource:pn_populate_pn_recovery_tables.inc
+%I cclsource:bbt_ops_batch_transf_flex.inc
+set log_program_name = "bbt_chg_event_transfusion"
+;set log_override_ind = 1
+
+        /***********************************************************
+         * Used to change the events associated with a product due to the
+         * product being transfused to a patient
+         ***********************************************************/
+        /*
+        record request
+        (
+          1 productlist[x]
+            2 product_type            = vc      ;"B" or "D"
+            2 product_id              = f8
+            2 person_id               = f8       ;transfused to person id
+            2 encounter_id            = f8       ;encounter id for transfuse
+            2 event_prsnl_id          = f8       ;event_prsnl_id for product event table (transfusion row)
+            2 bag_returned_ind        = i2
+            2 tag_returned_ind        = i2
+            2 transfused_vol          = i4
+            2 transfused_iu           = i4
+            2 transfused_qty          = i4
+            2 transfused_dt_tm        = dq8
+            2 order_id                = f8
+            2 p_updt_cnt              = i4
+            2 pd_product_event_id     = f8
+            2 pd_updt_cnt             = i4       ;product_event info for updating
+            2 pe_pd_updt_cnt          = i4
+            2 xm_product_event_id     = f8
+            2 pe_xm_updt_cnt          = i4
+            2 xm_updt_cnt             = i4
+            2 from_interface_flag	  = i2
+         )
+
+        */
+
+        record reply
+        (
+%i cclsource:status_block.inc
+         1 results[1]
+;yck
+           2 product_event_id      = f8
+           2 dispense_event_id     = f8
+           2 product_id            = f8
+           2 status                = c1
+           2 err_process           = vc
+           2 err_message           = vc
+           2 pn_recovery_id        = f8        ;used for product recovery ;002
+           2 event_type_flag       = i2        ;used to denote transfuse event type ;002
+         )
+
+        call log_message("---BBT_CHG_EVENT_TRANSFUSION STARTING", log_level_debug)
+        
+        declare flex_get_error_ind       = i2  with protect, noconstant(0)
+		declare flex_upd_error_flag      = i2  with protect, noconstant(0) ;0=ok, 1 = upd
+		declare FLEX_UPD_ERROR           = i2  with protect, constant(1)
+		declare chg_event_transfuse_succss_cnt = i4 with protect, noconstant(0)
+		declare chg_event_transfuse_prod_cnt = i4 with protect, noconstant(0)
+		
+        /* Values used when filling out the pn_recovery table */
+        declare product_event_id         = f8  with public, noconstant(0.0)
+
+        /* Initialize Variables */
+        set nbr_to_add = cnvtint(size(request->productlist,5))
+        set error_process = "                                                         "
+        set error_message = "                                                         "
+        set count1 = 0                                    ;count variable used in 'for' loop
+        set count2 = 0                                    ;variable used to detrimine if there are multiple events for current
+        set success_cnt = 0                               ;count of number of successful updates
+        set chg_event_transfuse_succss_cnt = 0			
+        set product_event_id = 0.0
+        set failure_occured = "F"
+        set pd_qty = 0
+        set pd_iu = 0
+        set as_qty = 0
+        set as_iu = 0
+        set thistable = "    "
+        set other_events = "F"                   ;flag if other events exist for this product_id
+        set this_prod_id = 0.0                              ;current product_id
+        set event_to_inactivate = "F"                     ;variable flag if an event exists that should be inactivated
+                                                          ;when updating the product to transfused
+
+        /* alter the reply array to accomodate nbr_to_update items */
+        set stat = alter(reply->results,nbr_to_add)
+        set stat = alter(reply->status_data->subeventstatus,nbr_to_add)
+        set reply->status_data->status = "F"                 ;set the status to fail as default
+;001 begin
+        set code_cnt = 1
+        set transfused_event_type_cd = 0.0
+        set stat = uar_get_meaning_by_codeset(1610, "7", code_cnt, transfused_event_type_cd)
+        if (transfused_event_type_cd = 0.0)
+               set failure_occured = "T"
+               set reply->status_data->subeventstatus[prod]->OperationName = "uar_get_meaning_by_codeset"
+               set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+               set error_process = "transfused_event_type_cd"
+               set error_message = "unable to retrieve code_value"
+        endif
+;001 end
+		call FlexGet_Init(NULL)
+
+
+        for (prod = 1 to nbr_to_add)
+            set failure_occured = "F"         ;SET TO SUCCESS BY DEFAULT
+            set product_event_id = 0.0
+            set pd_qty = 0
+            set pd_iu = 0
+            set as_qty = 0
+            set as_iu = 0
+            set other_events = "F"                   ;flag if other events exist for this product_id
+            
+            if(request->productlist[prod]->from_interface_flag > 0)
+            	select into "nl:"
+            		p.product_id
+            	from product p,
+            		 product_category pc,
+            		product_index pi
+            	plan p where p.product_id = request->productlist[prod].product_id
+            	join pi where pi.product_cd = p.product_cd
+            				and pi.autologous_ind = 0
+            	join pc where pc.product_cat_cd = pi.product_cat_cd
+            				and pc.xmatch_required_ind = 1
+            	head p.product_id
+            		if(request->productlist[prod].product_type = "B")
+            			call FlexGet_AddPerson(request->productlist[prod]->person_id )
+            		endif
+            	with nocounter
+            	
+		        ;found something to flex, so get avail specs, lock xm'd prods and commit
+		        if (FlexGet_Run(NULL) = 1)
+		        	set flex_get_error_ind = 0
+		        else
+		            set flex_get_error_ind  = 1
+		        endif
+		        
+		        if (flex_get_error_ind  = 1)
+				   set failure_occured = "T"
+	               set reply->status_data->subeventstatus[prod]->OperationName = "chk"
+	               set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+	               set error_process = "bbt_get_avail_flex_specs"
+	               set error_message = "Expiration Check Failed"
+            	endif
+	        endif     
+
+            ;see if the product has other dispense events associated with it that are to be transfused
+            ;if it does set the variable so the product is not unlocked
+            set this_prod_id = request->productlist[prod]->product_id
+            set count2 = prod + 1
+            if (prod < nbr_to_add)
+               for (count1 = count2 to nbr_to_add)
+                   if (this_prod_id = request->productlist[count1]->product_id)
+                       set other_events = "T"
+                   endif
+               endfor
+            endif
+
+            /********************************* add product_event for transfusion ***************************/
+            call ADD_PRODUCT_EVENT
+            (
+            /* product_id               */ request->productlist[prod]->product_id,
+            /* person_id                */ request->productlist[prod]->person_id,
+            /* encntr_id                */ request->productlist[prod]->encounter_id,
+            /* order_id                 */ 0,
+            /* bb_result_id             */ 0,
+            /* event_type_cd            */ transfused_event_type_cd,
+            /* event_dt_tm              */ cnvtdatetime(request->productlist[prod]->transfused_dt_tm),
+            /* event_prsnl_id           */ request->productlist[prod]->event_prsnl_id,
+            /* event_status_flag        */ 0,
+            /* override_ind             */ 0,
+            /* override_reason_cd       */ 0,
+            /* related_product_event_id */ request->productlist[prod]->pd_product_event_id,
+            /* active_ind               */ 1,
+            /* active_status_cd         */ ReqData->active_status_cd,
+            /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+            /* active_status_prsnl_id   */ ReqInfo->updt_id
+            )
+            if (curqual = 0)
+               set failure_occured = "T"
+               set reply->status_data->subeventstatus[prod]->OperationName = "add"
+               set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+               set error_process = "transfuse product_event"
+               set error_message = "unable to add transfuse product event"
+            else
+                set reply->results[prod]->product_event_id = product_event_id
+               /************insert event into the transfusion table ***********************************************/
+               insert into transfusion t
+                  set
+                     t.product_event_id = product_event_id,
+                     t.product_id = request->productlist[prod]->product_id,
+                     t.person_id = request->productlist[prod]->person_id,
+                     t.bag_returned_ind = request->productlist[prod]->bag_returned_ind,
+                     t.tag_returned_ind = request->productlist[prod]->tag_returned_ind,
+                     t.transfused_vol = request->productlist[prod]->transfused_vol,
+                     t.orig_transfused_qty = request->productlist[prod]->transfused_qty,
+                     t.cur_transfused_qty = request->productlist[prod]->transfused_qty,
+                     t.transfused_intl_units = request->productlist[prod]->transfused_iu,
+                     t.updt_cnt                      = 0,
+                     t.updt_dt_tm                    = cnvtdatetime(curdate, curtime3),
+                     t.updt_id                       = ReqInfo->updt_id,
+                     t.updt_task                     = ReqInfo->updt_task,
+                     t.updt_applctx                  = ReqInfo->updt_applctx,
+                     t.active_ind                    = 1,
+                     t.active_status_cd              = ReqData->active_status_cd,
+                     t.active_status_dt_tm           = cnvtdatetime(curdate, curtime3),
+                     t.active_status_prsnl_id        = ReqInfo->updt_id
+                  with counter
+
+               if (curqual = 0)
+                  set failure_occured = "T"
+                  set reply->status_data->subeventstatus[prod]->OperationName = "add"
+                  set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+                  set error_process = "add transfusion"
+                  set error_message = "unable to add transfusion event"
+               endif   ;add transfusion
+            endif   ;add transfusion
+
+            /*************************update product event table for the patient dispense*********/
+            if (failure_occured = "F")
+               select into "nl:"
+                    pe.product_event_id
+               from product_event pe
+               plan pe where (pe.product_event_id = request->productlist[prod]->pd_product_event_id)
+                             and (pe.updt_cnt = request->productlist[prod]->pe_pd_updt_cnt)
+               with nocounter, forupdate(pe)
+               
+               if (curqual != 0)
+                 select into "nl:"
+                      pd.product_event_id
+                   from patient_dispense pd
+                   plan pd where (pd.product_event_id = request->productlist[prod]->pd_product_event_id)
+                             and (pd.updt_cnt = request->productlist[prod]->pd_updt_cnt)
+                   detail
+                      pd_qty = pd.cur_dispense_qty         ;save the current dispense quantity and iu
+                      pd_iu = pd.cur_dispense_intl_units
+                   with nocounter, forupdate(pd)
+               endif
+
+               if (curqual = 0)
+                  set failure_occured = "T"
+                  set reply->status_data->subeventstatus[prod]->OperationName = "lock"
+                  set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+                  set error_process = "lock tables for update"
+                  set error_message = "unable to lock tables for update"
+                  if (thistable = "unkn")
+                     set error_process = "no xmatch/assign"
+                     set error_message = "xmatch/assign information not found"
+                  endif   ;thistable = "    ")
+               else
+                  /********************** update the patient_dispense event in the product_event table***********/
+                  update into product_event pe
+                  set
+                     pe.updt_cnt                      = pe.updt_cnt +1,
+                     pe.updt_dt_tm                    = cnvtdatetime(curdate, curtime3),
+                     pe.updt_id                       = ReqInfo->updt_id,
+                     pe.updt_task                     = ReqInfo->updt_task,
+                     pe.updt_applctx                  = ReqInfo->updt_applctx,
+                     pe.active_ind                    = if (request->productlist[prod]->product_type = "B")
+                                                           0
+                                                        elseif (pd_qty <= request->productlist[prod]->transfused_qty)
+                                                           0
+                                                        else
+                                                           1
+                                                        endif,
+                     pe.active_status_cd              = if (request->productlist[prod]->product_type = "B")
+                                                           ReqData->inactive_status_cd
+                                                        elseif (pd_qty = request->productlist[prod]->transfused_qty)
+                                                           ReqData->inactive_status_cd
+                                                        else
+                                                           ReqData->active_status_cd
+                                                        endif
+                  where (pe.product_event_id = request->productlist[prod]->pd_product_event_id)
+                         and (pe.updt_cnt = request->productlist[prod]->pe_pd_updt_cnt)
+                  with nocounter
+                  if (curqual = 0)
+                     set failure_occured = "T"
+                     set reply->status_data->subeventstatus[prod]->OperationName = "chg"
+                     set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+                     set error_process = "update product event dispense"
+                     set error_message = "dispense product event row not updated"
+                  else
+                 /**********************************update patient dispense table*******************************/
+                     update into patient_dispense pd
+                     set
+                        pd.dispense_status_flag          = 2,  ;transfused
+                        pd.cur_dispense_qty              = if (request->productlist[prod]->product_type = "B")
+                                                              0
+                                                           elseif (pd_qty  <= request->productlist[prod]->transfused_qty)
+                                                               0
+                                                           else
+                                                               (pd_qty - request->productlist[prod]->transfused_qty)
+                                                           endif,
+                        pd.cur_dispense_intl_units       = if (request->productlist[prod]->product_type = "B")
+                                                              0
+                                                           elseif (pd_iu = request->productlist[prod]->transfused_iu)
+                                                               0
+                                                           else
+                                                               (pd_iu - request->productlist[prod]->transfused_iu)
+                                                           endif,
+                        pd.updt_cnt                      = pd.updt_cnt +1,
+                        pd.updt_dt_tm                    = cnvtdatetime(curdate, curtime3),
+                        pd.updt_id                       = ReqInfo->updt_id,
+                        pd.updt_task                     = ReqInfo->updt_task,
+                        pd.updt_applctx                  = ReqInfo->updt_applctx,
+                        pd.active_ind                    = if (request->productlist[prod]->product_type = "B")
+                                                              0
+                                                           elseif (pd_qty
+                                                                   <= request->productlist[prod]->transfused_qty)
+                                                              0
+                                                           else
+                                                              1
+                                                           endif,
+                        pd.active_status_cd              = if (request->productlist[prod]->product_type = "B")
+                                                              ReqData->inactive_status_cd
+                                                           elseif (pd_qty <= request->productlist[prod]->transfused_qty)
+                                                              ReqData->inactive_status_cd
+                                                           else
+                                                              ReqData->active_status_cd
+                                                           endif
+                     where (pd.product_event_id = request->productlist[prod]->pd_product_event_id)
+                             and (pd.updt_cnt = request->productlist[prod]->pd_updt_cnt)
+                     with nocounter
+                     if (curqual = 0)
+                        set failure_occured = "T"
+                        set reply->status_data->subeventstatus[prod]->OperationName = "chg"
+                        set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+                        set error_process = "update patient dispense"
+                        set error_message = "unable to update patient dispense table"
+                     endif   ;update patient dispense
+                  endif   ;update dispense row in product event
+               endif   ;lock rows in tables for update
+            endif   ;failure occured
+
+           /************************************ release the xmatch/assign info if present ***************************/
+            if ((failure_occured = "F") and (request->productlist[prod]->xm_product_event_id > 0))
+               select into "nl:"
+                    pe.product_event_id,
+                    a.product_event_id,
+                    xm.product_event_id,
+                    tablefrom = decode(a.seq, "asgn", xm.seq, "xmtc","unkn")
+               from assign a, crossmatch xm, product_event pe,(dummyt d1 with seq = 1)
+               plan pe where (pe.product_event_id = request->productlist[prod]->xm_product_event_id)
+                             and (pe.updt_cnt = request->productlist[prod]->pe_xm_updt_cnt)
+               join (d1 where (d1.seq = 1))
+                     join (a where (a.product_event_id = request->productlist[prod]->xm_product_event_id)
+                                    and (a.updt_cnt = request->productlist[prod]->xm_updt_cnt)
+                          )
+                     orjoin (xm where (xm.product_event_id = request->productlist[prod]->xm_product_event_id)
+                                       and (xm.updt_cnt = request->productlist[prod]->xm_updt_cnt)
+                            )
+               detail
+                    if (tablefrom = "asgn")
+                         as_qty = a.cur_assign_qty
+                         as_iu = a.cur_assign_intl_units
+                         thistable = "asgn"
+                    elseif (tablefrom = "xmtc")
+                         as_qty = xm.crossmatch_qty
+                         thistable = "xmtc"
+                    endif
+               with nocounter, dontcare = a, dontcare = xm
+               
+               if (curqual != 0)
+                  select into "nl:"
+                       pe.product_event_id
+                    from product_event pe
+                    plan pe where (pe.product_event_id = request->productlist[prod]->xm_product_event_id)
+                              and (pe.updt_cnt = request->productlist[prod]->pe_xm_updt_cnt)
+                    with nocounter, forupdate(pe)
+               endif
+
+               if (curqual = 0)
+                  set failure_occured = "T"
+                  set reply->status_data->subeventstatus[prod]->OperationName = "lock"
+                  set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+                  set error_process = "lock tables for update"
+                  set error_message = "unable to lock product_event table for update"
+               elseif (thistable = "asgn")
+               ;**************************************** update crossmatch/assign******************************/
+                  update into assign a
+                     set
+                         a.cur_assign_qty          = if (request->productlist[prod]->product_type = "B")
+                                                        0
+                                                     elseif (as_qty <= request->productlist[prod]->transfused_qty)
+                                                        0
+                                                     else
+                                                       ( as_qty - request->productlist[prod]->transfused_qty)
+                                                     endif,
+                         a.cur_assign_intl_units   = if (request->productlist[prod]->product_type = "B")
+                                                        0
+                                                     elseif (as_iu <= request->productlist[prod]->transfused_iu)
+                                                        0
+                                                     else
+                                                       ( as_iu - request->productlist[prod]->transfused_iu)
+                                                     endif,
+                         a.updt_cnt                = a.updt_cnt + 1,
+                         a.updt_dt_tm              = cnvtdatetime(curdate, curtime3),
+                         a.updt_id                 = ReqInfo->updt_id,
+                         a.updt_task               = ReqInfo->updt_task,
+                         a.updt_applctx            = ReqInfo->updt_applctx,
+                         a.active_ind              = if (request->productlist[prod]->product_type = "B")
+                                                        0
+                                                     elseif (as_qty <= request->productlist[prod]->transfused_qty)
+                                                        0
+                                                     else
+                                                        1
+                                                     endif,
+                         a.active_status_cd        = if (request->productlist[prod]->product_type = "B")
+                                                         ReqData->inactive_status_cd
+                                                     elseif ( as_qty <= request->productlist[prod]->transfused_qty)
+                                                         ReqData->inactive_status_cd
+                                                     else
+                                                         ReqData->active_status_cd
+                                                     endif
+                  where (a.product_event_id = request->productlist[prod]->xm_product_event_id)
+                         and (a.updt_cnt = request->productlist[prod]->xm_updt_cnt)
+                  with nocounter
+                  if (curqual = 0)
+                     set failure_occured = "T"
+                     set reply->status_data->subeventstatus[prod]->OperationName = "chg"
+                     set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+                     set error_process = "update assign"
+                     set error_message = "unable to update assign table"
+                  else
+                     update into product_event pe
+                        set
+                           pe.updt_cnt                      = pe.updt_cnt +1,
+                           pe.updt_dt_tm                    = cnvtdatetime(curdate, curtime3),
+                           pe.updt_id                       = ReqInfo->updt_id,
+                           pe.updt_task                     = ReqInfo->updt_task,
+                           pe.updt_applctx                  = ReqInfo->updt_applctx,
+                           pe.active_ind                    = if (request->productlist[prod]->product_type = "B")
+                                                                  0
+                                                              elseif (as_qty <= request->productlist[prod]->transfused_qty)
+                                                                  0
+                                                              else
+                                                                  1
+                                                              endif,
+                           pe.active_status_cd              = if (request->productlist[prod]->product_type = "B")
+                                                                 ReqData->inactive_status_cd
+                                                              elseif (as_qty <= request->productlist[prod]->transfused_qty)
+                                                                 ReqData->inactive_status_cd
+                                                              else
+                                                                 ReqData->active_status_cd
+                                                              endif
+                     where (pe.product_event_id = request->productlist[prod]->xm_product_event_id)
+                                and (pe.updt_cnt = request->productlist[prod]->pe_xm_updt_cnt)
+                     with nocounter
+                     if (curqual = 0)
+                        set failure_occured = "T"
+                        set reply->status_data->subeventstatus[prod]->OperationName = "chg"
+                        set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+                        set error_process = "update assign product event"
+                        set error_message = "unable to update product event for assign"
+                     endif   ;product_event assign
+                        endif   ;update assign ok
+               elseif (thistable = "xmtc")
+                  update into crossmatch xm
+                     set
+                        xm.crossmatch_qty                = if (request->productlist[prod]->product_type = "B")
+                                                              0
+                                                           elseif (as_qty <= request->productlist[prod]->transfused_qty)
+                                                              0
+                                                           else
+                                                              (as_qty - request->productlist[prod]->transfused_qty)
+                                                           endif,
+                        xm.updt_cnt                      = xm.updt_cnt + 1,
+                        xm.updt_dt_tm                    = cnvtdatetime(curdate, curtime3),
+                        xm.updt_id                       = ReqInfo->updt_id,
+                        xm.updt_task                     = ReqInfo->updt_task,
+                        xm.updt_applctx                  = ReqInfo->updt_applctx,
+                        xm.active_ind                    = if (request->productlist[prod]->product_type = "B")
+                                                              0
+                                                           elseif (as_qty = request->productlist[prod]->transfused_qty)
+                                                              0
+                                                           else
+                                                              1
+                                                           endif,
+                        xm.active_status_cd              = if (request->productlist[prod]->product_type = "B")
+                                                               ReqData->inactive_status_cd
+                                                           elseif (as_qty <= request->productlist[prod]->transfused_qty)
+                                                               ReqData->inactive_status_cd
+                                                           else
+                                                               ReqData->active_status_cd
+                                                           endif
+                  where (xm.product_event_id = request->productlist[prod]->xm_product_event_id)
+                         and (xm.updt_cnt = request->productlist[prod]->xm_updt_cnt)
+                  with nocounter
+                  if (curqual = 0)
+                     set failure_occured = "T"
+                     set reply->status_data->subeventstatus[prod]->OperationName = "chg"
+                     set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+                     set error_process = "update crossmatch"
+                     set error_message = "unable to update crossmatch table"
+                  else
+                     update into product_event pe
+                        set
+                           pe.updt_cnt                      = pe.updt_cnt +1,
+                           pe.updt_dt_tm                    = cnvtdatetime(curdate, curtime3),
+                           pe.updt_id                       = ReqInfo->updt_id,
+                           pe.updt_task                     = ReqInfo->updt_task,
+                           pe.updt_applctx                  = ReqInfo->updt_applctx,
+                           pe.active_ind                    = if (request->productlist[prod]->product_type = "B")
+                                                                 0
+                                                              elseif (as_qty <= request->productlist[prod]->transfused_qty)
+                                                                 0
+                                                              else
+                                                                 1
+                                                              endif,
+                           pe.active_status_cd              = if (request->productlist[prod]->product_type = "B")
+                                                                 ReqData->inactive_status_cd
+                                                              elseif (as_qty <= request->productlist[prod]->transfused_qty)
+                                                                 ReqData->inactive_status_cd
+                                                              else
+                                                                 ReqData->active_status_cd
+                                                              endif
+                     where (pe.product_event_id = request->productlist[prod]->xm_product_event_id)
+                            and (pe.updt_cnt = request->productlist[prod]->pe_xm_updt_cnt)
+                     with nocounter
+                     if (curqual = 0)
+                        set failure_occured = "T"
+                        set reply->status_data->subeventstatus[prod]->OperationName = "chg"
+                        set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+                        set error_process = "update crossmatch product event"
+                        set error_message = "unable to update product event for xmatch"
+                     endif   ;product_event crossmatch
+                  endif   ; update crossmatch
+               else
+                  ;if the script gets here the request->productlist[prod]->xm_product_event_id > 0
+                  ;but tablefrom != "asgn" or "xmtc"
+                  set failure_occured = "T"
+                  set reply->status_data->status = "F"
+                  set reply->status_data->subeventstatus[prod]->OperationName = "get"
+                  set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+                  set error_process = "get assign /crossmatch event"
+                  set error_message = "unable to find assign or crossmatch event"
+               endif   ;lock pe,xmatch,assign failed
+            endif   ;request->productlist[prod]->xm_product_event_id > 0
+
+
+            /****** check the product_event table and inactivate any active  records that should be inactive *********/
+            ;per lsj 2/25/97 don't need to inactivate any other events except the patient_dispense and crossmatch or assign
+
+            /********************************************  unlock the product *****************************************/
+            ;if there are other events for this product_id do not unlock the product it will be done on the last occurance
+            ;of the product_id in the productlist array
+            if ((failure_occured = "F") and (other_events = "F"))
+               select into "nl:"
+                     p.product_id
+               from product p
+               plan p  where (p.product_id = request->productlist[prod]->product_id) and
+                             (p.updt_cnt = request->productlist[prod]->p_updt_cnt) and
+                             (p.locked_ind = 1)
+               with nocounter, forupdate(p)
+               if (curqual = 0)
+               	  ;Products coming from the interface could be unlocked in the flex/modify crossmatch path)
+                  if(request->productlist[prod]->from_interface_flag = 0)
+	                  set error_process = "update product"
+	                  set error_message = "product not locked"
+	                  set failure_occured = "T"
+                  endif
+               else
+                  update into product p
+                      set p.locked_ind        = 0,
+                      	  p.interfaced_device_flag = 0,
+                          p.updt_cnt          = p.updt_cnt + 1,
+                          p.updt_dt_tm        = cnvtdatetime(curdate, curtime3),
+                          p.updt_id           = ReqInfo->updt_id,
+                          p.updt_task         = ReqInfo->updt_task,
+                          p.updt_applctx      = ReqInfo->updt_applctx
+                  plan p where (p.product_id = request->productlist[prod]->product_id) and
+                               (p.updt_cnt = request->productlist[prod]->p_updt_cnt) and
+                               (p.locked_ind = 1)
+                  with counter
+                  if (curqual = 0)
+                  	 ;Products coming from the interface could be unlocked in the flex/modify crossmatch path)
+                  	 if(request->productlist[prod]->from_interface_flag = 0)
+	                     set error_process = "update product"
+	                     set error_message = "product not unlocked"
+	                     set failure_occured = "T"
+	                 endif 
+                  endif   ; update product
+               endif   ; lock failed
+            endif   ;lock product
+
+			/******** Update Flex (Done via front end if not executing via interface) **********/
+			if((failure_occured = "F") and (request->productlist[prod]->from_interface_flag > 0))
+
+				;The modify crossmatch scripts alters success_cnt and prod and causes issues
+				; This is a workaround for the moment				
+				set chg_event_transfuse_succss_cnt = success_cnt
+				set chg_event_transfuse_prod_cnt = prod
+										
+				;Flex script is looking for this, it will be overwritten in summary info later						
+				set reply->results[prod]->product_id = request->productlist[prod]->product_id
+                set reply->results[prod]->status = "S"
+				;run the update to calculate the new expirations
+	            if (FlexUpd_Run(NULL) = 0)
+	                set flex_upd_error_flag = FLEX_UPD_ERROR
+	                set failure_occured = "T"
+	                call log_message("flex update error", log_level_audit)
+	            else
+	                set stat = FlexUpd_PrintReports(NULL)
+	            endif	
+	            set prod = chg_event_transfuse_prod_cnt
+	            set success_cnt = chg_event_transfuse_succss_cnt
+			endif
+             ;**********************************************summary info****************************************
+             /* see if the add/changes were sucessful*/
+             if (failure_occured = "F")
+                set success_cnt = success_cnt + 1
+                set reply->status_data->status = "S"
+                set reply->status_data->subeventstatus[prod]->OperationName = "Complete"
+                set reply->status_data->subeventstatus[prod]->OperationStatus = "S"
+                set reply->status_data->subeventstatus[prod]->TargetObjectName = "Tables Updated"
+                set reply->status_data->subeventstatus[prod]->TargetObjectValue = "S"
+                ;set the product_id and the dispense product_event_id for this event
+                set reply->results[prod]->product_id = request->productlist[prod]->product_id
+                set reply->results[prod]->dispense_event_id = request->productlist[prod]->pd_product_event_id
+                set reply->results[prod]->status = "S"
+                set reply->results[prod]->err_process = "complete"
+                set reply->results[prod]->err_message = "no errors"
+             else
+                set reply->status_data->subeventstatus[prod]->OperationName = error_process
+                set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+                set reply->status_data->subeventstatus[prod]->TargetObjectName = error_message
+                set reply->status_data->subeventstatus[prod]->TargetObjectValue = "F"
+                set reply->results[prod]->product_id = request->productlist[prod]->product_id
+                set reply->results[prod]->status = "F"
+                set reply->results[prod]->err_process = error_process
+                set reply->results[prod]->err_message = error_message
+             endif
+        endfor
+
+        /*********  Call subroutine to fill out the pn_recovery* tables  *********/
+          if ((reply->status_data->status != "F") 
+               and (success_cnt = nbr_to_add))
+            set g_sub_event_type_flag = 1
+            set g_sub_num_products = size(request->productlist,5)
+            set stat = insert_pn_recovery_data (0)
+            if (stat = 1)    ;argument of 0 used to show that this is NOT an ops script
+              set reply->status_data->status = "S"
+              set ReqInfo->commit_ind = 1
+            elseif (stat = 2) ;no products available to transfuse
+              set reply->status_data->status = "S"
+              set ReqInfo->commit_ind = 0
+            else
+              set reply->status_data->status = "F"
+              set ReqInfo->commit_ind = 0
+              go to exit_script
+            endif
+          else
+            set ReqInfo->commit_ind = 0
+          endif
+        /*********  Done filling out pn_recovery  *********/
+
+%i cclsource:bbt_add_product_event.inc
+END             ; end subroutine ADD_PRODUCT_EVENT
+
+if (success_cnt = 0)
+  set reply->status_data->status = "F"
+elseif (success_cnt < nbr_to_add)
+  set reply->status_data->status = "P"
+else
+  set reply->status_data->status = "S"
+endif
+
+#exit_script
+
+call log_message("---BBT_CHG_EVENT_TRANSFUSION ENDING", log_level_debug)
+call uar_SysDestroyHandle(hSys)
+
+end go
+
+;Generated by GNU enscript 1.6.4.

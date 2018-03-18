@@ -1,0 +1,377 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_gl_to_afc/pfmt_gl_to_afc.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       pfmt_gl_to_afc.prg
+        Object name:            pfmt_gl_to_afc
+        Request #:              951060
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Post charges throught charge server.
+
+        Tables read:            none
+
+        Tables updated:         none
+
+        Executing from:         Process Server
+
+        Special Notes:          Triggered from Request 250074.
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 01/27/97 Kevin Brunner        Initial Release                     *
+;    *001 04/24/97 Scott Monsees                added In_lab_dt_tm
+;    *002 09/05/97 Kevin Brunner        Add autoverify logic.               *
+;    *003 10/20/97 Jeff Fry             Add accession_id and repeat_ind     *
+;    *004 10/22/97 Kevin Brunner        Add result level informatiom        *
+;    *005 12/19/97 Hal Patchen          Use reply perform dt tm for Gen Lab *
+;    *006 02/25/98 Jeff Fry             Make changes to support new AFC     *
+;    *                                  Request record structure            *
+;    *007 04/12/99 Chris Heil           Pass correct careset information    *
+;    *008 08/24/99 Gary Runde           Add error logging to msgview        *
+;    *009 01/20/01 SD4221               Improve Error Logging               *
+;                                       Feature :- 15673                    *
+;    *010 08/16/01 Mike Gabrick         Add checking for twice-verified     *
+;                                       result                              *
+;    *011 09/30/02 CERGYL               Date of Service logic.              *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program pfmt_gl_to_afc:dba go
+create program pfmt_gl_to_afc:dba
+
+%I CCLSOURCE:PCS_DATE_OF_SERVICE.INC
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC                                  ;008
+SET LOG_PROGRAM_NAME = "pfmt_gl_to_afc"                    ;008
+
+CALL LOG_MESSAGE ("Starting GL to AFC ", LOG_LEVEL_DEBUG)
+
+%i cclsource:glb_format_result.inc
+
+/***********************************************************************
+ *   Print date and time to log file.                                  *
+ ***********************************************************************/
+ 
+  declare iFailReasonFlag = i2									   ;010
+ 
+  select into "nl:"                                                ;008
+    currentdate = cnvtdatetime(curdate,curtime3)                   ;008
+  detail                                                           ;008
+    sText = fillstring(254, " ")                                   ;008
+    sText = CONCAT("{{Script::PFMT_GL_TO_AFC}} Started at ",         ;008
+                   format(currentdate, "dd-mmm-yyyy-hhmm;;d"))     ;008
+    call uar_SysEvent(hSys, 4, "ScriptBegin", NULLTERM(sText))     ;008
+  with nocounter                                                   ;008
+
+/***********************************************************************
+ *  Subroutine - get careset information                               *
+ ***********************************************************************/
+  subroutine get_careset_info(arg_order, arg_catalog_cd)                  ;007
+    set bFound = 1                                                        ;007
+    set sub_hold_order_id = arg_order                                     ;007
+
+    while (bFound = 1)                                                    ;007
+      select into "nl:"                                                   ;007
+        ord.catalog_cd,                                                   ;007
+        ord.cs_order_id                                                   ;007
+      from orders ord                                                     ;007
+      plan ord                                                            ;007
+        where ord.order_id = sub_hold_order_id                            ;007
+
+      head report                                                         ;007
+        bFound = 0                                                        ;007
+
+      detail                                                              ;007
+        if (ord.cs_order_id > 0)                                          ;007
+          bFound = 1                                                      ;007
+          sub_hold_order_id = ord.cs_order_id                             ;007
+        else                                                              ;007
+          careset_id = sub_hold_order_id                                  ;007
+          careset_catalog_cd = ord.catalog_cd                             ;007
+        endif                                                             ;007
+
+      with nocounter                                                      ;007
+
+      CALL ERROR_MESSAGE(0)                                               ;008
+    endwhile                                                              ;007
+  end                                                                     ;007
+
+      /***********************************************************************
+      *  Subroutine - set billing type                                       *
+      ***********************************************************************/
+         subroutine add_charge( arg_occurs, arg_charge_cd )
+            set replyout->charge_event[cidx]->                          ;003
+                charge_event_act[arg_occurs]->accession_id =            ;003
+                requestin->request->orders[oidx]->accession_id          ;003
+            set replyout->charge_event[cidx]->                          ;003
+                charge_event_act[arg_occurs]->repeat_ind =              ;003
+                requestin->request->orders[oidx]->assays[aidx]->        ;003
+                repeat_ind                                              ;003
+            set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->cea_type_cd = arg_charge_cd
+            if (charge_cd = CD->afc_perfed_cd)
+              set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->cea_prsnl_id =
+                  requestin->request->orders[oidx]->assays[aidx]->perform_personnel_id
+            else
+              set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->cea_prsnl_id =
+                  requestin->request->event_personnel_id
+            endif
+;006            set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->cea_prsnl_type_cd =
+;006                reqinfo->position_cd
+;006            set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->cea_service_resource_cd =
+;006                requestin->request->orders[oidx]->assays[aidx]->service_resource_cd
+            set replyout->charge_event[cidx]->
+                charge_event_act[arg_occurs]->service_resource_cd =     ;006
+                requestin->request->orders[oidx]->assays[aidx]->        ;006
+                service_resource_cd                                     ;006
+;006            set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->ceact_dt_tm =
+;005                requestin->request->orders[oidx]->assays[aidx]->perform_dt_tm
+;006                requestin->reply->orders[oidx]->assays[aidx]->perform_dt_tm ;005
+
+            if (date_of_service_ind = 1)
+              set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->service_dt_tm =
+                  requestin->request->orders[oidx]->assays[aidx]->drawn_dt_tm
+            else
+              set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->service_dt_tm =
+                  requestin->reply->orders[oidx]->assays[aidx]->perform_dt_tm
+            endif
+
+            set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->in_lab_dt_tm =
+                requestin->request->orders[oidx]->assays[aidx]->in_lab_dt_tm
+;006            set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->cea_field1 =
+;006                cnvtstring(requestin->request->orders[oidx]->assays[aidx]->result_type_cd)
+;006            if (requestin->request->orders[oidx]->assays[aidx]->result_type_cd = CD->alp_result_type_cd)
+;006              set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->cea_field2 =
+;006                 cnvtstring(requestin->request->orders[oidx]->assays[aidx]->nomenclature_id)
+;006            endif
+
+/*004...*/
+            set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->alpha_nomen_id =
+                 requestin->request->orders[oidx]->assays[aidx]->nomenclature_id
+            set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->reference_range_factor_id =
+                 requestin->request->orders[oidx]->assays[aidx]->reference_range_factor_id
+            if ((requestin->request->orders[oidx]->assays[aidx]->result_type_cd = CD->num_result_type_cd) or
+                (requestin->request->orders[oidx]->assays[aidx]->result_type_cd = CD->cal_result_type_cd))
+               set num_min = requestin->request->orders[oidx]->assays[aidx]->min_digits
+               set num_max = requestin->request->orders[oidx]->assays[aidx]->max_digits
+               set num_dec = requestin->request->orders[oidx]->assays[aidx]->min_decimal_places
+               set num_less_great_flag = requestin->request->orders[oidx]->assays[aidx]->less_great_flag
+               set num_value = requestin->request->orders[oidx]->assays[aidx]->result_value_numeric
+               call format_numeric_result ( num_min, num_max, num_dec, num_less_great_flag, num_value )
+               set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->result = formatted->result_value
+            else
+               if (requestin->request->orders[oidx]->assays[aidx]->result_type_cd = CD->alp_result_type_cd)
+                  set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->result =
+                      requestin->request->orders[oidx]->assays[aidx]->result_value_alpha
+               else
+                  set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->result =
+                      requestin->request->orders[oidx]->assays[aidx]->ascii_text
+               endif
+            endif
+/*004...*/
+
+            set arg_occurs = arg_occurs + 1
+            if (charge_cd = CD->afc_perfed_cd)
+              set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->cea_type_cd = CD->afc_perfing_cd
+              set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->cea_prsnl_id =
+                  requestin->request->orders[oidx]->assays[aidx]->perform_personnel_id
+            endif
+            if (charge_cd = CD->afc_verfed_cd)
+              set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->cea_type_cd = CD->afc_verfing_cd
+              set replyout->charge_event[cidx]->charge_event_act[arg_occurs]->cea_prsnl_id =
+                  requestin->request->event_personnel_id
+            endif
+         end
+
+;* Determines if the collected date/time is defaulted as the service date/time.
+declare date_of_service_ind = i2 with noconstant (0), protect
+
+/**** Main Processing ****/
+
+if ( requestin->reply->status_data->status = "F" )
+     set reqinfo->commit_ind = 0
+;009     Call LOG_MESSAGE ( "Requestin failure", LOG_LEVEL_ERROR)                              ;008
+     Call LOG_MESSAGE ( "Requestin failure", LOG_LEVEL_INFO)                           ;009
+     go to EXIT_SCRIPT
+endif
+
+set reqinfo->commit_ind = 1
+set replyout->action_type = "ADD"
+
+
+set date_of_service_ind = GetDateOfServiceInd (0)
+
+set stat = alterlist(replyout->charge_event, 10)
+set nbr_of_occurs = 1
+set cidx = 0
+set iFailReasonFlag = 0															;010
+set nbr_of_orders = size(requestin->request->orders, 5)
+for (oidx = 1 to nbr_of_orders)
+  Call LOG_MESSAGE ( build( "Processing:", requestin->request->orders[oidx]->accession ), LOG_LEVEL_DEBUG)    ;008
+
+  set nbr_of_assays = size(requestin->request->orders[oidx]->assays, 5)
+  for (aidx = 1 to nbr_of_assays)
+
+  if (validate(requestin->reply->orders[oidx]->assays[aidx]->fail_reason_flag, -1) = -1)						;010
+    set iFailReasonFlag = 0																		    		    ;010
+  else																											;010
+    set iFailReasonFlag = requestin->reply->orders[oidx]->assays[aidx]->fail_reason_flag 						;010
+  endif																											;010
+
+    if ((requestin->reply->orders[oidx]->assays[aidx]->result_status_cd = CD->perform_status_cd or
+        requestin->reply->orders[oidx]->assays[aidx]->result_status_cd = CD->auto_verify_status_cd or
+        requestin->reply->orders[oidx]->assays[aidx]->result_status_cd = CD->verify_status_cd)
+        and (iFailReasonFlag != 4))                              												;010
+      set cidx = nbr_of_occurs
+      if (mod(nbr_of_occurs, 10) = 1)
+        set stat = alterlist(replyout->charge_event, nbr_of_occurs + 10)
+      endif
+      if ( requestin->request->orders[oidx]->cs_order_id > 0 )
+        set order_id = requestin->request->orders[oidx]->order_id               ;007
+        set catalog_cd = requestin->request->orders[oidx]->catalog_cd           ;007
+        set careset_catalog_cd = 0.0                                            ;007
+        set careset_id = 0.0                                                    ;007
+        call get_careset_info(order_id, catalog_cd)                             ;007
+
+;007        set replyout->charge_event[cidx]->ext_master_event_id =
+;007            requestin->request->orders[oidx]->cs_order_id
+        set replyout->charge_event[cidx]->ext_master_event_id = careset_id      ;007
+        set replyout->charge_event[cidx]->                                      ;007
+                      ext_master_reference_id = careset_catalog_cd              ;007
+      else
+        set replyout->charge_event[cidx]->ext_master_event_id =
+            requestin->request->orders[oidx]->order_id
+        set replyout->charge_event[cidx]->ext_master_reference_id =             ;007
+            requestin->request->orders[oidx]->catalog_cd                        ;007
+      endif
+      set replyout->charge_event[cidx]->ext_master_event_cont_cd = CD->afc_ord_cd
+;007      set replyout->charge_event[cidx]->ext_master_reference_id =
+;007          requestin->request->orders[oidx]->catalog_cd
+      set replyout->charge_event[cidx]->ext_master_reference_cont_cd = CD->afc_cat_cd
+      set replyout->charge_event[cidx]->ext_parent_event_id =
+          requestin->request->orders[oidx]->order_id
+      set replyout->charge_event[cidx]->order_id =
+          requestin->request->orders[oidx]->order_id
+      set replyout->charge_event[cidx]->ext_parent_event_cont_cd = CD->afc_ord_cd
+      set replyout->charge_event[cidx]->ext_parent_reference_id =
+          requestin->request->orders[oidx]->catalog_cd
+      set replyout->charge_event[cidx]->ext_parent_reference_cont_cd = CD->afc_cat_cd
+      if ( requestin->request->orders[oidx]->assays[aidx]->result_key =
+           requestin->reply->orders[oidx]->assays[aidx]->result_key )
+        set replyout->charge_event[cidx]->ext_item_event_id =
+            requestin->reply->orders[oidx]->assays[aidx]->result_id
+        set replyout->charge_event[cidx]->reference_nbr =
+              build(requestin->request->orders[oidx]->order_id,
+                 requestin->reply->orders[oidx]->assays[aidx]->result_id,
+                 requestin->request->orders[oidx]->assays[aidx]->task_assay_cd)
+      else
+        set nbr_of_assays_reply = size(requestin->reply->orders[oidx]->assays, 5)
+        for (fidx = 1 to nbr_of_assays_reply)
+          if ( requestin->request->orders[oidx]->assays[aidx]->result_key =
+               requestin->reply->orders[oidx]->assays[fidx]->result_key )
+            set replyout->charge_event[cidx]->ext_item_event_id =
+                requestin->reply->orders[oidx]->assays[fidx]->result_id
+            set replyout->charge_event[cidx]->reference_nbr =
+                build(requestin->request->orders[oidx]->order_id,
+                  requestin->reply->orders[oidx]->assays[fidx]->result_id,
+                  requestin->request->orders[oidx]->assays[aidx]->task_assay_cd)
+            exitfor
+          endif
+        endfor
+      endif
+
+      set replyout->charge_event[cidx]->contributor_system_cd = CD->contributor_system_cd
+
+      set replyout->charge_event[cidx]->ext_item_event_cont_cd = CD->afc_rslt_cd
+      set replyout->charge_event[cidx]->ext_item_reference_id =
+          requestin->request->orders[oidx]->assays[aidx]->task_assay_cd
+      set replyout->charge_event[cidx]->ext_item_reference_cont_cd = CD->afc_task_cd
+      set replyout->charge_event[cidx]->person_id =
+          requestin->request->orders[oidx]->person_id
+      set replyout->charge_event[cidx]->encntr_id =
+          requestin->request->orders[oidx]->encntr_id
+;006      set replyout->charge_event[cidx]->accession_nbr =
+      set replyout->charge_event[cidx]->accession =                     ;006
+          requestin->request->orders[oidx]->accession
+      set nbr_of_charges = 0
+      if (requestin->reply->orders[oidx]->assays[aidx]->result_status_cd = CD->perform_status_cd)
+        if (requestin->request->orders[oidx]->assays[aidx]->perform_ind = 1)
+          set nbr_of_charges = 2
+          set stat = alterlist(replyout->charge_event[cidx]->charge_event_act, nbr_of_charges)
+          set charge_cd = CD->afc_perfed_cd
+          call add_charge ( 1, charge_cd )
+        endif
+      endif
+      if (requestin->reply->orders[oidx]->assays[aidx]->result_status_cd = CD->verify_status_cd or
+          requestin->reply->orders[oidx]->assays[aidx]->result_status_cd = CD->auto_verify_status_cd)
+          if (requestin->request->orders[oidx]->assays[aidx]->perform_ind = 1)
+            set nbr_of_charges = 4
+            set stat = alterlist(replyout->charge_event[cidx]->charge_event_act,nbr_of_charges)
+            set charge_cd = CD->afc_perfed_cd
+            call add_charge ( 1, charge_cd )
+            set charge_cd = CD->afc_verfed_cd
+            call add_charge ( 3, charge_cd )
+          else
+            set nbr_of_charges = 2
+            set stat = alterlist(replyout->charge_event[cidx]->charge_event_act,nbr_of_charges)
+            set charge_cd = CD->afc_verfed_cd
+            call add_charge ( 1, charge_cd )
+          endif
+      endif
+
+      set replyout->charge_event[cidx]->charge_event_act_qual = nbr_of_charges
+
+      set nbr_of_occurs = nbr_of_occurs + 1
+    endif
+  endfor
+
+endfor
+
+set replyout->charge_event_qual = cidx
+
+Call LOG_MESSAGE ( build("AFC replyout->charge_event_qual :",replyout->charge_event_qual), LOG_LEVEL_DEBUG)  ;008
+
+if ( cidx = 0 )
+  set reqinfo->commit_ind = 0
+else
+  set stat = alterlist(replyout->charge_event, cidx)
+endif
+
+#EXIT_SCRIPT
+
+Call LOG_MESSAGE ( "Ending GL to AFC ", LOG_LEVEL_DEBUG)  ;008
+
+call uar_SysDestroyHandle(hSys)   ;008
+
+end go
+
+;Generated by GNU enscript 1.6.4.

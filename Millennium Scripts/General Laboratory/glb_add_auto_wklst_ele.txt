@@ -1,0 +1,828 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_add_auto_wklst_ele/glb_add_auto_wklst_ele.inc Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2000 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_ADD_AUTO_WKLST_ELE.inc
+ 
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Subroutines to update automatic worklists
+ 
+        Executing from:         glb_upd_lab_results
+ 
+        Special notes:          This include file has a dependency on
+                                cclsource:glb_script_logging.inc
+ 
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 07/26/10 Ryan Manuel        	Initial Release                     *
+;     001 08/09/10 Ryan Manuel        	Add auto-worklist status logic      *
+;    *002 08/10/10 Steve Hendrick     	Add QC and QP accessions            *
+;    *003 08/19/10 Steve Hendrick       Add Continuous auto-worklist type   *
+;    *004 09/01/10 Steve Hendrick       Add QC group ID logic               *
+;    *005 10/28/10 Steve Hendrick       Bookend QC Worklist Generation      *
+;    *006 04/12/11 Ryan Manuel          Subsection Generation               *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+%i cclsource:pm_dynamic_query.inc
+%i cclsource:pm_create_request.inc
+ 
+declare AddItemsToAutomaticWorklist() = NULL with protect
+declare LoadAutomaticWorklistReferenceData(lServiceResourceIdx = i4 (value),
+                                           nAccessionType      = i2 (value)) = NULL with protect
+declare NeedNewAutomaticWorklist() = i2 with protect
+declare DoneBuilding() = i2 with protect
+declare PopulateExistingAccessions() = NULL with protect
+declare PopulateOrderData(lServiceResourceIdx = i4 (value),
+                          lAccessionIdx       = i4 (value),
+                          lOrderIdx           = i4 (value)) = NULL with protect
+declare PopulateAccessionData(lServiceResourceIdx = i4 (value),
+                              lAccessionIdx       = i4 (value),
+                              nAccessionType      = i2 (value)) = NULL with protect
+declare PopulateServiceResourceData(lServiceResourceIdx = i4 (value),
+                                    nAccessionType      = i2 (value)) = NULL with protect
+declare UpdateResults(nAccessionType = i2 (value)) = NULL with protect
+declare UpdateWorklistStatusToPending() = NULL with protect
+declare PopulateQCAccessionData(lServiceResourceIdx = i4 (value),
+                                lAccessionIdx       = i4 (value)) = Null with protect
+declare CheckForQCOnWorklist(lCurrNumAccns = i4 (value),
+                             dAccessionID  = f8 (value),
+                             dQCGroupID    = f8 (value)) = i2 with protect
+declare UpdateCopyForwardWorklistId() = NULL with protect
+declare PopulateBookendQCData() = NULL with protect
+declare GetQCAccnType(dAccessionID = f8 (value)) = i2 with protect
+ 
+record items_for_automatic_worklist
+(
+  1 service_resources[*]
+    2 service_resource_cd = f8
+    2 accessions[*]
+      3 accession_id = f8
+      3 sequence = i4
+      3 orders[*]
+        4 order_id = f8
+        4 on_worklist_ind = i2
+        4 results[*]
+          5 perform_result_id = f8
+      3 qc_results[*]
+        4 qc_result_id = f8
+      3 qc_group_id = f8
+)
+ 
+record automatic_worklist
+(
+  1 worklist_ref_id = f8
+  1 automatic_worklist_type_cd = f8
+  1 automatic_max_accn_cnt = i4
+  1 worklist_type_flag = i2
+  1 current_display = c25
+  1 worklist_id = f8
+  1 previous_worklist_id = f8
+  1 update_copy_forward_ind = i2
+  1 accession_count = i4
+  1 worklist_has_changes_ind = i2
+  1 max_sequence = i4
+  1 status_cd = f8
+  1 bookend_qc_accns[*]
+   2 accession_id = f8
+   2 qc_group_id = f8
+   2 accession_id_cnt = i4
+  1 service_resource_cd = f8 ; This will either be the instrument the result came from or the subsection for that instrument
+ 
+)
+ 
+record results_for_worklist
+(
+  1 results[*]
+    2 perform_result_id = f8
+  1 qc_results[*]
+    2 qc_result_id = f8
+)
+ 
+declare dCONTINUOUS_WORKLIST_CD = f8 with protect, constant(uar_get_code_by("MEANING", 4000826, "CONTINUOUS"))
+declare dCOUNTED_WORKLIST_CD    = f8 with protect, constant(uar_get_code_by("MEANING", 4000826, "COUNTED"))
+declare dBOOKENDQC_WORKLIST_CD  = f8 with protect, constant(uar_get_code_by("MEANING", 4000826, "BOOKEND_QC"))
+declare dBUILDING_STATUS_CD  = f8 with protect, constant(uar_get_code_by("MEANING", 90, "BUILDING"))
+declare dPENDING_STATUS_CD   = f8 with protect, constant(uar_get_code_by("MEANING", 90, "PENDING"))
+declare dINPROCESS_STATUS_CD = f8 with protect, constant(uar_get_code_by("MEANING", 90, "INPROCESS"))
+declare dCOMPLETE_STATUS_CD  = f8 with protect, constant(uar_get_code_by("MEANING", 90, "COMPLETE"))
+declare dPAUSED_STATUS_CD    = f8 with protect, constant(uar_get_code_by("MEANING", 90, "PAUSED"))
+declare dSUBSECTION_CD       = f8 with protect, constant(uar_get_code_by("MEANING", 223, "SUBSECTION"))
+declare nBATCH_SIZE          = i2 with protect, constant(20)
+declare nQC_ACCN_IDX         = i2 with protect, constant(1)
+;Accession types
+declare nPATIENT             = i2 with protect, constant(0)
+declare nQC                  = i2 with protect, constant(1)
+declare nQP                  = i2 with protect, constant(2)
+ 
+subroutine AddItemsToAutomaticWorklist(NULL)
+  declare nMoreToProcessInd = i2 with protect, noconstant(0)
+  declare lServiceResourceIdx = i4 with protect, noconstant(0)
+  declare lAccnIdx = i4 with protect, noconstant(0)
+  declare lHoldAccnIdx = i4 with protect, noconstant(0)
+  declare lOrderIdx = i4 with protect, noconstant(0)
+  declare lAccessionCnt = i4 with protect, noconstant(0)
+  declare nAccessionType = i2 with protect, noconstant(0)
+ 
+  for (lServiceResourceIdx = 1 to size(items_for_automatic_worklist->service_resources, 5))
+    ;must have an accession to do any processing in this for loop
+    if ( size(items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions, 5) > 0 )
+      if ( size(items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[nQC_ACCN_IDX].
+                                              qc_results, 5) > 0 )
+          set nAccessionType = GetQCAccnType(items_for_automatic_worklist->service_resources[lServiceResourceIdx].
+                                          accessions[nQC_ACCN_IDX].accession_id)
+      else
+          set nAccessionType = nPATIENT
+      endif
+      call LoadAutomaticWorklistReferenceData(lServiceResourceIdx, nAccessionType)
+ 
+      if (automatic_worklist->worklist_ref_id > 0.0 and automatic_worklist->status_cd != dPAUSED_STATUS_CD)
+        set nMoreToProcessInd = 1
+      else
+        set nMoreToProcessInd = 0
+      endif
+      set lHoldAccnIdx = 1
+      while (nMoreToProcessInd = 1)
+        set stat = initrec(results_for_worklist)
+ 
+        call PopulateServiceResourceData(lServiceResourceIdx, nAccessionType)
+        set lAccessionCnt = size(items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions, 5)
+ 
+        for (lAccnIdx = lHoldAccnIdx to lAccessionCnt)
+          call PopulateAccessionData(lServiceResourceIdx, lAccnIdx, nAccessionType)
+ 
+          if (nAccessionType = nPATIENT)
+            for (lOrderIdx = 1 to size(items_for_automatic_worklist->service_resources[lServiceResourceIdx].
+                                                                     accessions[lAccnIdx].orders, 5))
+              call PopulateOrderData(lServiceResourceIdx, lAccnIdx, lOrderIdx)
+            endfor
+          else
+            call PopulateQCAccessionData( lServiceResourceIdx, lAccnIdx )
+          endif
+ 
+          if (DoneBuilding(0) = 1 or lAccnIdx = lAccessionCnt)
+            set lHoldAccnIdx = lAccnIdx + 1
+            set lAccnIdx = lAccessionCnt + 1
+            if (automatic_worklist->worklist_has_changes_ind = 1)
+              if (automatic_worklist->worklist_id = 0)
+ 
+                ;*** REPLY RECORD FOR REQUEST 250085 ***
+                free record reply_wklst_ele
+                record reply_wklst_ele
+                (
+%i cclsource:glb_add_wklst_ele_rep.inc
+                )
+                execute glb_add_wklst_ele with replace("REQUEST", "REQUEST_WKLST_ELE"),
+                                               replace("REPLY", "REPLY_WKLST_ELE")
+                set automatic_worklist->worklist_id = reply_wklst_ele->worklist_id
+              else
+ 
+                ;*** REPLY RECORD FOR REQUEST 250087 ***
+                free record reply_wklst_ele
+                record reply_wklst_ele
+                (
+%i cclsource:glb_chg_wklst_ele_rep.inc
+                )
+                execute glb_chg_wklst_ele with replace("REQUEST", "REQUEST_WKLST_ELE"),
+                                               replace("REPLY", "REPLY_WKLST_ELE")
+              endif
+              
+              if (automatic_worklist->update_copy_forward_ind = 1)
+                call UpdateCopyForwardWorklistId(0)
+                set stat = alterlist(automatic_worklist->bookend_qc_accns, 0) ;remove bookend_QC_accns so new worklist 
+                                                                              ;ID doesn't go immediately to pending status.
+              endif
+ 
+              if (DoneBuilding(0) = 1)
+                call UpdateWorklistStatusToPending(0)
+              endif
+            endif
+            call UpdateResults(nAccessionType)
+          endif
+        endfor
+ 
+        if (lHoldAccnIdx > lAccessionCnt)
+          set nMoreToProcessInd = 0
+        endif
+      endwhile
+    endif   ;endif for checking for accession
+  endfor
+end
+ 
+subroutine GetQCAccnType(dAccessionID)
+  declare nQCType = i2 with protect, noconstant(0)
+ 
+  select into "nl:"
+    from accession a
+    plan a where a.accession_id = dAccessionID
+  detail
+    if (uar_get_code_meaning(a.accession_format_cd) = "QP")
+      nQCType = nQP
+    else
+      nQCType = nQC
+    endif
+  with nocounter
+ 
+  return(nQCType)
+ 
+end
+ 
+subroutine LoadAutomaticWorklistReferenceData(lServiceResourceIdx, nAccessionType)
+  declare laccn_cnt = i4 with protect, noconstant(0)
+  declare laccn_idx = i4 with protect, noconstant(0)
+  declare lIdx = i4 with protect, noconstant(0)
+  declare nLockIter = i2 with protect, noconstant(0) 
+  declare nLOCK_WAIT_TIME = i2 with protect, constant(2) 
+  declare nLOCK_WAIT_ITER = i2 with protect, constant(75) 
+  declare saccn_no = vc with protect,noconstant(" ")
+  declare nLocked   = i2 with protect, noconstant(0)
+  
+  declare error_str           = c132 with noconstant (" ")
+  declare error_nbr           = i4 with noconstant (0)
+  declare nCCL_LOCK_ERR_NBR   = i2 with constant (290); CCL error number for lock rows failure
+
+ 
+  set stat = initrec(automatic_worklist)
+  
+  ;* Lock automatic worklist_ref row to prevent other results from posting 
+  ;* simultaneously to the same automatic worklist until this transaction is complete.
+  set nLocked = 0
+  set nLockIter = 1
+  while (nLockIter <= nLOCK_WAIT_ITER)
+
+ 
+	  select into "nl:"
+	  from worklist_ref wr
+	  where wr.service_resource_cd = items_for_automatic_worklist->service_resources[lServiceResourceIdx].service_resource_cd
+	    and wr.automatic_worklist_ind = 1
+	    and wr.active_ind = 1
+	  detail
+	    automatic_worklist->worklist_ref_id = wr.worklist_ref_id
+	    automatic_worklist->automatic_worklist_type_cd = wr.automatic_worklist_type_cd
+	    automatic_worklist->automatic_max_accn_cnt = wr.automatic_max_accn_cnt
+	    automatic_worklist->worklist_type_flag = evaluate(wr.result_space_ind, 1, 0, 1)
+	    automatic_worklist->current_display = build(wr.display, "_", wr.next_seq_number)
+	    automatic_worklist->service_resource_cd = wr.service_resource_cd
+        nLocked = 1
+	  with nocounter,forupdate(wr)
+	  
+	  set error_nbr = error(error_str, 0)
+	  
+	  if (error_nbr!= nCCL_LOCK_ERR_NBR and automatic_worklist->worklist_ref_id = 0.0)
+	    select into "nl:"
+	    from worklist_ref wr,
+	         resource_group rg
+	    plan rg where rg.child_service_resource_cd = 
+	                     items_for_automatic_worklist->service_resources[lServiceResourceIdx].service_resource_cd
+	              and rg.active_ind = 1
+	              and rg.resource_group_type_cd = dSUBSECTION_CD
+	              and rg.root_service_resource_cd = 0.0
+	    join wr where wr.service_resource_cd = rg.parent_service_resource_cd
+	              and wr.automatic_worklist_ind = 1
+	              and wr.active_ind = 1
+	    detail
+	      automatic_worklist->worklist_ref_id = wr.worklist_ref_id
+	      automatic_worklist->automatic_worklist_type_cd = wr.automatic_worklist_type_cd
+	      automatic_worklist->automatic_max_accn_cnt = wr.automatic_max_accn_cnt
+	      automatic_worklist->worklist_type_flag = evaluate(wr.result_space_ind, 1, 0, 1)
+	      automatic_worklist->current_display = build(wr.display, "_", wr.next_seq_number)
+	      automatic_worklist->service_resource_cd = rg.parent_service_resource_cd
+	      nLocked = 1
+	    with nocounter,forupdate(wr)
+	    
+		  set error_nbr = error(error_str, 0)
+		  
+		  if(error_nbr!= nCCL_LOCK_ERR_NBR) 
+		    set nLockIter = 999
+		  endif
+	  
+	  endif
+	   
+	  
+	  
+		if (nLocked = 0 and nLockIter != 999)
+	    	call pause(nLOCK_WAIT_TIME)
+	   	else
+	     	set nLockIter = 999
+	    endif
+	    
+   		set nLockIter = nLockIter + 1
+  endwhile
+
+    ;* Ensure lock was obtained.
+  if (nLocked = 0)
+  	select a.accession from accession a where a.accession_id = 
+    items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[1].accession_id
+    detail
+    	saccn_no = a.accession
+    with nocounter
+           	 
+     call log_message(build("Error - Failed to obtain lock on the worklist table for accesion ",
+             saccn_no),log_level_error) 
+    set automatic_worklist->worklist_ref_id = 0.0
+    return
+  endif
+
+  if (automatic_worklist->worklist_ref_id > 0.0)
+    select into "nl:"
+      w.worklist_id,
+      w.status_cd
+    from worklist w
+    plan w where w.worklist_ref_id + 0.0 = automatic_worklist->worklist_ref_id
+             and w.worklist_alias = automatic_worklist->current_display
+    detail
+      automatic_worklist->worklist_id = w.worklist_id
+      automatic_worklist->status_cd = w.status_cd
+    with nocounter
+ 
+    if (automatic_worklist->worklist_id = 0.0 or automatic_worklist->status_cd = dPAUSED_STATUS_CD)
+      return
+    endif
+    
+    select into "nl:"
+      max_seq = max(wor.sequence)
+    from worklist_order_r wor
+    plan wor where wor.worklist_id = automatic_worklist->worklist_id
+    detail
+      automatic_worklist->accession_count = max_seq
+      automatic_worklist->max_sequence = max_seq
+    with nocounter
+ 
+    select into "nl:"
+    from worklist_accession_r war,
+         accession a
+    plan war where war.worklist_id = automatic_worklist->worklist_id
+    join a where a.accession_id = war.accession_id
+    order by war.sequence desc
+    head report
+      laccn_cnt = 0
+      lIdx = 0
+      laccn_idx = 0
+      if (war.sequence > automatic_worklist->max_sequence)
+        automatic_worklist->accession_count = war.sequence
+        automatic_worklist->max_sequence = war.sequence
+      endif
+ 
+    detail
+      if (uar_get_code_meaning(a.accession_format_cd) = "QP")
+        automatic_worklist->accession_count = automatic_worklist->accession_count - 1
+      else
+        if (automatic_worklist->automatic_worklist_type_cd = dBOOKENDQC_WORKLIST_CD)
+          laccn_idx = locateval(lIdx, 1, laccn_cnt, a.accession_id , automatic_worklist->bookend_qc_accns[lIdx].accession_id)
+          if ( laccn_idx = 0)
+            laccn_cnt = laccn_cnt + 1
+            stat = alterlist(automatic_worklist->bookend_qc_accns, laccn_cnt)
+            automatic_worklist->bookend_qc_accns[laccn_cnt].accession_id = a.accession_id
+            automatic_worklist->bookend_qc_accns[laccn_cnt].qc_group_id = war.qc_group_id
+            automatic_worklist->bookend_qc_accns[laccn_cnt].accession_id_cnt = 1
+          else
+            automatic_worklist->bookend_qc_accns[laccn_idx].accession_id_cnt =
+                                                          automatic_worklist->bookend_qc_accns[laccn_idx].accession_id_cnt + 1
+          endif
+        endif
+      endif
+    with nocounter
+ 
+    ;if bookendQC and QC accession we need to add the accession ID and or count from the items_for_automatic_worklist struct
+    if (automatic_worklist->automatic_worklist_type_cd = dBOOKENDQC_WORKLIST_CD and nAccessionType != nPATIENT)
+      ;don't include QP accessions in bookend QC struct
+      if ( nAccessionType = nQC )
+        if (automatic_worklist->status_cd in (dPENDING_STATUS_CD, dINPROCESS_STATUS_CD, dCOMPLETE_STATUS_CD) )
+          set laccn_cnt = 0   ; if a QC comes through and the worklist is pending, complete, or inprocess we need to make it
+        endif                 ; the only QC in the bookend_qc_accns struct
+        set laccn_idx = locateval(lIdx, 1, laccn_cnt,
+                    items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[nQC_ACCN_IDX].accession_id,
+                    automatic_worklist->bookend_qc_accns[lIdx].accession_id)
+        if ( laccn_idx = 0)
+          set laccn_cnt = laccn_cnt + 1
+          set stat = alterlist(automatic_worklist->bookend_qc_accns, laccn_cnt)
+          set automatic_worklist->bookend_qc_accns[laccn_cnt].accession_id =
+                items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[nQC_ACCN_IDX].accession_id
+ 
+          set automatic_worklist->bookend_qc_accns[laccn_cnt].qc_group_id =
+                items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[nQC_ACCN_IDX].qc_group_id
+ 
+          set automatic_worklist->bookend_qc_accns[laccn_cnt].accession_id_cnt = 1
+        else
+          set automatic_worklist->bookend_qc_accns[laccn_idx].accession_id_cnt =
+                                                        automatic_worklist->bookend_qc_accns[laccn_idx].accession_id_cnt + 1
+ 
+          set automatic_worklist->bookend_qc_accns[laccn_idx].qc_group_id =
+                     items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[nQC_ACCN_IDX].qc_group_id
+        endif
+      endif
+    endif
+ 
+ 
+  endif
+end
+ 
+subroutine NeedNewAutomaticWorklist(NULL)
+  ;checks for new worklist for both COUNTED and CONTINUOUS worklists
+  if (automatic_worklist->max_sequence = 0 or
+      automatic_worklist->status_cd in (dPENDING_STATUS_CD, dINPROCESS_STATUS_CD, dCOMPLETE_STATUS_CD))
+    return(1)
+  endif
+ 
+  if (automatic_worklist->automatic_worklist_type_cd = dCOUNTED_WORKLIST_CD)
+    if (automatic_worklist->accession_count >= automatic_worklist->automatic_max_accn_cnt)
+      return (1)
+    endif
+  endif
+ 
+  return (0)
+end
+ 
+subroutine DoneBuilding(NULL)
+ 
+  declare nBookendComplete = i2 with protect, noconstant(0)
+  declare nBookendQCAccnCnt = i2 with protect, noconstant(0)
+ 
+  if (automatic_worklist->automatic_worklist_type_cd = dCOUNTED_WORKLIST_CD)
+    if (automatic_worklist->accession_count >= automatic_worklist->automatic_max_accn_cnt)
+      return (1)
+    endif
+  elseif (automatic_worklist->automatic_worklist_type_cd = dBOOKENDQC_WORKLIST_CD)
+    set nBookendQCAccnCnt = size(automatic_worklist->bookend_qc_accns, 5)
+    if (nBookendQCAccnCnt = 0)
+      return( 0 )
+    endif
+    set nBookendComplete = 1
+    for (lIdx = 1 to nBookendQCAccnCnt)
+      if ( automatic_worklist->bookend_qc_accns[lIdx].accession_id_cnt < 2 )
+        set nBookendComplete = 0
+      endif
+    endfor
+    return (nBookendComplete)
+  endif
+  return (0)
+end
+ 
+subroutine PopulateBookendQCData(NULL)
+;Populate new worklist ID with QC accessions from previous worklist
+ 
+  declare lNumBookendQCAccns = i4 with protect, noconstant(0)
+  declare stat = i2 with protect, noconstant(0)
+  declare lLoopIdx = i4 with protect, noconstant(0)
+  declare lIdx = i4 with protect, noconstant(0)
+ 
+  set lNumBookendQCAccns = size(automatic_worklist->bookend_qc_accns, 5)
+  if ( lNumBookendQCAccns > 0)
+    set stat = alterlist(request_wklst_ele->orders, lNumBookendQCAccns)
+    set lIdx = 0
+    for (lLoopIdx = lNumBookendQCAccns to 1 by -1 )
+      set lIdx = lIdx + 1
+      set request_wklst_ele->orders[lIdx].accession_id = automatic_worklist->bookend_qc_accns[lLoopIdx].accession_id
+      set request_wklst_ele->orders[lIdx].qc_group_id = automatic_worklist->bookend_qc_accns[lLoopIdx].qc_group_id
+      set request_wklst_ele->orders[lIdx].sequence = lIdx
+      set request_wklst_ele->orders[lIdx].sequence_ident = cnvtstring(lIdx)
+    endfor
+    set automatic_worklist->worklist_has_changes_ind = 1
+    set automatic_worklist->accession_count = lNumBookendQCAccns
+    set automatic_worklist->max_sequence = lNumBookendQCAccns
+  endif
+ 
+end
+
+subroutine UpdateCopyForwardWorklistId(NULL)
+  declare lBookendQCCnt = i4 with protect, noconstant(0)
+  declare lLoopCnt = i4 with protect, noconstant(0)
+  declare lStart = i4 with protect, noconstant(0)
+  declare lIndex = i4 with protect, noconstant(0)
+  
+  set lBookendQCCnt = size(automatic_worklist->bookend_qc_accns, 5)
+  set lLoopCnt = ceil(cnvtreal(lBookendQCCnt) / nBATCH_SIZE)
+  set lStart = 1
+  update into (dummyt d1 with seq = value(lLoopCnt)),
+       qc_result qr
+  set qr.copy_forward_worklist_id = automatic_worklist->worklist_id,
+      qr.updt_applctx = reqinfo->updt_applctx,
+      qr.updt_cnt = qr.updt_cnt + 1,
+      qr.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+      qr.updt_id = reqinfo->updt_id,
+      qr.updt_task = reqinfo->updt_task
+  plan d1 where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+  join qr where expand(lIndex, lStart, minval(lBookendQCCnt, lStart + (nBATCH_SIZE-1)),
+                       qr.qc_group_id, automatic_worklist->bookend_qc_accns[lIndex].qc_group_id)
+            and qr.worklist_id = automatic_worklist->previous_worklist_id
+end
+ 
+subroutine PopulateExistingAccessions(NULL)
+  declare lCurrentItem = i4 with protect, noconstant(0)
+ 
+  if (automatic_worklist->worklist_id > 0.0)
+    select into "nl:"
+    from worklist_order_r wor
+    plan wor where wor.worklist_id = automatic_worklist->worklist_id
+    order by wor.sequence
+    detail
+      lCurrentItem = lCurrentItem + 1
+      if (mod(lCurrentItem, 10) = 1)
+        stat = alterlist(request_wklst_ele->orders, lCurrentItem + 9)
+      endif
+      request_wklst_ele->orders[lCurrentItem].order_id = wor.order_id
+      request_wklst_ele->orders[lCurrentItem].sequence = wor.sequence
+      request_wklst_ele->orders[lCurrentItem].sequence_ident = wor.identifier
+    with nocounter
+ 
+    select into "nl:"
+    from worklist_accession_r war
+    plan war where war.worklist_id = automatic_worklist->worklist_id
+    order by war.sequence
+    detail
+      lCurrentItem = lCurrentItem + 1
+      if (mod(lCurrentItem, 10) = 1)
+        stat = alterlist(request_wklst_ele->orders, lCurrentItem + 9)
+      endif
+      request_wklst_ele->orders[lCurrentItem].accession_id = war.accession_id
+      request_wklst_ele->orders[lCurrentItem].sequence = war.sequence
+      request_wklst_ele->orders[lCurrentItem].sequence_ident = war.identifier
+      request_wklst_ele->orders[lCurrentItem].qc_group_id = war.qc_group_id
+    with nocounter
+ 
+    set stat = alterlist(request_wklst_ele->orders, lCurrentItem)
+  endif
+end
+ 
+subroutine CheckForQCOnWorklist(lCurrNumAccns, dAccessionID, dQCGroupID)
+  declare lTempAccnIdx = i4 with protect, noconstant(0)
+  declare lIdx = i4 with protect, noconstant(0)
+ 
+  set lTempAccnIdx = locateval(lIdx, 1, lCurrNumAccns,
+                                dAccessionID, request_wklst_ele->orders[lIdx].accession_id,
+                                dQCGroupID,   request_wklst_ele->orders[lIdx].qc_group_id)
+  if (lTempAccnIdx > 0)
+    return(1)
+  else
+    return(0)
+  endif
+end
+ 
+subroutine PopulateQCAccessionData(lServiceResourceIdx, lAccessionIdx)
+  declare lItemQCResultIdx = i4 with protect, noconstant(0)
+  declare lItemQCResultCnt = i4 with protect, noconstant(0)
+  declare lResultWorklistSize = i4 with protect, noconstant(0)
+  declare lCurrNumAccns = i4 with protect, noconstant(0)
+  declare dCurrAccnID = f8 with protect, noconstant(0)
+  declare dCurrQCGroupID = f8 with protect, noconstant(0)
+ 
+    set dCurrAccnID =
+                 items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].accession_id
+    set dCurrQCGroupID =
+                 items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].qc_group_id
+ 
+    set lItemQCResultCnt = size(items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].
+    														  qc_results, 5)
+    set lResultWorklistSize = size(results_for_worklist->qc_results, 5)
+    set stat = alterlist(results_for_worklist->qc_results, lResultWorklistSize + lItemQCResultCnt)
+    for (lItemQCResultIdx = 1 to lItemQCResultCnt)
+      set results_for_worklist->qc_results[lResultWorklistSize + lItemQCResultIdx].qc_result_id =
+                                items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].
+                                                              qc_results[lItemQCResultIdx].qc_result_id
+    endfor
+ 
+    set lCurrNumAccns = size(request_wklst_ele->orders, 5)  ;QC accessions stored at the order level
+    ; only add if new worklist or QC accn ID and QC group id are NOT already on the worklist
+    if ( automatic_worklist->worklist_id = 0 or CheckForQCOnWorklist(lCurrNumAccns, dCurrAccnID, dCurrQCGroupID) = 0 )
+      set lCurrNumAccns = lCurrNumAccns + 1
+      set stat = alterlist(request_wklst_ele->orders, lCurrNumAccns)
+      set request_wklst_ele->orders[lCurrNumAccns].accession_id = dCurrAccnID
+      set request_wklst_ele->orders[lCurrNumAccns].qc_group_id  = dCurrQCGroupID
+ 
+      set request_wklst_ele->orders[lCurrNumAccns].sequence =
+          items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].sequence
+      set request_wklst_ele->orders[lCurrNumAccns].sequence_ident =
+          cnvtstring(request_wklst_ele->orders[lCurrNumAccns].sequence)
+      set automatic_worklist->worklist_has_changes_ind = 1
+    endif
+ 
+end
+ 
+ 
+subroutine PopulateOrderData(lServiceResourceIdx, lAccessionIdx, lOrderIdx)
+  declare lItemResultIdx = i4 with protect, noconstant(0)
+  declare lItemResultCnt = i4 with protect, noconstant(0)
+  declare lResultWorklistSize = i4 with protect, noconstant(0)
+ 
+  if (items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].orders[lOrderIdx]
+                                                                                                    .on_worklist_ind = 0)
+    set lCurrNumOrders = size(request_wklst_ele->orders, 5)
+    set lCurrNumOrders = lCurrNumOrders + 1
+    set stat = alterlist(request_wklst_ele->orders, lCurrNumOrders)
+    set request_wklst_ele->orders[lCurrNumOrders].order_id =
+          items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].
+                                                                               orders[lOrderIdx].order_id
+    set request_wklst_ele->orders[lCurrNumOrders].sequence =
+        items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].sequence
+    set request_wklst_ele->orders[lCurrNumOrders].sequence_ident =
+        cnvtstring(request_wklst_ele->orders[lCurrNumOrders].sequence)
+    set automatic_worklist->worklist_has_changes_ind = 1
+  endif
+ 
+  set lItemResultCnt = size(items_for_automatic_worklist->service_resources[lServiceResourceIdx].
+                                                          accessions[lAccessionIdx].orders[lOrderIdx].results, 5)
+  set lResultWorklistSize = size(results_for_worklist->results, 5)
+  set stat = alterlist(results_for_worklist->results, lResultWorklistSize + lItemResultCnt)
+  for (lItemResultIdx = 1 to lItemResultCnt)
+    set results_for_worklist->results[lResultWorklistSize + lItemResultIdx].perform_result_id =
+                              items_for_automatic_worklist->service_resources[lServiceResourceIdx].
+                                                            accessions[lAccessionIdx].orders[lOrderIdx].
+                                                            results[lItemResultIdx].perform_result_id
+  endfor
+end
+ 
+subroutine PopulateAccessionData(lServiceResourceIdx, lAccessionIdx, nAccessionType)
+ 
+  if (nAccessionType = nPATIENT)
+    select into "nl:"
+      wor_exists_ind = evaluate(nullind(wor.order_id), 0, 1, 0)
+    from accession_order_r aor,
+         worklist_order_r wor
+    plan aor  where aor.accession_id = items_for_automatic_worklist->service_resources[lServiceResourceIdx].
+                                                                    accessions[lAccessionIdx].accession_id
+    join wor  where wor.order_id = outerjoin(aor.order_id)
+                and wor.worklist_id = outerjoin(automatic_worklist->worklist_id)
+    head report
+      lIdx = 0
+      lTempOrderSize = size(items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].
+                                                                                                       orders, 5)
+    head aor.order_id
+      lTempOrderIdx = locateval(lIdx, 1, lTempOrderSize,
+                                aor.order_id, items_for_automatic_worklist->service_resources[lServiceResourceIdx].
+                                                                            accessions[lAccessionIdx].orders[lIdx].order_id)
+      if (wor_exists_ind = 1)
+        if (lTempOrderIdx > 0)
+          items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].orders[lTempOrderIdx]
+                                                                                                        .on_worklist_ind = 1
+        endif
+        items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].sequence = wor.sequence
+      endif
+    with nocounter
+ 
+  endif
+ 
+  if (items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].sequence = 0
+      OR nAccessionType != nPATIENT)
+ 
+    if (nAccessionType != nQP)
+      set automatic_worklist->accession_count = automatic_worklist->accession_count + 1
+    endif
+    set automatic_worklist->max_sequence = automatic_worklist->max_sequence + 1
+    set items_for_automatic_worklist->service_resources[lServiceResourceIdx].accessions[lAccessionIdx].sequence =
+                                      automatic_worklist->max_sequence
+  endif
+end
+ 
+subroutine PopulateServiceResourceData(lServiceResourceIdx, nAccessionType)
+  if (NeedNewAutomaticWorklist(0) = 1)
+    ;*** REQUEST RECORD FOR REQUEST 250085 ***
+    free record request_wklst_ele
+    call cr_createRequest(0, 250085, "request_wklst_ele")
+ 
+    set automatic_worklist->accession_count = 0
+    set automatic_worklist->max_sequence = 0
+    set automatic_worklist->previous_worklist_id = automatic_worklist->worklist_id
+    set automatic_worklist->worklist_id = 0
+    set automatic_worklist->worklist_has_changes_ind = 1
+    set automatic_worklist->update_copy_forward_ind = 0
+ 
+    set request_wklst_ele->worklist_ref_id = automatic_worklist->worklist_ref_id
+    set request_wklst_ele->auto_assign_ind = 1
+    set request_wklst_ele->seq_ident_ind = 1
+    set request_wklst_ele->seq_ident_start_nbr = 1
+    set request_wklst_ele->seq_ident_beg_range_nbr = 1
+    set request_wklst_ele->seq_ident_end_range_nbr = 999999999
+    set stat = alterlist(request_wklst_ele->components, 1)
+    set request_wklst_ele->components[1].worklist_seq = 1
+    set request_wklst_ele->components[1].catalog_cd = 0.0
+    set request_wklst_ele->components[1].task_assay_cd = 0.0
+    set request_wklst_ele->worklist_prsnl_id = 0.0              ;system user id
+ 
+    if (automatic_worklist->automatic_worklist_type_cd = dBOOKENDQC_WORKLIST_CD)
+      if ( nAccessionType = nPATIENT or nAccessionType = nQP )       ;patient or QP accession
+        call PopulateBookendQCData(0)
+        set automatic_worklist->update_copy_forward_ind = 1
+      endif                                                           
+    endif
+  else
+    ;*** REQUEST RECORD FOR REQUEST 250087 ***
+    free record request_wklst_ele
+    call cr_createRequest(0, 250087, "request_wklst_ele")
+ 
+    call PopulateExistingAccessions(0)
+    set automatic_worklist->worklist_has_changes_ind = 0
+    set automatic_worklist->update_copy_forward_ind = 0
+ 
+    set request_wklst_ele->worklist_id = automatic_worklist->worklist_id
+    set request_wklst_ele->worklist_alias = automatic_worklist->current_display
+    set stat = alterlist(request_wklst_ele->components, 1)
+    set request_wklst_ele->components[1].catalog_cd = 0.0
+    set request_wklst_ele->components[1].task_assay_cd = 0.0
+  endif
+ 
+  set request_wklst_ele->status_cd = dBUILDING_STATUS_CD
+  set request_wklst_ele->service_resource_cd = automatic_worklist->service_resource_cd
+  set request_wklst_ele->worklist_type_flag = automatic_worklist->worklist_type_flag
+end
+ 
+subroutine UpdateResults(nAccessionType)
+  declare lStart = i4 with protect, noconstant(0)
+  declare lIndex = i4 with protect, noconstant(0)
+  declare lLoopCnt = i2 with protect, noconstant(0)
+  declare lResultCnt = i4 with protect, noconstant(0)
+  if ( nAccessionType = nPATIENT )
+      set lResultCnt = size(results_for_worklist->results, 5)
+      set lLoopCnt = ceil(cnvtreal(lResultCnt) / nBATCH_SIZE)
+      set lStart = 1
+      update into (dummyt d1 with seq = value(lLoopCnt)),
+           perform_result pr
+      set pr.worklist_id = automatic_worklist->worklist_id,
+          pr.updt_applctx = reqinfo->updt_applctx,
+          pr.updt_cnt = pr.updt_cnt + 1,
+          pr.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+          pr.updt_id = reqinfo->updt_id,
+          pr.updt_task = reqinfo->updt_task
+      plan d1 where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+      join pr where expand(lIndex, lStart, minval(lResultCnt, lStart + (nBATCH_SIZE-1)),
+                           pr.perform_result_id, results_for_worklist->results[lIndex].perform_result_id)
+  else   ;QC results
+      set lResultCnt = size(results_for_worklist->qc_results, 5)
+      set lLoopCnt = ceil(cnvtreal(lResultCnt) / nBATCH_SIZE)
+      set lStart = 1
+      update into (dummyt d1 with seq = value(lLoopCnt)),
+           qc_result qr
+      set qr.worklist_id = automatic_worklist->worklist_id,
+          qr.updt_applctx = reqinfo->updt_applctx,
+          qr.updt_cnt = qr.updt_cnt + 1,
+          qr.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+          qr.updt_id = reqinfo->updt_id,
+          qr.updt_task = reqinfo->updt_task
+      plan d1 where initarray(lStart, evaluate(d1.seq, 1, 1, lStart + nBATCH_SIZE))
+      join qr where expand(lIndex, lStart, minval(lResultCnt, lStart + (nBATCH_SIZE-1)),
+                           qr.qc_result_id, results_for_worklist->qc_results[lIndex].qc_result_id)
+ 
+  endif
+end
+ 
+subroutine UpdateWorklistStatusToPending(NULL)
+  select into "nl:"
+  from worklist w
+  plan w where w.worklist_id = automatic_worklist->worklist_id
+  with forupdate(w)
+ 
+  if (error_message(0) > 0)
+    call log_message("Error - Failed to select for update on the worklist table", log_level_audit)
+    return
+  endif
+ 
+  update into worklist w
+  set w.status_cd = dPENDING_STATUS_CD,
+      w.updt_applctx = reqinfo->updt_applctx,
+      w.updt_cnt = w.updt_cnt + 1,
+      w.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+      w.updt_id = reqinfo->updt_id,
+      w.updt_task = reqinfo->updt_task
+  plan w where w.worklist_id = automatic_worklist->worklist_id
+ 
+  insert into worklist_event we
+  set we.worklist_event_id      = seq(pathnet_seq, nextval),
+      we.worklist_id            = automatic_worklist->worklist_id,
+      ; Add a little bit of time to ensure that multiple events don't have the same event_dt_tm
+      we.event_dt_tm            = cnvtdatetime(curdate, curtime3 + 100.0),
+      we.event_prsnl_id         = 0.0,                         ; system id  replaces reqinfo->updt_id
+      we.event_type_flag        = 4,
+      we.updt_dt_tm             = cnvtdatetime(curdate, curtime3),
+      we.updt_id                = reqinfo->updt_id,
+      we.updt_task              = reqinfo->updt_task,
+      we.updt_cnt               = 0,
+      we.updt_applctx           = reqinfo->updt_applctx
+  with nocounter
+end
+
+;Generated by GNU enscript 1.6.4.

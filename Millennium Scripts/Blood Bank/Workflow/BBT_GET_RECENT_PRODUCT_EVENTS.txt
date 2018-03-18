@@ -1,0 +1,211 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBCompXMElig/BBT_GET_RECENT_PRODUCT_EVENTS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_recent_product_events.prg
+        Object name:            bbt_get_recent_product_events
+        Request #:              225568
+
+        Product:                Pathnet                              
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Gets recent product events of given type for
+                                a given patient.
+                               
+
+        Tables read:            code_value, product_event, product
+                               
+        Tables updated:         none
+        Executing from:         Computer Crossmatch
+
+        Special Notes:          none
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 07/31/98 Doug Saus            Initial Release                     *
+;    *001 03/29/99 Doug Saus            Removed selects from code_value and
+;    *                                  added debug_ind
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_get_recent_product_events:dba go
+create program bbt_get_recent_product_events:dba
+
+/*
+record request
+(
+  1 person_id                   = f8
+  1 event_dt_tm                 = dq8
+  1 eventlist[*]
+        2 event_type_mean       = c12
+        2 event_type_cd         = c8
+)
+*/
+
+record reply
+(
+ 1  eventlist[*]
+   2  product_event_id         = f8
+   2  event_type_cd            = f8
+   2  event_type_disp          = c40
+   2  event_type_mean          = c12
+   2  event_dt_tm              = dq8
+   2  product_id               = f8
+   2  product_nbr              = c26
+   2  product_sub_nbr          = c5
+   2  product_cd               = f8
+   2  product_disp             = c40
+   2  product_mean             = c12
+   2  cur_abo_cd               = f8
+   2  cur_abo_disp             = c40
+   2  cur_abo_mean             = c12
+   2  cur_rh_cd                = f8
+   2  cur_rh_disp              = c40
+   2  cur_rh_mean              = c12
+%i cclsource:status_block.inc
+)
+
+;001 begin
+set event_cnt   = size(request->eventlist, 5)
+set cdf_meaning = fillstring(12," ")
+set stat = 1
+
+for (idx = 1 to event_cnt)
+    set code_value = 0.0
+    set cdf_meaning = request->eventlist[idx].event_type_mean
+
+    set stat = uar_get_meaning_by_codeset(1610, cdf_meaning, 1, code_value)
+    
+    if (request->debug_ind = 1)
+        call echo(stat)
+        call echo("1610")
+        call echo(cdf_meaning)
+        call echo(code_value)
+        call echo(" ")
+    endif
+
+    if (stat = 1)
+        set reply->status_data.status                                   = "F"
+        set reply->status_data.subeventstatus[1].operationname          = "select"
+        set reply->status_data.subeventstatus[1].operationstatus        = "F"
+        set reply->status_data.subeventstatus[1].targetobjectname       = "bbt_get_latest_product_event"
+        set reply->status_data.subeventstatus[1].targetobjectvalue      = "uar select for event type codes failed"
+        go to EXIT_SCRIPT
+    else
+        set request->eventlist[idx].event_type_cd = code_value
+    endif
+endfor
+;001 end
+
+set stat = alterlist(reply->eventlist, 5)
+set select_ok_ind = 0
+
+select into "nl:"
+    pe.event_type_cd
+    , pe.event_dt_tm
+    , p.product_nbr
+
+from
+    (dummyt d with seq = value(event_cnt))
+    , product_event pe
+    , product p
+    , blood_product bp
+
+plan d
+    join pe where pe.person_id      = request->person_id
+            and   pe.active_ind     = 1
+            and   pe.event_type_cd  = request->eventlist[d.seq].event_type_cd
+            and   (pe.event_dt_tm   >= cnvtdatetime(request->event_dt_tm)
+             or   pe.event_dt_tm    = cnvtdatetime(" ")
+             or   pe.event_dt_tm    = NULL)
+
+    join p  where p.product_id      = pe.product_id
+    join bp where bp.product_id     = p.product_id
+
+head report
+    select_ok_ind   = 0
+    qual_cnt        = 0
+
+detail
+    qual_cnt        = qual_cnt + 1
+    if (mod(qual_cnt, 5) = 1 and qual_cnt != 1)
+        stat = alterlist(reply->eventlist, qual_cnt + 4)
+    endif
+    reply->eventlist[qual_cnt].event_type_cd       = pe.event_type_cd
+    reply->eventlist[qual_cnt].product_event_id    = pe.product_event_id
+    reply->eventlist[qual_cnt].product_id          = p.product_id
+    reply->eventlist[qual_cnt].product_nbr         = p.product_nbr
+    reply->eventlist[qual_cnt].product_sub_nbr     = p.product_sub_nbr
+    reply->eventlist[qual_cnt].event_dt_tm         = cnvtdatetime(pe.event_dt_tm)
+    reply->eventlist[qual_cnt].product_cd          = p.product_cd
+    reply->eventlist[qual_cnt].cur_abo_cd          = bp.cur_abo_cd
+    reply->eventlist[qual_cnt].cur_rh_cd           = bp.cur_rh_cd
+
+foot report
+    stat          = alterlist(reply->eventlist, qual_cnt)
+    select_ok_ind = 1
+
+with nocounter, nullreport
+
+if (select_ok_ind = 1)
+    set reply->status_data.status                               = "S"
+else
+    set reply->status_data.status                               = "F"
+    set reply->status_data.subeventstatus[1].operationname      = "select"
+    set reply->status_data.subeventstatus[1].operationstatus    = "F"
+    set reply->status_data.subeventstatus[1].targetobjectname   = "bbt_get_latest_product_event"
+    set reply->status_data.subeventstatus[1].targetobjectvalue  = "product_event select failed"
+endif
+
+
+#EXIT_SCRIPT
+
+if (request->debug_ind = 1)
+    set item_cnt = cnvtint(size(reply->eventlist, 5))
+    call echo(build(reply->status_data.status, " / "))
+    for (item = 1 to item_cnt)
+       call echo(build(item, ".",
+       reply->eventlist[item].product_nbr                  , " / ",
+       reply->eventlist[item].product_sub_nbr              , " / ",
+       reply->eventlist[item].product_id                   , " / ",
+       reply->eventlist[item].product_event_id             , " / ",
+       reply->eventlist[item].event_type_cd                , " / ",
+       reply->eventlist[item].event_dt_tm                  , " / ",
+       reply->eventlist[item].product_cd                   , " / ",
+       reply->eventlist[item].cur_abo_cd                   , " / ",
+       reply->eventlist[item].cur_rh_cd                     ))
+    endfor
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

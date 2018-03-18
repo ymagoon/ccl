@@ -1,0 +1,844 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Interpretationtool/bbt_chg_components.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_chg_components
+        Object name:            bbt_chg_components
+        Request #:              225164
+
+        Product:                Pathnet
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        To change a component and all child records
+                                if necessary and change ranges and all child
+                                records if necessary and change result hash
+      
+        Tables read:            interp_component, interp_range, 
+                                result_hash, interp_result
+        Tables updated:         interp_component, interp_range, 
+                                result_hash
+        Executing from:         Interpretation Tool
+
+        Special Notes:          ?
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 06/30/96 Mike Goings          Initial Release                     *
+;     001 04/29/97 Mike Goings          Interp Modifications                *
+;     002 03/25/98 Mike Goings          Days ineligible result hash         *
+;     003 08/17/98 Mike Goings          From result range updating correctly*
+;                                       when value is -1                    *
+;     004 08/22/05 Jim Jensen           Update new biohazard_ind.           *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+
+drop program bbt_chg_components:dba go
+create program bbt_chg_components:dba
+
+/************************/
+/*    Request record    */
+/************************/
+/*
+record request
+( 
+  1 children_exist    = vc
+  1 comp_count          = i4
+  1 comp_data[1]
+        2 interp_detail_id              = f8
+        2 sequence_changed              = vc
+        2 sequence                      = i4
+        2 verified_flag                 = i2
+;        2 result_status_cd              = f8
+        2 cross_time_ind                = i2
+        2 time_win_minutes              = i4
+        2 time_win_min_cd               = f8
+        2 result_req_flag               = i2
+        2 active_ind                    = i2
+        2 updt_cnt                      = i4
+  1 range_count         = i4
+  1 range_data[1]
+        2 interp_detail_id              = f8
+        2 interp_range_id               = f8
+        2 age_from_units_cd             = f8
+        2 age_from_minutes              = i4
+        2 age_to_units_cd               = f8
+        2 age_to_minutes                = i4
+        2 species_cd                    = f8
+        2 gender_cd                     = f8
+        2 race_cd                       = f8
+        2 unknown_age_ind               = i2
+        2 active_ind                    = i2
+        2 updt_cnt                      = i4
+  1 result_count        = i4
+  1 result_data[1]
+        2 interp_detail_id              = f8
+        2 result_hash_id                = f8
+        2 from_result_range             = f8
+        2 from_result_range_yn          = vc  ; 003
+        2 to_result_range               = f8
+        2 to_result_range_yn            = vc  ; 003
+        2 result_hash                   = vc
+        2 nomenclature_id               = f8
+        2 result_cd                     = f8
+        2 donor_eligibility_cd          = f8
+        2 donor_reason_cd               = f8
+        2 days_ineligible               = i4
+        2 active_ind                    = i2
+        2 updt_cnt                      = i4
+        2 biohazard_ind                 = i2
+ )
+*/
+
+
+/************************/
+/*     Reply record     */
+/************************/
+  record reply
+  ( 
+%i cclsource:status_block.inc
+  )
+
+/************************/
+/* Initialize variables */
+/************************/
+set reply->status_data->status = "F"
+set x = 0
+set y = 0
+  
+/**************************/
+/*    Update component    */
+/**************************/
+for (y = 1 to request->comp_count)
+  select into "nl:" 
+        ic.*
+  from 
+        interp_component ic
+  where
+        ic.interp_detail_id = request->comp_data[y].interp_detail_id and
+        ic.updt_cnt = request->comp_data[y].updt_cnt and
+        ic.active_ind = 1
+  with counter, forupdate(ic)
+
+  if (curqual = 0)
+    set reply->status_data->status = "F",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+    set reply->status_data->subeventstatus[1]->OperationName
+               = "Lock",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Interp Component",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->comp_data[y].interp_detail_id,
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  else
+    set reply->status_data->status = "S"
+  endif
+
+  update into interp_component ic set
+        ic.sequence = request->comp_data[y].sequence,
+        ic.verified_flag = request->comp_data[y].verified_flag,
+        ic.cross_drawn_dt_tm_ind = request->comp_data[y].cross_time_ind,
+        ic.time_window_minutes = if (request->comp_data[y].time_win_minutes = -1)
+                                null
+                                 else
+                                 request->comp_data[y].time_win_minutes
+                                endif,
+        ic.time_window_units_cd = if (request->comp_data[y].time_win_min_cd = -1)
+                                0
+                                  else
+                                  request->comp_data[y].time_win_min_cd
+                                endif,
+        ic.result_req_flag = request->comp_data[y].result_req_flag,
+        ic.active_ind = request->comp_data[y].active_ind,
+        ic.updt_cnt = ic.updt_cnt + 1,
+        ic.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        ic.updt_id = reqinfo->updt_id,
+        ic.updt_task = reqinfo->updt_task,
+        ic.updt_applctx = reqinfo->updt_applctx
+  where
+        ic.interp_detail_id = request->comp_data[y].interp_detail_id and
+        ic.updt_cnt = request->comp_data[y].updt_cnt and
+        ic.active_ind = 1
+  with nocounter
+
+  if (curqual = 0)
+    set reply->status_data->status = "F",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+    set reply->status_data->subeventstatus[1]->OperationName
+               = "Update",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Interp Component",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->comp_data[y].interp_detail_id,
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  else
+    set reply->status_data->status = "S"
+  endif
+  /**************************************/
+  /*  inactivate children if necessary  */
+  /**************************************/
+  if ((request->comp_data[y].active_ind = 0) and (request->children_exist = "T"))
+    /**************************************/
+    /*  lock interp range                 */
+    /**************************************/
+    select into "nl:" 
+        ir.*
+    from 
+        interp_range ir
+    where
+        ir.interp_detail_id = request->comp_data[y].interp_detail_id and
+        ir.active_ind = 1
+    with counter, forupdate(ir)
+
+    if (curqual = 0)
+      set reply->status_data->status = "F",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "Lock",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Interp Range Inactivate",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->comp_data[y].interp_detail_id,
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    else
+      set reply->status_data->status = "S"
+    endif
+    /**************************************/
+    /*  inactivate interp range           */
+    /**************************************/
+    update into interp_range ir set
+        ir.active_ind = 0,
+        ir.updt_cnt = ir.updt_cnt + 1,
+;        ir.inactive_dt_tm = cnvtdatetime(curdate,curtime3),
+        ir.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        ir.updt_id = reqinfo->updt_id,
+        ir.updt_task = reqinfo->updt_task,
+        ir.updt_applctx = reqinfo->updt_applctx
+    where
+        ir.interp_detail_id = request->comp_data[y].interp_detail_id and
+        ir.active_ind = 1
+    with nocounter
+
+    if (curqual = 0)
+      set reply->status_data->status = "F",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "Inactivate",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Interp Range",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->comp_data[y].interp_detail_id,
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    else
+      set reply->status_data->status = "S"
+    endif  
+
+    /**************************************/
+    /*  lock result hash                  */
+    /**************************************/
+    select into "nl:" 
+        rh.*
+    from 
+        result_hash rh
+    where
+        rh.interp_detail_id = request->comp_data[y].interp_detail_id and
+        rh.active_ind = 1
+    with nocounter, forupdate(rh)
+
+    if (curqual = 0)
+      set reply->status_data->status = "F",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "Lock",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Result Hash Inactivate",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->comp_data[y].interp_detail_id,
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    else
+      set reply->status_data->status = "S"
+    endif  
+
+    /**************************************/
+    /*  inactivate result hash            */
+    /**************************************/
+    update into result_hash rh set
+        rh.active_ind = 0,
+        rh.updt_cnt = rh.updt_cnt + 1,
+        rh.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        rh.updt_id = reqinfo->updt_id,
+        rh.updt_task = reqinfo->updt_task,
+        rh.updt_applctx = reqinfo->updt_applctx
+    where
+        rh.interp_detail_id = request->comp_data[y].interp_detail_id and
+        rh.active_ind = 1
+    with nocounter
+
+    if (curqual = 0)
+      set reply->status_data->status = "F",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "Inactivate",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Result Hash",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->comp_data[y].interp_detail_id,
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    else
+      set reply->status_data->status = "S"
+    endif  
+  endif
+  /**************************************/
+  /*  resequence children if necessary  */
+  /**************************************/
+  if ((request->comp_data[y].sequence_changed = "T") and (request->children_exist = "T"))
+    /**************************************/
+    /*  lock interp range                 */
+    /**************************************/
+    select into "nl:" 
+        ir.*
+    from 
+        interp_range ir
+    where
+        ir.interp_detail_id = request->comp_data[y].interp_detail_id and
+        ir.active_ind = 1
+    with counter, forupdate(ir)
+
+    if (curqual = 0)
+      set reply->status_data->status = "F",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "Lock",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Interp Range Resequence",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->comp_data[y].interp_detail_id,
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    else
+      set reply->status_data->status = "S"
+    endif
+    /**************************************/
+    /* resequence  interp range           */
+    /**************************************/
+    update into interp_range ir set
+        ir.sequence = request->comp_data[y].sequence,
+        ir.updt_cnt = ir.updt_cnt + 1,
+        ir.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        ir.updt_id = reqinfo->updt_id,
+        ir.updt_task = reqinfo->updt_task,
+        ir.updt_applctx = reqinfo->updt_applctx
+    where
+        ir.interp_detail_id = request->comp_data[y].interp_detail_id and
+        ir.active_ind = 1
+    with nocounter
+
+    for (x = 1 to request->range_count)
+        if (request->range_data[x].interp_detail_id = request->comp_data[y].interp_detail_id)
+           set request->range_data[x].updt_cnt = request->range_data[x].updt_cnt + 1
+        endif
+    endfor
+    if (curqual = 0)
+      set reply->status_data->status = "F",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "Resequence",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Interp Range",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->comp_data[y].interp_detail_id,
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    else
+      set reply->status_data->status = "S"
+    endif  
+
+    /**************************************/
+    /*  lock result hash                  */
+    /**************************************/
+    select into "nl:" 
+        rh.*
+    from 
+        result_hash rh
+    where
+        rh.interp_detail_id = request->comp_data[y].interp_detail_id and
+        rh.active_ind = 1
+    with nocounter, forupdate(rh)
+
+    if (curqual = 0)
+      set reply->status_data->status = "F",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "Lock",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Result Hash Resequence",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->comp_data[y].interp_detail_id,
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    else
+      set reply->status_data->status = "S"
+    endif  
+
+    for (x = 1 to  request->result_count)
+        if (request->result_data[x].interp_detail_id = request->comp_data[y].interp_detail_id)
+           set request->result_data[x].updt_cnt = request->result_data[x].updt_cnt + 1
+        endif
+    endfor
+    /**************************************/
+    /*  resequence result hash            */
+    /**************************************/
+    update into result_hash rh set
+        rh.sequence = request->comp_data[y].sequence,
+        rh.updt_cnt = rh.updt_cnt + 1,
+        rh.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        rh.updt_id = reqinfo->updt_id,
+        rh.updt_task = reqinfo->updt_task,
+        rh.updt_applctx = reqinfo->updt_applctx
+    where
+        rh.interp_detail_id = request->comp_data[y].interp_detail_id and
+        rh.active_ind = 1
+    with nocounter
+    
+    if (curqual = 0)
+      set reply->status_data->status = "F",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "Resequence",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Result Hash",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->comp_data[y].interp_detail_id,
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    else
+      set reply->status_data->status = "S"
+    endif  
+  endif
+endfor
+
+/**************************/
+/*    Update component    */
+/**************************/
+for (y = 1 to request->range_count)
+  /**************************************/
+  /*  lock interp range           */
+  /**************************************/
+  select into "nl:" 
+        ir.*
+  from 
+        interp_range ir
+  where
+      ir.interp_range_id = request->range_data[y].interp_range_id and
+      ir.updt_cnt = request->range_data[y].updt_cnt and
+      ir.active_ind = 1
+  with counter, forupdate(ir)
+
+  if (curqual = 0)
+    set reply->status_data->status = "F",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+    set reply->status_data->subeventstatus[1]->OperationName
+               = "Lock",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Interp Range Update",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->range_data[y].interp_range_id,
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  else
+    set reply->status_data->status = "S"
+  endif
+  /**************************************/
+  /*  update interp range               */
+  /**************************************/
+  update into interp_range ir set
+      ir.age_from_units_cd = if (request->range_data[y].age_from_units_cd = -1)
+                        0
+                            else
+                        request->range_data[y].age_from_units_cd
+                            endif,
+      ir.age_from_minutes = request->range_data[y].age_from_minutes,
+      ir.age_to_units_cd = if (request->range_data[y].age_to_units_cd = -1)
+                        0
+                            else
+                        request->range_data[y].age_to_units_cd
+                            endif,
+      ir.age_to_minutes = request->range_data[y].age_to_minutes,
+      ir.species_cd = if (request->range_data[y].species_cd = -1)
+                        0
+                            else
+                        request->range_data[y].species_cd
+                            endif,
+      ir.gender_cd = if (request->range_data[y].gender_cd = -1)
+                        0
+                            else
+                        request->range_data[y].gender_cd
+                            endif,
+      ir.race_cd = if (request->range_data[y].race_cd = -1)
+                        0
+                            else
+                        request->range_data[y].race_cd
+                            endif,
+      ir.unknown_age_ind = request->range_data[y].unknown_age_ind,
+      ir.active_ind = request->range_data[y].active_ind,
+      ir.updt_cnt = ir.updt_cnt + 1,
+      ir.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+      ir.updt_id = reqinfo->updt_id,
+      ir.updt_task = reqinfo->updt_task,
+      ir.updt_applctx = reqinfo->updt_applctx
+  where
+      ir.interp_range_id = request->range_data[y].interp_range_id and
+      ir.updt_cnt = request->range_data[y].updt_cnt and
+      ir.active_ind = 1
+  with nocounter
+
+  if (curqual = 0)
+    set reply->status_data->status = "F",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+    set reply->status_data->subeventstatus[1]->OperationName
+               = "Update",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Interp Range",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->range_data[y].interp_range_id,
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  else
+    set reply->status_data->status = "S"
+  endif
+
+  /**************************************/
+  /*  inactivate children if necessary  */
+  /**************************************/
+  if (request->range_data[y].active_ind = 0)
+    /**************************************/
+    /*  lock result hash                  */
+    /**************************************/
+    select into "nl:" 
+        rh.*
+    from 
+        result_hash rh
+    where
+        rh.interp_range_id = request->range_data[y].interp_range_id and
+        rh.active_ind = 1
+    with nocounter, forupdate(rh)
+
+    if (curqual = 0)
+      set reply->status_data->status = "F",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "Lock",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Result Hash Inactivate 2",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->range_data[y].interp_range_id,
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    else
+      set reply->status_data->status = "S"
+    endif  
+
+    /**********************************/
+    /*  inactivate result hash        */
+    /**********************************/
+    update into result_hash rh set
+        rh.active_ind = 0,
+        rh.updt_cnt = rh.updt_cnt + 1,
+;        rh.inactive_dt_tm = cnvtdatetime(curdate,curtime3),
+        rh.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        rh.updt_id = reqinfo->updt_id,
+        rh.updt_task = reqinfo->updt_task,
+        rh.updt_applctx = reqinfo->updt_applctx
+    where
+        rh.interp_range_id = request->range_data[y].interp_range_id and
+        rh.active_ind = 1
+    with nocounter
+
+    if (curqual = 0)
+      set reply->status_data->status = "F",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "Inactivate",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Result Hash",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->range_data[y].interp_range_id,
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    else
+      set reply->status_data->status = "S"
+    endif  
+  endif
+endfor
+
+/***************************/
+/*    Update result hash   */
+/***************************/
+for (y = 1 to request->result_count)
+   /**************************************/
+   /*  lock result hash                  */
+   /**************************************/
+   select into "nl:" 
+        rh.*
+   from 
+        result_hash rh
+   where
+        rh.result_hash_id = request->result_data[y].result_hash_id and
+        rh.updt_cnt = request->result_data[y].updt_cnt and
+        rh.active_ind = 1
+   with nocounter, forupdate(rh)
+
+   if (curqual = 0)
+     set reply->status_data->status = "F",
+     set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+     set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+     set reply->status_data->subeventstatus[1]->OperationName
+               = "Lock",
+     set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+     set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Result Hash Update",
+     set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->range_data[y].interp_range_id,
+     set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+     set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+     go to exit_script
+   else
+     set reply->status_data->status = "S"
+   endif  
+
+   /***************************/
+   /*  update result hash     */
+   /***************************/
+   update into result_hash rh set 
+; 003       rh.from_result_range = if (request->result_data[y].from_result_range = -1)
+       rh.from_result_range = if (request->result_data[y].from_result_range_yn = "N")  ; 003
+                        null
+                              else
+                        request->result_data[y].from_result_range
+                              endif,
+; 003       rh.to_result_range = if (request->result_data[y].to_result_range = -1)
+       rh.to_result_range = if (request->result_data[y].to_result_range_yn = "N") ; 003
+                        null
+                              else
+                        request->result_data[y].to_result_range
+                              endif,    
+       rh.result_hash = request->result_data[y].result_hash,
+       rh.nomenclature_id = if (request->result_data[y].nomenclature_id = -1)
+                        0
+                            else
+                        request->result_data[y].nomenclature_id
+                            endif,
+       rh.donor_eligibility_cd = if (request->result_data[y].donor_eligibility_cd = -1)
+                        0
+                            else
+                        request->result_data[y].donor_eligibility_cd
+                            endif,
+       rh.donor_reason_cd = if (request->result_data[y].donor_reason_cd = -1)
+                        0
+                            else
+                        request->result_data[y].donor_reason_cd
+                            endif,
+       rh.days_ineligible = request->result_data[y].days_ineligible,
+       rh.biohazard_ind   = request->result_data[y].biohazard_ind,
+       rh.active_ind = request->result_data[y].active_ind,
+       rh.updt_cnt = rh.updt_cnt + 1,
+       rh.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+       rh.updt_id = reqinfo->updt_id,
+       rh.updt_task = reqinfo->updt_task,
+       rh.updt_applctx = reqinfo->updt_applctx
+   where
+        rh.result_hash_id = request->result_data[y].result_hash_id and
+        rh.updt_cnt = request->result_data[y].updt_cnt and
+        rh.active_ind = 1
+   with nocounter
+
+   if (curqual = 0)
+     set reply->status_data->status = "F",
+     set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+     set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_components",
+     set reply->status_data->subeventstatus[1]->OperationName
+               = "Modify",
+     set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+     set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "Result Hash Update",
+     set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = request->range_data[y].interp_range_id,
+     set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+     set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+     go to exit_script
+   else
+     set reply->status_data->status = "S"
+   endif
+endfor
+
+/************************/
+/*    exit_script       */
+/************************/
+#exit_script
+if (reply->status_data->status = "F")
+   rollback
+else
+   commit
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

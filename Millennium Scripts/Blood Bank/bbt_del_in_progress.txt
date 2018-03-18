@@ -1,0 +1,273 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/RESULTENTRYFORBLOODBANK/BBT_DEL_IN_PROGRESS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       BBT_DEL_IN_PROGRESS
+        Object name:            BBT_DEL_IN_PROGRESS
+        Request #:              225071
+
+        Product:                PATHNET
+        Product Team:           BLOOD BANK
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Release the in progress state for a product and delete
+                                any results for the test
+
+        Tables read:            RESULT
+        Tables updated:         PRODUCT_EVENT
+                                RESULT
+                                PERFORM_RESULT
+                                RESULT_COMMENT
+                                RESULT_EVENT
+        Executing from:         ##
+
+        Special Notes:          NA
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 06/05/96 Yvonne Klipfel       Initial Release                     *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program bbt_del_in_progress:dba go
+create program bbt_del_in_progress:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+/*
+record request
+(
+1  qual[x]
+   2  product_event_id       = f8
+   2  bb_result_id           = f8
+)
+*/
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+record reply
+(
+%I CCLSOURCE:STATUS_BLOCK.INC
+  1 exception_data[1]
+    2 event_id     = f8
+)
+
+/****************************************************************************
+*       Initialize Variables                                                *
+*****************************************************************************/
+set reply->status_data->status = "F"
+set number_of_product = cnvtint(size(request->qual,5))
+set failed = "F"
+set status_count = 0
+set exception_count = 0
+
+ /***********************************************************************
+  * Delete the product event, then any perform_result, result_comment,  *
+  * result_event, and result
+  ***********************************************************************/
+for (x = 1 to number_of_product)
+     delete from product_event p
+        where p.product_event_id = request->qual[x]->product_event_id
+     with nocounter
+
+     /* determine if delete was successful */
+     if (curqual = 0)
+         set failed = "T"
+         set status_count = status_count + 1
+         /* create an occurrence of the reply status record if the original occurrence previously used */
+         if (status_count > 1)
+            set stat = alter(reply->status_data->subeventstatus, status_count+1)
+         endif
+         set reply->status_data->subeventstatus[status_count]->OperationName = "DELETE"
+         set reply->status_data->subeventstatus[status_count]->OperationStatus = "F"
+         set reply->status_data->subeventstatus[status_count]->TargetObjectName = "Product Event"
+         set reply->status_data->subeventstatus[status_count]->TargetObjectValue = 
+                                                              "Unable to delete product event" 
+         set exception_count = exception_count + 1
+         /* create an occurrence of the reply exception record if the original occurrence previously used */
+         if (exception_count > 1)
+            set stat = alter(reply->exception_data, exception_count+1)
+         endif
+         set reply->exception_data[exception_count]->event_id = request->qual[x]->product_event_id
+         go to exit_script
+     elseif (request->qual[x]->bb_result_id > 0)
+         set hold_result_id[200] = 0.0
+         set long_text_id[200] = 0.0
+         set count1 = 0
+         set count2 = 0
+
+         /* retrieve the result id in order to find the records to delete from the other result tables */
+         select into "nl:"
+            r.*
+         from result r 
+         where r.bb_result_id = request->qual[x]->bb_result_id
+         detail
+            count1 = count1 + 1
+            hold_result_id[count1] = r.result_id
+         with nocounter
+
+         /* determine if any results exist to delete */
+         if (curqual > 0)
+            select into "nl:"
+               pr.*
+            from perform_result pr,
+                (dummyt d1 with seq = value(count1))
+            plan d1
+            join pr where pr.result_id = hold_result_id[d1.seq]
+                      and pr.long_text_id > 0
+            detail
+               count2 = count2 + 1
+               long_text_id[count2] = pr.long_text_id
+            with nocounter 
+
+            select into "nl:"
+                 rc.*
+            from result_comment rc,
+                (dummyt d1 with seq = value(count1))
+            plan d1
+            join rc where rc.result_id = hold_result_id[d1.seq]
+                      and rc.long_text_id > 0
+            detail
+               count2 = count2 + 1
+               long_text_id[count2] = rc.long_text_id
+            with nocounter 
+
+            for (y = 1 to count2)
+               delete from long_text l
+               where l.long_text_id = long_text_id[y]
+               with nocounter
+
+               /* determine if delete was successful */
+               if (curqual = 0)
+                  set failed = "T"
+                  set status_count = status_count + 1
+                  /* create an occurrence of the reply status record if the original occurrence previously used */
+                  if (status_count > 1)
+                     set stat = alter(reply->status_data->subeventstatus, status_count+1)
+                  endif
+                  set reply->status_data->subeventstatus[status_count]->OperationName = "DELETE"
+                  set reply->status_data->subeventstatus[status_count]->OperationStatus = "F"
+                  set reply->status_data->subeventstatus[status_count]->TargetObjectName = "Long Text"
+                  set reply->status_data->subeventstatus[status_count]->TargetObjectValue = 
+                                                              "Unable to delete long text"
+                  go to exit_script
+               endif
+            endfor
+
+            for (y = 1 to count1)
+               /* delete any result comments that may exist, 
+                  this table may or maynot be filled out although a result exists */
+               delete from result_comment r
+               where r.result_id = hold_result_id[y]
+               with nocounter
+
+               /* if records exist on the perform_result table, records should exist in result_event */
+               delete from result_event r
+               where r.result_id = hold_result_id[y]
+               with nocounter
+
+               /* determine if delete was successful */
+               if (curqual = 0)
+                  set failed = "T"
+                  set status_count = status_count + 1
+                  /* create an occurrence of the reply status record if the original occurrence previously used */
+                  if (status_count > 1)
+                     set stat = alter(reply->status_data->subeventstatus, status_count+1)
+                  endif
+                  set reply->status_data->subeventstatus[status_count]->OperationName = "DELETE"
+                  set reply->status_data->subeventstatus[status_count]->OperationStatus = "F"
+                  set reply->status_data->subeventstatus[status_count]->TargetObjectName = "Result Event"
+                  set reply->status_data->subeventstatus[status_count]->TargetObjectValue = 
+                                                                 "Unable to delete result event"
+                  go to exit_script
+               else
+                  /* if records exist on the result table, records should exist in perform_result */
+                  delete from perform_result r
+                  where r.result_id = hold_result_id[y]
+                  with nocounter
+
+                  /* determine if delete was successful */
+                  if (curqual = 0)
+                     set failed = "T"
+                     set status_count = status_count + 1
+                     /* create an occurrence of the reply status record if the original occurrence previously used */
+                     if (status_count > 1)
+                        set stat = alter(reply->status_data->subeventstatus, status_count+1)
+                     endif
+                     set reply->status_data->subeventstatus[status_count]->OperationName = "DELETE"
+                     set reply->status_data->subeventstatus[status_count]->OperationStatus = "F"
+                     set reply->status_data->subeventstatus[status_count]->TargetObjectName = "Perform Result"
+                     set reply->status_data->subeventstatus[status_count]->TargetObjectValue = 
+                                                                    "Unable to delete perform result"
+                     go to exit_script
+                  else
+                     delete from result r
+                     where r.result_id = hold_result_id[y]
+                     with nocounter
+
+                     /* determine if delete was successful */
+                     if (curqual = 0)
+                        set failed = "T"
+                        set status_count = status_count + 1
+                        /* create an occurrence of the reply status record if the original occurrence previously used */
+                        if (status_count > 1)
+                           set stat = alter(reply->status_data->subeventstatus, status_count+1)
+                        endif
+                        set reply->status_data->subeventstatus[status_count]->OperationName = "DELETE"
+                        set reply->status_data->subeventstatus[status_count]->OperationStatus = "F"
+                        set reply->status_data->subeventstatus[status_count]->TargetObjectName = "Result"
+                        set reply->status_data->subeventstatus[status_count]->TargetObjectValue = 
+                                                                       "Unable to delete result"
+                        go to exit_script
+                     endif
+                  endif
+               endif
+            endfor
+         endif
+     endif
+endfor
+
+/****************************************************************************
+*       exit_script                                                         *
+*****************************************************************************/
+#exit_script
+if (failed = "T")
+   set reqinfo->commit_ind = 0
+else
+   set reqinfo->commit_ind = 1
+   set reply->status_data->status = "S"
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,721 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_ref_ranges/glb_get_ref_ranges.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_ref_ranges.prg
+        Object name:            glb_get_ref_ranges
+        Request #:              250009
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load reference ranges.
+
+        Tables read:            alpha_responses,
+                                code_value,
+                                nomenclature,
+                                reference_range_factor,
+                                resource_group
+
+        Tables updated:         None
+        Executing from:         
+
+        Special Notes:          A matching reference range is determine
+                                as follows:
+                                1) By order of importance of the criteria
+                                   (species, specimen type, age, sex, 
+                                   service resource) which reference ranges
+                                   can be flexed.  For example, species is 
+                                   more important to match on than specimen
+                                   type and specimen type is more important
+                                   to match on than age, etc.  A weighted
+                                   value is used by the script to determine
+                                   the order of importance.
+                                   NOTE: patient condition as a criteria is
+                                   initially not going to be utilized.
+                                2) If multiple reference ranges qualify,
+                                   then the one with the lowest precedence
+                                   sequence value will be used.  A precedence
+                                   sequence of 1 is more important than a
+                                   precedence sequence of 2, etc.
+                                If request->mdi_nomen_ind = 0, then return
+                                all non-MDI alpha responses.  Otherwise
+                                if request->mdi_nomen_ind = 1, then only
+                                return MDI alpha responses.
+                                
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 04/11/96 Hal Patchen          Initial Release                     *
+;    *001 07/18/97 Jeff Fry             Add linear and feasible ranges      *
+;    *002 08/12/97 Jeff Fry             Retrieve advanced delta information *
+;    *003 09/19/97 Jeff Fry             Retrieve display for units_cd       *
+;    *004 08/13/98 Jeff Fry             Move Reply record to include file.  *
+;    *005 09/09/98 Matt Benson          Retrieve concept info for alpah_resp* 
+;    *006 04/21/99 Chris Heil           Expand length of mnemonic field     *
+;    *007 07/28/99 Chris Heil           Change to .inc file for unknown ages*    
+;    *008 08/20/99 Chris Heil           Add unknown ages logic              *    
+;    *009 04/30/01 Gary Runde           Fix logic to look at all ages       *
+;    *010 01/18/02 Gary Runde           Qual on reeval_effective_dt_tm      *
+;    *011 02/28/03 Nick Smith           Add assay specimen_type_cd logic    *
+;    *012 02/16/04 Mark Brooks          Return all alpha resp not just MDI  *
+;    *013 05/25/06 Ryan Manuel          Fixed some problems caused by DAR   *
+;                                       changes                             *
+;    *014 07/14/06 Ryan Manuel          Added notify triggers               *
+;    *015 05/28/08 Matt Schile          Added age_in_minutes to assays list *
+;    *016 03/01/09 Oliver Barbara       Fix for CR 1-3029927901: select now *
+;                                       picks correct historical ref range  *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program GLB_GET_REF_RANGES:dba go    
+             create program GLB_GET_REF_RANGES:dba 
+
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      * NOTE:  Keep in sync with GLB_REQ_GET_REF_RANGES.INC
+      record request
+      (
+         1  species_cd                   = f8
+         1  specimen_type_cd             = f8
+         1  sex_cd                       = f8
+         1  age_in_minutes               = i4
+         1  patient_condition_cd         = f8
+         1  assays[x]
+            2  task_assay_cd             = f8
+            2  service_resource_cd       = f8
+            2  order_key                 = f8  ;Pass back in reply
+            2  reeval_effective_dt_tm    = dq8 ;orig perform_dt_tm of assay
+            2  specimen_type_cd          = f8
+            2  prompt_test_ind           = i2
+            2  age_in_minutes            = i4
+         1  mdi_nomen_ind                = i2 
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+if (validate(reply->status_data->status, "U") = "U")
+
+      record reply
+      ( 
+;004 - Added below ***
+%i cclsource:glb_reply_get_ref_ranges.inc
+;004 - Added above ***
+;004         1  qual[*]
+;004            2  order_key                 = f8
+;004            2  task_assay_cd             = f8
+;004            2  service_resource_cd       = f8
+;004            2  precedence_sequence       = i4
+;004            2  reference_range_factor_id = f8
+;004            2  species_cd                = f8  
+;004            2  organism_cd               = f8
+;004            2  gestational_ind           = i2
+;004            2  unknown_age_ind           = i2
+;004            2  sex_cd                    = f8
+;004            2  age_from_units_cd         = f8
+;004            2  age_from_minutes          = i4
+;004            2  age_to_units_cd           = f8
+;004            2  age_to_minutes            = i4
+;004            2  specimen_type_cd          = f8
+;004            2  patient_condition_cd      = f8
+;004            2  default_result            = f8
+;004            2  def_result_ind            = i2
+;004            2  review_ind                = i2
+;004            2  review_low                = f8
+;004            2  review_high               = f8
+;004            2  sensitive_ind             = i2
+;004            2  sensitive_low             = f8
+;004            2  sensitive_high            = f8
+;004            2  normal_ind                = i2
+;004            2  normal_low                = f8
+;004            2  normal_high               = f8
+;004            2  critical_ind              = i2
+;004            2  critical_low              = f8
+;004            2  critical_high             = f8
+;004            2  linear_ind                = i2                           ;001
+;004            2  linear_low                = f8                           ;001
+;004            2  linear_high               = f8                           ;001
+;004            2  feasible_ind              = i2                           ;001
+;004            2  feasible_low              = f8                           ;001
+;004            2  feasible_high             = f8                           ;001
+;004            2  dilute_ind                = i2                           ;001
+;004            2  units_cd                  = f8
+;004            2  units_disp                = vc                           ;003
+;004            2  delta_check_type_cd       = f8
+;004            2  delta_check_type_disp     = vc
+;004            2  delta_check_type_mean     = c12
+;004            2  delta_minutes             = f8
+;004            2  delta_value               = f8
+;004            2  code_set                  = i4
+;004            2  alpha_responses_cnt       = i4
+;004            2  alpha_responses[*]
+;004               3  nomenclature_id        = f8
+;004               3  sequence               = i4
+;004               3  source_vocabulary_cd   = f8
+;004               3  source_vocabulary_disp = vc
+;004               3  source_vocabulary_mean = c12
+;004               3  short_string           = vc
+;004               3  mnemonic               = c15
+;004               3  use_units_ind          = i2
+;004               3  result_process_cd      = f8
+;004               3  concept_identifier     = c18                          ;005
+;004               3  concept_source_cd      = f8                           ;005        
+;004               3  concept_source_disp    = vc                           ;005        
+;004               3  concept_source_mean    = c12                          ;005
+;004           3  result_process_disp    = VC   
+;004               3  default_ind            = i2
+;004               3  reference_ind          = i2
+;004               3  description            = vc
+;004            2  delta_chk_flag            = i2                           ;002
+;004            2  advanced_delta_cnt        = i4                           ;002
+;004            2  advanced_delta[*]                                        ;002
+;004               3  advanced_delta_id      = f8                           ;002
+;004               3  delta_ind              = i2                           ;002
+;004               3  delta_low              = f8                           ;002
+;004               3  delta_high             = f8                           ;002
+;004               3  delta_check_type_cd    = f8                           ;002
+;004               3  delta_minutes          = i4                           ;002
+;004               3  delta_value            = f8                           ;002
+;               2  notify_triggers[*]
+;                  3  sequence               = i4
+;                  3  trigger_name           = c30
+%i cclsource:status_block.inc
+      )
+
+endif
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set MDI_CDF                     = "MDI"
+         set SERV_RSRC_TYPE_CODESET      = 223
+         set SERV_RSRC_SUBSECTION_CDF    = "SUBSECTION"
+         declare subsection_cd           = f8
+         declare stat                    = i4
+         declare cnt                     = i4
+         declare q_cnt                   = i4
+         declare a_cnt                   = i4
+         declare d_cnt                   = i4
+         declare nbr_of_assays           = i4
+         declare species_value           = i4
+         declare species_all             = i4
+         declare specimen_type_value     = i4
+         declare specimen_type_all       = i4
+         declare age_value               = i4
+         declare sex_value               = i4
+         declare sex_all                 = i4
+         declare resource_ts_value       = i4
+         declare resource_subsection_value = i4
+         declare resource_all            = i4
+         declare pat_cond_value          = i4
+         declare pat_cond_all            = i4
+         declare tot_value               = i4
+         declare highest_tot_value       = i4
+         declare lCnt                    = i4 with protected, noconstant(0)
+
+         set reply->status_data.status = "F"
+         set nbr_of_assays = size(request->assays,5)
+
+      /***********************************************************************
+      * Load testing site group code value from the service resource type    *
+      * code set.                                                            *
+      ***********************************************************************/
+                 
+         set subsection_cd = uar_get_code_by("MEANING", SERV_RSRC_TYPE_CODESET, nullterm(SERV_RSRC_SUBSECTION_CDF))
+
+         ;* Verify that all required code value records were read.
+         if (subsection_cd <= 0.0)
+            go to Exit_Script
+         endif
+
+      /***********************************************************************
+      * Check dates passed in                                                *
+      ***********************************************************************/
+         ;if the reeval_effective_dt_tm is not filled out, set it to curdate, curtime3
+         ;if the age_in_minutes is filled out at the top level, fill out all of the assays with the age_in_minutes
+      if(nbr_of_assays > 0)
+         select into "nl:"
+           d1.seq
+         from
+           (dummyt d1 with seq = value(nbr_of_assays))           
+       
+         plan d1
+         detail
+           if (cnvtdatetime(request->assays[d1.seq].reeval_effective_dt_tm) <= 0.000000)
+             request->assays[d1.seq].reeval_effective_dt_tm = cnvtdatetime(curdate, curtime3)
+           endif
+           
+           if(request->age_in_minutes > 0)
+             call echo("Update assays age_in_minutes")
+             request->assays[d1.seq].age_in_minutes = request->age_in_minutes
+           endif
+         with nocounter
+         call echorecord(request)
+         
+         
+      /***********************************************************************
+      * Verify that SR_RESOURCE_GROUP_HIST table exists. This is a safety    *
+      * check for the change made to fix CR 1-3029927901.                    *
+      ***********************************************************************/
+        if(checkdic("SR_RESOURCE_GROUP_HIST","T",0) = 0)
+           set reply->status_data->subeventstatus[1]->operationname = "CheckTableExists"
+           set reply->status_data->subeventstatus[1]->operationstatus = "F"
+           set reply->status_data->subeventstatus[1]->targetobjectname = "table"
+           set reply->status_data->subeventstatus[1]->targetObjectValue = "SR_RESOURCE_GROUP_HIST" 
+	       
+           go to Exit_Script
+        endif
+      
+         
+      /***********************************************************************
+      * Select reference ranges                                              *
+      ***********************************************************************/
+   
+         select into "nl:"
+            d1.seq,
+            srg_exists = evaluate(nullind(srg.resource_group_type_cd), 1, "N", "Y"),
+            rr_exists = decode(rr.seq, "Y", "N"),
+            rr.reference_range_factor_id
+
+            /* Selection fields:
+            d1.seq,
+            d2.seq,
+            srg_exists = decode(srg.seq, "Y", "N"),            
+            d3.seq,
+            rr_exists = decode(rr.seq, "Y", "N"),
+            rr.reference_range_factor_id,
+            rr.service_resource_cd, 
+            rr.task_assay_cd,
+            rr.precedence_sequence,
+            rr.species_cd,
+            rr.organism_cd,
+            rr.gestational_ind,
+            rr.unknown_age_ind,
+            rr.sex_cd,
+            rr.age_from_units_cd,
+            rr.age_from_minutes,
+            rr.age_to_units_cd,
+            rr.age_to_minutes,
+            rr.specimen_type_cd,
+            rr.patient_condition_cd,
+            rr.default_result,
+            rr.def_result_ind,
+            rr.review_low,               
+            rr.review_high,
+            rr.sensitive_ind,
+            rr.sensitive_low,
+            rr.sensitive_high,
+            rr.normal_ind,
+            rr.normal_low,
+            rr.normal_high,
+            rr.critical_ind,
+            rr.critical_low,
+            rr.critical_high,
+            rr.linear_ind,                                              ;001
+            rr.linear_low,                                              ;001
+            rr.linear_high,                                             ;001
+            rr.feasible_ind,                                            ;001
+            rr.feasible_low,                                            ;001
+            rr.feasible_high,                                           ;001
+            rr.units_cd,
+            rr.delta_check_type_cd,
+            rr.delta_minutes,
+            rr.delta_value,
+            rr.code_set,
+            rr.active_ind
+            */
+
+         from
+            (dummyt d1 with seq = value(nbr_of_assays)),
+            sr_resource_group_hist srg,
+            reference_range_factor rr
+
+         plan    d1 
+         join    rr   where rr.task_assay_cd = request->assays[d1.seq].task_assay_cd
+                        and rr.beg_effective_dt_tm <= cnvtdatetime(request->assays[d1.seq].reeval_effective_dt_tm)
+                        and rr.end_effective_dt_tm >= cnvtdatetime(request->assays[d1.seq].reeval_effective_dt_tm)
+         join    srg   where srg.child_service_resource_cd = outerjoin(request->assays[d1.seq].service_resource_cd)
+                        and srg.resource_group_type_cd = outerjoin(subsection_cd)
+                        and srg.root_service_resource_cd = outerjoin(0.0)
+                        and srg.beg_effective_dt_tm <= outerjoin(cnvtdatetime(request->assays[d1.seq].reeval_effective_dt_tm))
+                        and srg.end_effective_dt_tm >= outerjoin(cnvtdatetime(request->assays[d1.seq].reeval_effective_dt_tm))
+                        and srg.parent_service_resource_cd = outerjoin(rr.service_resource_cd)
+						
+         order by
+            d1.seq,
+            rr.task_assay_cd,
+            rr.precedence_sequence
+
+         head report
+            cnt = 0
+            q_cnt = 0
+            species_value = 512
+            species_all = 256
+            specimen_type_value = 128
+            specimen_type_all = 64
+            age_value = 32
+            sex_value = 16
+            sex_all = 8
+            resource_ts_value = 4
+            resource_subsection_value = 2
+            resource_all = 1
+            pat_cond_value = 0   ;* Patient condition currently not used
+            pat_cond_all = 0     ;* Patient condition currently not used
+            tot_value = 0
+            highest_tot_value = -1
+
+	    prompt_test_all = species_all + specimen_type_all + age_value + sex_all + resource_all + pat_cond_all
+
+         head d1.seq
+            cnt = d1.seq
+            q_cnt = q_cnt + 1
+            stat = alterlist(reply->qual, q_cnt)
+            reply->qual[q_cnt].order_key = request->assays[cnt].order_key
+            reply->qual[q_cnt].task_assay_cd = request->assays[cnt].task_assay_cd
+            highest_tot_value = 0
+
+         detail
+            if (rr_exists = "Y")
+               tot_value = 0
+               ;* Determine what matches are made for each qualification
+               if (rr.species_cd > 0.0)
+                  ;* Check for specific species match
+                  if (rr.species_cd = request->species_cd)
+                     tot_value = tot_value + species_value
+                  endif
+               else
+                  ;* All species
+                  tot_value = tot_value + species_all
+               endif
+               if (rr.specimen_type_cd > 0.0)
+                  ;* Check for specific specimen type match
+                  if ((rr.specimen_type_cd = request->specimen_type_cd and 
+                       request->specimen_type_cd > 0.0)
+                      or
+                      (rr.specimen_type_cd = request->assays[cnt].specimen_type_cd))  ;011
+                     tot_value = tot_value + specimen_type_value
+                  endif
+               else
+                  ;* All specimen types
+                  tot_value = tot_value + specimen_type_all
+               endif
+;008               if (rr.age_from_minutes <= request->age_in_minutes
+;008               and rr.age_to_minutes   >= request->age_in_minutes)
+               if ((request->unknown_age_ind = 1 and rr.unknown_age_ind = 1) or       ;008
+;009                   (request->unknown_age_ind = 0 and rr.unknown_age_ind = 0 and   ;008
+                   ((request->unknown_age_ind = 0 or request->assays[cnt].prompt_test_ind = 1) and 				  			             ;009
+                    rr.age_from_minutes <= request->assays[cnt].age_in_minutes and                ;008   
+                    rr.age_to_minutes   >= request->assays[cnt].age_in_minutes))                  ;008
+                  tot_value = tot_value + age_value
+               endif
+               if (rr.sex_cd > 0.0)
+                  ;* Check for gender match
+                  if (rr.sex_cd = request->sex_cd)
+                     tot_value = tot_value + sex_value
+                  endif
+               else
+                  ;* All genders
+                  tot_value = tot_value + sex_all
+               endif
+               ;* When adjusting reference ranges by service resource,
+               ;* Use the reference range at the testing site level if it
+               ;* exits, otherwise use the reference range at the testing
+               ;* site group level if it exists.
+               if (rr.service_resource_cd > 0.0)
+                  ;* If service resource passed in is a testing site
+                  ;* or a testing site group, use the reference range
+                  ;* when an identical match is found.
+                  if (rr.service_resource_cd = request->assays[cnt].service_resource_cd)
+                     tot_value = tot_value + resource_ts_value
+                  endif
+                  ;* If service resource passed in is a testing site and
+                  ;* belongs to a ts group, attempt to use reference range
+                  ;* for the testing site group if one exists.
+                  if (srg_exists = "Y"
+                  and rr.service_resource_cd = srg.parent_service_resource_cd)
+                     tot_value = tot_value + resource_subsection_value
+                  endif
+               else
+                  ;* All service resources.
+                  tot_value = tot_value + resource_all
+               endif
+               if (rr.patient_condition_cd > 0.0)
+                  ;* Check for specific patient condition.
+                  if (rr.patient_condition_cd = request->patient_condition_cd)
+                     tot_value = tot_value + pat_cond_value
+                  endif
+               else
+                  ;* All patient conditions
+                  tot_value = tot_value + pat_cond_all
+               endif
+
+                if (request->assays[d1.seq].prompt_test_ind = 1 and tot_value != prompt_test_all)
+                   tot_value = highest_tot_value
+                endif
+
+               ;* Determine if a better match was found.
+               ;* If a better match was found, update reply record.
+               if (tot_value > highest_tot_value)
+                  highest_tot_value = tot_value
+                  ;* Fill out reply record with best match found.
+                  reply->qual[q_cnt].task_assay_cd = rr.task_assay_cd
+                  reply->qual[q_cnt].service_resource_cd = rr.service_resource_cd
+                  reply->qual[q_cnt].precedence_sequence = rr.precedence_sequence
+                  reply->qual[q_cnt].reference_range_factor_id = rr.reference_range_factor_id
+                  reply->qual[q_cnt].species_cd = rr.species_cd
+                  reply->qual[q_cnt].organism_cd = rr.organism_cd
+                  reply->qual[q_cnt].gestational_ind = rr.gestational_ind
+                  reply->qual[q_cnt].unknown_age_ind = rr.unknown_age_ind
+                  reply->qual[q_cnt].sex_cd = rr.sex_cd
+                  reply->qual[q_cnt].age_from_units_cd = rr.age_from_units_cd
+                  reply->qual[q_cnt].age_from_minutes = rr.age_from_minutes
+                  reply->qual[q_cnt].age_to_units_cd = rr.age_to_units_cd
+                  reply->qual[q_cnt].age_to_minutes = rr.age_to_minutes
+                  reply->qual[q_cnt].specimen_type_cd = rr.specimen_type_cd
+                  reply->qual[q_cnt].patient_condition_cd = rr.patient_condition_cd
+                  reply->qual[q_cnt].default_result = rr.default_result 
+                  reply->qual[q_cnt].def_result_ind = rr.def_result_ind
+                  reply->qual[q_cnt].review_ind = rr.review_ind
+                  reply->qual[q_cnt].review_low = rr.review_low
+                  reply->qual[q_cnt].review_high = rr.review_high
+                  reply->qual[q_cnt].sensitive_ind = rr.sensitive_ind
+                  reply->qual[q_cnt].sensitive_low = rr.sensitive_low
+                  reply->qual[q_cnt].sensitive_high = rr.sensitive_high
+                  reply->qual[q_cnt].normal_ind = rr.normal_ind
+                  reply->qual[q_cnt].normal_low = rr.normal_low
+                  reply->qual[q_cnt].normal_high = rr.normal_high
+                  reply->qual[q_cnt].critical_ind = rr.critical_ind
+                  reply->qual[q_cnt].critical_low = rr.critical_low
+                  reply->qual[q_cnt].critical_high = rr.critical_high 
+                  reply->qual[q_cnt].linear_ind = rr.linear_ind         ;001
+                  reply->qual[q_cnt].linear_low = rr.linear_low         ;001
+                  reply->qual[q_cnt].linear_high = rr.linear_high       ;001
+                  reply->qual[q_cnt].feasible_ind = rr.feasible_ind     ;001
+                  reply->qual[q_cnt].feasible_low = rr.feasible_low     ;001
+                  reply->qual[q_cnt].feasible_high = rr.feasible_high   ;001
+                  reply->qual[q_cnt].dilute_ind = rr.dilute_ind         ;001
+                  reply->qual[q_cnt].units_cd = rr.units_cd
+                  reply->qual[q_cnt].delta_check_type_cd = rr.delta_check_type_cd
+                  reply->qual[q_cnt].delta_minutes = rr.delta_minutes
+                  reply->qual[q_cnt].delta_value = rr.delta_value
+                  reply->qual[q_cnt].delta_chk_flag = rr.delta_chk_flag ;002
+                  reply->qual[q_cnt].code_set = rr.code_set
+                  reply->qual[q_cnt].alpha_responses_cnt = 0
+               endif
+            endif
+
+         foot d1.seq
+call echo(concat("Ref Range Factor: ",                                        ;008
+                 CNVTSTRING(reply->qual[q_cnt].reference_range_factor_id,32,2)))   ;008
+            row+0
+
+         with nocounter,
+            outerjoin = d1,
+            maxread(srg, 1)
+
+      /***********************************************************************
+      * Select alpha responses                                               *
+      ***********************************************************************/
+         select into "nl:"
+            d1.seq,
+            ar.seq,
+            n.seq
+
+            /* Selection fields:
+            d1.seq,
+            ar.nomenclature_id,
+            ar.sequence,
+            n.nomenclature_id,
+            n.source_vocabulary_cd,
+            n.short_string,
+            n.mnemonic,
+            n.concept_identifier,                                       ;005
+            n.concept_source_cd,                                        ;005    
+            cv.code_value,
+            cv.code_set,
+            cv.cdf_meaning
+            */
+         from
+            (dummyt d1 with seq = value(nbr_of_assays)),
+            alpha_responses ar,
+            nomenclature n
+
+         plan    d1
+         join    ar   where ar.reference_range_factor_id = 
+                                 reply->qual[d1.seq].reference_range_factor_id
+                        and (ar.beg_effective_dt_tm <= 
+                                    cnvtdatetime(request->assays[d1.seq].reeval_effective_dt_tm)
+                        and  ar.end_effective_dt_tm >= 
+                                    cnvtdatetime(request->assays[d1.seq].reeval_effective_dt_tm))
+         join    n    where n.nomenclature_id = ar.nomenclature_id
+                        and (n.beg_effective_dt_tm <= 
+                                    cnvtdatetime(request->assays[d1.seq].reeval_effective_dt_tm)
+                        and  n.end_effective_dt_tm >= 
+                                    cnvtdatetime(request->assays[d1.seq].reeval_effective_dt_tm))
+         order by
+            d1.seq,
+            ar.reference_range_factor_id,
+            ar.sequence
+
+         head report
+            cnt = 0
+            a_cnt = 0
+
+         head d1.seq
+            cnt = d1.seq
+            a_cnt = 0
+
+         detail
+            a_cnt = a_cnt + 1
+            if (mod(a_cnt,10) = 1)
+               stat = alterlist(reply->qual[cnt].alpha_responses, a_cnt + 10)
+            endif
+            reply->qual[cnt].alpha_responses_cnt = a_cnt
+            reply->qual[cnt].alpha_responses[a_cnt].sequence =
+              ar.sequence
+            reply->qual[cnt].alpha_responses[a_cnt].nomenclature_id =
+              n.nomenclature_id
+            reply->qual[cnt].alpha_responses[a_cnt].short_string =
+              n.short_string
+            reply->qual[cnt].alpha_responses[a_cnt].source_vocabulary_cd =
+              n.source_vocabulary_cd
+            reply->qual[cnt].alpha_responses[a_cnt].mnemonic =
+              n.mnemonic
+            reply->qual[cnt].alpha_responses[a_cnt].concept_identifier =        ;005
+              n.concept_identifier                                              ;005
+            reply->qual[cnt].alpha_responses[a_cnt].concept_source_cd =         ;005
+              n.concept_source_cd                                               ;005
+            reply->qual[cnt].alpha_responses[a_cnt].nomenclature_term =
+              n.source_string_keycap
+            reply->qual[cnt].alpha_responses[a_cnt].use_units_ind =
+              ar.use_units_ind
+            reply->qual[cnt].alpha_responses[a_cnt].result_process_cd =
+              ar.result_process_cd
+            reply->qual[cnt].alpha_responses[a_cnt].default_ind =
+              ar.default_ind
+            reply->qual[cnt].alpha_responses[a_cnt].reference_ind =
+              ar.reference_ind
+            reply->qual[cnt].alpha_responses[a_cnt].description =
+              ar.description
+
+         foot d1.seq
+            stat = alterlist(reply->qual[cnt].alpha_responses, a_cnt)
+
+         with nocounter
+	endif
+
+      /***********************************************************************
+      * Select advanced delta ranges                                         *
+      ***********************************************************************/
+      	select into "nl:"
+         	ad.seq
+         from advanced_delta ad
+         where expand(lCnt, 1, size(reply->qual,5), ad.reference_range_factor_id, reply->qual[lCnt].reference_range_factor_id)
+         order ad.reference_range_factor_id  
+         
+         head ad.reference_range_factor_id
+         	d_cnt = 0
+         detail
+         		d_cnt = d_cnt + 1
+          	cnt = locateval(lCnt,1,size(reply->qual,5),ad.reference_range_factor_id,
+                                  reply->qual[lCnt].reference_range_factor_id)
+            
+            while (cnt > 0)
+         	    if (reply->qual[cnt].delta_chk_flag = 2)
+           			stat = alterlist(reply->qual[cnt].advanced_delta, d_cnt)
+           		
+             		reply->qual[cnt].advanced_delta[d_cnt].advanced_delta_id = ad.advanced_delta_id
+        				reply->qual[cnt].advanced_delta[d_cnt].delta_ind = ad.delta_ind
+        				reply->qual[cnt].advanced_delta[d_cnt].delta_low = ad.delta_low
+        				reply->qual[cnt].advanced_delta[d_cnt].delta_high = ad.delta_high
+        				reply->qual[cnt].advanced_delta[d_cnt].delta_check_type_cd = ad.delta_check_type_cd
+        				reply->qual[cnt].advanced_delta[d_cnt].delta_minutes = ad.delta_minutes
+        				reply->qual[cnt].advanced_delta[d_cnt].delta_value = ad.delta_value
+  			        reply->qual[cnt].advanced_delta_cnt = d_cnt
+    			    endif  
+  			        
+            	cnt = locateval(lCnt,cnt + 1,size(reply->qual,5),ad.reference_range_factor_id,
+                                                               reply->qual[lCnt].reference_range_factor_id)
+      			endwhile
+         foot ad.reference_range_factor_id
+          row + 0
+         with nocounter                                                    ;002
+
+
+      /***********************************************************************
+      * Select notify triggers                                               *
+      ***********************************************************************/
+       select into "nl:"
+       from ref_range_notify_trig r
+       where expand(lCnt, 1, size(reply->qual,5), r.reference_range_factor_id, reply->qual[lCnt].reference_range_factor_id)
+       order r.reference_range_factor_id  
+       
+       head r.reference_range_factor_id
+          n_cnt = 0
+       detail
+          n_cnt = n_cnt + 1
+          cnt = locateval(lCnt,1,size(reply->qual,5),r.reference_range_factor_id,
+                                reply->qual[lCnt].reference_range_factor_id)
+          
+          while (cnt > 0)
+            stat = alterlist(reply->qual[cnt].notify_triggers, n_cnt)
+            
+            reply->qual[cnt].notify_triggers[n_cnt].sequence = r.trigger_seq_nbr
+            reply->qual[cnt].notify_triggers[n_cnt].trigger_name = r.trigger_name  
+                      
+            cnt = locateval(lCnt,cnt + 1,size(reply->qual,5),r.reference_range_factor_id,
+                                                             reply->qual[lCnt].reference_range_factor_id)
+          endwhile
+       foot r.reference_range_factor_id
+        row + 0
+       with nocounter 
+
+
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/
+      #Resize_Reply
+         if (q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+         endif
+
+      #Exit_Script
+         end
+         go      
+
+;Generated by GNU enscript 1.6.4.

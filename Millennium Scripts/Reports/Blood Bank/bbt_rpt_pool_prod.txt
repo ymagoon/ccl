@@ -1,0 +1,913 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_rpt_pool_prod/bbt_rpt_pool_prod.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_rpt_pool_prod.prg
+        Object name:            bbt_rpt_pool_prod
+        Request #:              225235
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Report units created thru pooling including
+                                component units
+
+        Tables read:            code_value, product, blood_product, product_event,
+                                prsnl, person_alias, person
+
+        Tables updated:         none
+
+        Executing from:         VB
+
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 11/01/96 Brian Franke         Initial Release                     *
+;     002 06/12/97 Doug Saus            Modified to select owner and inventory
+;                                       areas                               *
+;     003 03/24/98 Matt Benson          Modified to retrieve Institution    *
+;                                       name from preferences               *
+;     004 01/04/99 John Rieck           Added logic to print location name  *
+;                                       and address. Added the address_     *
+;                                       location_cd to request.  Added bbt_ *
+;                                       get_location_info.inc and bbt_print_*
+;                                       location_info.inc.                  *
+;     005 05/21/99 Jose Suarez          change cer_temp to cer_print        *
+;     006 09/08/99 Badari Kopparapu     Modified to use bbt_ops_owninvloc.inc
+;                                       for processing owner area, inventory*
+;                                       area & location address from batch  *
+;                                       selection field in Ops Job Templates*
+;                                       Modified to use ops_date for computing
+;                                       the report date range.              *
+;     007 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       removed bbt_ops_owninvloc.inc and   *
+;                                       added bbt_ops_parm_passed.inc       *
+;     008 08/09/00 Lawrence Dsouza      internationalized date and time     *
+;     009 02/23/01 Chris Noe		    Internationalize text               *
+;     010 07/26/02 Jason Osborn			Unique RPT filename project			*
+;     011 11/21/03 Chris Noe            Replace code value selects with UAR *
+;                                       calls.                              *
+;     012 04/12/04 Jim Jensen           Remove "Select" for own/inv info and*
+;                                       use UAR, instead. Increase size of  *
+;                                       ABORh display and add CNVTALIAS for *
+;                                       mrn display.  Allow multiple mrn to *
+;                                       display. Change "Pooled for:" to    *
+;                                       "Assigned to:".  Use Encntr_Alias to*
+;                                       retrieve MRN.                       *
+;     013 06/28/04 David Fifer          Rearranged the report to handle a 25*
+;                                       character eurocode product number.  *
+;     014 12/09/04 Jason Osborn         Remove "########" delimiting from   *
+;                                       _id fields.                         *
+;     015 04/29/10 Archita Subramanya	Added code to print the pooled 	    *
+;					ABO\RH to report without truncation *					*
+;     016 05/07/10 Sachin Yadav         Modified report name to be Pooled/  *
+;										Reconstituted Products report.      *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_rpt_pool_prod:dba go
+create program bbt_rpt_pool_prod:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+        /*
+        record request
+        (
+          1  beg_dt_tm                = di8
+          1  end_dt_tm                = di8
+          1  printer_name             = vc
+          1  batch_selection          = c100
+          1  output_dist              = c100
+          1  ops_date                 = dq8
+          1  cur_owner_area_cd        = f8
+          1  cur_inv_area_cd          = f8
+          1  address_location_cd      = f8
+        )
+        */
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+        record reply
+        (
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+        )
+
+;Begin 009
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+ 
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+
+declare rowvar = i4
+ 
+record captions
+(
+  1  pooled_recon_products = vc
+  1  time                  = vc
+  1  as_of_date            = vc
+  1  bb_owner              = vc
+  1  inventory_area        = vc
+  1  beg_dt_tm             = vc
+  1  end_dt_tm             = vc
+  1  new_product           = vc
+  1  components            = vc
+  1  product_type          = vc
+  1  aborh                 = vc
+  1  state                 = vc
+  1  received              = vc
+  1  volume                = vc
+  1  expires               = vc
+  1  assigned_to           = vc
+  1  none                  = vc
+  1  mrn                   = vc
+  1  pooled                = vc
+  1  tech_id               = vc
+  1  transfused_to         = vc
+  1  not_transfused        = vc
+  1  transfused            = vc
+  1  report_id             = vc
+  1  page_no               = vc
+  1  printed               = vc
+  1  end_of_report         = vc
+  1  all                   = vc
+  1  not_on_file           = vc
+  1  not_applicable        = vc
+  1  modified              = vc
+)
+ 
+set captions->pooled_recon_products = uar_i18ngetmessage(i18nHandle,
+  "pooled_recon_products",
+  "P O O L E D / R E C O N S T I T U T E D  P R O D U C T S   R E P O R T")
+set captions->time = uar_i18ngetmessage(i18nHandle,
+  "time", "Time:")
+set captions->as_of_date = uar_i18ngetmessage(i18nHandle,
+  "as_of_date", "As of Date:")
+set captions->bb_owner = uar_i18ngetmessage(i18nHandle,
+  "bb_owner", "Blood Bank Owner: ")
+set captions->inventory_area = uar_i18ngetmessage(i18nHandle,
+  "inventory_area", "Inventory Area: ")
+set captions->beg_dt_tm = uar_i18ngetmessage(i18nHandle,
+  "beg_dt_tm", "Beginnning Date/Time:")
+set captions->end_dt_tm = uar_i18ngetmessage(i18nHandle,
+  "end_dt_tm", "Ending Date/Time:")
+set captions->new_product = uar_i18ngetmessage(i18nHandle,
+  "new_product", "New Product")
+set captions->components = uar_i18ngetmessage(i18nHandle,
+  "components", "Components")
+set captions->product_type = uar_i18ngetmessage(i18nHandle,
+  "product_type", "Product Type")
+set captions->aborh = uar_i18ngetmessage(i18nHandle,
+  "aborh", "ABO/Rh")
+set captions->state = uar_i18ngetmessage(i18nHandle,
+  "state", "State")
+set captions->received = uar_i18ngetmessage(i18nHandle,
+  "received", "Received")
+set captions->volume = uar_i18ngetmessage(i18nHandle,
+  "volume", "Volume")
+set captions->expires = uar_i18ngetmessage(i18nHandle,
+  "expires", "Expires")
+set captions->assigned_to = uar_i18ngetmessage(i18nHandle,
+  "assigned_to", "Assigned to:")
+set captions->none = uar_i18ngetmessage(i18nHandle,
+  "none", "NONE")
+set captions->mrn = uar_i18ngetmessage(i18nHandle,
+  "mrn", "MRN:")
+set captions->pooled = uar_i18ngetmessage(i18nHandle,
+  "pooled", "Pooled:")
+set captions->tech_id = uar_i18ngetmessage(i18nHandle,
+  "tech_id", "Tech ID:")
+set captions->transfused_to = uar_i18ngetmessage(i18nHandle,
+  "transfused_to", "Transfused to:")
+set captions->not_transfused = uar_i18ngetmessage(i18nHandle,
+  "not_transfused", "NOT TRANSFUSED")
+set captions->transfused = uar_i18ngetmessage(i18nHandle,
+  "transfused", "Transfused:")
+set captions->report_id = uar_i18ngetmessage(i18nHandle,
+  "report_id", "Report ID: BBT_RPT_POOL_PROD")
+set captions->page_no = uar_i18ngetmessage(i18nHandle,
+  "page_no", "Page:")
+set captions->printed = uar_i18ngetmessage(i18nHandle,
+  "printed", "Printed:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+set captions->all = uar_i18ngetmessage(i18nHandle,
+  "all", "(All)")
+set captions->not_on_file = uar_i18ngetmessage(i18nHandle,
+  "not_on_file", "<Not on File>")
+set captions->not_applicable = uar_i18ngetmessage(i18nHandle,
+  "not_applicable", "N/A")
+set captions->modified = uar_i18ngetmessage(i18nHandle,
+  "Modified", "Modified:")
+;End 009
+ 
+;006 beg
+/* Determine if printing from Operations */
+if (trim(request->batch_selection) > " ")
+  set begday = request->ops_date
+  set endday = request->ops_date
+  set temp_string = cnvtupper(trim(request->batch_selection))
+  CALL CHECK_OPT_DATE_PASSED("bbt_rpt_pool_prod")
+  if (reply->status_data->status != "F")
+        set request->beg_dt_tm = begday
+        set request->end_dt_tm = endday
+  endif
+
+call CHECK_OWNER_CD ("bbt_rpt_pool_prod")
+call CHECK_INVENTORY_CD ("bbt_rpt_pool_prod")
+call CHECK_LOCATION_CD ("bbt_rpt_pool_prod")
+set request->printer_name = trim(request->output_dist)
+endif
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+
+;004 %i cclsource:bbt_get_inst_name.inc
+%i cclsource:bbt_get_location_info.inc
+;006 end
+
+set cur_owner_area_disp = fillstring(40," ")
+set cur_inv_area_disp = fillstring(40, " ")
+
+/* Retrieve display values for requested Owner Area and Inventory Area */
+if (request->cur_owner_area_cd = 0.0)
+   set cur_owner_area_disp = captions->all
+else
+   set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+endif
+
+if (request->cur_inv_area_cd = 0.0)
+   set cur_inv_area_disp = captions->all
+else
+   set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+endif
+
+set line           = fillstring(125,"_")
+
+record pool
+(
+ 1  pool_list[*]
+    2  product_id1          = f8
+    2  product_id2          = f8
+    2  event_type_cd1       = f8
+    2  product_nbr1         = c20
+    2  product_sub_nbr1     = c5
+    2  product_nbr2         = c20
+    2  product_sub_nbr2     = c5
+    2  product_type1        = c17
+    2  product_type2        = c17
+    2  abo1                 = f8
+    2  abo2                 = f8
+    2  rh1                  = f8
+    2  rh2                  = f8
+    2  status1              = c12
+    2  status2              = c12
+    2  recv_dt_tm1          = dq8
+    2  recv_dt_tm2          = dq8
+    2  pool_dt_tm           = dq8
+    2  volume1              = f8
+    2  volume2              = f8
+    2  exp_dt_tm1           = dq8
+    2  exp_dt_tm2           = dq8
+    2  username             = c6
+    2  alias[*]
+       3 mrn                = c22
+    2  name                 = c30
+    2  tran_alias[*]
+       3 mrn                = c22
+    2  tran_name            = vc
+    2  tran_date            = dq8
+    2  tran_username        = c6
+    2  tran_active_ind      = c1
+)
+ 
+set stat = alterlist(pool->pool_list, 10)
+
+record aborh
+(
+ 1  aborh_list[*]
+    2  aborh_display = c20
+    2  abo_code      = f8
+    2  rh_code       = f8
+)
+
+set stat = alterlist(aborh->aborh_list, 10)
+
+set aborh_index = 0
+select into "nl:"
+from    code_value cv1,
+        code_value_extension cve1,
+        code_value_extension cve2,
+        (dummyt d1 with seq = 1),
+        code_value cv2,
+        (dummyt d2 with seq = 1),
+        code_value cv3
+plan    cv1 where cv1.code_set = 1640 and
+        cv1.active_ind = 1
+join    cve1 where cve1.code_set = 1640 and
+        cv1.code_value = cve1.code_value and
+        cve1.field_name = "ABOOnly_cd"
+join    cve2 where cve2.code_set = 1640 and
+        cv1.code_value = cve2.code_value and
+        cve2.field_name = "RhOnly_cd"
+join    d1 where d1.seq = 1
+join    cv2 where cv2.code_set = 1641 and
+        cnvtint(cve1.field_value) = cv2.code_value
+join    d2 where d2.seq = 1
+join    cv3 where cv3.code_set = 1642 and
+        cnvtint(cve2.field_value) = cv3.code_value
+order   cve1.field_value,
+        cve2.field_value
+detail
+        aborh_index = aborh_index + 1
+        if (mod(aborh_index, 10) = 1 and aborh_index != 1)
+          stat = alterlist(aborh->aborh_list, aborh_index + 9)
+        endif
+        aborh->aborh_list[aborh_index]->aborh_display = cv1.display
+        aborh->aborh_list[aborh_index]->abo_code = cv2.code_value
+        aborh->aborh_list[aborh_index]->rh_code  = cv3.code_value
+foot report
+        stat = alterlist(aborh->aborh_list, aborh_index)
+
+with    outerjoin (d1),
+        outerjoin (d2),
+        check,
+        nocounter
+set assign_code = 0.0
+set pool_code = 0.0
+set tran_code = 0.0
+set mrn_code = 0.0
+set assign_code = uar_get_code_by("MEANING", 1610, nullterm("1"))
+set pool_code   = uar_get_code_by("MEANING", 1610, nullterm("18"))
+set tran_code   = uar_get_code_by("MEANING", 1610, nullterm("7"))
+set mrn_code    = uar_get_code_by("MEANING",  319, nullterm("MRN"))
+
+set reply->status_data->status = "F"
+set select_ok_ind = 0
+ 
+set rpt_cnt = 0
+
+execute cpm_create_file_name_logical "bbt_pool_prod", "txt", "x"
+
+select into cpm_cfn_info->file_name_logical
+      pr1.product_nbr "###############",
+      pr1.product_sub_nbr "#####",
+      pr2.product_nbr "###############",
+      pr2.product_sub_nbr "#####",
+      c3.display "##########",
+      c4.display "##########",
+      pr1.product_id,
+      pr2.product_id,
+      pe1.event_type_cd,
+      c1.display,
+      c2.display,
+      pr2.recv_dt_tm,
+      pe1.event_dt_tm,
+      bp1.cur_abo_cd,
+      bp1.cur_rh_cd,
+      prs.username,
+      encntr_alias_exists = decode(ea.seq, "Y", "N"),
+      per.name_full_formatted "##############################",
+      pe1.active_ind
+from  product pr1,
+      blood_product bp1,
+      code_value c1,
+      product_event pet,
+      product_event pe1,
+      code_value c3,
+      prsnl prs,
+      (dummyt d2 with seq = 1),
+      encntr_alias ea,
+      person per,
+      (dummyt d1 with seq = 1),
+      product pr2,
+      blood_product bp2,
+      code_value c2,
+      product_event pe2,
+      code_value c4
+
+plan  pr1 where pr1.pooled_product_ind > 0
+                  and ((request->cur_owner_area_cd > 0.0
+                  and request->cur_owner_area_cd = pr1.cur_owner_area_cd)
+                  or (request->cur_owner_area_cd = 0.0))
+                  and ((request->cur_inv_area_cd > 0.0
+                  and request->cur_inv_area_cd = pr1.cur_inv_area_cd)
+                  or (request->cur_inv_area_cd = 0.0))
+join  pet where pr1.product_id = pet.product_id and
+                pet.event_type_cd = pool_code and
+                pet.event_dt_tm between
+                  cnvtdatetime(request->beg_dt_tm) and
+                  cnvtdatetime(request->end_dt_tm)
+join  pe1 where pet.product_id = pe1.product_id and
+               (pe1.active_ind = 1 or
+                pe1.event_type_cd = tran_code or
+                pe1.event_type_cd = assign_code)
+join  bp1 where pr1.product_id = bp1.product_id
+join  c1  where c1.code_set = 1604 and
+                bp1.product_cd = c1.code_value
+join  c3  where c3.code_set = 1610 and
+                c3.active_ind = 1 and
+                pe1.event_type_cd = c3.code_value
+join  prs where pe1.updt_id = prs.person_id
+
+join  (d2 where d2.seq = 1
+join  ea  where pe1.person_id > 0 and
+                pe1.encntr_id = ea.encntr_id and
+                ea.encntr_alias_type_cd = mrn_code and
+                ea.active_ind = 1
+join  per where pe1.person_id = per.person_id)
+
+join  (d1 where d1.seq = 1
+join  pr2 where pr1.product_id = pr2.pooled_product_id
+join  bp2 where pr2.product_id = bp2.product_id
+join  c2  where c2.code_set = 1604 and
+                bp2.product_cd = c2.code_value)
+join  pe2 where pr2.product_id = pe2.product_id and
+                pe2.active_ind = 1
+join  c4  where c4.code_set = 1610 and
+                c4.active_ind = 1 and
+                pe2.event_type_cd = c4.code_value
+
+order by
+      pr1.product_nbr,
+      pr1.product_sub_nbr,
+      pr1.product_id,
+      pr2.product_id,
+      pe1.event_type_cd,
+      ea.encntr_alias_id
+
+head  report
+      pool_idx   = 0
+      x          = 0
+      y          = 0
+      prt_rec    = "N"
+      component_hld = 0
+      event_type_cd_hld[10]   = 0.0
+      event_type_display[10]  = "            "
+      for (x = 1 to 10)
+        event_type_cd_hld[x] = 0.0
+        event_type_display[x] = "            "
+      endfor
+      first_time = "Y"
+      select_ok_ind = 0
+      mrn_cnt1 = 0
+      mrn_cnt2 = 0
+      bmrnfound = "F"
+      bpooled   = "F"
+      btrans    = "F"
+      bdisplay = "T"
+      stat = alterlist(pool->pool_list[1].tran_alias, 0)
+      stat = alterlist(pool->pool_list[1].alias, 0)
+      mrn_alias = fillstring(27, " ")
+      product1_display = fillstring(43, " ")
+      product2_display = fillstring(25, " ")	;013
+ 
+head  page
+      call center(captions->pooled_recon_products,1,125)
+      col 104, captions->time,
+      col 118, curtime "@TIMENOSECONDS;;M",
+      row + 1
+      col 104, captions->as_of_date,
+      col 118, curdate "@DATECONDENSED;;d",
+%i cclsource:bbt_print_location_info.inc
+      row + 1
+      col 1, captions->bb_owner,
+      col 19, cur_owner_area_disp,
+      row + 1
+      col 1, captions->inventory_area,
+      col 17, cur_inv_area_disp
+      row + 2
+      dt_tm = cnvtdatetime(request->beg_dt_tm)
+      col  32, captions->beg_dt_tm
+      col  56, dt_tm "@DATECONDENSED;;d"
+      col  64, dt_tm "@TIMENOSECONDS;;M"
+      dt_tm = cnvtdatetime(request->end_dt_tm)
+      col  74, captions->end_dt_tm
+      col  92, dt_tm "@DATECONDENSED;;d"
+      col 100, dt_tm "@TIMENOSECONDS;;M"
+      row + 2
+      call center(captions->new_product, 1, 22)			;013
+      call center(captions->components, 24, 45)	;013
+      call center(captions->product_type, 47, 63)		;013
+      call center(captions->aborh, 65, 84)				;013
+      call center(captions->state, 86, 95)				;013
+      call center(captions->received, 97, 106)			;013
+      col 108, captions->volume							;013
+      call center(captions->expires, 115, 124)			;013
+      row + 1
+      col   1, "----------------------"		;013
+      col  24, "----------------------"		;013
+      col  47, "-----------------"				;013
+      col  65, "--------------------"						;013
+      col  86, "----------"						;013
+      col  97, "----------"					;013
+      col 108, "------"							;013
+      col 115, "----------"					;013
+      row + 1
+
+head  pr1.product_nbr
+      pool->pool_list[1]->tran_active_ind = " "
+ 
+      ;clear out aliases
+      for (i = 1 to size(pool->pool_list[1].tran_alias, 5))
+        pool->pool_list[1].tran_alias[i].mrn = " "
+      endfor
+      for (j = 1 to size(pool->pool_list[1].alias, 5))
+        pool->pool_list[1].alias[i].mrn = " "
+      endfor
+      stat = alterlist(pool->pool_list[1].tran_alias, 0)
+      stat = alterlist(pool->pool_list[1].alias, 0)
+      mrn_cnt1 = 0
+      mrn_cnt2 = 0
+      bpooled   = "F"
+      btrans    = "F"
+ 
+head  pr1.product_sub_nbr
+      row + 0
+
+head  pr1.product_id
+      row + 0
+
+head  pr2.product_id
+      row + 0
+
+head  pe1.event_type_cd
+      if (pe1.event_type_cd = assign_code)
+        if (pe1.active_ind = 1)
+          bdisplay = "T"
+        else
+          bdisplay = "F"
+        endif
+      else
+        bdisplay = "T"
+      endif
+ 
+head  ea.encntr_alias_id
+      mrn_alias = cnvtalias(ea.alias, ea.alias_pool_cd)
+      if (pe1.event_type_cd = tran_code)
+       if (encntr_alias_exists = "Y")
+        bmrnfound = "F"
+        if (mrn_cnt1 = 0)
+          row + 0
+        else
+          for (i = 1 to mrn_cnt1)
+            if (pool->pool_list[1].tran_alias[i].mrn = mrn_alias)
+              bmrnfound = "T"
+              i = mrn_cnt1 + 1
+            endif
+          endfor
+        endif
+        if (bmrnfound = "F")
+          mrn_cnt1 = mrn_cnt1 + 1
+          stat = alterlist(pool->pool_list[1].tran_alias, mrn_cnt1)
+          pool->pool_list[1].tran_alias[mrn_cnt1].mrn = mrn_alias
+        endif
+       endif
+     elseif (pe1.event_type_cd = assign_code)
+       if (encntr_alias_exists = "Y")
+        bmrnfound = "F"
+        if (mrn_cnt2 = 0)
+          row + 0
+        else
+          for (i = 1 to mrn_cnt2)
+            if (pool->pool_list[1].alias[i].mrn = mrn_alias)
+              bmrnfound = "T"
+              i = mrn_cnt2 + 1
+            endif
+          endfor
+        endif
+        if (bmrnfound = "F")
+          mrn_cnt2 = mrn_cnt2 + 1
+          stat = alterlist(pool->pool_list[1].alias, mrn_cnt2)
+          pool->pool_list[1].alias[mrn_cnt2].mrn = mrn_alias
+        endif
+       endif
+     endif
+
+detail
+        pool_idx = pool_idx + 1
+        if (mod(pool_idx, 10) = 1 and pool_idx != 1)
+          stat = alterlist(pool->pool_list, pool_idx + 9)
+        endif
+
+        pool->pool_list[pool_idx]->product_id1 = pr1.product_id
+        pool->pool_list[pool_idx]->product_id2 = pr2.product_id
+        pool->pool_list[pool_idx]->event_type_cd1 = pe1.event_type_cd
+
+        if (pe1.event_type_cd = tran_code)
+          pool->pool_list[1]->tran_name  = per.name_full_formatted
+          pool->pool_list[1]->tran_date  = pe1.event_dt_tm
+          pool->pool_list[1]->tran_username = prs.username
+          if (pool->pool_list[1]->tran_active_ind != "Y")
+            if (pe1.active_ind = 0)
+              pool->pool_list[1]->tran_active_ind = "N"
+            else
+              pool->pool_list[1]->tran_active_ind = "Y"
+            endif
+          endif
+        endif
+ 
+        new_rec = "Y"
+
+        if ((pool->pool_list[1]->tran_active_ind = "Y") or
+            (pool->pool_list[1]->tran_active_ind = " "))
+          if ((first_time = "Y") and (bdisplay = "T"))
+            event_type_cd_hld[1] = pe1.event_type_cd
+            event_type_display[1] = c3.display
+            event_idx = 1
+            new_rec = "Y"
+          else
+            for (y = 1 to event_idx)
+              if (pe1.event_type_cd = event_type_cd_hld[y])
+                new_rec = "N"
+              endif
+            endfor
+          endif
+          if ((new_rec = "Y") and (bdisplay = "T"))
+            if (first_time = "Y")
+              first_time = "N"
+            else
+              event_idx = event_idx + 1
+            endif
+            event_type_cd_hld[event_idx]  = pe1.event_type_cd
+            event_type_display[event_idx] = c3.display
+          endif
+        endif
+        pool->pool_list[pool_idx]->product_nbr1     = concat(trim(bp1.supplier_prefix), trim(pr1.product_nbr))
+        pool->pool_list[pool_idx]->product_sub_nbr1 = pr1.product_sub_nbr
+        pool->pool_list[pool_idx]->product_nbr2     = concat(trim(bp2.supplier_prefix), trim(pr2.product_nbr))
+        pool->pool_list[pool_idx]->product_sub_nbr2 = pr2.product_sub_nbr
+        pool->pool_list[pool_idx]->product_type1    = c1.display
+        pool->pool_list[pool_idx]->product_type2    = c2.display
+        pool->pool_list[pool_idx]->abo1             = bp1.cur_abo_cd
+        pool->pool_list[pool_idx]->rh1              = bp1.cur_rh_cd
+        pool->pool_list[pool_idx]->abo2             = bp2.cur_abo_cd
+        pool->pool_list[pool_idx]->rh2              = bp2.cur_rh_cd
+        pool->pool_list[pool_idx]->status1          = c3.display
+        pool->pool_list[pool_idx]->status2          = c4.display
+        pool->pool_list[pool_idx]->recv_dt_tm1      = pr1.recv_dt_tm
+        pool->pool_list[pool_idx]->recv_dt_tm2      = pr2.recv_dt_tm
+        if (pet.event_type_cd = pool_code)
+          pool->pool_list[1]->pool_dt_tm = pet.event_dt_tm
+        endif
+
+        pool->pool_list[pool_idx]->volume1    = bp1.cur_volume
+        pool->pool_list[pool_idx]->volume2    = bp2.cur_volume
+        pool->pool_list[pool_idx]->exp_dt_tm1 = pr1.cur_expire_dt_tm
+        pool->pool_list[pool_idx]->exp_dt_tm2 = pr2.cur_expire_dt_tm
+        pool->pool_list[pool_idx]->username   = prs.username
+        if ((ea.alias > " ") and (pe1.event_type_cd = assign_code))
+          pool->pool_list[1]->name = per.name_full_formatted
+        endif
+
+foot  pr1.product_id
+      stat = alterlist(pool->pool_list, pool_idx)
+      if (row > 56) break endif
+      product1_display = concat(trim(pool->pool_list[1]->product_nbr1), " ", trim(pool->pool_list[1]->product_sub_nbr1))
+      col   1, product1_display
+      col  47, pool->pool_list[1]->product_type1	;013
+ 
+      col 65, "                  "	;013
+      idx_a = 1
+      finish_flag = "N"
+      while ((idx_a <= aborh_index) and (finish_flag = "N"))
+        if ((pool->pool_list[1]->abo1 = aborh->aborh_list[idx_a]->abo_code) and
+            (pool->pool_list[1]->rh1  = aborh->aborh_list[idx_a]->rh_code))
+          col 65, aborh->aborh_list[idx_a]->aborh_display  "####################"	;013
+          finish_flag = "Y"
+        else
+          idx_a = idx_a + 1
+        endif
+      endwhile
+      vol = trim(cnvtstring(pool->pool_list[1]->volume1,6,1,r))
+      col 108, vol		;013
+ 
+ 	  rowvar = row
+      dt_tm = cnvtdatetime(pool->pool_list[1]->exp_dt_tm1)
+      col 115, dt_tm "@DATECONDENSED;;d"  	;013
+      row+1
+      col 115, dt_tm "@TIMENOSECONDS;;M"	;013
+ 
+      row rowvar
+      for (x = 1 to event_idx)
+        if (event_type_cd_hld[x] != pool_code)
+          col  86, event_type_display[x]
+          row + 1
+          if (row > 56) break endif
+        endif
+      endfor
+ 	row+1
+      first_time = "Y"
+      for (x = 1 to pool_idx)
+        if (first_time = "Y")
+          first_time = "N"
+          new_rec = "Y"
+          component_hold = pool->pool_list[x]->product_id2
+        else
+          if (component_hold = pool->pool_list[x]->product_id2)
+            new_rec = "N"
+          else
+            new_rec = "Y"
+            component_hold = pool->pool_list[x]->product_id2
+          endif
+        endif
+
+        if ((new_rec = "Y") and (pool->pool_list[x]->product_id2 > 0.0))
+          product2_display = concat(trim(pool->pool_list[x]->product_nbr2), " ", trim(pool->pool_list[x]->product_sub_nbr2))
+          col 24, product2_display		;013
+          col 47, pool->pool_list[x]->product_type2
+ 
+          col 65, "                  "		;013
+          idx_a = 1
+          finish_flag = "N"
+          while ((idx_a <= aborh_index) and (finish_flag = "N"))
+            if ((pool->pool_list[x]->abo2 = aborh->aborh_list[idx_a]->abo_code) and
+                (pool->pool_list[x]->rh2  = aborh->aborh_list[idx_a]->rh_code))
+              col 65, aborh->aborh_list[idx_a]->aborh_display  "####################"	;013
+              finish_flag = "Y"
+            else
+              idx_a = idx_a + 1
+            endif
+          endwhile
+ 
+          vol = trim(cnvtstring(pool->pool_list[x]->volume2,6,1,r))
+          col 108, vol		;013
+          col  86, pool->pool_list[x]->status2
+          dt_tm = cnvtdatetime(pool->pool_list[x]->recv_dt_tm2)
+          col  97, dt_tm "@DATECONDENSED;;d"	;013
+          dt_tm = cnvtdatetime(pool->pool_list[x]->exp_dt_tm2)
+          col 115, dt_tm "@DATECONDENSED;;d"	;013
+          row+1
+          dt_tm = cnvtdatetime(pool->pool_list[x]->recv_dt_tm2)
+          col 97, dt_tm "@TIMENOSECONDS;;M"	;013
+          dt_tm = cnvtdatetime(pool->pool_list[x]->exp_dt_tm2)
+          col 115, dt_tm "@TIMENOSECONDS;;M"	;013
+ 
+          row + 1
+          if (row > 56) break endif
+
+        endif
+ 
+      endfor
+
+      col   1, captions->assigned_to
+      if (pool->pool_list[1]->name > " ")
+        col 18, pool->pool_list[1]->name
+        bpooled = "T"
+      else
+        col 18, captions->none
+      endif
+
+      col  46, captions->mrn
+      if (size(pool->pool_list[1].alias, 5) > 0)
+        for (i = 1 to mrn_cnt2)
+          if (i > 1)
+             row + 1
+          endif
+          col 52, pool->pool_list[1]->alias[i].mrn
+        endfor
+      else
+        if (bpooled = "T")
+          col 52, captions->not_on_file
+        else
+          col 52, captions->not_applicable
+        endif
+      endif
+
+      col  86, captions->modified
+      dt_tm = cnvtdatetime(pool->pool_list[1]->pool_dt_tm)
+      col  95, dt_tm "@DATECONDENSED;;d"
+      col 103, dt_tm "@TIMENOSECONDS;;M"
+
+      col 109, captions->tech_id
+      col 118, pool->pool_list[1]->username
+
+      row + 1
+      if (row > 56) break endif
+
+      col   1, captions->transfused_to
+      if (pool->pool_list[1]->tran_active_ind = "Y")
+        col  18, pool->pool_list[1]->tran_name "###########################"
+        btrans = "T"
+      else
+        col  18, captions->not_transfused
+      endif
+
+      col  46, captions->mrn
+      if (pool->pool_list[1]->tran_active_ind = "Y")
+        if (size(pool->pool_list[1].tran_alias, 5) > 0)
+          for (i = 1 to mrn_cnt1)
+            if (i > 1)
+             row + 1
+            endif
+            col 52, pool->pool_list[1]->tran_alias[i].mrn
+          endfor
+        endif
+      else
+        if (btrans = "T")
+          col 52, captions->not_on_file
+        else
+          col 52, captions->not_applicable
+        endif
+      endif
+ 
+      col  84, captions->transfused
+      if (pool->pool_list[1]->tran_active_ind = "Y")
+        dt_tm = cnvtdatetime(pool->pool_list[1]->tran_date)
+        col  95, dt_tm "@DATECONDENSED;;d"
+        col 103, dt_tm "@TIMENOSECONDS;;M"
+      else
+        col  95, captions->not_applicable
+      endif
+ 
+      col 109, captions->tech_id
+      if (pool->pool_list[1]->tran_active_ind = "Y")
+        col 118, pool->pool_list[1]->username
+      else
+        col 118, captions->not_applicable
+      endif
+ 
+      row + 3
+      if (row > 56) break endif
+      stat = alterlist(pool->pool_list, 0)
+      stat = alterlist(pool->pool_list, 10)
+      pool_idx = 0
+
+      for (x = 1 to 10)
+        event_type_cd_hld[x] = 0.0
+      endfor
+
+      first_time = "Y"
+
+foot page
+      row  57
+      col   1, line,
+      row + 1
+      col   1, captions->report_id,
+      col  58, captions->page_no,
+      col  64, curpage "###",
+      col 100, captions->printed,
+      col 110, curdate "@DATECONDENSED;;d"
+      col 120, curtime "@TIMENOSECONDS;;M"
+
+foot report
+      row  60
+      col  51, captions->end_of_report
+      select_ok_ind = 1
+
+with  counter,
+      nullreport,
+      maxrow = 61,
+      outerjoin (d1),
+      outerjoin (d2),
+      dontcare  (ea),
+      compress, nolandscape ;BNK - 10/31/97
+
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+      
+if (request->batch_selection > " ")
+  set spool value(reply->rpt_list[rpt_cnt].rpt_filename) value(request->printer_name)
+endif
+
+if (select_ok_ind = 1)
+    set reply->status_data->status = "S"
+endif
+
+#exit_script
+end
+go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,1586 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_pat_typ_com.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-2004 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_rpt_pat_typ_com.prg
+        Object name:            bbt_rpt_pat_typ_com
+        Request #:              225187
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Report patient ABO/Rh, antibodies, antigens and
+                                comments and phenotype  ; BNK - 11/08/97
+                                and transfusion requirements and birth date and time - BNK 12/24/97
+
+        Tables read:            code_value, person_alias, person, person_aborh,
+                                blood_bank_comment, person_antibody,
+                                person_antigen, 
+                                person_rh_phenotype, bb_rh_phenotype, nomenclature ; BNK - 11/08/97
+                                person_trans_req, transfusion_requirements         - BNK - 12/24/97
+
+        Tables updated:         none
+
+        Executing from:         VB
+
+        Special Notes:          This program generates the reports incrementally
+                                based on a value stored on the DM_INFO table
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 09/30/96 Brian Franke         Initial Release                     *
+;     001 11/08/97 Badari Kopparapu     modified to display person phenotype*
+;     001 12/11/97 Badari Kopparapu     modified to retrieve transfusion    *
+;                                       requirements for this person.       *
+;     001 12/31/97 Badari Kopparapu     modified to display birth_date      *
+;     002 03/24/98 Matt Benson          Modified to retrieve Institution    *
+;                                       name from preferences               *
+;     003 04/27/97 Badari Kopparapu     Modified the spacing while printing *
+;                                       header, antigens & antibodies. Also *
+;                                       now selecting only active rows from *
+;                                       person_antibody and person_antigen  *
+;                                       tables.                             *
+;     004 05/08/98 Matt Benson          Changed initial select for aborh    *
+;                                       changes to select against the       *
+;                                       person_aborh_result table instead of*
+;                                       person_aborh in order to report     *
+;                                       aborh results of same type, i.e.,   *
+;                                       orig = O pos new = O pos            *
+;     005 01/04/99 John Rieck           Added logic to print location name  *
+;                                       and address. Added the address_     *
+;                                       location_cd to request.  Added bbt_ *
+;                                       get_location_info.inc and bbt_print_*
+;                                       location_info.inc.                  *
+;     006 01/26/99 Doug Saus            Modified report to handle large number
+;                                       of records in internal record structues.
+;     007 05/21/99 Jose Suarez          change cer_temp to cer_print        *
+;     008 08/16/99 Doug Saus            UAR changes                         *
+;     009 09/01/99 Badari Kopparapu     Recorded the modification to use    *
+;                                       trans_cnt1 as array index instead of*
+;                                       trans_cnt when printing trans.req.  *
+;     010 10/21/99 Jose Suarez          modify so it runs from operations   *
+;     011 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       added bbt_ops_parm_passed.inc       * 
+;     012 4/5/01 Gary Runde             modifications to correct            *
+;                                       issue of comments not printing on   *
+;                                       report.                             *
+;     013 08/09/00 Lawrence Dsouza      internationalized date and time     *
+;     014 02/23/01 Chris Noe		       Internationalize text			*
+;     015 07/05/01 Gary Runde           Look for person_aborh rows          *
+;     016 07/26/02 Jason Osborn			Unique RPT filename project			*
+;     017 04/18/03 Ronda Zheng          UTC phase II birth dt changes       *
+;     018 01/28/04 Jason Coy            Fixed multiple defects see ITN      *
+;                                       0100209.                            *
+;     019 08/03/04 Jason Coy            Performance enhancements.           *
+;     020 06/20/05 Jeff Wain            Modified select that queries        *
+;      									person_id's for performance         *
+;     021 03/27/07 Matt Cummings        Filter patients' encounters on the  *
+;                                       transfusion fac. passed through     *
+;                                       request->facility_cd                *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_rpt_pat_typ_com:dba go
+create program bbt_rpt_pat_typ_com:dba
+                                                
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+        /*
+        record request
+        (
+          1  beg_dt_tm           = dq8
+          1  end_dt_tm           = dq8
+          1  batch_selection     = c100
+          1  output_dist         = c100
+          1  ops_date            = dq8
+          1  patient_selection   = f8
+          1  sort_selection      = i2
+          1  address_location_cd = f8
+          1  facility_cd         = f8
+        )
+        */
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+        record reply
+        (
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+        )
+
+record person_antib
+(
+ 1  antib_list[*] ;006
+    2  antib_display = c10
+)
+
+record person_antig
+(
+ 1  antig_list[*] ;006
+    2  antig_display = c10
+)
+
+record person_trans_req
+(
+ 1  trans_req_list[*] ;006
+    2  trans_req_display = c12
+
+)
+
+record personhold_all
+(
+ 1  person_list[*]
+   2 person_id = f8
+)
+
+record personhold_unsorted
+(
+ 1  person_list[*]
+    2  person_id = f8
+)
+
+record personhold
+(
+ 1  person_list[*]
+    2  person_id = f8
+    2  person_id_alias_id = vc
+    2  person_mrn_list[*]
+       3 formatted_mrn = vc
+)
+
+record bbcomment                           ;012
+(                                          ;012
+ 1  qual[1]                                ;012
+   2  comment = vc                         ;012
+)                                          ;012
+
+if (trim(request->batch_selection) > " ")
+  set begday = request->ops_date
+  set endday = request->ops_date
+  set temp_string = cnvtupper(trim(request->batch_selection))
+  CALL CHECK_OPT_DATE_PASSED("bbt_rpt_pat_typ_com")
+  if (reply->status_data->status != "F")
+        set request->beg_dt_tm = begday
+        set request->end_dt_tm = endday
+  endif
+
+  ;set to 0.0 because no specific patient from operations
+  set request->patient_selection = 0.0
+
+  set sort_selection = fillstring(20," ")
+  call CHECK_SORT_OPT ("bbt_rpt_pat_typ_com")
+  if (sort_selection = "NAME")
+    set request->sort_selection = 0
+  elseif (sort_selection = "MRN")
+    set request->sort_selection = 1
+  else
+    set request->sort_selection = 0
+  endif
+  call CHECK_LOCATION_CD ("bbt_rpt_pat_typ_com")
+  call CHECK_FACILITY_CD ("bbt_rpt_pat_typ_com")
+
+endif
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+
+%i cclsource:bbt_GetBBPreference.inc
+
+%i cclsource:bbt_get_location_info.inc
+
+%i cclsource:aps_uar_rtf.inc
+
+;Begin 014
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc                										  
+                                                                       
+set i18nHandle = 0                                                     
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)   
+
+record captions                                                        
+(                                                                      
+  1  patient_typings  = vc														  
+  1  time             = vc														  
+  1  as_of_date       = vc														  
+  1  by_patient       = vc														  
+  1  by_med_no        = vc														  
+  1  specific_patient = vc														  
+  1  beg_date         = vc														  
+  1  end_date         = vc														  
+  1  name             = vc														  
+  1  medical          = vc
+  1  record_number    = vc														  
+  1  birth_dt         = vc														  
+  1  aborh            = vc												        
+  1  phenotype        = vc												        
+  1  transfusion      = vc												        
+  1  antibodies       = vc												        
+  1  antigens         = vc												        
+  1  requirements     = vc												        
+  1  not_on_file      = vc												        											        
+  1  none             = vc												        											        
+  1  patient_comments = vc														  
+  1  report_id        = vc														  
+  1  page_no          = vc														  
+  1  printed          = vc														  
+  1  rpt_by           = vc													     
+  1  end_of_report    = vc
+  1  facility         = vc														  
+)      																					  
+
+set captions->patient_typings = uar_i18ngetmessage(i18nHandle,			  
+  "patient_typings",																	  
+  "P A T I E N T   T Y P I N G S   A N D   C O M M E N T S")			    
+set captions->time = uar_i18ngetmessage(i18nHandle,  		 		        
+  "time", "Time:")			    							  						  
+set captions->as_of_date = uar_i18ngetmessage(i18nHandle,        		  
+  "as_of_date", "As of Date:")  													  
+set captions->by_patient = uar_i18ngetmessage(i18nHandle,			     
+  "by_patient", "(by Patient Name)")  											  
+set captions->by_med_no = uar_i18ngetmessage(i18nHandle,		   	     
+  "by_med_no", "(by Medical Record Number)")  								  
+set captions->specific_patient = uar_i18ngetmessage(i18nHandle,	     
+  "specific_patient", "(Specific Patient)")  								      
+set captions->beg_date = uar_i18ngetmessage(i18nHandle,         		    
+  "beg_date", "Beginning Date:")  									           
+set captions->end_date = uar_i18ngetmessage(i18nHandle,				  	  
+  "end_date", "Ending Date:") 		 							  				  
+set captions->name = uar_i18ngetmessage(i18nHandle,     	  				  
+  "name", "Name")  														           
+set captions->medical = uar_i18ngetmessage(i18nHandle,     				    													           
+  "medical", "Medical")
+set captions->record_number = uar_i18ngetmessage(i18nHandle,
+  "record_number", "Record Number")
+set captions->birth_dt = uar_i18ngetmessage(i18nHandle, 				     
+  "birth_dt", "  Birth Date")														  
+set captions->aborh = uar_i18ngetmessage(i18nHandle,  		     		    
+  "aborh", "ABO/Rh")  													           
+set captions->phenotype = uar_i18ngetmessage(i18nHandle, 	     		    
+  "phenotype", " Phenotype")  										           
+set captions->transfusion = uar_i18ngetmessage(i18nHandle,  	  		    
+  "transfusion", "Transfusion")  									           
+set captions->antibodies = uar_i18ngetmessage(i18nHandle,  		   	    
+  "antibodies", "Antibodies")  												     
+set captions->antigens = uar_i18ngetmessage(i18nHandle,  	    		    
+  "antigens", "Antigens")  											           
+set captions->requirements = uar_i18ngetmessage(i18nHandle,  			    
+  "requirements", "Requirements")  											     
+set captions->not_on_file = uar_i18ngetmessage(i18nHandle,  			    
+  "not_on_file", "<Not on File>")						     								     
+set captions->none = uar_i18ngetmessage(i18nHandle,  						    
+  "none", "<None>")  														          															     
+set captions->patient_comments = uar_i18ngetmessage(i18nHandle,		  
+  "patient_comments",																  
+  "* * * * * * * * * * * * * * * * Patient Comments * * * * * * * * * * * * * * * *")			  
+set captions->report_id = uar_i18ngetmessage(i18nHandle,   		  	  	  
+  "report_id", "Report ID: BBT_RPT_PAT_TYP_COM.PRG")			 		     
+set captions->page_no = uar_i18ngetmessage(i18nHandle,        		     
+  "page_no", "Page:")															     
+set captions->printed = uar_i18ngetmessage(i18nHandle,        		     
+  "printed", "Printed:")														       
+set captions->rpt_by = uar_i18ngetmessage(i18nHandle,       		     
+  "rpt_by", "By:")																     
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,        	  
+  "end_of_report", "* * * End of Report * * *") 		 
+set captions->facility = uar_i18ngetmessage(i18nHandle, 
+   "facility", "Facility:")     				  
+;End 014
+
+set stat = alterlist(person_antib->antib_list,10)
+set stat = alterlist(person_antig->antig_list,10)
+set stat = alterlist(person_trans_req->trans_req_list,10)
+
+declare done              = i2 with noconstant(0)         
+declare report_person_cnt = i4 with noconstant(0)     
+declare increment         = i4 with noconstant(500)    
+declare seq_var           = i4 with noconstant(0)       
+declare first_person      = i2 with noconstant(0)  ;First time in this instance of loop.  
+declare report_page       = i4 with noconstant(0)         
+declare row_hold          = i4 with noconstant(60)     
+declare bump_lines        = i4 with noconstant(0)     
+
+declare DM_DOMAIN         = vc with constant("PATHNET_BBT")      
+declare DM_LOOP_INCREMENT = vc with constant("PTC_REPORT_LOOP_INCREMENT")    
+
+set reply->status_data->status = "F"
+set count1          = 0
+set line           = fillstring(125,"_")
+set comment_size   = 0
+set idx1           = 0
+set idx2           = 0
+set idx3           = 0
+set idx4           = 0
+set comment_cnt    = 0
+set trans_cnt      = 0
+set trans_cnt1     = 0
+set index          = 0
+set hld_trans_req  = ""
+set anti_col       = 12
+set person_cnt     = 0
+set report_complete_ind = "N"
+SET cur_username = fillstring(10, " ")
+
+declare pheno_cnt      = i4 with noconstant(0)
+declare person_mrn_cnt = i4 with noconstant(0)
+declare mrn_count1     = i4 with noconstant(0)
+declare mrn_count2     = i4 with noconstant(0)
+
+declare facility_disp = vc with protect,noconstant("")
+
+/* Retrieve username of user printing report */
+    SET cur_username = GET_USERNAME(reqinfo->updt_id)
+
+set mrn_code = 0.0
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(4, "MRN", code_cnt, mrn_code)
+
+if (mrn_code = 0.0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        SET stat = ALTERLIST(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get MRN alias_type_cd"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_pat_typ_com"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+        = "could not get MRN alias type code_value"
+    go to EXIT_SCRIPT
+endif
+
+select into "nl:"
+       seq = decode(bb.seq, "bb ", pan.seq, "pan", pab.seq, "pab", par.seq, "pa ", prh.seq, "pr", "   ")
+      , person_id = decode(bb.person_id, bb.person_id, pan.person_id, pan.person_id, 
+          pab.person_id, pab.person_id, par.person_id, par.person_id, prh.person_id, prh.person_id,
+          pah.person_id, pah.person_id, ptr.person_id, ptr.person_id, 0.0)                             ;015
+      , pa = decode(par.seq, par.seq, 0)
+      , par.person_id
+      , par.updt_dt_tm ";;f"
+      , pah.person_id                              ;015
+      , pab = decode(pab.seq, pab.seq, 0)
+      , pab.person_id
+      , pab.updt_dt_tm ";;f"
+      , pan = decode(pan.seq, pan.seq, 0)
+      , pan.person_id
+      , pan.updt_dt_tm ";;f"
+      , bb = decode(bb.seq, bb.seq, 0)
+      , bb.person_id
+      , bb.updt_dt_tm ";;f"
+      , prh.person_id
+      , prh.person_rh_pheno_rs_id
+ 
+from  (dummyt d1 with seq = 1)
+      , person_aborh_result par
+      , person_aborh pah                            ;015
+      , person_antibody pab
+      , person_antigen  pan
+      , blood_bank_comment bb
+      , person_rh_pheno_result prh
+      , person_trans_req ptr            ;BNK - 12/11/97
+
+
+plan  (d1
+    join  (par   where   par.active_ind     = 1 
+                          and par.person_id + 0 > 0
+                          and (par.updt_dt_tm between cnvtdatetime(request->beg_dt_tm)
+                                                  and cnvtdatetime(request->end_dt_tm))
+                          and ((request->patient_selection = 0.0)
+                                or (request->patient_selection > 0.0
+                                     and par.person_id = request->patient_selection)))
+    orjoin (pah where   pah.active_ind      = 1                                           ;015
+                          and pah.person_id + 0 > 0                                           ;015
+                          and (pah.updt_dt_tm between cnvtdatetime(request->beg_dt_tm)    ;015
+                                                  and cnvtdatetime(request->end_dt_tm))   ;015
+                          and ((request->patient_selection = 0.0)                         ;015
+                                or (request->patient_selection > 0.0                      ;015
+                                     and pah.person_id = request->patient_selection)))    ;015
+    orjoin (pab where   pab.active_ind      = 1
+                          and pab.person_id + 0 > 0
+                          and (pab.updt_dt_tm between cnvtdatetime(request->beg_dt_tm)
+                                                  and cnvtdatetime(request->end_dt_tm))
+                          and ((request->patient_selection = 0.0)
+                                or (request->patient_selection > 0.0
+                                     and pab.person_id = request->patient_selection)))
+    orjoin (pan where   pan.active_ind      = 1 
+                          and pan.person_id + 0 > 0
+                          and (pan.updt_dt_tm between cnvtdatetime(request->beg_dt_tm)
+                                                  and cnvtdatetime(request->end_dt_tm))
+                          and ((request->patient_selection = 0.0)
+                                or (request->patient_selection > 0.0
+                                     and pan.person_id = request->patient_selection)))
+    orjoin (bb where    bb.active_ind      = 1
+                          and bb.person_id + 0 > 0
+                          and (bb.updt_dt_tm between cnvtdatetime(request->beg_dt_tm)
+                                                 and cnvtdatetime(request->end_dt_tm))
+                          and ((request->patient_selection = 0.0)
+                                or (request->patient_selection > 0.0
+                                     and bb.person_id = request->patient_selection)))
+    orjoin (prh where   prh.active_ind      = 1
+                          and prh.person_id + 0 > 0
+                          and prh.person_id = request->patient_selection
+                          and (prh.updt_dt_tm between cnvtdatetime(request->beg_dt_tm)
+                                                  and cnvtdatetime(request->end_dt_tm)))
+    orjoin (ptr where   ptr.active_ind      = 1
+                          and ptr.person_id + 0 > 0
+                          and (ptr.updt_dt_tm between cnvtdatetime(request->beg_dt_tm)
+                                                  and cnvtdatetime(request->end_dt_tm))
+                          and ((request->patient_selection = 0.0)
+                                or (request->patient_selection > 0.0
+                                     and ptr.person_id = request->patient_selection))))
+
+order by   person_id
+
+head report
+      person_cnt = 0
+
+head  person_id
+      if (person_id > 0)
+         person_cnt = person_cnt + 1
+         if (size(personhold_all->person_list,5) < person_cnt)
+            stat = alterlist(personhold_all->person_list, person_cnt + 500)
+         endif
+      
+         personhold_all->person_list[person_cnt]->person_id = person_id
+      endif
+      
+with nocounter     
+
+if (curqual > 0)
+    set stat = alterlist(personhold_all->person_list, person_cnt)
+endif
+
+if (curqual = 0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        SET stat = ALTERLIST(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->status = "Z"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get qualifying person_id's"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "Z"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_pat_typ_com"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+        = "No qualifying data found"
+    go to EXIT_SCRIPT
+endif
+
+;If filtering on a specific facility.
+if(request->facility_cd > 0)
+   
+    ;Get the encounter facilities for this transfusion facility.
+    set stat = BbtGetEncounterLocations( request->facility_cd, PREF_LEVEL_BB )
+    
+    if( stat = -1 )
+        set count1 = count1 + 1
+        if (count1 > 1)
+          SET stat = ALTERLIST(reply->status_data->subeventstatus, count1+1)
+        endif
+        set reply->status_data->status = "Z"
+        set reply->status_data->subeventstatus[count1]->OperationName = "BbtGetEncounterLocations"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_pat_typ_com"
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+          = "Retrieve patient encounter locations failed."
+        go to EXIT_SCRIPT
+    endif
+	
+	declare BATCH_SIZE = i4 with constant(200)
+	declare nstart = i4 with noconstant(1)
+	declare record_list_size = i4 with noconstant(size(personhold_all->person_list,5))
+    ;Move persons to the personhold_unsorted structure if they had an
+    ;encounter at the filter facility.
+    set idx1 = 0
+    set personIdx = 0
+    set facIdx = 0
+    set locationIdx = 0
+    
+    select into "nl:"
+        e.person_id,
+        e.loc_facility_cd
+    from
+      (dummyt d with seq = value(ceil(cnvtreal(record_list_size)/BATCH_SIZE))),
+      encounter e
+    ;Get all encounters of each patient that are associated with the
+    ;transfusion service facility.
+    plan d where assign(nstart, evaluate(d.seq, 1, 1, nstart+BATCH_SIZE))
+    join e where expand(personIdx,nstart,minval(nstart+BATCH_SIZE-1, record_list_size),
+                        e.person_id,personhold_all->person_list[personIdx].person_id)
+                 
+    group by e.person_id,e.loc_facility_cd
+    detail
+        locationIdx = 0
+        locationIdx = locateval(facIdx, 1, size(EncounterLocations->Locs,5), 
+                                e.loc_facility_cd, EncounterLocations->Locs[facIdx].EncFacilityCd)
+        ;The encounter occurred at an encounter facility that is associated with the filter transfusion service facility.
+        ;The encounter occurred at the transfusion service facility.                                
+        if (e.loc_facility_cd = request->facility_cd or locationIdx > 0)
+	        idx1 = idx1 + 1
+	        if( size(personhold_unsorted->person_list,5) < idx1)
+	            ;Increase the size of the unsorted list by increments of 50.
+	            stat = alterlist(personhold_unsorted->person_list,idx1 + 49)
+	        endif
+	            
+	        ;Copy person to the unsorted list.
+	        personhold_unsorted->person_list[idx1].person_id = e.person_id
+        endif
+    with nocounter, expand = 1
+
+    ;Resize the unsorted list to remove unused elements.
+    set stat = alterlist(personhold_unsorted->person_list,idx1)
+
+    ;The new person_cnt needs to be updated to reflect the number of persons
+    ;that have had an encounter that qualifies in the filter.
+    set person_cnt = idx1
+    
+    ;Reinitialize this, it will be used again.
+    set idx1 = 0
+
+;If filtering on a specific facility is not being done.
+else
+
+    ;Move all persons over to the personhold_unsorted structure.
+    set stat = alterlist(personhold_unsorted->person_list,person_cnt)
+    for(idx1 = 1 to person_cnt)
+      set personhold_unsorted->person_list[idx1].person_id = personhold_all->person_list[idx1].person_id
+    endfor
+    
+    ;Reinitialize this, it will be used again.
+    set idx1 = 0
+endif
+
+free record personhold_all
+
+;If there are no patients left to sort and display in the report after
+;applying the facility filtering.
+if( person_cnt = 0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        SET stat = ALTERLIST(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->status = "Z"
+    set reply->status_data->subeventstatus[count1]->OperationName = "filter qualifying person_id's"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "Z"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_pat_typ_com"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+        = "No patients have an encounter at the filter transfusion facility."
+    go to EXIT_SCRIPT
+endif
+
+;If the report needs to be filter on a transfusion service facility.
+if(request->facility_cd > 0)
+    set facility_disp = uar_get_code_display(request->facility_cd)
+endif
+
+set select_ok_ind = 0         
+set rpt_cnt = 0
+
+execute cpm_create_file_name_logical "bbt_pat_typ_com", "txt", "x"		;016
+
+
+/********************************************************************************************/
+/*    Obtain loop increment from dm_info table.                                             */
+/********************************************************************************************/
+select into "nl:" 
+    dm.info_date 
+from 
+    dm_info dm 
+plan dm 
+    where dm.info_domain = DM_DOMAIN 
+      and dm.info_name   = DM_LOOP_INCREMENT 
+detail 
+    increment = cnvtint(trim(dm.info_char)) 
+with nocounter 
+
+if (increment < 500)  /*  Make sure increment hasn't been set too low  */ 
+   set increment = 500 
+endif 
+
+
+if(request->sort_selection = 0
+or request->patient_selection > 0) ;by Patient Name or Specific patient
+    /********************************************************************************************/  
+    /*    Sort the personhold_unsorted structure into the personhold structure  according to    */
+    /*    the request selection parameters.                                                     */
+    /********************************************************************************************/ 
+    select into "nl:" 
+         person_id_alias_id = decode(pra.person_alias_id, build(per.person_id, pra.person_alias_id), 
+                                     build(per.person_id, 0.0)),
+         sort_mrn = decode(pra.seq, substring(1, 15, cnvtalias(pra.alias,pra.alias_pool_cd)), ""),
+         sort_patient_name = substring(1,30, cnvtupper(per.name_full_formatted)) 
+   
+    from  
+         (dummyt d_sortPer with seq = value(person_cnt)) ,
+         person per,
+         person_alias pra
+       
+    plan d_sortPer 
+    join per where per.person_id  = personhold_unsorted->person_list[d_sortPer.seq]->person_id
+    join pra where pra.person_id = outerjoin(per.person_id)
+               and pra.person_alias_type_cd  = mrn_code 
+               and pra.active_ind            = 1
+    order by 
+         sort_patient_name, 
+         per.person_id 
+            
+    head report 
+         stat = alterlist(personhold->person_list, person_cnt) 
+         person_cnt_sort = 0 
+ 
+    head per.person_id
+         person_cnt_sort = person_cnt_sort + 1
+         personhold->person_list[person_cnt_sort]->person_id = per.person_id
+
+    foot report
+         if (person_cnt < increment)
+             increment = person_cnt
+             report_person_cnt = 0
+         else
+             report_person_cnt = person_cnt - increment
+         endif
+         
+    with nocounter, dontcare(pra)                                                     
+
+    free record personhold_unsorted
+    
+    /********************************************************************************************/
+    /*    The following select finds all MRN(s) for each patient and adds them to               */
+    /*    person_mrn_list which is part of the personhold record.                               */
+    /********************************************************************************************/
+    select into "nl:"
+      formatted_mrn=cnvtalias(pra.alias,pra.alias_pool_cd)
+    from
+      (dummyt d_person_list with seq = value(person_cnt)),
+      person_alias pra
+    plan d_person_list
+    join pra where personhold->person_list[d_person_list.seq]->person_id = pra.person_id
+             and pra.person_alias_type_cd  = mrn_code
+             and pra.active_ind            = 1
+    order by d_person_list.seq,
+             formatted_mrn
+    head d_person_list.seq
+      stat = alterlist(personhold->person_list[d_person_list.seq]->person_mrn_list, 10)
+      person_mrn_cnt = 0
+    detail
+      person_mrn_cnt = person_mrn_cnt + 1
+      if (mod(person_mrn_cnt, 10) = 1 and person_mrn_cnt !=1)
+          stat = alterlist(personhold->person_list[d_person_list.seq]->person_mrn_list, person_mrn_cnt + 9)
+      endif
+      personhold->person_list[d_person_list.seq]->person_mrn_list[person_mrn_cnt]->formatted_mrn=formatted_mrn
+    foot d_person_list.seq
+          stat = alterlist(personhold->person_list[d_person_list.seq]->person_mrn_list, person_mrn_cnt)
+    with nocounter
+
+    /********************************************************************************************/
+    /*    The following select generates the report for "by patient" or "specific patient".     */
+    /********************************************************************************************/
+    while (done = 0)
+        select into cpm_cfn_info->file_name_logical
+              per.person_id
+            , sort_patient_name = substring(1,30, cnvtupper(per.name_full_formatted))
+            , d_flag = decode(trq.seq, "F", nom.seq, "E", bb.seq, "D", pan.seq, "C", pab.seq, "B", pa.seq, "A", "G")
+            , aborh_display = concat(trim(uar_get_code_display(pa.abo_cd))," ",trim(uar_get_code_display(pa.rh_cd)))
+            , pa.rh_cd
+            , per.person_id
+            , pab.antibody_cd
+            , pan.antigen_cd
+            , pab_display = substring(1, 15, uar_get_code_display(pab.antibody_cd))
+            , pan_display = substring(1, 10, uar_get_code_display(pan.antigen_cd))
+            , antibody_display = uar_get_code_display(pab.antibody_cd)
+            , antigen_display = uar_get_code_display(pan.antigen_cd)
+            , prh.rh_phenotype_id
+            , prh.person_id 
+            , nom.short_string
+            , ptr.person_id
+            , ptr.requirement_cd
+            , requirement_disp = uar_get_code_display(trq.requirement_cd)
+            
+        from 
+            (dummyt d10 with seq = value(increment))
+            , person per
+            , (dummyt d9 with seq = 1)
+            , person_aborh pa
+            , blood_bank_comment bb
+            , long_text lt
+            , person_antibody pab
+            , person_antigen pan
+            , person_rh_phenotype prh
+            , bb_rh_phenotype brh 
+            , nomenclature nom
+            , person_trans_req ptr         
+            , transfusion_requirements trq
+      
+        plan  d10 
+        join per where per.person_id  = personhold->person_list[d10.seq + seq_var]->person_id                 
+        join (d9 where d9.seq = 1
+              join (pa where pa.active_ind = 1
+                         and pa.person_id  = per.person_id)
+              orjoin (bb where bb.active_ind = 1
+                           and bb.person_id  = per.person_id
+                      join lt where lt.long_text_id = bb.long_text_id)
+              orjoin (pab where pab.person_id  = per.person_id
+                            and pab.active_ind = 1)
+              orjoin (pan where pan.person_id  = per.person_id
+                            and pan.active_ind = 1)
+              orjoin (prh where prh.person_id  = per.person_id
+                            and prh.active_ind = 1
+                      join brh where prh.rh_phenotype_id = brh.rh_phenotype_id
+                      join nom where nom.nomenclature_id = brh.w_nomenclature_id
+                                  or nom.nomenclature_id = brh.fr_nomenclature_id)
+              orjoin (ptr where ptr.person_id = per.person_id
+                            and ptr.person_id > 0
+                            and ptr.active_ind  = 1
+                      join trq where ptr.requirement_cd = trq.requirement_cd))
+            
+        order by
+           sort_patient_name, 
+           per.person_id,
+           d_flag,
+           pab_display,  
+           pab.antibody_cd,
+           pan_display, 
+           pan.antigen_cd
+       
+        head report
+           beg_dt_tm = cnvtdatetime(request->beg_dt_tm)
+           end_dt_tm = cnvtdatetime(request->end_dt_tm)
+           select_ok_ind = 0
+           first_person = 0
+       
+        head page
+           if (row_hold >= 55)
+              if(first_person = 0 and report_page > 1)
+                 row + 1
+              endif
+%i cclsource:bbt_print_location_info.inc       
+              row 0
+              call center(captions->patient_typings,1,125)
+              col 104, captions->time,
+              col 118, CURTIME "@TIMENOSECONDS;;M", 
+              row + 1
+              col 104, captions->as_of_date,
+              col 118, CURDATE "@DATECONDENSED;;d",
+              row 1
+              if (request->patient_selection = 0.0)  
+                  call center(captions->by_patient,1,125)
+              else
+                  call center(captions->specific_patient,1,125)
+              endif
+              row + 2
+              col  30, captions->beg_date
+              col  46, beg_dt_tm "@DATECONDENSED;;d"  
+              col  55, beg_dt_tm "@TIMENOSECONDS;;M" 
+              col  69, captions->end_date	
+              col  82, end_dt_tm "@DATECONDENSED;;d" 
+              col  91, end_dt_tm  "@TIMENOSECONDS;;M"
+              ;If the report needs to be filter on a transfusion service facility.
+              if(request->facility_cd > 0)
+                  row + 2
+                  col 1,  captions->facility
+                  col 11, facility_disp
+              endif
+              row + 3
+              call center(captions->medical,31,46)
+              call center(captions->transfusion, 91, 103)	       
+              row + 1
+              call center(captions->name,1,30)
+              call center(captions->record_number,31,46)
+              col  47, captions->birth_dt
+              col  66, captions->aborh
+              col  78, captions->phenotype
+              call center(captions->requirements, 91, 105)
+              call center(captions->antibodies,106,117)
+              call center(captions->antigens,119,128)
+              row + 1
+              col   1, "----------------------------"
+              col  31, "---------------"  
+              col  48, "-------------"
+              col  63, "-------------"
+              col  78, "------------"
+              col  92, "------------" 
+              col 106, "-----------"
+              col 119, "--------"
+              row + 1
+              row_hold = row
+           else
+              row + 1
+           endif
+           first_person = 1
+                  
+        head per.person_id
+           if (row_hold > 55) 
+               break 
+           endif
+           hld_antibody = "          " ;This must be 10 wide otherwise the comparison below will not work.
+           hld_antigen  = "          " ;This must also be 10 spaces wide.
+           hld_trans_req = "            " ;This must be 12 spaces wide.
+           person_name = substring(1,30,per.name_full_formatted)
+           person_birth_dt_tm = cnvtdatetime(per.birth_dt_tm)
+           person_birth_tz = validate(per.birth_tz,0)
+           col_name = 1
+           col_mrn = 31
+       
+           if (size(trim(person_name)) = 0)
+               col  col_name, captions->not_on_file
+           else
+               col  col_name, person_name
+           endif
+       
+           if (person_birth_dt_tm = 0)
+               col  48, captions->not_on_file
+           else
+               if (curutc = 1)
+                   temp1 = format(datetimezone(person_birth_dt_tm,person_birth_tz),"@DATECONDENSED;4;q")   
+                   temp2 = format(datetimezone(person_birth_dt_tm,person_birth_tz),"@TIMENOSECONDS;4;q")   
+               else
+                   temp1 = format(person_birth_dt_tm,"@DATECONDENSED;;d" )  
+                   temp2 = format(person_birth_dt_tm,"@TIMENOSECONDS;;M")  
+               endif 
+               col 48 temp1  
+               col 56 temp2
+           endif
+                
+           if (size(trim(aborh_display)) > 0)
+               call center(trim(substring(1,13,aborh_display)),63, 75)
+           else
+               call center(trim(substring(1,13,captions->none)),63,75)
+           endif    
+       
+           antib_col = 0
+           antig_col = 0
+           first_time = "Y"
+           comment_cnt = 0
+           pheno_cnt = 0
+      
+        detail
+           if (d_flag = "B")
+               if (substring(1,10,trim(antibody_display)) != hld_antibody)
+                   idx1 = idx1 + 1
+                   if (mod(idx1, 10) = 1 and idx1 != 1)
+                       stat = alterlist(person_antib->antib_list, idx1 + 9)
+                   endif
+                   person_antib->antib_list[idx1]->antib_display = substring(1,10,trim(antibody_display))
+                   hld_antibody = substring(1,10,trim(antibody_display))
+               endif
+           elseif (d_flag = "C")
+               if (substring(1,10,trim(antigen_display)) != hld_antigen)
+                   idx3 = idx3 + 1
+                   if (mod(idx3, 10) = 1 and idx3 != 1)
+                       stat = alterlist(person_antig->antig_list, idx3 + 9)
+                   endif
+                   person_antig->antig_list[idx3]->antig_display = substring(1,10,trim(antigen_display))
+                   hld_antigen = substring(1,10,trim(antigen_display))
+               endif
+           elseif ( d_flag = "E" )
+               if (nom.nomenclature_id = brh.fr_nomenclature_id)
+                   pheno_cnt = pheno_cnt + 1
+                   fisher_disp = substring(1, 10, trim(nom.short_string))
+               elseif (nom.nomenclature_id = brh.w_nomenclature_id)
+                   pheno_cnt = pheno_cnt + 1
+                   wiener_disp = substring(1, 10, trim(nom.short_string))
+                   phen_display = substring(1, 20, concat(trim(fisher_disp), "  ", trim(wiener_disp)))
+                   col 78, phen_display
+               endif
+           elseif (d_flag = "F")
+               if (substring(1,12,trim(requirement_disp)) != trim(hld_trans_req))
+                   trans_cnt = trans_cnt + 1 
+                   if (mod(trans_cnt, 10) = 1 and trans_cnt != 1)
+                       stat = alterlist(person_trans_req->trans_req_list, trans_cnt + 9)
+                   endif
+                   person_trans_req->trans_req_list[trans_cnt]->trans_req_display = substring(1, 12, trim(requirement_disp))
+                   hld_trans_req = substring(1, 12, trim(requirement_disp))
+               endif
+           elseif (d_flag = "D")
+               comment_cnt = comment_cnt + 1
+               bbcomment->qual[1].comment = trim(lt.long_text,3)
+           endif
+       
+        foot per.person_id
+           idx2 = 1
+           idx4 = 1
+           trans_cnt1 = 1
+           mrn_count1 = size(personhold->person_list[d10.seq + seq_var]->person_mrn_list,5)
+           mrn_count2 = 1
+             
+           if (mrn_count1 = 0)
+              col col_mrn, captions->not_on_file
+           endif
+      
+           if (pheno_cnt = 0)
+              call center(captions->none,78,90)
+           endif
+     
+           if (trans_cnt = 0)
+              call center(captions->none,92,104)
+           endif
+      
+           if (idx1 = 0)
+               call center(captions->none,106,118)
+           endif
+      
+           if (idx3 = 0)
+               call center(captions->none,120,127)
+           endif
+      
+           if ((idx1 > 0) or (idx3 > 0) or (trans_cnt > 0) or (mrn_count1 > 0)) 
+               while ((idx2 <=idx1) or (idx4 <= idx3) or (trans_cnt1 <= trans_cnt) or (mrn_count2 <= mrn_count1))
+                   if (first_time = "Y")
+                       first_time = "N"
+                   else
+                       row + 1
+                       row_hold = row_hold + 1
+                       if (row_hold > 56)
+                           break
+                       endif
+                   endif
+                
+                   cnt = 1
+                   while ((cnt < 2) and (mrn_count2 <= mrn_count1))
+                       cnt = cnt + 1
+                       person_nbr = substring(1,15, 
+                                          personhold->person_list[d10.seq + seq_var]->person_mrn_list[mrn_count2]->formatted_mrn)
+                       col col_mrn, person_nbr
+                       mrn_count2 = mrn_count2 + 1
+                   endwhile
+                 
+                   trans_req_col = 0
+                   cnt  = 1
+                   while ((cnt < 2) and (trans_cnt1 <= trans_cnt))
+                       cnt = cnt + 1
+                       col 87
+                       trans_req_col = trans_req_col + 5
+                       col + trans_req_col, person_trans_req->trans_req_list[trans_cnt1]->trans_req_display
+                       trans_cnt1 = trans_cnt1 + 1
+                   endwhile 
+       
+                   antib_col = 0
+                   cnt = 1
+                   while ((cnt < 2) and (idx2 <= idx1))
+                       cnt = cnt + 1
+                       col 107
+                       col + antib_col, person_antib->antib_list[idx2]->antib_display
+                       idx2 = idx2 + 1
+                   endwhile
+ 
+                   antig_col = 0
+                   cnt = 1 
+                   while ((cnt < 2) and (idx4 <= idx3))
+                       cnt = cnt + 1
+                       col 110
+                       antig_col = antig_col + 11               
+                       col + antig_col, person_antig->antig_list[idx4]->antig_display  
+                       idx4 = idx4 + 1
+                   endwhile
+               endwhile
+           endif
+
+           idx2 = 1
+           idx4 = 1
+           trans_cnt1 = 1 
+ 
+           while (idx2 <= idx1)      
+               person_antib->antib_list[idx2]->antib_display = ""
+               idx2 = idx2 + 1
+           endwhile
+
+           while (idx4 <= idx3)      
+               person_antig->antig_list[idx4]->antig_display = ""
+               idx4 = idx4 + 1
+           endwhile
+
+           while (trans_cnt1 <= trans_cnt)
+              person_trans_req->trans_req_list[trans_cnt1]->trans_req_display = ""
+              trans_cnt1 = trans_cnt1 + 1
+           endwhile
+
+           idx1 = 0 
+           idx3 = 0
+           trans_cnt = 0
+
+           tmptext_index = 0
+           if (comment_cnt > 0)
+               call RTF_TO_TEXT(bbcomment->qual[1].comment,1,80)
+               row + 2
+               row_hold = row_hold + 2
+               if (row_hold > 55)
+                   break
+               endif
+               col 27, captions->patient_comments
+               row + 1
+               row_hold = row_hold + 1 
+               for(tmptext_index = 1 to size(tmptext->qual,5))
+                   col 27, tmptext->qual[tmptext_index].text
+                   if (row_hold > 55)
+                       break
+                   else 
+                       row + 1
+                       row_hold = row_hold + 1
+                   endif
+                endfor
+           endif
+           
+           if (row_hold >= 55)
+              break
+           else
+              row + 2
+              row_hold = row_hold + 2
+           endif
+           
+        foot page
+           if ((row_hold >= 55) or (report_person_cnt = 0))
+              bump_lines = row_hold - 57
+              row - bump_lines
+              report_page = report_page + 1
+              col   1, line,
+              ROW + 1 
+              COL 001,    captions->report_id
+              COL 060,    captions->page_no
+              COL 067,    report_page ";L"
+              COL 103,    captions->printed
+              COL 112,    curdate "@DATECONDENSED;;d" 
+              COL 121,    curtime "@TIMENOSECONDS;;M" 
+              ROW + 1 
+              COL 108,    captions->rpt_by
+              COL 112,    cur_username
+           endif
+           
+        foot report
+           if (report_person_cnt = 0)
+              row + 1
+              call center(captions->end_of_report, 1, 125)
+              report_complete_ind = "Y"
+              select_ok_ind = 1
+           endif
+  
+        with  
+           counter, nullreport, maxrow = 61, outerjoin(d9), dontcare(pra), outerjoin(d_pra), dontcare(ap),
+           outerjoin(d_ap), compress, nolandscape, memsort, append 
+   
+        set seq_var = seq_var + increment
+   
+        if (report_person_cnt = 0)     
+            set done = 1
+        elseif (report_person_cnt < increment)
+            set increment = report_person_cnt
+            set report_person_cnt = 0       
+        else
+            set report_person_cnt = report_person_cnt - increment
+        endif
+    endwhile                         
+else ;by MRN 
+    /********************************************************************************************/
+    /*    Sort the personhold_unsorted structure into the personhold structure according to     */
+    /*    the request selection parameters.                                                     */
+    /********************************************************************************************/ 
+    select into "nl:" 
+         person_id_alias_id = decode(pra.person_alias_id, build(per.person_id, pra.person_alias_id), 
+                                     build(per.person_id, 0.0)),
+         sort_mrn = decode(pra.seq, substring(1, 15, cnvtalias(pra.alias,pra.alias_pool_cd)), ""),
+         sort_patient_name = substring(1,30, cnvtupper(per.name_full_formatted))
+
+    from  
+         (dummyt d_sortPer with seq = value(person_cnt)),
+         person per,
+         (dummyt d_sortPra with seq = 1),
+         person_alias pra
+       
+    plan d_sortPer 
+    join per where per.person_id  = personhold_unsorted->person_list[d_sortPer.seq]->person_id                  
+    join (d_sortPra where d_sortPra.seq = 1 
+          join pra where per.person_id             = pra.person_id 
+                     and pra.person_alias_type_cd  = mrn_code 
+                     and pra.active_ind            = 1) 
+
+    order by 
+         sort_mrn,          
+         sort_patient_name,
+         person_id_alias_id 
+
+    head report 
+         stat = alterlist(personhold->person_list, person_cnt) 
+         person_cnt_sort = 0 
+ 
+    head person_id_alias_id 
+         person_cnt_sort = person_cnt_sort + 1
+         if (size(personhold->person_list,5) < person_cnt_sort)
+             stat = alterlist(personhold->person_list,person_cnt_sort + 500)
+         endif
+         
+         stat = alterlist(personhold->person_list[person_cnt_sort].person_mrn_list,1) ;will only have one MRN per record.
+         personhold->person_list[person_cnt_sort].person_mrn_list[1].formatted_mrn = sort_mrn 
+         personhold->person_list[person_cnt_sort].person_id_alias_id = person_id_alias_id
+         personhold->person_list[person_cnt_sort]->person_id = per.person_id 
+    foot report
+         person_cnt = person_cnt_sort
+         stat = alterlist(personhold->person_list,person_cnt)
+
+         if (person_cnt < increment)
+             increment = person_cnt
+             report_person_cnt = 0 
+         else 
+             report_person_cnt = person_cnt - increment
+         endif 
+               
+    with nocounter, dontcare(pra), outerjoin(d_sortPra)
+    
+    free record personhold_unsorted
+
+    /********************************************************************************************/
+    /* Generate report sorted by MRN.                                                           */
+    /********************************************************************************************/
+    while (done = 0)
+        select into cpm_cfn_info->file_name_logical
+            person_id_alias_id = personhold->person_list[d10.seq + seq_var].person_id_alias_id
+           , sort_patient_name = substring(1,30, cnvtupper(per.name_full_formatted))
+           , d_flag = decode(trq.seq, "F", nom.seq, "E", bb.seq, "D", pan.seq, "C", pab.seq, "B", pa.seq, "A", "G")
+           , aborh_display = concat(trim(uar_get_code_display(pa.abo_cd))," ",trim(uar_get_code_display(pa.rh_cd)))
+           , pa.rh_cd
+           , sort_mrn = substring(1,15,personhold->person_list[d10.seq + seq_var].person_mrn_list[1].formatted_mrn)
+           , per.person_id
+           , pab.antibody_cd
+           , pan.antigen_cd
+           , pab_display = substring(1, 15, uar_get_code_display(pab.antibody_cd)) 
+           , pan_display = substring(1, 10, uar_get_code_display(pan.antigen_cd)) 
+           , antibody_display = uar_get_code_display(pab.antibody_cd) 
+           , antigen_display = uar_get_code_display(pan.antigen_cd)
+           , prh.rh_phenotype_id
+           , prh.person_id 
+           , nom.short_string
+           , ptr.person_id     
+           , ptr.requirement_cd 
+           , requirement_disp = uar_get_code_display(trq.requirement_cd)
+            
+        from 
+           (dummyt d10 with seq = value(increment))
+           , person per
+           , (dummyt d9 with seq = 1)
+           , person_aborh pa
+           , blood_bank_comment bb
+           , long_text lt
+           , person_antibody pab
+           , person_antigen pan
+           , person_rh_phenotype prh
+           , bb_rh_phenotype brh 
+           , nomenclature nom
+           , person_trans_req ptr
+           , transfusion_requirements trq 
+     
+        plan d10 
+        join per where per.person_id  = personhold->person_list[d10.seq + seq_var]->person_id        
+        join (d9 where d9.seq = 1
+              join (pa where pa.active_ind = 1
+                         and pa.person_id  = per.person_id)
+              orjoin (bb where bb.active_ind = 1
+                           and bb.person_id  = per.person_id
+                      join lt where lt.long_text_id = bb.long_text_id)
+              orjoin (pab where pab.person_id  = per.person_id
+                            and pab.active_ind = 1)
+              orjoin (pan where pan.person_id  = per.person_id
+                            and pan.active_ind = 1)
+              orjoin (prh where prh.person_id  = per.person_id
+                            and prh.active_ind = 1
+                      join brh where prh.rh_phenotype_id = brh.rh_phenotype_id
+                      join nom where nom.nomenclature_id = brh.w_nomenclature_id
+                                  or nom.nomenclature_id = brh.fr_nomenclature_id)
+              orjoin (ptr where ptr.person_id = per.person_id
+                            and ptr.person_id > 0
+                            and ptr.active_ind  = 1
+                      join trq where ptr.requirement_cd = trq.requirement_cd))
+           
+        order by
+           sort_mrn,
+           sort_patient_name,
+           person_id_alias_id,
+           d_flag,
+           pab_display,
+           pab.antibody_cd,
+           pan_display,
+           pan.antigen_cd    
+
+        head report
+           beg_dt_tm = cnvtdatetime(request->beg_dt_tm)
+           end_dt_tm = cnvtdatetime(request->end_dt_tm)
+           select_ok_ind = 0
+           first_person = 0 
+    
+        head page
+           if (row_hold >= 55)
+               if (first_person = 0 and report_page > 1) 
+                   row + 1 
+               endif 
+
+%i cclsource:bbt_print_location_info.inc       
+               row 0
+               call center(captions->patient_typings,1,125)	
+               col 104, captions->time,	
+               col 118, CURTIME "@TIMENOSECONDS;;M", 
+               row + 1
+               col 104, captions->as_of_date,
+               col 118, CURDATE "@DATECONDENSED;;d",
+               row 1
+               call center(captions->by_med_no,1,125)
+               row + 2
+               col  30, captions->beg_date	
+               col  46, beg_dt_tm "@DATECONDENSED;;d"  
+               col  55, beg_dt_tm "@TIMENOSECONDS;;M" 
+               col  69, captions->end_date		
+               col  82, end_dt_tm "@DATECONDENSED;;d" 
+               col  91, end_dt_tm  "@TIMENOSECONDS;;M"
+               ;If the report needs to be filter on a transfusion service facility.
+               if(request->facility_cd > 0)
+                   row + 2
+                   col 1,  captions->facility
+                   col 11, facility_disp
+               endif
+               row + 3
+               call center(captions->medical,1,16)
+               call center(captions->transfusion, 91, 103)	
+               row + 1
+               call center(captions->record_number,1,16)
+               call center(captions->name,18,45)
+               col  47, captions->birth_dt	
+               col  66, captions->aborh		
+               col  78, captions->phenotype
+               call center(captions->requirements, 91, 105)       	
+               call center(captions->antibodies,106,117)
+               call center(captions->antigens,119,128)	
+               row + 1
+               col   1, "---------------"
+               col  18, "----------------------------"
+               col  48, "-------------"
+               col  63, "-------------"
+               col  78, "------------"
+               col  92, "------------" 
+               col 106, "-----------"
+               col 119, "--------"
+               row + 1
+               row_hold = row  
+           else
+               row + 1
+           endif
+           first_person = 1
+        head person_id_alias_id
+           if (row > 55) 
+               break 
+           endif
+           hld_antibody = "          " ;This must be 10 wide otherwise the comparison below will not work.
+           hld_antigen  = "          " ;This must also be 10 spaces wide.
+           hld_trans_req = "            " ;This must be 12 spaces wide.           
+           person_name = substring(1,30,per.name_full_formatted)
+           person_nbr = substring(1,15, sort_mrn)
+           person_birth_dt_tm = cnvtdatetime(per.birth_dt_tm) 
+           person_birth_tz = validate(per.birth_tz,0)
+           col_name = 18
+           col_mrn = 1
+    
+           if (size(trim(person_name)) = 0)
+               col  col_name, captions->not_on_file	
+           else
+               col  col_name, person_name
+           endif
+        
+    
+           if (size(trim(person_nbr)) = 0)
+               col col_mrn, captions->not_on_file
+           else
+               col col_mrn, person_nbr
+           endif
+    
+           if (person_birth_dt_tm = 0)
+               col  48, captions->not_on_file
+           else
+               if (curutc = 1)
+                   temp1 = format(datetimezone(person_birth_dt_tm,person_birth_tz),"@DATECONDENSED;4;q")   
+                   temp2 = format(datetimezone(person_birth_dt_tm,person_birth_tz),"@TIMENOSECONDS;4;q")   
+               else
+                   temp1 = format(person_birth_dt_tm,"@DATECONDENSED;;d" )  
+                   temp2 = format(person_birth_dt_tm,"@TIMENOSECONDS;;M")  
+               endif 
+               col 48 temp1  
+               col 56 temp2
+           endif
+           
+           if (size(trim(aborh_display)) > 0)
+               call center(trim(substring(1,13,aborh_display)),63, 75)
+           else
+               call center(trim(substring(1,13,captions->none)),63,75)
+           endif 
+
+           antib_col = 0
+           antig_col = 0
+           first_time = "Y"
+           comment_cnt = 0 
+           pheno_cnt = 0
+
+        detail
+           if (d_flag = "B")
+               if (substring(1,10,trim(antibody_display)) != hld_antibody)
+                   idx1 = idx1 + 1
+                   if (mod(idx1, 10) = 1 and idx1 != 1)
+                       stat = alterlist(person_antib->antib_list, idx1 + 9)
+                   endif
+                   person_antib->antib_list[idx1]->antib_display = substring(1,10,trim(antibody_display))
+                   hld_antibody = substring(1,10,trim(antibody_display))
+               endif
+           elseif (d_flag = "C")
+               if (substring(1,10,trim(antigen_display)) != hld_antigen)
+                   idx3 = idx3 + 1
+                   if (mod(idx3, 10) = 1 and idx3 != 1)
+                       stat = alterlist(person_antig->antig_list, idx3 + 9)
+                   endif
+                   person_antig->antig_list[idx3]->antig_display = substring(1,10,trim(antigen_display))
+                   hld_antigen = substring(1,10,trim(antigen_display))
+               endif
+           elseif ( d_flag = "E" )
+               if (nom.nomenclature_id = brh.fr_nomenclature_id)
+                   pheno_cnt = pheno_cnt + 1
+                   fisher_disp = substring(1, 10, trim(nom.short_string))
+                elseif (nom.nomenclature_id = brh.w_nomenclature_id)
+                   pheno_cnt = pheno_cnt + 1
+                   wiener_disp = substring(1, 10, trim(nom.short_string))
+                   phen_display = substring(1, 20, concat(trim(fisher_disp), "  ", trim(wiener_disp)))
+                   col 78, phen_display
+                endif
+           elseif (d_flag = "F")
+               if (substring(1,12,trim(requirement_disp)) != trim(hld_trans_req))
+                   trans_cnt = trans_cnt + 1 
+                   if (mod(trans_cnt, 10) = 1 and trans_cnt != 1)
+                       stat = alterlist(person_trans_req->trans_req_list, trans_cnt + 9)
+                   endif
+                   person_trans_req->trans_req_list[trans_cnt]->trans_req_display = substring(1, 12, trim(requirement_disp))
+                   hld_trans_req = substring(1, 12, trim(requirement_disp))
+               endif
+           elseif (d_flag = "D")
+              comment_cnt = comment_cnt + 1
+              bbcomment->qual[1].comment = trim(lt.long_text,3)
+           endif
+   
+        foot person_id_alias_id
+           idx2 = 1
+           idx4 = 1
+           trans_cnt1 = 1
+   
+           if (pheno_cnt = 0)
+               call center(captions->none,78,90)
+           endif
+   
+           if (trans_cnt = 0)
+               call center(captions->none,92,104)
+           endif
+   
+           if (idx1 = 0)
+               call center(captions->none,106,118)
+           endif
+   
+           if (idx3 = 0)
+               call center(captions->none,120,127)
+           endif
+     
+   
+           if ((idx1 > 0) or (idx3 > 0) or (trans_cnt > 0)) 
+               while ((idx2 <=idx1) or (idx4 <= idx3) or (trans_cnt1 <= trans_cnt))
+                   if (first_time = "Y")
+                       first_time = "N"
+                   else
+                       row + 1
+                       row_hold = row_hold + 1
+                       if (row_hold > 56)
+                           break
+                       endif
+                   endif
+       
+                   trans_req_col = 0
+                   cnt  = 1
+                   while ((cnt < 2) and (trans_cnt1 <= trans_cnt))
+                       cnt = cnt + 1
+                       col 87
+                       trans_req_col = trans_req_col + 5
+                       col + trans_req_col, person_trans_req->trans_req_list[trans_cnt1]->trans_req_display
+                       trans_cnt1 = trans_cnt1 + 1
+                   endwhile
+      
+                   antib_col = 0
+                   cnt = 1
+                   while ((cnt < 2) and (idx2 <= idx1))
+                       cnt = cnt + 1
+                       col 107
+                       col + antib_col, person_antib->antib_list[idx2]->antib_display
+                       idx2 = idx2 + 1
+                   endwhile
+        
+                   antig_col = 0
+                   cnt = 1
+                   while ((cnt < 2) and (idx4 <= idx3))
+                       cnt = cnt + 1
+                       col 110
+                       antig_col = antig_col + 11               
+                       col + antig_col, person_antig->antig_list[idx4]->antig_display
+                       idx4 = idx4 + 1
+                   endwhile
+               endwhile
+           endif
+
+           idx2 = 1
+           idx4 = 1
+           trans_cnt1 = 1 
+      
+           while (idx2 <= idx1)      
+               person_antib->antib_list[idx2]->antib_display = ""
+               idx2 = idx2 + 1
+           endwhile
+    
+           while (idx4 <= idx3)      
+               person_antig->antig_list[idx4]->antig_display = ""
+               idx4 = idx4 + 1
+           endwhile
+
+           while (trans_cnt1 <= trans_cnt)
+               person_trans_req->trans_req_list[trans_cnt1]->trans_req_display = ""
+               trans_cnt1 = trans_cnt1 + 1
+           endwhile
+
+           idx1 = 0 
+           idx3 = 0
+           trans_cnt = 0 
+ 
+           tmptext_index = 0
+           if (comment_cnt > 0)
+               call RTF_TO_TEXT(bbcomment->qual[1].comment,1,80)
+               row + 2
+               row_hold = row_hold + 2
+               if (row_hold > 55)
+                   break
+               endif
+               col 27, captions->patient_comments
+               row + 1 
+               row_hold = row_hold + 1
+               for(tmptext_index = 1 to size(tmptext->qual,5))
+                   col 27, tmptext->qual[tmptext_index].text
+                   if (row_hold > 55)
+                       break
+                   else 
+                       row + 1
+                       row_hold = row_hold + 1
+                   endif
+               endfor
+           endif
+           
+           if (row_hold >=55)
+               break
+           else
+               row + 2
+               row_hold = row_hold + 2
+           endif
+           
+        foot page
+           if ((row_hold >= 55) or (report_person_cnt = 0))
+               bump_lines = row_hold - 57
+               row - bump_lines
+               report_page = report_page + 1
+               col   1, line,
+               ROW + 1 
+               COL 001,    captions->report_id
+               COL 060,    captions->page_no
+               COL 067,    report_page ";L"
+               COL 103,    captions->printed
+               COL 112,    curdate "@DATECONDENSED;;d" 
+               COL 121,    curtime "@TIMENOSECONDS;;M" 
+               ROW + 1 
+               COL 108,    captions->rpt_by	
+               COL 112,    cur_username
+           endif
+            
+        foot report	
+           if (report_person_cnt = 0)
+               row + 1
+               call center(captions->end_of_report, 1, 125)
+               report_complete_ind = "Y"
+               select_ok_ind = 1
+           endif
+ 
+        with counter, nullreport, maxrow = 61, outerjoin(d9), dontcare(pra), outerjoin(d_pra),
+            dontcare(ap), outerjoin(d_ap), compress, nolandscape, memsort, append
+           
+        set seq_var = seq_var + increment
+            
+        if (report_person_cnt = 0) 
+            set done = 1 
+        elseif (report_person_cnt < increment) 
+            set increment = report_person_cnt
+            set report_person_cnt = 0 
+        else 
+            set report_person_cnt = report_person_cnt - increment 
+        endif 
+    endwhile  
+endif
+
+set count1 = count1 + 1
+if (count1 > 1)
+    SET stat = ALTERLIST(reply->status_data->subeventstatus, count1+1)
+endif
+if (report_complete_ind = "Y")
+    set reply->status_data->status = "S"
+    set reply->status_data->subeventstatus[count1]->OperationName = "Report Complete"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "S"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_pat_typ_com"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+        = "Report completed successfully"
+
+else
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "Abnormal End"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_pat_typ_com"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue 
+        = "Report ended abnormally"
+endif
+
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+
+if (select_ok_ind = 1)
+    set reply->status_data->status = "S"
+endif
+
+if (trim(request->batch_selection) > " " and 
+    trim(request->output_dist) > " ")
+         SET spool value(reply->rpt_list[rpt_cnt].rpt_filename) value(request->output_dist)
+endif
+
+go to EXIT_SCRIPT
+
+%i cclsource:bbt_get_username.inc
+
+#EXIT_SCRIPT
+
+end go
+
+;Generated by GNU enscript 1.6.4.

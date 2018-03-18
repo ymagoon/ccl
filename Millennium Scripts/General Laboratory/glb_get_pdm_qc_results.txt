@@ -1,0 +1,154 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_pdm_qc_results/GLB_GET_PDM_QC_RESULTS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_PDM_QC_RESULTS.PRG
+        Object name:            GLB_GET_PDM_QC_RESULTS        
+        Request #:              250173
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Retrieve a group of results for a graph that 
+                                is used to try to produce a bell curve
+
+        Tables read:            qc_result
+ 
+        Tables updated:         n/a
+        Executing from:         General Lab
+
+        Special Notes:          n/a
+******************************************************************************/
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 11/09/98 Gary Runde           Initial Release                     *
+;     001 04/04/11 Matt Schile          Rewrite for CR: 1-4835564141        *
+;~DE~************************************************************************
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+    drop program glb_get_pdm_qc_results:dba go
+    create program glb_get_pdm_qc_results:dba
+
+/*
+    record request
+    (
+        1  service_resource_cd   = F8
+        1  control_id            = f8
+        1  task_assay_cd         = F8
+        1  num_results           = i4
+    )
+*/
+
+    record reply
+    (
+        1  min_digits            = I4
+        1  max_digits            = I4
+        1  min_dec_places        = I4
+        1  qual[*]
+            2  result            = f8
+%i cclsource:status_block.inc
+    )
+    
+    set reply->status_data->status = "F"
+
+    ;Include files to be able to dynamically create the request/reply
+%i cclsource:pm_dynamic_query.inc
+%i cclsource:pm_create_request.inc
+
+    ;Create the glb_get_data_map request
+    call cr_createRequest(0, 250145, "data_map_request")
+    
+    ;Declare the glb_get_data_map reply
+    record data_map_reply
+    (
+%i cclsource:glb_get_data_map_reply.inc
+    ) with protect
+
+    ;Retrieve the data map
+    set stat = alterlist(data_map_request->qual, 1)
+    set data_map_request->qual[1].service_resource_cd = request->service_resource_cd
+    set data_map_request->qual[1].task_assay_cd = request->task_assay_cd
+    set data_map_request->qual[1].data_map_type_flag = 1 ;Retrieve the patient data_map or the QC data_map
+    execute glb_get_data_map with replace("REQUEST", "DATA_MAP_REQUEST"), replace("REPLY", "DATA_MAP_REPLY")
+    if(data_map_reply->status_data.status = "S" and size(data_map_reply->qual, 5) = 1)
+        set reply->max_digits = data_map_reply->qual[1].max_digits
+        set reply->min_dec_places = data_map_reply->qual[1].min_decimal_places
+        set reply->min_digits = data_map_reply->qual[1].min_digits
+    else
+        set reply->max_digits = 8
+        set reply->min_dec_places = 0
+        set reply->min_digits = 1
+    endif
+    
+    ;Get code values for result status types
+    declare acc_status = f8 with protect, constant(uar_get_code_by("MEANING", 1901, "ACCEPT"))
+    declare verf_status = f8 with protect, constant(uar_get_code_by("MEANING", 1901, "VERIFIED"))
+    declare av_status = f8 with protect, constant(uar_get_code_by("MEANING", 1901, "AUTOVERIFIED"))
+    declare chg_status = f8 with protect, constant(uar_get_code_by("MEANING", 1901, "CHANGE"))
+
+    ;Select to retrieve the last request->num_results from the qc_result table
+    select 
+        if (request->num_results > 0)
+            with maxqual(q, value(request->num_results)),
+                 nocounter
+        endif
+    into "nl:"
+    from qc_result q
+    plan q  
+        where q.service_resource_cd = request->service_resource_cd
+          and q.task_assay_cd = request->task_assay_cd
+          and q.control_id = request->control_id
+          and q.result_value_numeric > 0
+          and q.qc_result_type_flag = 0
+          and q.result_status_cd in (chg_status, av_status, verf_status, acc_status)
+    order by
+        q.perform_dt_tm desc
+    head report
+        r_cnt = 0
+    detail
+        r_cnt = r_cnt + 1
+        if (mod(r_cnt, 15) = 1)
+            stat =  alterlist(reply->qual, r_cnt + 14)
+        endif
+        reply->qual[r_cnt].result = q.result_value_numeric
+    foot report 
+        stat = alterlist(reply->qual, r_cnt)
+    with nocounter
+    
+    ;If no record matching, exit with return status of "Z".
+    if (size(reply->qual, 5) = 0)
+        set reply->status_data->status = "Z"
+    else
+        set reply->status_data->status = "S"
+    endif
+
+    end go
+
+;Generated by GNU enscript 1.6.4.

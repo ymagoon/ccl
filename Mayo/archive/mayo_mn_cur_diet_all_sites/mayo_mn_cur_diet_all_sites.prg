@@ -1,0 +1,679 @@
+/*******************************************************************
+ 
+Report Name:  Luther Current Diets
+Report Path:  /mayo/mhspd/prg/1_lm_mbw_current_diets_lm.prg
+Report Description:  Displays all patients with an active
+						dietary order.
+ 
+Created by:  Mary Wiersgalla
+Created date:  08/2006
+ 
+Modified by:	Lisa Sword
+Modified date:	03/2009
+Modifications:	Added "Attending - Hospital" Provider. Looking for only
+				the authenticated attending, so we only pull the
+				attending sent from the reg system, otherwise food
+				allergies were printing multiple times. (07/2009, las)
+ 
+ 
+Modified by:	Lisa Sword
+Modified date:	04/2009
+Modifications:	Added Page Braek by Nurse Unit
+ 
+Modified by:  Scott Easterhaus, Akcia Inc.
+Modified date:  12/20/10
+Modifications:  Make into one version for all facilities
+Mod Number: 103
+ 
+Modified by:  Phil Landry, Akcia Inc.
+Modified date:  01/11/11
+Modifications:  Remove check on alias_pool_cd for FNBR
+Mod Number: 104
+ 
+Modified by:  Scott Easterhaus, Akcia Inc.
+Modified date:   02/01/2011
+Modifications:  fix rooms with letters not displaying
+Mod Number:  105
+ 
+Modified by:  Scott Easterhaus, Akcia Inc.
+Modified date:   02/17/2011
+Modifications:  add back in attending, add separate display fields for snacks and supplements
+Mod Number:  106
+ 
+Modified by:  Scott Easterhaus, Akcia Inc.
+Modified date:   02/17/2011
+Modifications:  add birthdate to report
+Mod Number:  107
+ 
+Modified by:  Scott Easterhaus, Akcia Inc.
+Modified date:   01/17/2012
+Modifications:  fix to pull "Calorie Count - Dietary" and change diet name display based of of change to order setup
+Mod Number:  108
+ 
+Modified by:  Scott Easterhaus, Akcia Inc.
+Modified date:   12/21/2012
+Modifications:  add new catalog type cd to pull "Room Service Participation order"; fix duplicate allergies
+Mod Number:  109
+ 
+ Modified by:  Scott Easterhaus, Akcia Inc.
+Modified date:   12/21/2012
+Modifications:  make all code values variables
+Mod Number:  110
+ 
+ Modified by:  Scott Easterhaus, Akcia Inc.
+Modified date:   6/21/2014
+Modifications:  add code for effciencies on the orders tables
+Mod Number:  111
+ 
+ Modified by:  Scott Easterhaus, Akcia Inc.
+Modified date:   7/30/2014
+Modifications:  add code for effciencies on the orders tables
+Mod Number:  112
+ 
+ Modified by:  Scott Easterhaus, Akcia Inc.
+Modified date:   10/21/2014
+Modifications:  add db2 code
+Mod Number:  113
+ 
+ Modified by:  Scott Easterhaus, Akcia Inc.
+Modified date:   02/27/2015
+Modifications:  exclude outpatients
+Mod Number:  114
+ 
+ *******************************************************************/
+ 
+drop program mayo_mn_cur_diet_all_sites go
+create program mayo_mn_cur_diet_all_sites
+ 
+ 
+prompt
+	"Output to File/Printer/MINE" = "MINE"
+	;<<hidden>>"Facility Group" = ""
+	, "Select Facilities" = ""
+ 
+with OUTDEV, facility
+ 
+/*** Start 113 - New Code ****/
+;****************** Begin ORACLE INSTANCE 2 routine ****************
+;*** If PROD / CERT then run as 2nd oracle instance to improve
+;***   efficiency. Will auto Fail-over to Instance 1 if Instance 2 down.
+;***   Then after at the end, set the program back to instance 1.
+;******************************************************************************
+ 
+;*** This section calls an O/S scritp that reads the current v500 password
+;***   from the Millennium registry and stores it in a file named
+;***   $CCLUSERDIR/dbinfo.dat
+declare dcl_command = vc
+declare dcl_size = i4
+declare dcl_stat = i4
+ 
+set dcl_command = "/mayo/procs/req_query.ksh"
+set dcl_size = size(dcl_command)
+set dcl_stat = 0
+ 
+call dcl(dcl_command,dcl_size,dcl_stat)
+ 
+;*** Next the password is read from the dbinfo.dat file to variable 'pass'.
+FREE DEFINE RTL
+DEFINE RTL IS "dbinfo.dat"
+ 
+declare pass=vc
+ 
+SELECT DISTINCT INTO "NL:"
+  line = substring(1,30,R.LINE)   ; 9,9       10,9
+FROM RTLT R
+PLAN R
+ 
+detail
+ 
+if (line = "dbpw*")
+  pass_in=substring(9,15,line)
+  pass=trim(pass_in,3)
+endif
+ 
+with counter
+ 
+;*** Now we are finished with the dbinfo.dat file and will delete it.
+set dcl_command = ""
+set dcl_command = "rm $CCLUSERDIR/dbinfo.dat"
+set dcl_size = size(dcl_command)
+set dcl_stat = 0
+ 
+call dcl(dcl_command,dcl_size,dcl_stat)
+ 
+declare system=vc
+ 
+;*** This section redifines the OracleSystem variable pointing it to
+;***   database instance 2 using the password read in above.
+;*** This only applies to PRD and CRT, because they are the only domains
+;***   that have multiple instance databases.
+IF (curdomain = "MHPRD")
+  Free define oraclesystem
+  set system=build(concat('v500/', pass, '@mhprdrpt'))
+  DEFINE oraclesystem system
+ELSEIF (CURDOMAIN="MHCRT")
+    FREE DEFINE oraclesystem
+    set system=build(concat('v500/', pass, '@mhcrtrpt'))
+    DEFINE oraclesystem system
+ENDIF
+/*** END 113 - New Code ***/
+ 
+Declare allergy_string = vc
+Declare order_comment = vc
+ 
+SET MaxSecs = 500
+ 
+; 12.10.09
+declare census_cd = f8 with protect, constant(uar_get_code_by("MEANING", 339, "CENSUS"))
+declare fin_cd = f8 with protect, constant(uar_get_code_by("MEANING", 319, "FIN NBR"))  ;104
+declare dietary_cd = f8 with constant(uar_get_code_by("MEANING",6000,"DIETARY"))		;108
+declare room_serv_cd = f8 with constant(uar_get_code_by("DISPLAYKEY",200,"ROOMSERVICEPARTICIPATION"))		;110
+declare ordered_cd = f8 with constant(uar_get_code_by("MEANING",6004,"ORDERED"))		;110
+declare diets_cd = f8 with constant(uar_get_code_by("DISPLAYKEY",106,"DIETS"))		;110
+declare discharged_cd = f8 with constant(uar_get_code_by("MEANING",261,"DISCHARGED"))		;110
+declare calorie_cnt_cd = f8 with constant(uar_get_code_by("DISPLAYKEY",200,"CALORIECOUNTDIETARY"))		;110
+declare supplement_cd = f8 with constant(uar_get_code_by("DISPLAYKEY",106,"SNACKS"))		;110
+declare snacks_cd = f8 with constant(uar_get_code_by("DISPLAYKEY",106,"SUPPLEMENTS"))		;110
+declare attending_cd = f8 with constant(uar_get_code_by("MEANING",333,"ATTENDDOC"))		;110
+declare weight_cd = f8 with constant(uar_get_code_by("DISPLAYKEY",72,"ACTUALWEIGHT"))		;110
+declare height_cd = f8 with constant(uar_get_code_by("DISPLAYKEY",72,"HEIGHT"))		;110
+declare outpatient_cd = f8 with constant(uar_get_code_by("DISPLAYKEY",69,"OUTPATIENT"))		;114
+
+;start 108
+declare diet_type_id = f8
+select
+from
+order_entry_fields oef
+where oef.description = "Diet Type"
+  and oef.catalog_type_cd = dietary_cd
+detail
+diet_type_id = oef.oe_field_id
+with nocounter
+ 
+;end 108
+ 
+; report output is sent to a file, Mayo JAX sends it to the printer
+SELECT INTO $OUTDEV
+	O.ORDER_MNEMONIC
+	, O.CLINICAL_DISPLAY_LINE
+	, FACILITY = UAR_GET_CODE_description( E.LOC_FACILITY_CD )
+	, DEPARTMENT = UAR_GET_CODE_DISPLAY( E.LOC_NURSE_UNIT_CD )
+	;105  , ROOM = CNVTINT(UAR_GET_CODE_DISPLAY( E.LOC_ROOM_CD ))
+	, ROOM = UAR_GET_CODE_DISPLAY( E.LOC_ROOM_CD )    ;105
+	, room_sort1 = cnvtint(cnvtalphanum(UAR_GET_CODE_DISPLAY(E.LOC_ROOM_CD),1))		;105
+	, room_sort2 = cnvtalphanum(UAR_GET_CODE_DISPLAY(E.LOC_ROOM_CD),2)		;105
+	, BED = UAR_GET_CODE_DISPLAY( E.LOC_BED_CD )
+	, ACCOUNT_NO = substring(1,20,EA.ALIAS)
+	, P.PERSON_ID
+	, NAME = P.NAME_FULL_FORMATTED
+	;107  , AGE = cnvtage(P.BIRTH_DT_TM)
+	;107  , DOB = P.BIRTH_DT_TM
+	, AGE = substring(1,5,cnvtage(P.BIRTH_DT_TM))												;107
+	, DOB = format(P.BIRTH_DT_TM,"mm/dd/yy;;d")													;107
+	, WT = decode(C.CLINICAL_EVENT_ID, substring(1,15,C.RESULT_VAL), " ")
+	, C_RESULT_UNITS_DISP = decode(C.CLINICAL_EVENT_ID, UAR_GET_CODE_DISPLAY( C.RESULT_UNITS_CD ), " ")
+	, HT = decode(C1.CLINICAL_EVENT_ID, substring(1,15,C1.RESULT_VAL), " ")
+	, C1_RESULT_UNITS_DISP = decode(C1.CLINICAL_EVENT_ID, UAR_GET_CODE_DISPLAY( C1.RESULT_UNITS_CD ), " ")
+	, FOOD_ALLERGY = decode(A.ALLERGY_ID, N.SOURCE_STRING, "No known food allergies")
+	, COMMENT = decode(OC.LONG_TEXT_ID, L.LONG_TEXT, " ")
+	, DAYS = cnvtstring(CNVTINT(DATETIMEDIFF(CNVTDATETIME(CURDATE, CURTIME), O.CURRENT_START_DT_TM)))
+;112	, LOS = cnvtstring(CNVTINT(DATETIMEDIFF(CNVTDATETIME(CURDATE, CURTIME), E.ARRIVE_DT_TM)))
+	, LOS = cnvtstring(DATETIMEDIFF(CNVTDATETIME(CURDATE, CURTIME), E.reg_DT_TM),11,1)			;112
+	, ATTENDING = PE.NAME_FULL_FORMATTED
+	, EP.END_EFFECTIVE_DT_TM
+ 
+FROM
+	ORDERS   O
+	,orders o1			;106
+	,orders o2			;106
+	,orders o3			;108
+	,orders o4			;109
+	,order_detail od1   ;108
+	, ENCOUNTER   E
+	, PERSON   P
+	, ENCNTR_ALIAS   EA
+	, CLINICAL_EVENT   C
+	, CLINICAL_EVENT   C1
+	, ALLERGY   A
+	, NOMENCLATURE   N
+	, ORDER_COMMENT   OC
+	, LONG_TEXT   L
+	, ENCNTR_PRSNL_RELTN   EP
+	, PERSON   PE
+	;106  , DUMMYT   D1
+	;106  , DUMMYT   D2
+	, DUMMYT   D3
+	, DUMMYT   D4
+	, DUMMYT   D5
+	, DUMMYT   D6
+	;106   , DUMMYT   D7
+	, encntr_domain ed
+ 
+ 
+; 12.10.09
+plan ed
+where ed.loc_facility_cd = $facility  ;103  in (633867,3180507,3186521,3186522,3196533,3196534)
+  and ed.end_effective_dt_tm > sysdate
+  and ed.encntr_domain_type_cd+0 = census_cd
+  and ed.active_ind+0 = 1
+ 
+join e
+where e.encntr_id = ed.encntr_id
+; 856 = discharged
+and e.encntr_status_cd != discharged_cd
+and e.encntr_type_class_cd != outpatient_cd 		;114
+ 
+JOIN O WHERE o.ENCNTR_ID = e.ENCNTR_ID
+  and o.person_id = e.person_id				;111
+  ; 2511 = Nutrition Services
+;110  AND O.CATALOG_TYPE_CD+0 = outerjoin(2511.00)
+  AND O.CATALOG_TYPE_CD+0 = dietary_cd				;110
+  ; 2550 = Ordered
+;110  AND O.ORDER_STATUS_CD+0 = outerjoin(2550.00)
+  AND O.ORDER_STATUS_CD+0 = ordered_cd			;110
+  ; 681598 = Diets  snacks and supplements
+;103  AND O.ACTIVITY_TYPE_CD+0 = 681598.00
+;106  AND O.ACTIVITY_TYPE_CD+0 in (681598.00, 636696.00, 636695.00)    ;103
+;109  AND O.ACTIVITY_TYPE_CD+0 = 681598.00    ;106
+;110  AND O.ACTIVITY_TYPE_CD+0 in (681598.00)
+  AND O.ACTIVITY_TYPE_CD+0 in (diets_cd)			;110
+  AND O.ACTIVE_IND+0 = 1
+ 
+JOIN EA
+WHERE EA.ENCNTR_ID = E.ENCNTR_ID
+  AND EA.ACTIVE_IND = 1
+  ; 683992 = FIN
+;104  AND EA.ALIAS_POOL_CD = 683992.00
+  and ea.encntr_alias_type_cd = fin_cd  ;104
+  and ea.end_effective_dt_tm > sysdate  ;103
+ 
+JOIN P
+WHERE P.PERSON_ID = E.PERSON_ID
+  AND P.ACTIVE_IND+0 = 1
+  ;AND trim(P.NAME_LAST_KEY) != "TESTPATIENT"
+ 
+join od1											;002
+where od1.order_id = outerjoin(o.order_id)			;002
+  and od1.oe_field_id = outerjoin(diet_type_id)			;002
+ 
+;108 start
+JOIN O3 WHERE o3.ENCNTR_ID = outerjoin(e.ENCNTR_ID)
+  and o3.person_id = outerjoin(e.person_id)				;111
+  ; 2511 = Nutrition Services
+;110  AND O3.CATALOG_TYPE_CD+0 = outerjoin(2511.00)
+  AND O3.CATALOG_TYPE_CD+0 = outerjoin(dietary_cd)				;110
+  ; 2550 = Ordered
+;110  AND O3.ORDER_STATUS_CD+0 = outerjoin(2550.00)
+  AND O3.ORDER_STATUS_CD+0 = outerjoin(ordered_cd)			;110
+  ;  supplements
+;110  AND o3.catalog_cd+0 = outerjoin(35664356.00)
+  AND o3.catalog_cd+0 = outerjoin(calorie_cnt_cd)			;110
+  AND O3.ACTIVE_IND+0 = outerjoin(1)
+;108 end
+ 
+;106 start
+JOIN O1 WHERE o1.ENCNTR_ID = outerjoin(e.ENCNTR_ID)
+  and o1.person_id = outerjoin(e.person_id)				;111
+  ; 2511 = Nutrition Services
+;110  AND O1.CATALOG_TYPE_CD+0 = outerjoin(2511.00)
+  AND O1.CATALOG_TYPE_CD+0 = outerjoin(dietary_cd)				;110
+  ; 2550 = Ordered
+;110  AND O1.ORDER_STATUS_CD+0 = outerjoin(2550.00)
+  AND O1.ORDER_STATUS_CD+0 = outerjoin(ordered_cd)			;110
+  ;  supplements
+;110  AND O1.ACTIVITY_TYPE_CD+0 = outerjoin(636696.00)
+  AND O1.ACTIVITY_TYPE_CD+0 = outerjoin(supplement_cd)			;110
+  AND O1.ACTIVE_IND+0 = outerjoin(1)
+ 
+JOIN O2 WHERE o2.ENCNTR_ID = outerjoin(e.ENCNTR_ID)
+  and o2.person_id = outerjoin(e.person_id)				;111
+  ; 2511 = Nutrition Services
+;110  AND O2.CATALOG_TYPE_CD+0 = outerjoin(2511.00)
+  AND O2.CATALOG_TYPE_CD+0 = outerjoin(dietary_cd)				;110
+  ; 2550 = Ordered
+;110  AND O2.ORDER_STATUS_CD+0 = outerjoin(2550.00)
+  AND O2.ORDER_STATUS_CD+0 = outerjoin(ordered_cd)			;110
+  ; snacks
+;110  AND O2.ACTIVITY_TYPE_CD+0 = outerjoin(636695.00)
+  AND O2.ACTIVITY_TYPE_CD+0 = outerjoin(snacks_cd)			;110
+  AND O2.ACTIVE_IND+0 = outerjoin(1)
+ 
+;START 109
+JOIN O4 WHERE o4.ENCNTR_ID = outerjoin(e.ENCNTR_ID)
+  and o4.person_id = outerjoin(e.person_id)				;111
+  ; 2511 = Nutrition Services
+;110  AND O4.CATALOG_TYPE_CD+0 = outerjoin(2511.00)
+  AND O4.CATALOG_TYPE_CD+0 = outerjoin(dietary_cd)				;110
+  ; 2550 = Ordered
+;110  AND O4.ORDER_STATUS_CD+0 = outerjoin(2550.00)
+  AND O4.ORDER_STATUS_CD+0 = outerjoin(ordered_cd)			;110
+  ; Room service participation
+;110  AND O4.CATALOG_CD+0 = outerjoin(  588790009.00)
+  AND O4.CATALOG_CD+0 = outerjoin(room_serv_cd)		;110
+  AND O4.ACTIVE_IND+0 = outerjoin(1)
+;end 109
+ 
+JOIN EP
+WHERE EP.ENCNTR_ID = outerjoin(E.ENCNTR_ID)
+and EP.ENCNTR_PRSNL_R_CD = outerjoin(attending_cd)		;attending - hospital
+and EP.DATA_STATUS_CD = outerjoin(25.00) 		;auth
+and ep.active_ind = outerjoin(1)
+and EP.END_EFFECTIVE_DT_TM > outerjoin(sysdate)  ;pull active attending only
+ 
+Join PE
+WHERE PE.PERSON_ID = outerjoin(EP.PRSNL_PERSON_ID) 		;pulling attending provider name
+ 
+JOIN A
+WHERE A.PERSON_ID = outerjoin(E.PERSON_ID)
+  ; 188 = Active
+  AND A.ACTIVE_STATUS_CD+0 = outerjoin(188)
+  ; 3300 = Canceled
+  AND A.REACTION_STATUS_CD+0 != outerjoin(3300)
+  ; 3290 = Food
+  AND A.SUBSTANCE_TYPE_CD+0 = outerjoin(3290.00)
+  AND A.ACTIVE_IND = outerjoin(1)
+ 
+join n
+WHERE N.NOMENCLATURE_ID = outerjoin(A.SUBSTANCE_NOM_ID)
+;106 end
+ 
+;106  join D1
+;106  JOIN A
+;106  WHERE A.PERSON_ID = E.PERSON_ID
+;106    ; 188 = Active
+;106    AND A.ACTIVE_STATUS_CD+0 = 188
+;106    ; 3300 = Canceled
+;106    AND A.REACTION_STATUS_CD+0 != 3300
+;106    ; 3290 = Food
+;106    AND A.SUBSTANCE_TYPE_CD+0 = 3290.00
+;106    AND A.ACTIVE_IND = 1
+ 
+;106  join D2
+;106  join n
+;106  WHERE N.NOMENCLATURE_ID = A.SUBSTANCE_NOM_ID
+ 
+join D3
+JOIN C
+WHERE C.ENCNTR_ID+0 = E.ENCNTR_ID
+ and c.person_id = e.person_id
+  ; 2700654 = Weight
+  ;110AND C.EVENT_CD = 25026055
+  AND C.EVENT_CD = weight_cd			;110
+  ; 25 = Auth
+  AND C.RESULT_STATUS_CD = 25
+  AND C.UPDT_DT_TM = (SELECT MAX(C2.UPDT_DT_TM)
+                       FROM CLINICAL_EVENT C2
+                        WHERE C2.ENCNTR_ID+0 = C.ENCNTR_ID
+                        and c2.person_id = c.person_id
+                          ; 2700654 = Weight
+                          ;110  AND C2.EVENT_CD = 25026055
+                          AND C2.EVENT_CD = weight_cd		;110
+                            ; 25 = Auth
+                           AND C2.RESULT_STATUS_CD = 25)
+ 
+join D4
+JOIN C1
+WHERE C1.ENCNTR_ID+0 = E.ENCNTR_ID
+and c1.person_id = e.person_id
+  ; 2700653 = Height
+ ;110 AND C1.EVENT_CD = 2700653.00
+  AND C1.EVENT_CD = height_cd		;110
+  ; 25 = Auth
+  AND C1.RESULT_STATUS_CD = 25
+  AND C1.UPDT_DT_TM = (SELECT MAX(C3.UPDT_DT_TM)
+                     FROM CLINICAL_EVENT C3
+                    WHERE C3.ENCNTR_ID+0 = C1.ENCNTR_ID
+                    and c3.person_id = c1.person_id
+                         ; 2700653 = Height
+                         ;110 AND C3.EVENT_CD = 2700653.00
+                      	AND C3.EVENT_CD = height_cd		;110
+                      ; 25 = Auth
+                      AND C3.RESULT_STATUS_CD = 25)
+ 
+join D5
+JOIN OC
+WHERE Oc.ORDER_ID = O.ORDER_ID AND OC.action_sequence = (select max(oc1.action_sequence) from
+order_comment oc1 where oc1.order_id = oc.order_id)
+ 
+join D6
+JOIN L
+WHERE L.LONG_TEXT_ID = OC.LONG_TEXT_ID
+;106  WHERE L.LONG_TEXT_ID = outerjoin(OC.LONG_TEXT_ID)
+ 
+;106   JOIN D7
+ 
+;106   JOIN EP
+;106   ;103  WHERE E.ENCNTR_ID = outerjoin (EP.ENCNTR_ID)
+;106   WHERE E.ENCNTR_ID = EP.ENCNTR_ID     ;103
+;106   and EP.ENCNTR_PRSNL_R_CD = 1119		;attending - hospital
+;106   and EP.DATA_STATUS_CD =          25.00 		;auth
+;106   and EP.END_EFFECTIVE_DT_TM > CNVTDATETIME(CNVTDATE( 12302100 ), 0)  ;pull active attending only
+ 
+;106   Join PE
+;106   WHERE EP.PRSNL_PERSON_ID = PE.PERSON_ID			;pulling attending provider name
+ 
+ORDER BY
+	DEPARTMENT
+	;, ROOM
+	, room_sort1  ;105
+	, room_sort2  ;105
+	, P.PERSON_ID
+	, NAME
+ 	, FOOD_ALLERGY  ;109
+ 
+Head Report
+	m_NumLines = 0
+%I cclsource:vccl_diortf.inc
+	y_pos = 0
+ 
+	PrintPSHeader = 0
+	COL 0, "{PS/792 0 translate 90 rotate/}"
+	ROW + 1
+SUBROUTINE OFFSET( yVal )
+	CALL PRINT( FORMAT( y_pos + yVal, "###" ))
+END
+	cnt = 0
+ 
+Head Page
+	if (curpage > 1)  y_pos = -4 endif
+ 
+	IF ( PrintPSHeader )
+		COL 0, "{PS/792 0 translate 90 rotate/}"
+		ROW + 1
+	ENDIF
+	PrintPSHeader = 1
+	ROW + 1, "{F/0}{CPI/15}"
+	CALL PRINT(CALCPOS(18,y_pos+11)) "Run Date:"
+	ROW + 1, "{F/0}"
+	CALL PRINT(CALCPOS(18,y_pos+23)) "Run Time:"
+	ROW + 1, CALL PRINT(CALCPOS(74,y_pos+11)) curdate
+	ROW + 1, CALL PRINT(CALCPOS(74,y_pos+23)) curtime
+	ROW + 1, "{F/1}"
+	ROW + 1, CALL PRINT(CALCPOS(280,y_pos+29)) "Nutrition Services - Current Diets"
+	ROW + 1, "{F/1}"
+	disp = concat(trim(facility,3)," - ",department)   ;103
+	;103  ROW + 1, CALL PRINT(CALCPOS(280,y_pos+11)) "Luther Hospital - " DEPARTMENT
+	ROW + 1, CALL PRINT(CALCPOS(280,y_pos+11)) disp   ;103
+	ROW + 1
+	CALL PRINT(CALCPOS(27,y_pos+47)) "NURSE UNIT"
+	CALL PRINT(CALCPOS(132,y_pos+47)) "NAME"
+;106	CALL PRINT(CALCPOS(252,y_pos+47)) "HEIGHT"
+;107	CALL PRINT(CALCPOS(272,y_pos+47)) "HEIGHT"					;106
+	CALL PRINT(CALCPOS(287,y_pos+47)) "HEIGHT"					;107
+	CALL PRINT(CALCPOS(520,y_pos+47)) "ATTENDING"				;106
+	CALL PRINT(CALCPOS(692,y_pos+47)) "LOS"
+	ROW + 1
+ 
+	ROW + 1	y_val= 792-y_pos-89
+	^{PS/newpath 1 setlinewidth   23 ^, y_val, ^ moveto  741 ^, y_val, ^ lineto stroke 23 ^, y_val, ^ moveto/}^
+	CALL PRINT(CALCPOS(27,y_pos+65)) "ROOM"
+	CALL PRINT(CALCPOS(63,y_pos+65)) "BED"
+	CALL PRINT(CALCPOS(133,y_pos+65)) "ACCOUNT NO"
+	CALL PRINT(CALCPOS(200,y_pos+65)) "AGE"
+	CALL PRINT(CALCPOS(230,y_pos+65)) "BIRTHDATE"
+;106	CALL PRINT(CALCPOS(252,y_pos+65)) "WEIGHT"
+;107	CALL PRINT(CALCPOS(272,y_pos+65)) "WEIGHT"					;106
+	CALL PRINT(CALCPOS(287,y_pos+65)) "WEIGHT"					;107
+	CALL PRINT(CALCPOS(333,y_pos+65)) "DIET"
+	CALL PRINT(CALCPOS(671,y_pos+65)) "DAYS ON DIET"
+	ROW + 1
+	y_pos = y_pos + 81
+ 
+Head E.LOC_NURSE_UNIT_CD
+	 ROW +0
+ 
+Head P.PERSON_ID
+	if (( y_pos + 94) >= 612 ) y_pos = 0,  break endif
+	DEPARTMENT1 = SUBSTRING( 1, 20, DEPARTMENT ),
+ 	C1_RESULT_UNITS_DISP1 = SUBSTRING( 1, 7, C1_RESULT_UNITS_DISP ),
+	if (o.hna_order_mnemonic = "Diet")							;108
+	  ORDER_MNEMONIC1 = substring(1,40,od1.oe_field_display_value)				;108
+	else														;108
+	  ORDER_MNEMONIC1 = substring(1,40,o.hna_order_mnemonic)					;108
+	endif														;108
+	if (o3.order_mnemonic > " ")															;108
+	  ORDER_MNEMONIC1 = concat(trim(ORDER_MNEMONIC1,3),"; ",trim(o3.order_mnemonic,3))		;108
+	endif																					;108
+	supplements = SUBSTRING( 1, 100, O1.ORDER_MNEMONIC ),
+	snacks = SUBSTRING( 1, 100, O2.ORDER_MNEMONIC ),
+	ATTENDING1 = SUBSTRING( 1, 30, ATTENDING )
+ 
+	ROW + 1, "{F/0}{CPI/15}"
+	CALL PRINT(CALCPOS(27,y_pos+12)) DEPARTMENT1
+	ROW + 1, CALL PRINT(CALCPOS(128,y_pos+12))  NAME
+;106	ROW + 1, CALL PRINT(CALCPOS(243,y_pos+12))  HT
+;107	ROW + 1, CALL PRINT(CALCPOS(263,y_pos+12))  HT							;106
+	ROW + 1, CALL PRINT(CALCPOS(290,y_pos+12))  HT							;107
+;106	ROW + 1, CALL PRINT(CALCPOS(279,y_pos+12)) C1_RESULT_UNITS_DISP1
+;107	ROW + 1, CALL PRINT(CALCPOS(299,y_pos+12)) C1_RESULT_UNITS_DISP1		;106
+	ROW + 1, CALL PRINT(CALCPOS(314,y_pos+12)) C1_RESULT_UNITS_DISP1		;107
+	CALL PRINT(CALCPOS(333,y_pos+12)) ORDER_MNEMONIC1
+	CALL PRINT(CALCPOS(520,y_pos+12)) ATTENDING1							;106
+	ROW + 1
+    CALL PRINT(CALCPOS(693,y_pos+12))  LOS
+ 
+	;105   ROOM1 = SUBSTRING( 1, 10, CNVTSTRING(ROOM)),
+	ROOM1 = SUBSTRING( 1, 10, ROOM),    ;105
+	BED1 = SUBSTRING( 1, 5, BED ),
+ 
+	C_RESULT_UNITS_DISP1 = SUBSTRING( 1, 7, C_RESULT_UNITS_DISP ),
+ 
+	CALL PRINT(CALCPOS(27,y_pos+30)) ROOM1
+	CALL PRINT(CALCPOS(63,y_pos+30)) BED1
+	ROW + 1, CALL PRINT(CALCPOS(128,y_pos+30))  ACCOUNT_NO
+	ROW + 1, CALL PRINT(CALCPOS(195,y_pos+30))  AGE
+	ROW + 1, CALL PRINT(CALCPOS(230,y_pos+30))  DOB								;107
+;106 	ROW + 1, CALL PRINT(CALCPOS(243,y_pos+30))  WT
+;107	ROW + 1, CALL PRINT(CALCPOS(263,y_pos+30))  WT								;106
+	ROW + 1, CALL PRINT(CALCPOS(290,y_pos+30))  WT								;107
+;106	ROW + 1, CALL PRINT(CALCPOS(279,y_pos+30)) C_RESULT_UNITS_DISP1
+;107	ROW + 1, CALL PRINT(CALCPOS(299,y_pos+30)) C_RESULT_UNITS_DISP1					;106
+	ROW + 1, CALL PRINT(CALCPOS(314,y_pos+30)) C_RESULT_UNITS_DISP1					;107
+	;CALL cclrtf_print( 0, 333, 30, 80, O.CLINICAL_DISPLAY_LINE, 160, 1 )
+	cdl_size = size(O.clinical_display_line)
+;105	CALL cclrtf_print( 0, 333, 30, 80, O.CLINICAL_DISPLAY_LINE, cdl_size, 1 )
+	CALL cclrtf_print( 0, 333, 30, 75, O.CLINICAL_DISPLAY_LINE, cdl_size, 1 )		;105
+ 
+	ROW + 1, CALL PRINT(CALCPOS(693,y_pos+30))  DAYS
+	y_pos = y_pos + (m_NumLines * 12)
+ 
+	ROW + 1
+	"{CPI/14}"
+	allergy_string = "  "
+	ROW + 1, "{CPI/15}"
+    if (o1.order_id > 0)
+	  CALL PRINT(CALCPOS(36,y_pos+36)) "Supplements:  ", supplements			;106
+	endif
+	if (o2.order_id > 0)
+	  CALL PRINT(CALCPOS(36,y_pos+48)) "Snacks:  ", snacks					;106
+	endif
+	CALL PRINT(CALCPOS(333,y_pos+48)) "Comments:"
+	if (comment > " " and o4.order_id > 0)												;109
+	  order_comment =  concat("** ROOM SERVICE PARTICIPATION **  ",trim(o4.clinical_display_line,3),COMMENT)		;109
+	elseif (comment > " ")																;109
+	  order_comment =  COMMENT
+	elseif (o4.order_id > 0) 															;109
+	  order_comment =  concat("** ROOM SERVICE PARTICIPATION **  ",trim(o4.clinical_display_line,3) )						;109
+	endif  																				;109
+ 
+	ROW + 1,
+ 
+	oc_size = size(order_comment)
+	CALL cclrtf_print( 0, 387, 48, 80, order_comment, oc_size, 1 )
+    order_comment = ""			;109
+ 
+	ROW + 1
+	y_pos = y_pos + 47
+ 
+Head NAME
+	y_pos = y_pos + 0
+ 
+;109  Detail
+head FOOD_ALLERGY		;109
+	cnt = cnt + 1
+ 
+	IF (cnt = 1)
+	allergy_string = FOOD_ALLERGY
+	ELSE
+	allergy_string = concat(allergy_string, "    ",  FOOD_ALLERGY)
+	ENDIF
+ 
+Foot NAME
+	y_pos = y_pos + 0
+ 
+Foot P.PERSON_ID
+	if (( y_pos + 65) >= 612 ) y_pos = 0,  break endif
+	ROW + 1, "{F/1}{CPI/15}"
+	CALL PRINT(CALCPOS(36,y_pos+12)) "FOOD ALLERGIES:"
+	ROW + 1, "{F/0}"
+	ROW + 1, CALL PRINT(CALCPOS(123,y_pos+12)) allergy_string
+	ROW + 1
+ 
+	ROW + 1	y_val= 792-y_pos-40
+	^{PS/newpath 1 setlinewidth   18 ^, y_val, ^ moveto  734 ^, y_val, ^ lineto stroke 18 ^, y_val, ^ moveto/}^
+	y_pos = y_pos + 18
+ 
+Foot E.LOC_NURSE_UNIT_CD
+		IF(CURENDREPORT = 0)
+		BREAK
+		ENDIF
+ 
+ 
+ 
+Foot Page
+	y_pos = 565
+	ROW + 1, "{F/0}{CPI/15}"
+	page_Count = concat( "Current Diets, page: ", cnvtstring(curpage) )
+	ROW + 1, CALL PRINT(CALCPOS(18,y_pos+12)) 	page_Count
+ 
+WITH MAXCOL = 800, MAXROW = 500,
+DONTCARE = C, DONTCARE = C1,
+	;106 DONTCARE = A, DONTCARE = N,
+	DONTCARE = OC, OUTERJOIN = D6,
+	 LANDSCAPE,
+	;106   DONTCARE = PE,
+	;106   DONTCARE = D7,
+	DIO= 08, NOHEADING,
+	FORMAT= VARIABLE, TIME= VALUE( MaxSecs )
+; skipreport=1, format, separator = " "
+
+/****Start 003 - New Code ***/
+;*** Restore the OracleSystem variable to its normal definition pointing
+;***   to instance 1.
+IF (curdomain = "MHPRD")
+  Free define oraclesystem
+  set system=build(concat('v500/', pass, '@mhprd1'))
+  DEFINE oraclesystem system
+ 
+ELSEIF (CURDOMAIN="MHCRT")
+    FREE DEFINE oraclesystem
+    set system=build(concat('v500/', pass, '@mhcrt1'))
+    DEFINE oraclesystem system
+ 
+ENDIF
+ 
+/***END 003 - New Code ***/
+ 
+
+END
+GO

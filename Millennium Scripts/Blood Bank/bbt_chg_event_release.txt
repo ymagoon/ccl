@@ -1,0 +1,860 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/RELEASEPRODUCTS/bbt_chg_event_release.prg Turn on black mode
+
+/*~BB~************************************************************************
+      .                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1994 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved          *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner                                        *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~************************************************************************
+      *                   PathNet Blood Bank Transfusion                     *
+      *                           V500 Script                                *
+      *                     bbt_chg_event_release.prg                        *
+      *                                                                      *
+      * PURPOSE:          release crossmatch and assign events from a patient*
+      * LAST UPDATED BY:  jr3725                                             *
+      * DATE CREATED:     9/24/96                                            *
+      * LAST MODIFIED:    7/26/02                                            *
+      * TABLES USED:      product, product_event, derivative, assign,        *
+      *                   assign_release, crossmatch                         *
+      * PASSED IN:        record structure "request"                         *
+      * PASSED OUT:       record structure "reply"                           *
+      * ACTION#:          225065                                             *
+      * REQUEST#:         225065                                             *
+      * APPLICATION#:     225032                                             *
+      * SPECIAL NOTES:                                                       *
+      ***********************************************************************/
+;~DB~ ************************************************************************
+;     *                      GENERATED MODIFICATION CONTROL LOG              *
+;     ************************************************************************
+;     *                                                                      *
+;     *Mod Date     Engineer             Comment                             *
+;     *--- -------- -------------------- ----------------------------------- *
+;     *001 09/09/03 Jason Coy            Create new variable called          *
+;     *                                  active_disp so that Available is not*
+;     *                                  applied to dispensed products.      *
+;     *002 12/30/03 jg7520             39495: Expand SELECT with forupdate to*
+;     *                                be a series of single table selects.  *
+;     *003 07/19/04 JJ7138               Check the active_assign variable to *
+;     *                                  ensure that an 'Available' event is *
+;     *                                  not added if it was previously      *
+;     *                                  assigned.                           *
+;     *004 04/18/05 Jason Osborn         Correct issue where assigned only   *
+;     *                                  products are left with no active    *
+;     *                                  states.                             *
+;     *005 07/11/05 Jeff Wain            Removed formatting of seqn to whole *
+;     *006 01/20/06 Jason Osborn         Init.  active_xm for each product.  *
+;     *007 01/17/12 Gayatri Samala       fixed issue for the CR 1-3350865891 *
+;   								     regarding adding available state for*
+;										 a transfused unit when the specimen *
+;										 completion ops job runs             *
+;~DE~ ************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+      
+      drop program bbt_chg_event_release:dba go
+      create program bbt_chg_event_release:dba
+
+       /*
+        record request
+        (
+          1 productlist[x]
+            2 product_id           = f8             ;information for each product
+            2 rel_assign_flag      = vc             ; T = release assignment
+            2 rel_xmatch_flag      = vc             ; T = release crossmatch
+            2 product_type         = vc             ; B or D
+            2 p_updt_cnt           = i4             ;info for product table
+            2 der_updt_cnt         = i4             ;update count for derivative
+            2 pe_as_updt_cnt       = i4
+            2 release_qty          = i4
+            2 release_iu           = i4
+            2 release_reason_cd    = f8             ;info for updating the assign table
+            2 assgn_prod_event_id  = f8            
+            2 as_updt_cnt          = i4
+            2 keep_lock_ind        = i2           
+            2 rel_in_progress_flag = c1
+        )
+        */
+
+
+        record reply
+        (
+%i cclsource:status_block.inc
+         1 results[1]
+           2 product_event_id      = f8
+           2 status                = c1
+           2 err_process           = vc
+           2 err_message           = vc
+        )
+
+
+        /* Initialize Variables */
+        declare assign_release_id_val 		= f8 with protect, noconstant(0.0)
+        ;count variable used in 'for' loop
+        declare count1 						= i4 with protect, noconstant(0)  
+        ;count2 is used to detrimine if there are multiple events for current product_id
+        declare count2 						= i4 with protect, noconstant(0)  
+        set reply->status_data->status 		= "F"
+        ;flag for failure with any part of the script
+        declare failed 						= c1 with protect, noconstant("F")
+        ;flag for if the product has an active quarantine
+        declare active_quar 				= c1 with protect, noconstant("F")
+        ;flag for if the product has an active unconfirmed
+        declare active_uncfrm 				= c1 with protect, noconstant("F")
+        ;flag for active available event on product
+        declare active_avail 				= c1 with protect, noconstant("F")
+        ;flag for multiple crossmatches on a product
+        declare multiple_xm 				= c1 with protect, noconstant("F")
+        declare active_auto 				= c1 with protect, noconstant("F")
+        declare active_dir 					= c1 with protect, noconstant("F")
+        declare active_assign 				= c1 with protect, noconstant(" ")
+        declare active_xm 					= c1 with protect, noconstant("F")
+        declare active_transfuse            = c1 with protect, noconstant("F")
+        declare active_dispose              = c1 with protect, noconstant("F")
+        declare active_destroy              = c1 with protect, noconstant("F")
+        declare active_shipped              = c1 with protect, noconstant("F")
+        declare active_intransit            = c1 with protect, noconstant("F")
+        ;flag for if the product has an active dispense
+        declare active_disp 				= c1 with protect, noconstant("F")
+		;holds process description to set reply
+        declare error_process 				= c38 with protect, noconstant(fillstring(38, " "))
+        ;holds error_message to set reply
+        declare error_message 				= c38 with protect, noconstant(fillstring(38, " "))
+        ;count of number of successful updates
+        declare success_cnt 				= i4 with protect, noconstant(0)
+        ;flag to determine if any part of updates was unsuccessful
+        declare failure_occured 			= c1 with protect, noconstant("F")
+        ;variable for storing row information while locking row
+        declare quantity_val 				= i4 with protect, noconstant(0)
+        ;variable for the iu field of a row for updating it
+        declare quantity_iu 				= i4 with protect, noconstant(0)
+        ;needed for calling add_product_event
+        declare product_event_id 			= f8 with protect, noconstant(0.0)
+        ;(gsub = global subroutine variable)
+        declare gsub_product_event_status 	= c2 with protect, noconstant("  ")
+        ;current product_id
+        declare this_prod_id 				= f8 with protect, noconstant(0.0)
+        ;flag if other events exist for this product_id
+        declare other_events 				= c1 with protect, noconstant("F")
+
+        ;event_type_code values retrieved by script and used for inserting product events
+        declare quar_event_type_cd 			= f8 with protect, noconstant(0.0)
+        declare assgn_event_type_cd 		= f8 with protect, noconstant(0.0)
+        declare xmtch_event_type_cd 		= f8 with protect, noconstant(0.0)
+        declare avail_event_type_cd 		= f8 with protect, noconstant(0.0)
+        declare uncfrm_event_type_cd 		= f8 with protect, noconstant(0.0)
+        declare inprog_event_type_cd 		= f8 with protect, noconstant(0.0)
+        declare auto_event_type_cd 			= f8 with protect, noconstant(0.0)
+        declare dir_event_type_cd 			= f8 with protect, noconstant(0.0)
+        declare disp_event_type_cd 			= f8 with protect, noconstant(0.0)
+        declare trans_event_type_cd 		= f8 with protect, noconstant(0.0)
+        declare dispose_event_type_cd 		= f8 with protect, noconstant(0.0)
+        declare destroy_event_type_cd 		= f8 with protect, noconstant(0.0)
+        declare shipped_event_type_cd       = f8 with protect, noconstant(0.0)
+        declare intransit_event_type_cd     = f8 with protect, noconstant(0.0)
+
+        /* count the number of rows of blood product table that need to be updated - passed from the client app */
+        declare nbr_to_update 				= i4 with protect, noconstant(cnvtint(size(request->productlist,5)))
+
+        /* alter the reply array to accomodate nbr_to_update items */
+        set stat = alter(reply->results,nbr_to_update)
+        set stat = alter(reply->status_data->subeventstatus,nbr_to_update)
+
+        declare Unlock_Product(none = i2)  = i2
+     
+        set uar_failed = 0
+        set current_meaning = fillstring(12," ")
+        set code_set = 1610
+
+        set current_meaning = "1"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,assgn_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+        set current_meaning = "2"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,quar_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+        set current_meaning = "3"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,xmtch_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+        set current_meaning = "12"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,avail_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+        set current_meaning = "9"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,uncfrm_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+        set current_meaning = "10"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,auto_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+        set current_meaning = "11"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,dir_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+        set current_meaning = "16"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,inprog_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+        set current_meaning = "4"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,disp_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif 
+		set current_meaning = "7"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,trans_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+        set current_meaning = "5"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,dispose_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+        set current_meaning = "14"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,destroy_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+        set current_meaning = "15"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,shipped_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+        set current_meaning = "25"
+        set stat = uar_get_meaning_by_codeset(code_set, nullterm(current_meaning),1,intransit_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_THE_REST
+        endif
+#SKIP_THE_REST
+        if (uar_failed = 1)
+           set reply->status_data->status = "F"
+           set error_process = "lock assign/product_event"
+           set error_message = "assign/product_event not locked"
+           set failure_occured = "T"
+           set reply->status_data->status = "F"
+           set reply->status_data->subeventstatus[1]->OperationName = "release"
+           set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+           set reply->status_data->subeventstatus[1]->TargetObjectName = "code value read failed"
+           set reply->status_data->subeventstatus[1]->TargetObjectValue = "F"
+        endif
+
+
+        /* Execute a for loop for every item in the array.  The loop cycle will lock the necessary rows on all the tables
+           and then update the tables.  The tables that are updated depend on the information passed in on  the request.
+           The plan and join clauses controll which tables are accessed and locked.
+           If any of these updates is unsuccessfull any changes made for this item (loop iteration) will be rolled back.
+           If all updates are successful for an item (loop iteration) a commit command is issued for all tables
+         */
+        for (prod = 1 to nbr_to_update)
+            set failure_occured = "F"                ;set the failure flag to false
+            set active_quar = "F"                    ;default to no active quarantine on product
+            set active_uncfrm = "F"                  ;default to no active unconfirmed event on product
+            set this_prod_id = 0.0                     ;current product_id
+            set other_events = "F"                   ;flag if other events exist for this product_id
+            set active_avail = "F"                   ;flag for active available event on product
+            set multiple_xm = "F"                    ;flag for multiple crossmatches on a product
+            set active_auto = "F"
+            set active_dir = "F"
+            set active_assign = "F"
+            set active_disp = "F"                    ;default to no active dispense on product
+            set active_xm = "F"                      ;default to no active crossmatch on product.
+            set active_transfuse = "F"
+            set active_dispose = "F"
+            set active_destroy = "F"
+            set active_shipped = "F"
+            set active_intransit = "F"
+            ;see if the product has other crossmatches/assignments associated with it that are to be released
+            ;if it does do not unlock the product
+            set this_prod_id = request->productlist[prod]->product_id
+            set count2 = prod + 1
+            if (prod < nbr_to_update)
+               for (count1 = count2 to nbr_to_update)
+                   if (this_prod_id = request->productlist[count1]->product_id)
+                       set other_events = "T"
+                   endif
+               endfor
+            endif
+
+
+            /***************************************************************************************************************/
+            /* Search the product_event table for the active states for this product and if there is an active quarantine  */
+            /* or unconfirmed state then set the proper flag, these flags will be checked before creating an available     */
+            /* event. Also verify that there is not multiple crossmatches on the product                                   */
+            /***************************************************************************************************************/
+            select into "nl:"
+                pe.product_event_id
+            from product_event pe
+            where (
+                   (pe.active_ind = 1)
+                   And (pe.product_id = request->productlist[prod]->product_id)
+                  )
+            detail
+                  if (pe.event_type_cd = quar_event_type_cd)
+                      active_quar = "T"
+                  elseif (pe.event_type_cd = uncfrm_event_type_cd)
+                      active_uncfrm = "T"
+                  elseif (pe.event_type_cd = avail_event_type_cd)
+                      active_avail = "T"
+                  elseif (pe.event_type_cd = quar_event_type_cd)
+                      active_quar = "T"
+                  elseif (pe.event_type_cd = auto_event_type_cd)
+                      active_auto = "T"
+                  elseif (pe.event_type_cd = dir_event_type_cd)
+                      active_dir = "T"
+                  elseif (pe.event_type_cd = assgn_event_type_cd)
+                      active_assign = "T"
+                  elseif (pe.event_type_cd = disp_event_type_cd)
+                      active_disp = "T"
+                  elseif (pe.event_type_cd = trans_event_type_cd)
+                      active_transfuse = "T"
+                  elseif (pe.event_type_cd = dispose_event_type_cd)
+                      active_dispose = "T"
+                  elseif (pe.event_type_cd = destroy_event_type_cd)
+                      active_destroy = "T"
+                  elseif (pe.event_type_cd = shipped_event_type_cd)
+                      active_shipped = "T"
+                  elseif (pe.event_type_cd = intransit_event_type_cd)
+                      active_intransit = "T"
+                  elseif (pe.event_type_cd = xmtch_event_type_cd)
+                      active_xm = "T"
+                      if (pe.product_event_id != request->productlist[prod]->assgn_prod_event_id)
+                          multiple_xm = "T"
+                      endif
+                  elseif (
+                          (pe.event_type_cd = inprog_event_type_cd)
+                          and (pe.product_event_id != request->productlist[prod]->assgn_prod_event_id)
+                          )
+                       multiple_xm = "T"                      
+                  endif
+            with counter
+
+            /*********************************************   RELEASE  PRODUCT ************************************************/
+            /*This event will occur only for products that have been designated to have the assignment or crossmatch released*/
+            /*If the product is flagged to have the crossmatch/assign released the product is returned to available if there */
+            /*is not a quarantine put on the product. If the product is a derivative the inactivation of the rows depends on */
+            /*if the quantity returned = the cur_quantity fields on the respective tables.  If the product is assinged the   */
+            /*information is inserted on the assign_release table.                                                           */
+            /*NOTE: This is the only place an availalbe event is written, dispense will assign products to patients if there */
+            /*is not a crossmatch. So if there is no assignment or crossmatch and the product is returned
+            /*****************************************************************************************************************/
+            ;release assign or crossmatch
+            ;*********************************    ASSIGN    ************************************
+            if ((request->productlist[prod]->rel_assign_flag = "T") and (failure_occured = "F"))
+               select into "nl:"
+                      a.product_id,
+                      a.product_event_id
+
+               from assign a
+               plan a where (a.product_event_id = request->productlist[prod]->assgn_prod_event_id)
+                            And (a.product_id = request->productlist[prod]->product_id)
+                            And (a.updt_cnt = request->productlist[prod]->as_updt_cnt)
+               detail
+                     quantity_val = a.cur_assign_qty       ;store the quantity assigened
+                     quantity_iu = a.cur_assign_intl_units ;store the iu value
+               with nocounter ,forupdate(a)
+               
+               if (curqual != 0)
+                  select into "nl:"
+                       pe.product_id,
+                       pe.product_event_id
+
+                     from product_event pe
+                     plan pe where (pe.product_event_id = request->productlist[prod]->assgn_prod_event_id)
+                               And (pe.product_id = request->productlist[prod]->product_id)
+                               And (pe.event_type_cd = assgn_event_type_cd)
+                               And (pe.updt_cnt = request->productlist[prod]->pe_as_updt_cnt)
+               
+                     with nocounter , forupdate(pe)
+               endif
+
+               if (curqual = 0)
+                  set error_process = "lock assign/product_event"
+                  set error_message = "assign/product_event not locked"
+                  set failure_occured = "T"
+               else
+                  ;__________________________________  update tables _____________________________________
+                  update into assign a
+                  set
+                          a.cur_assign_qty   = if (request->productlist[prod]->product_type = "B")
+                                                   0
+                                                elseif (quantity_val <= request->productlist[prod]->release_qty)
+                                                   0
+                                                else
+                                                   (quantity_val - request->productlist[prod]->release_qty)
+                                                endif,
+                           a.cur_assign_intl_units = if (request->productlist[prod]->product_type = "B")
+                                                        0
+                                                     elseif (quantity_iu <= request->productlist[prod]->release_iu)
+                                                        0
+                                                     else
+                                                       (quantity_iu - request->productlist[prod]->release_iu)
+                                                     endif,
+                          a.updt_cnt         = a.updt_cnt + 1,
+                          a.updt_dt_tm       = cnvtdatetime(curdate,curtime3),
+                          a.updt_task        = reqinfo->updt_task,
+                          a.updt_id          = reqinfo->updt_id,
+                          a.updt_applctx     = reqinfo->updt_applctx,
+                          a.active_ind       =  if (request->productlist[prod]->product_type = "B")
+                                                   0
+                                                elseif (quantity_val = request->productlist[prod]->release_qty)
+                                                   0
+                                                else
+                                                   1
+                                                endif,
+                          a.active_status_cd   = if (request->productlist[prod]->product_type = "B")
+                                                    ReqData->inactive_status_cd
+                                                 elseif (quantity_val = request->productlist[prod]->release_qty)
+                                                    ReqData->inactive_status_cd
+                                                 else
+                                                    ReqData->active_status_cd
+                                                 endif,
+                          a.active_status_dt_tm  = cnvtdatetime(curdate, curtime3),
+                          a.active_status_prsnl_id = ReqInfo->updt_id
+                  plan a where (a.product_event_id = request->productlist[prod]->assgn_prod_event_id)
+                               And (a.product_id = request->productlist[prod]->product_id)
+                               And (a.updt_cnt = request->productlist[prod]->as_updt_cnt)
+                  with counter
+                  if (curqual = 0)
+                     set error_process = "update assign"
+                     set error_message = "assign row not updated"
+                     set failure_occured = "T"
+                  else
+                     ;insert a row into the assign release table
+                     /*
+                     * Retrieve new sequence number for product_event_id
+                     */
+                     select into "nl:"
+                          seqn        = seq(pathnet_seq,nextval)
+                     from
+                          dual
+                     detail
+                          assign_release_id_val   = seqn
+                     with format, nocounter
+                     if (curqual = 0)
+                        set error_process = "insert assign_release_id"
+                        set error_message = "assign_release_id not generated"
+                        set failure_occured = "T"
+                     else
+                        insert into assign_release ar
+                           set
+                              ar.assign_release_id = assign_release_id_val,
+                              ar.product_id        = request->productlist[prod]->product_id,
+                              ar.product_event_id  = request->productlist[prod]->assgn_prod_event_id,
+                              ar.release_reason_cd = request->productlist[prod]->release_reason_cd,
+                              ar.release_dt_tm     = cnvtdatetime(curdate,curtime3),
+                              ar.release_prsnl_ID  = reqinfo->updt_id,
+                              ar.release_qty       = if (request->productlist[prod]->product_type = "B")
+                                                        0
+                                                     else
+                                                        request->productlist[prod]->release_qty
+                                                      endif,
+                              ar.release_intl_units = if (request->productlist[prod]->product_type = "B")
+                                                         0
+                                                      else
+                                                         request->productlist[prod]->release_iu
+                                                      endif,
+                              ar.updt_cnt          = 0,
+                              ar.updt_dt_tm       = cnvtdatetime(curdate,curtime3),
+                              ar.updt_task        = reqinfo->updt_task,
+                              ar.updt_id          = reqinfo->updt_id,
+                              ar.updt_applctx     = reqinfo->updt_applctx,
+                              ar.active_ind       = 1,
+                              ar.active_status_cd = ReqData->active_status_cd,
+                              ar.active_status_dt_tm  = cnvtdatetime(curdate, curtime3),
+                              ar.active_status_prsnl_id = ReqInfo->updt_id
+                        with nocounter
+                        ;update the product_event table
+                        if (curqual = 0)
+                           set error_process = "insert assign_release row"
+                           set error_message = "assign_release row not updated"
+                           set failure_occured = "T"
+                        else
+                           update into product_event pe
+                           set
+                              pe.active_ind =  if (request->productlist[prod]->product_type = "B")
+                                                  0
+                                               elseif (quantity_val <= request->productlist[prod]->release_qty)
+                                                  0
+                                               else
+                                                  1
+                                               endif,
+                              pe.active_status_cd   = if (request->productlist[prod]->product_type = "B")
+                                                         ReqData->inactive_status_cd
+                                                      elseif (quantity_val <= request->productlist[prod]->release_qty)
+                                                         ReqData->inactive_status_cd
+                                                      else
+                                                         ReqData->active_status_cd
+                                                     endif,
+                              pe.active_status_dt_tm  = cnvtdatetime(curdate, curtime3),
+                              pe.active_status_prsnl_id = ReqInfo->updt_id,
+                              pe.updt_cnt = pe.updt_cnt + 1,
+                              pe.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+                              pe.updt_task  = reqinfo->updt_task,
+                              pe.updt_id    = reqinfo->updt_id,
+                              pe.updt_applctx = reqinfo->updt_applctx
+                           plan pe where (pe.product_event_id = request->productlist[prod]->assgn_prod_event_id)
+                                      And (pe.product_id = request->productlist[prod]->product_id)
+                                      And (pe.event_type_cd = assgn_event_type_cd)
+                                      And (pe.updt_cnt = request->productlist[prod]->pe_as_updt_cnt)
+                           with counter
+                           if (curqual = 0)
+                              set error_process = "update event"
+                              set error_message = "assign product_event event row not updated"
+                              set failure_occured = "T"
+                           endif   ;update product event failed
+                        endif   ;assign_release row not updated
+                     endif   ;generate the assign_release_id
+                  endif   ;assign row not updated
+               endif   ;lock failed
+            ;*********************************    CROSSMATCH    ************************************
+            elseif ((request->productlist[prod]->rel_xmatch_flag = "T")  and (failure_occured = "F"))
+               select into "nl:"
+                      xm.product_id,
+                      xm.product_event_id
+               from crossmatch xm
+               plan xm where (xm.product_event_id = request->productlist[prod]->assgn_prod_event_id)
+                            And (xm.product_id = request->productlist[prod]->product_id)
+                            And (xm.updt_cnt = request->productlist[prod]->as_updt_cnt)
+               detail
+                     quantity_val = xm.crossmatch_qty        ;store the quantity xmatched
+               with nocounter ,forupdate(xm)
+               
+               if (curqual != 0)
+                 select into "nl:"
+                      pe.product_id,
+                      pe.product_event_id
+                    from product_event pe
+                    plan pe where (pe.product_event_id = request->productlist[prod]->assgn_prod_event_id)
+                              And (pe.product_id = request->productlist[prod]->product_id)
+                              And (pe.event_type_cd = xmtch_event_type_cd)
+                              And (pe.updt_cnt = request->productlist[prod]->pe_as_updt_cnt)
+                    with nocounter , forupdate(pe)
+               endif
+               
+               if (curqual = 0)
+                  set error_process = "lock crossmatch/product_event"
+                  set error_message = "crossmatch/product_event not locked"
+                  set failure_occured = "T"
+               else
+                  ;______________________________________ update tables ____________________________________
+                  update into crossmatch xm
+                      set
+                         xm.release_reason_cd = request->productlist[prod]->release_reason_cd,
+                         xm.release_dt_tm = cnvtdatetime(curdate,curtime3),
+                         xm.release_prsnl_ID = reqinfo->updt_id,
+                         xm.release_qty  = if (request->productlist[prod]->product_type = "B")
+                                              0
+                                           elseif (quantity_val <= request->productlist[prod]->release_qty)
+                                              0
+                                           else
+                                              (request->productlist[prod]->release_qty)
+                                           endif,
+                         xm.crossmatch_qty = if (request->productlist[prod]->product_type = "B")
+                                                0
+                                             elseif (quantity_val = request->productlist[prod]->release_qty)
+                                                0
+                                             else
+                                                (quantity_val - request->productlist[prod]->release_qty)
+                                             endif,
+                         xm.updt_cnt         = xm.updt_cnt + 1,
+                         xm.updt_dt_tm       = cnvtdatetime(curdate,curtime3),
+                         xm.updt_task        = reqinfo->updt_task,
+                         xm.updt_id          = reqinfo->updt_id,
+                         xm.updt_applctx     = reqinfo->updt_applctx,
+                         xm.active_ind       = if (request->productlist[prod]->product_type = "B")
+                                                  0
+                                               elseif (quantity_val <= request->productlist[prod]->release_qty)
+                                                  0
+                                               else
+                                                  1
+                                               endif,
+                         xm.active_status_cd = if (request->productlist[prod]->product_type = "B")
+                                                  ReqData->inactive_status_cd
+                                               elseif (quantity_val <= request->productlist[prod]->release_qty)
+                                                  ReqData->inactive_status_cd
+                                               else
+                                                  ReqData->active_status_cd
+                                               endif,
+                         xm.active_status_dt_tm  = cnvtdatetime(curdate, curtime3),
+                         xm.active_status_prsnl_id = ReqInfo->updt_id
+                  plan xm where (xm.product_event_id = request->productlist[prod]->assgn_prod_event_id)
+                               And (xm.product_id = request->productlist[prod]->product_id)
+                               And (xm.updt_cnt = request->productlist[prod]->as_updt_cnt)
+                  with counter
+                  if (curqual = 0)
+                     set error_process = "update crossmatch"
+                     set error_message = "crossmatch not updated"
+                     set failure_occured = "T"
+                  else
+                     update into product_event pe
+                         set
+                             pe.active_ind = if (request->productlist[prod]->product_type = "B")
+                                                  0
+                                               elseif (quantity_val <= request->productlist[prod]->release_qty)
+                                                  0
+                                               else
+                                                  1
+                                               endif,
+                             pe.active_status_cd = if (request->productlist[prod]->product_type = "B")
+                                                      ReqData->inactive_status_cd
+                                                   elseif (quantity_val <= request->productlist[prod]->release_qty)
+                                                      ReqData->inactive_status_cd
+                                                   else
+                                                      ReqData->active_status_cd
+                                                   endif,
+                             pe.active_status_dt_tm    = cnvtdatetime(curdate, curtime3),
+                             pe.active_status_prsnl_id = ReqInfo->updt_id,
+                             pe.updt_cnt               = pe.updt_cnt + 1,
+                             pe.updt_dt_tm             = cnvtdatetime(curdate,curtime3),
+                             pe.updt_task              = reqinfo->updt_task,
+                             pe.updt_id                = reqinfo->updt_id,
+                             pe.updt_applctx           = reqinfo->updt_applctx
+                     plan pe where (pe.product_event_id = request->productlist[prod]->assgn_prod_event_id)
+                                   And (pe.product_id = request->productlist[prod]->product_id)
+                                   And (pe.event_type_cd = xmtch_event_type_cd)
+                                   And (pe.updt_cnt = request->productlist[prod]->pe_as_updt_cnt)
+                     with counter
+                     if (curqual = 0)
+                        set error_process = "update event"
+                        set error_message = "crossmatch product_event not updated"
+                        set failure_occured = "T"
+                     endif   ;update product event failed
+                  endif   ;update crossmatch
+               endif   ;lock failed
+
+            ;*********************************    IN PROGRESS    ************************************ 
+            else 
+               if ((request->productlist[prod]->rel_in_progress_flag = "T") and (failure_occured = "F"))
+                         
+                  ; Inactivate the In Progress event
+                  call CHG_PRODUCT_EVENT        /* These <variables> set in calling program */
+                  (
+                   /* product_event_id       */ request->productlist[prod]->assgn_prod_event_id,
+                   /* event_dt_tm            */ cnvtdatetime(curdate,curtime3),
+                   /* event_prsnl_id         */ ReqInfo->updt_id,
+                   /* event_status_flag      */ 0,
+                   /* active_ind             */ 0,
+                   /* active_status_cd       */ ReqData->inactive_status_cd,                                             
+                   /* active_status_dt_tm    */ cnvtdatetime(curdate,curtime3),
+                   /* active_status_prsnl_id */ ReqInfo->updt_id,
+                   /* updt_cnt               */ request->productlist[prod]->pe_as_updt_cnt,
+                   /* lock_forupdate_ind     */ 1,
+                   /* updt_dt_tm_prsnl_ind   */ 0            
+                  )
+                      
+                  if (gsub_product_event_status != "OK")
+                     set error_process = "update event"
+                     set error_message = "in progress product_event not updated"
+                     set failure_occured = "T"
+                  endif
+               endif                        
+            endif ;rel_assign_flag = "T"
+
+            /**********************************    CHECK FOR AVAILABLE   ******************************************/
+            /*  If there is not an active available event, and not an invalid event if a blood product, write an  */
+            /*  available event.                                                                                  */
+            /******************************************************************************************************/
+            If ((failure_occured = "F")
+                ;if a blood product make sure there isn't an invalid state active for the product
+                and (((active_quar = "F") and (active_uncfrm = "F") and (active_auto = "F")
+                        and (active_dir = "F") and (active_disp = "F") and (active_transfuse = "F") 
+                        and (active_dispose = "F") and (active_destroy = "F") and (active_shipped = "F")
+                         and (active_intransit = "F")
+                        and (multiple_xm = "F") and ((active_assign = "F") or (active_assign = "T" and active_xm = "F"))
+                        and (request->productlist[prod]->product_type = "B")
+                      )
+                     or (request->productlist[prod]->product_type = "D")
+                    )
+                and (active_avail = "F")
+               )
+               ;add available event
+               call ADD_PRODUCT_EVENT
+                    (
+                     /* product_id               */ request->productlist[prod]->product_id,
+                     /* person_id                */ 0,
+                     /* encntr_id                */ 0,
+                     /* order_id                 */ 0,
+                     /* bb_result_id             */ 0,
+                     /* event_type_cd            */ avail_event_type_cd,
+                     /* event_dt_tm              */ cnvtdatetime(curdate,curtime3),
+                     /* event_prsnl_id           */ ReqInfo->updt_id,
+                     /* event_status_flag        */ 0,
+                     /* override_ind             */ 0,
+                     /* override_reason_cd       */ 0,
+                     /* related_product_event_id */ 0,
+                     /* active_ind               */ 1,
+                     /* active_status_cd         */ ReqData->active_status_cd,
+                     /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+                     /* active_status_prsnl_id   */ ReqInfo->updt_id
+                     )
+               if (curqual = 0)
+                  set error_process = "add product_event"
+                  set error_message = "available product_event row not added for assign"
+                  set failure_occured = "T"
+               endif
+               ;else if derivative update the cur_avail_qty on the derivative table
+            Endif
+
+            /*********************************************************************************************************/
+            /*  If the product is a derivative it should be added back to the cur_avail_qty on the derivative table  */
+            /*  If there is another event that will be added later in the array then don't increment the udpt_cnt    */
+            /*********************************************************************************************************/
+            If ((failure_occured = "F") and(request->productlist[prod]->product_type = "D"))
+               ;add to quantity available
+               ;if derivative update into the derivative cur_avail_qty and not quarantined
+               update into derivative der
+                   set
+                       der.cur_avail_qty = der.cur_avail_qty + request->productlist[prod]->release_qty,
+                       der.cur_intl_units = der.cur_intl_units + request->productlist[prod]->release_iu,
+                       der.updt_cnt = if (other_events = "F")
+                                         der.updt_cnt + 1
+                                      else
+                                         der.updt_cnt
+                                      endif,
+                       der.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+                       der.updt_task  = reqinfo->updt_task,
+                       der.updt_id    = reqinfo->updt_id,
+                       der.updt_applctx = reqinfo->updt_applctx
+               plan der where (der.product_id = request->productlist[prod]->product_id)
+                       And (der.updt_cnt = request->productlist[prod]->der_updt_cnt)
+               with counter
+               if (curqual = 0)
+                  set error_process = "updt derivative"
+                  set error_message = "available qty not updated on derivative"
+                  set failure_occured = "T"
+               endif   ;udpate derivative cur_avail_qty failed
+            endif   ;check for available
+
+            /*********************************************   UNLOCK PORDUCT ***************************************************/
+            /* This event will occur for every product in the request if there is  not another event in the request array for */
+            /* this product_id                                                                                                */
+            /******************************************************************************************************************/
+
+            /* **********************************************************************
+            /* We want to execute the unlocking product_id logic if the new
+            /* REQUEST->KEEP_LOCKED_IND is set = 0.
+            /***********************************************************************/
+            /* keep_lock_ind is NOT in  request...process as before */
+            if (request->productlist[prod]->keep_lock_ind = 0)
+              call Unlock_Product(0)
+            endif   ;KEEP_LOCK_IND check                                       
+
+            ;commit the changes if a failure did not occur other wise roll back the chages
+            if (failure_occured = "F")
+               set reply->status_data->status = "S"
+               set reply->status_data->subeventstatus[prod]->OperationName = "Complete"
+               set reply->status_data->subeventstatus[prod]->OperationStatus = "S"
+               set reply->status_data->subeventstatus[prod]->TargetObjectName = "Tables Updated"
+               set reply->status_data->subeventstatus[prod]->TargetObjectValue = "S"
+               set reply->results[prod]->product_event_id = request->productlist[prod]->assgn_prod_event_id
+               set reply->results[prod]->status = "S"
+               set reply->results[prod]->err_process = "complete"
+               set reply->results[prod]->err_message = "no errors"
+               set success_cnt = success_cnt + 1
+            else
+               set reply->status_data->subeventstatus[prod]->OperationName = error_process
+               set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+               set reply->status_data->subeventstatus[prod]->TargetObjectName = error_message
+               set reply->status_data->subeventstatus[prod]->TargetObjectValue = "F"
+               set reply->results[prod]->product_event_id = request->productlist[prod]->assgn_prod_event_id
+               set reply->results[prod]->status = "F"
+               set reply->results[prod]->err_process = error_process
+               set reply->results[prod]->err_message = error_message
+            endif
+        endfor
+
+%i cclsource:bbt_add_product_event.inc
+END             ; end subroutine ADD_PRODUCT_EVENT
+
+%i cclsource:bbt_chg_product_event.inc
+END             ; end subroutine CHG_PRODUCT_EVENT
+/****************************************************  Wrap Up Information **************************************************/
+
+/********************************************
+/* Unlock_Product
+/*******************************************/
+subroutine Unlock_Product(none)
+  if ((failure_occured = "F") and (other_events = "F"))
+     select into "nl:"
+        p.product_id
+     from product p
+     plan p  where (p.product_id = request->productlist[prod]->product_id) and
+               (p.updt_cnt = request->productlist[prod]->p_updt_cnt) and
+               (p.locked_ind = 1)
+     with nocounter, forupdate(p)
+
+     if (curqual = 0)
+         set error_process = "update product"
+         set error_message = "product not locked"
+         set failure_occured = "T"
+     else
+
+         update into product p
+             set p.locked_ind        = 0,
+                 p.updt_cnt          = p.updt_cnt + 1,
+                 p.updt_dt_tm        = cnvtdatetime(curdate, curtime3),
+                 p.updt_id           = ReqInfo->updt_id,
+                 p.updt_task         = ReqInfo->updt_task,
+                 p.updt_applctx      = ReqInfo->updt_applctx
+         plan p where (p.product_id = request->productlist[prod]->product_id) and
+                  (p.updt_cnt = request->productlist[prod]->p_updt_cnt) and
+                  (p.locked_ind = 1)
+         with counter
+         if (curqual = 0)
+            set error_process = "update product"
+            set error_message = "product not updated"
+            set failure_occured = "T"
+         endif  ;update failed
+     endif   ;lock failed
+  endif   ; failure_occured = "F"
+end ;subroutine Unlock_Product
+
+if  (success_cnt < nbr_to_update)
+   set reply->status_data->status = "F"
+   set reqinfo->commit_ind = 0
+else
+   set reply->status_data->status = "S"
+   set reqinfo->commit_ind = 1
+endif
+
+#end_script
+end go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,381 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_resend_info/GLB_GET_RESEND_INFO.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_RESEND_INFO.PRG
+        Object name:            GLB_GET_RESEND_INFO
+        Request #:              250194
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve the calc components, comments, verify
+                                event information and catalog_cd and task_assay_cd
+                                event_cd's
+
+
+        Tables read:            result_event
+                                result_comment
+                                perform_result
+                                code_value_event_r
+                                long_text
+                                included_components
+                                result
+                                container
+
+
+        Tables updated:         n/a
+        Executing from:         General Lab audits -- resend to Clinical events
+
+        Special Notes:          If the request->calc_ind = 1, then load
+                                the calc components.
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 02/15/00 Gary Runde           Initial Release                     *
+;     001 07/24/00 Gary Runde           Put dontcare around catalog codes   *
+;                                       event code                          *
+;     002 08/10/00 Gary Runde           Retrieve cerner system id           *
+;     003 01/03/01 Gary Runde           Return default event_cd for cat_evt_cd*
+;    *004 06/11/04 Erik Ankrom          Order prsnl info posted             *
+;    *005 10/18/06 Jason Osborn         Performance Updates.                *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_RESEND_INFO:dba go
+      create program GLB_GET_RESEND_INFO:dba
+
+%i cclsource:pcs_code.inc
+
+/*
+      record request
+      (
+         1  accession          = vc
+      )
+*/
+      record reply
+      (
+	     1  accession                 = vc
+	     1  cerner_prsnl_id           = f8
+         1  orders[*]
+            2  order_id               = f8    
+            2  catalog_cd             = f8
+            2  catalog_desc           = vc
+            2  catalog_event_cd       = f8
+            2  orig_order_dt_tm       = dq8    
+            2  orig_order_tz          = i4 
+            2  assays[*]
+               3  container_id        = f8
+               3  specimen_id         = f8
+               3  task_assay_event_cd = f8
+               3  task_assay_cd       = f8
+               3  event_prsnl_id      = f8
+               3  event_dt_tm         = dq8
+               3  interp_data         = vc
+               3  order_provider_id   = f8     
+               3  result_id           = f8     
+               3  comments[*]
+                  4  comment_type_cd  = f8
+                  4  comment_text     = vc
+                  4  comment_dt_tm    = dq8
+                  4  comment_tz       = i4
+                  4  comment_prsnl_id = f8
+        1 image_event_cd              = f8
+%i cclsource:status_block.inc
+      )
+
+/* Initialization */
+      set reply->status_data->status = "F"
+
+/*002 Begin new code*/
+
+/*Retrieve the cerner prsnl Id */
+
+set code_set = 89
+set cdf_meaning = "POWERCHART"
+set code_value = 0.0
+set default_cat_event_cd = 0.0                            ;003
+set contributor_system_cd = 0.0
+set stat = uar_get_meaning_by_codeset(code_set, cdf_meaning, 1, code_value)
+set contributor_system_cd = code_value        ;// 89 POWERCHART
+
+declare dCEOrderActionTypeCd = f8 with protect, noconstant(0.0)
+declare dActionStatusCd = f8 with protect, noconstant(0.0)
+declare dOrderActionTypeCd = f8 with protect, noconstant(0.0)
+declare dModifyActionTypeCd = f8 with protect, noconstant(0.0)
+
+declare sReferenceNumber = vc with protect, noconstant(" ")
+
+declare dImage_cd             = f8 with protect, noconstant(0.0)
+
+set dCEOrderActionTypeCd = GetCodeValueByMeaning (21, "ORDER")
+set dActionStatusCd = GetCodeValueByMeaning (103, "COMPLETED")
+set dOrderActionTypeCd = GetCodeValueByMeaning (6003, "ORDER")
+set dModifyActionTypeCd = GetCodeValueByMeaning (6003, "MODIFY")
+
+call echo("contributor_system_cd")
+call echo(contributor_system_cd)
+set reply->cerner_prsnl_id = 0.0
+select into "nl:"
+  cs.prsnl_person_id
+from
+  contributor_system cs
+plan cs
+  where cs.contributor_system_cd = contributor_system_cd
+detail
+  reply->cerner_prsnl_id = cs.prsnl_person_id
+with nocounter
+
+/*002 END new code*/
+
+select into 'nl:'                          ;003
+  cver.event_cd,                           ;003
+  cver.parent_cd,                          ;003
+  cv.code_value                            ;003
+from code_value_event_r cver,              ;003
+     code_value cv                         ;003
+plan cv                                    ;003
+  where cv.code_set = 73                   ;003
+    and cv.cdf_meaning = "LAB"             ;003
+join cver                                  ;003
+  where cver.parent_cd = cv.code_value     ;003
+detail                                     ;003
+   default_cat_event_cd = cver.event_cd    ;003
+with nocounter                             ;003
+
+
+set dImage_cd = uar_get_code_by("MEANING", 73, "DOC_IMAGE")
+       
+select into "nl:"
+from 
+  code_value_event_r cver
+plan cver where cver.parent_cd = dImage_cd
+detail
+  reply->image_event_cd = cver.event_cd
+with nocounter
+
+
+/*Get the data needed */
+      select into "nl:"
+           aor.accession,
+           aor.order_id,
+           r.result_id,
+           r.catalog_cd,
+           cver1.event_cd,
+           cver2.event_cd,
+           pr.result_id,
+           c.container_id,
+           id.long_text_id,
+           lt2.long_text_id,
+           re.result_id,
+           d1.seq,
+           rc_exists = decode(rc.seq, "Y", "N"),
+           cver2_exists = decode(cver2.seq, "Y", "N"),                   ;001
+           oa_exists = decode(oa.seq, "Y", "N"),
+           rc.result_id,
+           lt.long_text_id,
+           lt.long_text
+      from accession_order_r aor,
+           orders ord,                                                   
+           result r,
+           order_catalog oc,
+           code_value_event_r cver1,
+           (dummyt d2 with seq = 1),                                     
+           code_value_event_r cver2,
+           (dummyt d3 with seq = 1),                                     ;001
+           order_action oa,                                           
+           (dummyt d4 with seq = 1),
+           perform_result pr,
+           container c,
+           interp_data id,
+           long_text lt2,
+           result_event re,
+           (dummyt d1 with seq = 1),
+           result_comment rc,
+           long_text lt
+      plan aor where aor.accession = request->accession
+      join ord where ord.order_id = aor.order_id                        
+      join r where r.order_id = aor.order_id
+      join oc where oc.catalog_cd = r.catalog_cd
+      join cver1 where cver1.parent_cd = r.task_assay_cd
+      join d2 where d2.seq = 1                                          ;001
+      join cver2 where cver2.parent_cd = r.catalog_cd
+      join d3 where d3.seq = 1                                          ;001
+      join oa where oa.order_id = r.order_id                            
+                and oa.action_type_cd in                                
+                (dOrderActionTypeCD, dModifyActionTypeCd)               
+      join d4 where d4.seq = 1                                          
+      join pr where r.result_id = pr.result_id and
+                    r.result_status_cd = pr.result_status_cd
+      join c where c.container_id = pr.container_id
+      join id where id.interp_data_id = pr.interp_data_id
+      join lt2 where id.long_text_id = lt2.long_text_id
+      join re where re.result_id = r.result_id
+                and re.event_type_cd = r.result_status_cd
+      join d1 where d1.seq = 1
+      join rc where rc.result_id = r.result_id
+      join lt where lt.long_text_id = rc.long_text_id
+      order by
+         r.order_id,
+         r.task_assay_cd,
+         c.container_id,
+         rc.comment_type_cd,
+         rc.action_sequence desc
+      HEAD report
+         reply->accession = aor.accession
+         o_cnt = 0
+      HEAD r.order_id
+         o_cnt = o_cnt + 1
+         if (mod(o_cnt, 5) = 1)
+             stat = alterlist(reply->orders, o_cnt + 5)
+         endif
+         reply->orders[o_cnt].order_id = r.order_id
+         reply->orders[o_cnt].orig_order_dt_tm = ord.orig_order_dt_tm   
+         reply->orders[o_cnt].orig_order_tz = ord.orig_order_tz         
+         reply->orders[o_cnt].catalog_cd = r.catalog_cd
+         reply->orders[o_cnt].catalog_desc = oc.description
+         if (cver2_exists = "Y")                                        ;001
+             reply->orders[o_cnt].catalog_event_cd = cver2.event_cd
+         endif                                                          ;001
+         a_cnt = 0
+      HEAD r.task_assay_cd
+         a_cnt = a_cnt + 1
+         if (mod(a_cnt, 5) = 1)
+             stat = alterlist(reply->orders[o_cnt].assays, a_cnt + 5)
+         endif
+         reply->orders[o_cnt].assays[a_cnt].task_assay_event_cd = cver1.event_cd
+         reply->orders[o_cnt].assays[a_cnt].task_assay_cd = r.task_assay_cd
+         reply->orders[o_cnt].assays[a_cnt].event_prsnl_id = re.event_personnel_id
+         reply->orders[o_cnt].assays[a_cnt].event_dt_tm = re.event_dt_tm
+         if (id.long_text_id > 0.0)
+    	         reply->orders[o_cnt].assays[a_cnt].interp_data = lt2.long_text
+         endif
+         reply->orders[o_cnt].assays[a_cnt].result_id = r.result_id
+         if (oa_exists = "Y")
+         	reply->orders[o_cnt].assays[a_cnt].order_provider_id = oa.order_provider_id
+         endif
+      HEAD c.container_id
+         reply->orders[o_cnt].assays[a_cnt].container_id = c.container_id
+         reply->orders[o_cnt].assays[a_cnt].specimen_id = c.specimen_id
+         rc_cnt = 0
+      HEAD rc.comment_type_cd
+         if (rc_exists = "Y")
+            rc_cnt = rc_cnt + 1
+            if (mod(rc_cnt, 5) = 1)
+                stat = alterlist(reply->orders[o_cnt].assays[a_cnt].comments, rc_cnt + 5)
+            endif
+            reply->orders[o_cnt].assays[a_cnt].comments[rc_cnt].comment_type_cd = rc.comment_type_cd
+            reply->orders[o_cnt].assays[a_cnt].comments[rc_cnt].comment_text = lt.long_text
+            reply->orders[o_cnt].assays[a_cnt].comments[rc_cnt].comment_dt_tm = rc.comment_dt_tm
+            if(curutc = 1)
+              reply->orders[o_cnt].assays[a_cnt].comments[rc_cnt].comment_tz = rc.comment_tz
+            endif
+            reply->orders[o_cnt].assays[a_cnt].comments[rc_cnt].comment_prsnl_id = rc.comment_prsnl_id
+         endif
+      FOOT c.container_id
+         if (rc_cnt > 0)
+             stat = alterlist(reply->orders[o_cnt].assays[a_cnt].comments, rc_cnt)
+         endif
+      FOOT r.order_id
+         stat = alterlist(reply->orders[o_cnt].assays, a_cnt)
+      FOOT REPORT
+         stat = alterlist(reply->orders, o_cnt)
+      WITH outerjoin = d1,
+           dontcare = oa,
+           dontcare = rc,
+           dontcare = lt,
+           dontcare = cver2,                                            ;001
+           memsort
+
+      if (curqual > 0)
+         set reply->status_data->status = "S"
+      else
+         set reply->status_data->status = "Z"
+      endif
+      
+      
+/*********************003 START NEW CODE ****************/
+      ;loop through the orders to make sure that the catalog_event_cd is 
+      ;filled out; if not, look for event_cd on v500_event_code; if not found, use
+      ;default
+      
+      set num_ords = value(size(reply->orders, 5))
+      for (ord_cnt = 1 to num_ords) 
+         set num_assays = value(size(reply->orders[ord_cnt].assays, 5))
+         if (reply->orders[ord_cnt].catalog_event_cd = 0.0)
+            ;check for code on v500_event_code
+            select into 'nl:'
+            from v500_event_code c
+            where c.event_cd_disp_key = reply->orders[ord_cnt].catalog_desc 
+            detail
+               reply->orders[ord_cnt].catalog_event_cd = c.event_cd
+            with nocounter
+   
+            if ( curqual = 0 )
+               set reply->orders[ord_cnt].catalog_event_cd = default_cat_event_cd
+            endif
+         endif    
+            
+          for (a_cnt = 1 to num_assays)         
+          	set sReferenceNumber = build(reply->orders[ord_cnt].order_id,
+          	                            reply->orders[ord_cnt].assays[a_cnt].result_id,
+          	                            reply->orders[ord_cnt].assays[a_cnt].task_assay_cd)
+          	select into "nl:"
+          	from clinical_event ce,
+          	     ce_event_prsnl cep
+          	plan ce
+    				where ce.contributor_system_cd = contributor_system_cd and
+          	      ce.valid_until_dt_tm > cnvtdatetime(curdate,curtime3) and
+          	      ce.reference_nbr = sReferenceNumber 
+          	join cep where cep.event_id = ce.event_id and
+          	               cep.action_type_cd +0 = dCEOrderActionTypeCd and
+          	               cep.action_status_cd +0 = dActionStatusCd and
+          	               cep.valid_until_dt_tm > cnvtdatetime(curdate,curtime3) and
+          	               cep.action_prsnl_id +0 = reply->orders[ord_cnt].assays[a_cnt].order_provider_id
+          	detail
+    					reply->orders[ord_cnt].assays[a_cnt].order_provider_id = 0
+    		with nocounter
+          endfor
+         
+      endfor
+
+/*********************003 END NEW CODE ****************/
+
+call echorecord(reply)
+
+#EXIT_SCRIPT
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

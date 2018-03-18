@@ -1,0 +1,453 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_upd_qc_run_params/glb_upd_qc_run_params.prg Turn on black mode
+
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_UPD_QC_RUN_PARAMS.PRG
+        Object name:            GLB_UPD_QC_RUN_PARAMS
+        Request #:              257550
+
+        Product:                General Lab - Quality Control
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Add QC Run parameters for a given service_resource
+
+        Tables read:            n/a
+
+        Tables updated:         run_setup
+                                run_ctrl
+
+        Executing from:         General Lab QC Maintenance
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 04/01/97 Chad Moats           Initial Release                     *
+;     001 11/30/98 Gary Runde		    Change for tables change            *
+;     002 07/30/98 Gary Runde           Rewrite of QCScheduler              *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_UPD_QC_RUN_PARAMS:dba go
+      create program GLB_UPD_QC_RUN_PARAMS:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+
+record REQUEST (
+  1 qc_schedule_id = f8   
+  1 service_resource_cd = f8   
+  1 start_dt_tm = dq8   
+  1 active_ind = i2   
+  1 multi_control_limit = i4   
+  1 steps [*]   
+    2 step_nbr = i4   
+    2 interval_min = i4   
+    2 cntrls [*]   
+      3 control_id = f8   
+      3 step_nbr = i4   
+      3 assays[*]
+        4 task_assay_cd = f8
+    2 verify_minutes_nbr = i4
+    2 verify_results_nbr = i4
+  1 enforce_verified_results_ind = i2
+  1 reminder_minutes_nbr = i4
+  1 reminder_results_nbr = i4  
+)
+*/
+
+/* record reqinfo
+( 1 commit_ind  = i2
+  1 updt_id     = f8
+  1 position_cd = f8
+  1 updt_app    = i4
+  1 updt_task   = i4
+  1 updt_req    = i4
+  1 updt_applctx= i4
+)
+*/
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+         1 qc_schedule_id = f8
+         1 status_data
+           2 status                = c1
+           2 subeventstatus[1]
+             3 OperationName       = c15
+             3 OperationStatus     = c1
+             3 TargetObjectName    = c15
+             3 TargetObjectValue   = vc
+      )
+
+     #Script
+      declare qcassay_cnt = i4 with protect, noconstant(0)
+      declare qcntrl_cnt  = i4 with protect, noconstant(0)
+      declare cnt         = i4 with protect, noconstant(0)
+      declare cnt2        = i4 with protect, noconstant(0)
+      declare cnt3        = i4 with protect, noconstant(0)
+      
+      set failed = "F"
+      set reply->status_data->status = "F"
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+      set qst_cnt = value(size(request->steps, 5))
+
+/*******************************************************************/
+/* Update into qc_schedule table                                     */
+/*******************************************************************/
+
+    if (request->qc_schedule_id = 0)
+
+        SELECT
+          into "nl:"
+            y = seq(reference_seq,nextval)
+        FROM
+          dual
+        DETAIL
+          reply->qc_schedule_id = y
+          request->qc_schedule_id = y
+        WITH
+          format, counter
+
+        if (curqual = 0)
+          go to seq_failed
+        endif
+
+        /*******************************************************************/
+        /* Insert into Run_Setup table                                     */
+        /*******************************************************************/
+
+        INSERT
+          into qc_schedule qs
+        SET
+          qs.qc_schedule_id       = reply->qc_schedule_id,
+          qs.service_resource_cd  = request->service_resource_cd,
+          qs.start_dt_tm          = cnvtdatetime(request->start_dt_tm),
+          qs.beg_effective_dt_tm  = cnvtdatetime(curdate, curtime3),
+          qs.end_effective_dt_tm  = cnvtdatetime("31 DEC 2100 00:00"),
+          qs.active_ind           = request->active_ind,
+          qs.multi_control_limit  = request->multi_control_limit,
+          qs.enforce_verified_results_ind = request->enforce_verified_results_ind,
+          qs.reminder_minutes_nbr = request->reminder_minutes_nbr,
+          qs.reminder_results_nbr = request->reminder_results_nbr,          
+          qs.updt_dt_tm           = cnvtdatetime(curdate, curtime3),
+          qs.updt_id              = reqinfo->updt_id,
+          qs.updt_task            = reqinfo->updt_task,
+          qs.updt_cnt             = 1,
+          qs.updt_applctx         = reqinfo->updt_applctx
+
+        WITH nocounter
+
+        set error_check = ERROR(sErrorMsg,0)   ;get error message                         ;002
+        if (error_check != 0)                                                             ;002
+          set Failed = "T"                                                                ;002
+          set reply->status_data->status = "F"                                            ;002
+          set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg        ;002
+          go to exit_script                                                               ;002
+        endif
+        
+    else
+        SELECT 
+          into "nl:"
+        FROM qc_schedule qs
+        WHERE
+          qs.qc_schedule_id = request->qc_schedule_id and
+          qs.service_resource_cd = request->service_resource_cd and
+          qs.active_ind = 1
+        WITH nocounter, forupdate(qs) 
+        
+        set error_check = ERROR(sErrorMsg,0)   ;get error message                         ;002
+        if (error_check != 0)                                                             ;002
+          set Failed = "T"                                                                ;002
+          set reply->status_data->status = "F"                                            ;002
+          set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg        ;002
+          go to exit_script                                                               ;002
+        endif      
+        
+        UPDATE
+          into qc_schedule qs
+        SET
+          qs.start_dt_tm          = cnvtdatetime(request->start_dt_tm),
+          qs.active_ind           = request->active_ind,
+          qs.multi_control_limit  = request->multi_control_limit,
+          qs.enforce_verified_results_ind = request->enforce_verified_results_ind,
+          qs.reminder_minutes_nbr = request->reminder_minutes_nbr,
+          qs.reminder_results_nbr = request->reminder_results_nbr,
+          qs.updt_dt_tm           = cnvtdatetime(curdate, curtime3),
+          qs.updt_id              = reqinfo->updt_id,
+          qs.updt_task            = reqinfo->updt_task,
+          qs.updt_cnt             = qs.updt_cnt + 1,
+          qs.updt_applctx         = reqinfo->updt_applctx
+        WHERE
+          qs.qc_schedule_id = request->qc_schedule_id and
+          qs.service_resource_cd = request->service_resource_cd and
+          qs.active_ind = 1
+        WITH nocounter
+
+        set error_check = ERROR(sErrorMsg,0)   ;get error message                        
+        if (error_check != 0)                                                            
+          set Failed = "T"                                                               
+          set reply->status_data->status = "F"                                           
+          set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg       
+          go to exit_script                                                              
+        endif     
+    endif
+
+/*****************************************************************************************************/
+/* Remove rows on qc_schd_step_ctrl_assay, qc_schedule_ctrl, and qc_schedule_step tables for this id */
+/*****************************************************************************************************/
+      SELECT
+        into "nl:"
+      FROM qc_schd_step_ctrl_assay qssc
+      WHERE
+        qssc.qc_schedule_id = request->qc_schedule_id
+      WITH
+        nocounter, forupdate(qssc)
+        
+      set error_check = ERROR(sErrorMsg,0)   ;get error message                        
+      if (error_check != 0)                                                           
+        set Failed = "T"                                                               
+        set reply->status_data->status = "F"                                           
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg       
+        go to exit_script                                                               
+      endif     
+      
+      DELETE
+        from qc_schd_step_ctrl_assay qssc
+      WHERE
+        qssc.qc_schedule_id = request->qc_schedule_id
+      WITH
+        nocounter
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message                         ;002
+      if (error_check != 0)                                                             ;002
+        set Failed = "T"                                                                ;002
+        set reply->status_data->status = "F"                                            ;002
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg        ;002
+        go to exit_script                                                               ;002
+      endif 
+
+      SELECT
+        into "nl:"
+      FROM qc_schedule_ctrl qsc
+      WHERE
+        qsc.qc_schedule_id =  request->qc_schedule_id
+      WITH
+        nocounter, forupdate(qsc)
+        
+      set error_check = ERROR(sErrorMsg,0)   ;get error message                        
+      if (error_check != 0)                                                           
+        set Failed = "T"                                                               
+        set reply->status_data->status = "F"                                           
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg       
+        go to exit_script                                                               
+      endif     
+
+      DELETE
+        from qc_schedule_ctrl qsc
+      WHERE
+        qsc.qc_schedule_id =  request->qc_schedule_id
+      WITH
+        nocounter
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message                         ;002
+      if (error_check != 0)                                                             ;002
+        set Failed = "T"                                                                ;002
+        set reply->status_data->status = "F"                                            ;002
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg        ;002
+        go to exit_script                                                               ;002
+      endif
+
+      SELECT
+        into "nl:"
+      FROM qc_schedule_step qst
+      WHERE
+        qst.qc_schedule_id = request->qc_schedule_id
+      WITH
+        nocounter, forupdate(qst)
+        
+      set error_check = ERROR(sErrorMsg,0)   ;get error message                        
+      if (error_check != 0)                                                           
+        set Failed = "T"                                                               
+        set reply->status_data->status = "F"                                           
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg       
+        go to exit_script                                                               
+      endif     
+
+      DELETE
+        from qc_schedule_step qst
+      WHERE
+        qst.qc_schedule_id = request->qc_schedule_id
+      WITH
+        nocounter
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message                         ;002
+      if (error_check != 0)                                                             ;002
+        set Failed = "T"                                                                ;002
+        set reply->status_data->status = "F"                                            ;002
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg        ;002
+        go to exit_script                                                               ;002
+      endif  
+
+
+/*******************************************************************/
+/* Update into qc_schedule_step table                              */
+/*******************************************************************/
+
+    for (cnt = 1 to qst_cnt)
+
+      INSERT
+        into qc_schedule_step qst
+      SET
+        qst.qc_schedule_id        = request->qc_schedule_id,
+        qst.step_nbr              = request->steps[cnt].step_nbr,
+        qst.interval_min          = request->steps[cnt].interval_min,
+        qst.updt_dt_tm            = cnvtdatetime(curdate, curtime3),
+        qst.updt_id               = reqinfo->updt_id,
+        qst.updt_task             = reqinfo->updt_task,
+        qst.updt_cnt              = 0,
+        qst.updt_applctx          = reqinfo->updt_applctx,
+        qst.verify_minutes_nbr    = request->steps[cnt].verify_minutes_nbr,
+        qst.verify_results_nbr    = request->steps[cnt].verify_results_nbr 
+      WITH nocounter
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message                         ;002
+      if (error_check != 0)                                                             ;002
+        set Failed = "T"                                                                ;002
+        set reply->status_data->status = "F"                                            ;002
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg        ;002
+        go to exit_script                                                               ;002
+      endif   
+
+/*******************************************************************/
+/* Update into qc_schedule_ctrl table                              */
+/*******************************************************************/
+      set qcntrl_cnt = value(size(request->steps[cnt].cntrls, 5))
+
+      if (qcntrl_cnt > 0)
+        for (cnt2 = 1 to qcntrl_cnt)
+          INSERT
+	        into qc_schedule_ctrl qc
+	      SET
+	        qc.qc_schedule_id        = request->qc_schedule_id,
+	        qc.step_nbr              = request->steps[cnt].step_nbr,
+	        qc.control_id            = request->steps[cnt]->cntrls[cnt2].control_id,
+	        qc.updt_dt_tm            = cnvtdatetime(curdate, curtime3),
+	        qc.updt_id               = reqinfo->updt_id,
+	        qc.updt_task             = reqinfo->updt_task,
+	        qc.updt_cnt              = 0,
+	        qc.updt_applctx          = reqinfo->updt_applctx
+	      WITH
+	         nocounter
+
+          set error_check = ERROR(sErrorMsg,0)   ;get error message                         ;002
+          if (error_check != 0)                                                             ;002
+            set Failed = "T"                                                                ;002
+            set reply->status_data->status = "F"                                            ;002
+            set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg        ;002
+            go to exit_script                                                               ;002
+          endif
+
+/*******************************************************************/
+/* Update into qc_schd_step_ctrl_assay table                       */
+/*******************************************************************/
+          set qcassay_cnt = value(size(request->steps[cnt]->cntrls[cnt2].assays, 5))
+
+          if (qcassay_cnt > 0)
+            for (cnt3 = 1 to qcassay_cnt)
+              INSERT 
+                into qc_schd_step_ctrl_assay qssc
+              SET
+                qssc.control_id                 = request->steps[cnt].cntrls[cnt2].control_id,
+                qssc.error_step_ind             = 0,
+                qssc.qc_schd_step_ctrl_assay_id = seq(reference_seq,nextval),
+                qssc.qc_schedule_id             = request->qc_schedule_id,
+                qssc.step_nbr                   = request->steps[cnt].step_nbr,
+                qssc.task_assay_cd              = request->steps[cnt]->cntrls[cnt2].assays[cnt3].task_assay_cd,
+                qssc.updt_applctx               = reqinfo->updt_applctx,
+                qssc.updt_cnt                   = 0,
+                qssc.updt_dt_tm                 = cnvtdatetime(curdate, curtime3),
+                qssc.updt_id                    = reqinfo->updt_id,
+                qssc.updt_task                  = reqinfo->updt_task
+              PLAN qssc 
+              WITH nocounter
+              
+              set error_check = ERROR(sErrorMsg,0)   ;get error message  
+              if (error_check != 0)                                                                           
+                set Failed = "T"                                                            
+                set reply->status_data->status = "F"                                        
+                set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg      
+                go to exit_script                                                            
+              endif 
+              
+            endfor
+          endif
+          
+        endfor
+	  endif
+
+    endfor
+
+    go to exit_script
+
+/********************************************************************/
+/*  Sequence Failed                                                 */
+/********************************************************************/
+     #seq_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "sequence"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "sequence"
+      set failed = "T"
+
+      go to exit_script
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+      if (failed = "F")
+         set reply->status_data->status = "S"
+         set reqinfo->commit_ind = 1
+      else
+         set reqinfo->commit_ind = 0
+      endif
+
+END
+GO
+
+;Generated by GNU enscript 1.6.4.

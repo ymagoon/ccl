@@ -1,0 +1,633 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_filter_values/glb_get_filter_values.prg Turn on black mode
+
+/*****************************************************************************
+      *  Copyright Notice:  (c) 2003 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+  Source file name:   GLB_GET_FILTER_VALUES.PRG
+  Object name:        GLB_GET_FILTER_VALUES
+  Request #:          250223
+
+  Product:            GLB DB QC Templates
+  Product Team:       Pathnet General Lab
+  HNA Version:        500
+  CCL Version:        8.2
+
+  Program purpose:    Accepts controls, test sites, assays defined on template
+  					  and returns the type of data requested.
+
+  Tables read:        CONTROL_MATERIAL, CONTROL_LOT, RESOURCE_LOT_R
+  Tables updated:     none
+  Executing from:
+
+  Special Notes:
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer		        Comment 	                        *
+;    *--- -------- --------------------	----------------------------------- *
+;    *001 09/24/03 cs6265               Initial Release			            *
+;    *                                                                      *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program glb_get_filter_values:dba go
+create program glb_get_filter_values:dba
+
+;*************************************************************************
+;*         Record Request                                                *
+;*************************************************************************
+/*
+record request
+(
+  1 data_type_flag =i4 (0=controls, 1 = test sites, 2=procs)
+  1 controls[*]
+    2 control_id              = f8
+  1 service_resources[*]
+    2 service_resource_cd     = f8
+  1 assays[*]
+    2 task_assay_cd           = f8
+)
+*/
+
+;***********************************************************************
+;*   Reply Record                                                      *
+;***********************************************************************
+record reply
+(
+  1 controls[*]
+    2 control_id               = f8
+    2 short_description        = vc
+  1 service_resources[*]
+    2 service_resource_cd      = f8
+    2 service_resource_disp    = c40
+  1 assays[*]
+    2 task_assay_cd            = f8
+    2 task_assay_disp          = c40
+%I CCLSOURCE:STATUS_BLOCK.INC
+)
+
+;***********************************************************************
+;*   Variable Declarations                                             *
+;***********************************************************************
+declare service_parser            = vc with protect, noconstant("")
+declare assay_parser              = vc with protect, noconstant("")
+declare control_parser            = vc with protect, noconstant("")
+declare nControlCnt                 = i4 with protect, noconstant(0)
+declare nServiceCnt                 = i4 with protect, noconstant(0)
+declare nAssayCnt                   = i4 with protect, noconstant(0)
+declare nStatus                     = i4 with protect, noconstant(0)
+declare dBenchCd                    = f8 with protect, noconstant(0.0)
+declare dInstrumentCd               = f8 with protect, noconstant(0.0)
+declare dGlbCd                      = f8 with protect, noconstant(0.0)
+declare nControllist                = i4 with protect, constant(size(request->controls,5))
+declare nServicelist                = i4 with protect, constant(size(request->service_resources,5))
+declare nAssayList                  = i4 with protect, constant(size(request->assays,5))
+declare nCONTROL_TYPE_FLAG          = i2 with protect, constant(0)
+declare nSR_TYPE_FLAG               = i2 with protect, constant(1)
+declare nPROC_TYPE_FLAG             = i2 with protect, constant(2)
+
+;***********************************************************************
+;*   Initializations                                                   *
+;***********************************************************************
+set reply->status_data->status = "F"
+set dBenchCd=UAR_GET_CODE_BY("MEANING", 223,"BENCH")
+set dInstrumentCd=UAR_GET_CODE_BY("MEANING", 223,"INSTRUMENT")
+set dGlbCd=UAR_GET_CODE_BY("MEANING", 106, "GLB")
+
+/********************************************************
+*determine how to retrieve data based on request info   *
+********************************************************/
+if (request->data_type_flag = nCONTROL_TYPE_FLAG)
+  if (nServiceList > 0 and nAssayList > 0)
+    call getCtrlsbyAssaysSr("")
+  elseif (nServiceList > 0)
+    call getCtrlbySR("")  
+  elseif (nAssayList > 0)
+    call getCtrlbyAssay("")
+  else
+    call getCtrl("")
+  endif
+elseif (request->data_type_flag = nSR_TYPE_FLAG)
+  if (nControllist > 0 and nAssayList > 0)
+    call getSRbyAssaysCtrls("")
+  elseif (nControllist > 0)
+    call getSRbyCtrl("")
+  elseif (nAssayList > 0)
+    call getSRbyAssay("")
+  else
+    call getSR("")
+  endif
+elseif (request->data_type_flag = nPROC_TYPE_FLAG)
+  if (nControllist > 0 and nServiceList > 0)
+    call getAssaysbySrCtrl("")
+  elseif (nControllist > 0)
+    call getAssaysbyCtrl("")
+  elseif (nServiceList> 0)
+    call getAssaysbySR("")
+  else
+    call getAssays("")
+  endif
+endif
+
+/***********************************************************************
+*subroutine for retrieving service resources by control                *
+***********************************************************************/
+declare getSRbyCtrl() = i2
+subroutine getSRbyCtrl(null)
+
+select into "nl:"
+from (dummyt d1 with seq = value(size(request->controls,5))),
+	   control_material cm,
+	   control_lot cl,
+     resource_lot_r rlr
+
+plan d1 where request->controls[d1.seq].control_id > 0
+join cm where cm.control_id = request->controls[d1.seq]->control_id
+join cl where cl.control_id = cm.control_id
+join rlr where rlr.lot_id = cl.lot_id
+
+order by
+rlr.service_resource_cd
+
+head rlr.service_resource_cd
+
+  nServiceCnt = nServiceCnt + 1
+
+  if(nServiceCnt> size(reply->service_resources, 5))
+    nStatus = alterlist(reply->service_resources, nServiceCnt + 9)
+  endif
+
+  reply->service_resources[nServiceCnt].service_resource_cd		= rlr.service_resource_cd
+
+foot report
+  nstatus = alterlist(reply->service_resources, nServiceCnt)
+
+with nocounter
+
+end
+/*****************************************************************************************
+*subroutine for retrieving assays by service resource                                    *
+*****************************************************************************************/
+declare getAssaysbySr() = i2
+subroutine getAssaysbySR(null)
+
+call getServicesParser(0)
+
+select into "nl:"
+from control_material cm,
+     control_lot cl,
+     assay_resource_lot arl
+
+plan cm where cm.control_id > 0
+join cl where cl.control_id = cm.control_id
+join arl where arl.lot_id = cl.lot_id and parser(service_parser)
+
+order by arl.task_assay_cd
+head arl.task_assay_cd
+
+  nAssayCnt = nAssayCnt + 1
+
+  if(nAssayCnt > size(reply->assays, 5))
+    nStatus = alterlist(reply->assays, nAssayCnt + 9)
+  endif
+  reply->assays[nAssayCnt]->task_assay_cd      = arl.task_assay_cd
+
+foot report
+ 	nstatus = alterlist(reply->assays, nAssayCnt)
+
+with nocounter
+end
+/*****************************************************************************************
+*subroutine for retrieving controls by service resource                                  *
+*****************************************************************************************/
+declare getCtrlbySR() = i2
+subroutine getCtrlbySR(null)
+
+select into "nl:"
+
+from (dummyt d1 with seq = value(size(request->service_resources,5))),
+     resource_assay_control rac,
+     control_material cm
+     
+plan d1 where request->service_resources[d1.seq]->service_resource_cd > 0
+join rac where rac.service_resource_cd = request->service_resources[d1.seq]->service_resource_cd
+join cm where cm.control_id = rac.control_id
+
+order by
+  d1.seq,
+  cm.control_id
+
+head cm.control_id
+
+  nControlCnt = nControlCnt + 1
+
+  if(nControlCnt > size(reply->controls, 5))
+    nStatus = alterlist(reply->controls, nControlCnt + 9)
+  endif
+
+  reply->controls[nControlCnt].control_id   			   = cm.control_id
+  reply->controls[nControlCnt].short_description  	 = cm.short_description
+
+foot report
+ 	nstatus = alterlist(reply->controls, nControlCnt)
+
+with nocounter
+
+end
+/*************************************************************************
+*subroutine for retrieving service resources by task assay               *
+*************************************************************************/
+declare getSRbyAssay()= i2
+subroutine getSRbyAssay(null)
+
+select into "nl:"
+
+from (dummyt d1 with seq = value(size(request->assays,5))),
+     resource_assay_control rac
+plan d1 where request->assays[d1.seq]->task_assay_cd > 0
+join rac where rac.task_assay_cd = request->assays[d1.seq]->task_assay_cd
+order by rac.service_resource_cd
+head rac.service_resource_cd
+
+  nServiceCnt = nServiceCnt + 1
+
+  if(nServiceCnt > size(reply->service_resources, 5))
+    nStatus = alterlist(reply->service_resources, nServiceCnt + 9)
+  endif
+
+  reply->service_resources[nServiceCnt].service_resource_cd		= rac.service_resource_cd
+
+foot report
+ 	nstatus = alterlist(reply->service_resources, nServiceCnt)
+
+with nocounter
+
+end
+/*************************************************************************
+*subroutine for retrieving controls via assays                           *
+*************************************************************************/
+declare getCtrlbyAssay()= i2
+subroutine getCtrlbyAssay(null)
+
+select into "nl:"
+from (dummyt d1 with seq = value(size(request->assays,5))),
+     resource_assay_control rac,
+     control_material cm
+
+plan d1 where request->assays[d1.seq]->task_assay_cd > 0
+join rac where rac.task_assay_cd = request->assays[d1.seq]->task_assay_cd
+join cm where cm.control_id = rac.control_id
+order by cm.control_id
+head cm.control_id
+  nControlCnt = nControlCnt + 1
+
+  if(nControlCnt > size(reply->controls, 5))
+    nStatus = alterlist(reply->controls, nControlCnt + 9)
+  endif
+
+  reply->controls[nControlCnt].control_id   			    = cm.control_id
+  reply->controls[nControlCnt].short_description  		= cm.short_description
+
+foot report
+ 	nstatus = alterlist(reply->controls, nControlCnt)
+
+with nocounter
+
+end
+
+/*************************************************************************
+*subroutine for retrieving assays via controls                           *
+*************************************************************************/
+declare getAssaysbyCtrl()= i2
+subroutine getAssaysbyCtrl(null)
+
+select into "nl:"
+from (dummyt d1 with seq = value(size(request->controls,5))),
+     resource_assay_control rac
+
+plan d1 where request->controls[d1.seq]->control_id > 0
+join rac where rac.control_id = request->controls[d1.seq]->control_id
+
+order by rac.task_assay_cd
+head rac.task_assay_cd
+  
+  nAssayCnt = nAssayCnt + 1
+
+  if(nAssayCnt > size(reply->Assays, 5))
+    nStatus = alterlist(reply->Assays, nAssayCnt + 9)
+  endif
+
+  reply->Assays[nAssayCnt].task_assay_cd   			  = rac.task_assay_cd
+
+foot report
+ 	nstatus = alterlist(reply->Assays, nAssayCnt)
+
+with nocounter
+
+end
+
+/**************************************************************************
+*subroutine for retrieving controls directly                              *
+**************************************************************************/
+declare getCtrl() = i2
+subroutine getCtrl(null)
+select into "nl:"
+  cm.control_id
+from    control_material cm
+plan cm  where cm.control_id > 0
+order by cm.control_id
+head cm.control_id
+  nControlCnt = nControlCnt + 1
+
+  if(nControlCnt > size(reply->controls, 5))
+    nStatus = alterlist(reply->controls, nControlCnt + 9)
+  endif
+
+  reply->controls[nControlCnt].control_id   			    = cm.control_id
+  reply->controls[nControlCnt].short_description  		= cm.short_description
+
+foot report
+ 	nstatus = alterlist(reply->controls, nControlCnt)
+
+with nocounter
+
+end
+/*************************************************************************
+*subroutine for retrieving service resources directly                    *
+*************************************************************************/
+declare getSR() = i2
+subroutine getSR(null)
+select into "nl:"
+  sr.service_resource_cd
+from  service_resource sr
+  where sr.service_resource_type_cd in(dBenchCd, dInstrumentCd) and sr.activity_type_cd = dGlbCd
+    and sr.active_ind = 1
+order by sr.service_resource_cd
+head sr.service_resource_cd
+  nServiceCnt = nServiceCnt + 1
+
+  if(nServiceCnt > size(reply->service_resources, 5))
+    nStatus = alterlist(reply->service_resources, nServiceCnt + 9)
+  endif
+
+  reply->service_resources[nServiceCnt].service_resource_cd     = sr.service_resource_cd
+
+foot report
+ 	nstatus = alterlist(reply->service_resources, nServiceCnt)
+
+with nocounter
+
+end
+/*************************************************************************
+*subroutine for retrieving Assays directly                               *
+*************************************************************************/
+declare getAssays() = i2
+subroutine getAssays(null)
+select into "nl:"
+  rac.task_assay_cd
+from resource_assay_control rac
+plan rac where rac.task_assay_cd > 0.0
+
+order by rac.task_assay_cd
+head rac.task_assay_cd
+
+  nAssayCnt = nAssayCnt + 1
+
+  if(nAssayCnt > size(reply->assays, 5))
+    nStatus = alterlist(reply->assays, nAssayCnt + 9)
+  endif
+
+  reply->assays[nAssayCnt].task_assay_cd       = rac.task_assay_cd
+
+foot report
+ 	nstatus = alterlist(reply->assays, nAssayCnt)
+
+with nocounter
+
+end
+
+/*****************************************************************************************
+*subroutine for retrieving controls by assays and service resources                      *
+*****************************************************************************************/
+declare getCtrlsbyAssaysSr() = i2
+subroutine getCtrlsbyAssaysSr(null)
+
+call getAssaysParser("")
+call getServicesParser(1)
+
+select into "nl:"
+from 
+  resource_assay_control rac,
+  control_material cm
+
+plan rac
+  where parser(assay_parser) and parser(service_parser)
+join cm
+  where cm.control_id = rac.control_id
+  
+order by rac.control_id
+head rac.control_id
+  nControlCnt = nControlCnt + 1
+
+  if(nControlCnt > size(reply->controls, 5))
+    nStatus = alterlist(reply->controls, nControlCnt + 9)
+  endif
+  reply->controls[nControlCnt]->control_id         = rac.control_id
+  reply->controls[nControlCnt]->short_description  = cm.short_description
+
+foot report
+ 	nstatus = alterlist(reply->controls, nControlCnt)
+
+with nocounter
+end
+
+/*****************************************************************************************
+*subroutine for retrieving service resources by assays and controls                      *
+*****************************************************************************************/
+declare getSRbyAssaysCtrls() = i2
+subroutine getSRbyAssaysCtrls(null)
+
+call getControlsParser("")
+call getAssaysParser("")
+
+select into "nl:"
+from control_lot cl,
+     assay_resource_lot arl
+     
+plan cl
+  where parser(control_parser) 
+join arl 
+  where arl.lot_id = cl.lot_id and parser(assay_parser)
+  
+order by arl.service_resource_cd
+head arl.service_resource_cd
+  nServiceCnt = nServiceCnt + 1
+
+  if(nServiceCnt > size(reply->service_resources, 5))
+    nStatus = alterlist(reply->service_resources, nServiceCnt + 9)
+  endif
+  reply->service_resources[nServiceCnt]->service_resource_cd      = arl.service_resource_cd
+
+foot report
+ 	nstatus = alterlist(reply->service_resources, nServiceCnt)
+
+with nocounter
+end
+
+/*****************************************************************************************
+*subroutine for retrieving assays by service resources and controls                      *
+*****************************************************************************************/
+declare getAssaysbySrCtrl() = i2
+subroutine getAssaysbySrCtrl(null)  
+
+call getServicesParser(1)
+call getControlsParser("")
+
+select into "nl:"
+from resource_assay_control rac
+plan rac 
+  where parser(service_parser) and parser(control_parser)
+  
+order by rac.task_assay_cd
+head rac.task_assay_cd
+
+  nAssayCnt = nAssayCnt + 1
+
+  if(nAssayCnt > size(reply->assays, 5))
+    nStatus = alterlist(reply->assays, nAssayCnt + 9)
+  endif
+  reply->assays[nAssayCnt]->task_assay_cd      = rac.task_assay_cd
+
+foot report
+ 	nstatus = alterlist(reply->assays, nAssayCnt)
+
+with nocounter
+end
+
+/**************************************************************************************
+* Parser build subroutines                                                            *
+**************************************************************************************/
+
+
+  /************************************************************************
+  *build assay string                                                     *
+  ************************************************************************/
+declare getAssaysParser() = vc
+subroutine getAssaysParser(null)  
+
+declare nAssCnt                 = i4 with protect, noconstant(0)
+
+  if (nAssayList > 0)
+    if (nServiceList > 0)
+      set assay_parser = "rac.task_assay_cd in("
+    else
+      set assay_parser = "arl.task_assay_cd in("   
+    endif
+    for (nAssCnt = 1 to nAssayList)
+      if (nAssCnt > 1)
+        set assay_parser = build(assay_parser, ",", request->assays[nAssCnt]->task_assay_cd)
+      else
+        set assay_parser = build(assay_parser, request->assays[nAssCnt]->task_assay_cd)
+      endif
+    endfor
+    set assay_parser = build(assay_parser,")")
+  else
+    set assay_parser = "1 = 1"
+  endif
+  return (assay_parser)
+end
+  
+  /************************************************************************
+  *build resource string                                                  *
+  ************************************************************************/
+declare getServicesParser(rac_ind = i2) = vc
+subroutine getServicesParser(rac_ind)  
+
+declare nSrvCnt                 = i4 with protect, noconstant(0)
+
+  if (nServiceList > 0)
+    if (rac_ind = 1)
+      set service_parser = "rac.service_resource_cd in("
+    else
+      set service_parser = "arl.service_resource_cd in("
+    endif
+    for (nSrvCnt = 1 to nServiceList)
+      if (nSrvCnt > 1)
+        set service_parser = build(service_parser, ",", request->service_resources[nSrvCnt]->service_resource_cd)
+      else
+        set service_parser = build(service_parser, request->service_resources[nSrvCnt]->service_resource_cd)
+      endif
+    endfor
+    set service_parser = build(service_parser,")")
+  else
+    set service_parser = "1 = 1"
+  endif
+  return (service_parser)
+end
+  
+  /************************************************************************
+  *build control string                                                   *
+  ************************************************************************/
+declare getControlsParser() = vc
+subroutine getControlsParser(null)  
+
+declare nCtrlCnt                 = i4 with protect, noconstant(0)
+
+  if (nControlList > 0)
+    if (nServiceList > 0)
+      set control_parser = "rac.control_id in("
+    else
+      set control_parser = "cl.control_id in("
+    endif      
+    for (nCtrlCnt = 1 to nControlList)
+      if (nCtrlCnt > 1)
+        set control_parser = build(control_parser, ",", request->controls[nCtrlCnt]->control_id)
+      else
+        set control_parser = build(control_parser, request->controls[nCtrlCnt]->control_id)
+      endif
+    endfor
+    set control_parser = build(control_parser,")")
+  else
+    set control_parser = "1 = 1"
+  endif
+  return (control_parser)
+end
+
+;***********************************************************************
+;*   End of main script                                                *
+;***********************************************************************/
+if (reply->assays[nAssayCnt].task_assay_cd = 0 and
+    reply->controls[nControlCnt].control_id = 0 and
+    reply->service_resources[nServiceCnt].service_resource_cd = 0)
+  set reply->status_data->status = "Z"
+else
+  set reply->status_data->status = "S"
+endif
+;***********************************************************************
+;*   End of Program                                                    *
+;***********************************************************************
+end go
+
+
+;Generated by GNU enscript 1.6.4.

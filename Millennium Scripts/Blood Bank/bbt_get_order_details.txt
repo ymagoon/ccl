@@ -1,0 +1,932 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbtorderdetails/BBT_GET_ORDER_DETAILS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2004 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+        /*****************************************************************************
+
+        Source file name:       bbt_get_order_details.prg
+        Object name:            bbt_get_order_details
+        Request #:              225082
+
+        Product:                Blood Bank
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve assay and result information for
+                                given order_id.  If the entire_accession_ind
+                                has a value of 1, all related order_id for
+                                the accession will be returned.
+
+        Tables read:            accession_order_r
+                                bb_order_cell
+                                bb_order_phase
+                                code_value
+                                data_map
+                                long_text
+                                orders
+                                perform_result
+                                phase_group
+                                product
+                                product_event
+                                profile_task_r
+                                prsnl
+                                result
+                                result_comment
+
+        Tables updated:         none
+        Executing from:
+
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 11/05/96 Hal Patchen          Initial Release                     *
+;     001 05/07/99 Doug Saus            replaced code_value selects with uar*
+;     002 09/13/01 Christi Ditmars      Corrected phase_group assays so they*
+;                                       always show comments and corrected  *
+;                                       runtime warnings.                   *
+;     003 09/20/02 Christi Ditmars      Correct CAPEP00011412 so that it    *
+;                                       error out with unresulted Computer  *
+;                                       crossmatches.                       *
+;     004 07/13/04 Jim Jensen           Correct CAPEP00059484 by displaying *
+;                                       Interps below the cells/phases and  *
+;                                       Prompt tests above cells/phases.    *
+;    *005 10/13/04 Jason Coy            Update the Reply to return the      *
+;    *                                  result_status_mean CDF meaning      *
+;    *                                  associate with the result_status_cd *
+;    *                                  from the result table.              *
+;     006 01/11/05 Jim Jensen           Correct Sequencing display.         *
+;     007 04/25/05 Jim Jensen           Correct CR 1-355233701, add sort on *
+;                                       on profile_task_r sequence to fix   *
+;                                       display in ORV.                     *
+;     008 08/20/10 AS019178	            Fix for CR 1-4112965511,to populate *
+;					                    reply structure by qualifying       *
+;                                       on primary accession for the order  *
+;     009 03/23/12 Satish Joshi         Fix for the CR 1-5678054311, to		*
+;                                       force the optimizer to use the index*
+;                                       XIE2RESULT in the CBO mode.			*
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program BBT_GET_ORDER_DETAILS:dba go
+             create program BBT_GET_ORDER_DETAILS:dba
+
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  order_id                     = f8
+         1  entire_accession_ind         = i2
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      (
+         1  qual[*]
+            2  order_id                  = f8
+            2  catalog_cd                = f8
+            2  order_mnemonic            = vc
+            2  assays_cnt                = i4
+            2  assays[*]
+               3  task_assay_cd             = f8
+               3  task_assay_disp           = vc
+               3  sequence                  = i4
+               3  bb_result_processing_cd   = f8
+               3  result_cnt                = i4
+               3  result[*]
+                  4  result_id                = f8
+                  4  bb_result_id             = f8
+                  4  bb_control_cell_cd       = f8
+                  4  bb_control_cell_disp     = vc
+                  4  product_id               = f8
+                  4  product_nbr              = c20
+                  4  result_status_cd         = f8
+                  4  result_status_disp       = vc
+                  4  result_status_mean       = c12
+                  4  result_type_cd           = f8
+                  4  result_type_disp         = vc
+                  4  result_type_mean         = c12
+                  4  result_value_dt_tm       = dq8
+                  4  result_value_numeric     = f8
+                  4  numeric_raw_value        = f8
+                  4  less_great_flag          = i2
+                  4  result_value_alpha       = vc
+                  4  long_text_id             = f8
+                  4  rtf_text                 = vc
+                  4  ascii_text               = vc
+                  4  result_code_set_cd       = f8
+                  4  result_code_set_disp     = vc
+                  4  perform_dt_tm            = dq8
+                  4  perform_personnel_id     = f8
+                  4  name_full_formatted      = vc
+                  4  normal_cd                = f8
+                  4  normal_disp              = vc
+                  4  normal_mean              = c12
+                  4  critical_cd              = f8
+                  4  critical_disp            = vc
+                  4  critical_mean            = c12
+                  4  review_cd                = f8
+                  4  review_disp              = vc
+                  4  review_mean              = c12
+                  4  delta_cd                 = f8
+                  4  delta_disp               = vc
+                  4  delta_mean               = c12
+                  4  normal_range_flag        = i2  ;1 = Low, 2 = High, 3 = Both
+                  4  normal_low               = f8
+                  4  normal_high              = f8
+                  4  normal_alpha             = vc
+                  4  data_map_ind             = i2
+                  4  max_digits               = i4
+                  4  min_digits               = i4
+                  4  min_decimal_places       = i4
+                  4  result_comment_ind       = i2
+                  4  service_resource_cd      = f8
+                  4  notify_cd                = f8
+                  4  notify_disp              = vc
+                  4  notify_mean              = c12
+%i cclsource:status_block.inc
+      )
+
+record temp
+(
+ 1  qual[*]
+    2  order_id                  = f8
+    2  catalog_cd                = f8
+    2  order_mnemonic            = vc
+    2  assays_cnt                = i4
+    2  assays[*]
+       3  task_assay_cd             = f8
+       3  task_assay_disp           = vc
+       3  sequence                  = i4
+       3  result_cnt                = i4
+       3  bb_result_processing_cd   = f8
+       3  bb_result_processing_disp = vc
+       3  result[*]
+          4  bb_result_id           = f8
+          4  orv_sequence           = i4
+)
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set CV_REQUIRED_RECS            = 3
+         declare cv_cnt                  = i4
+         set COMMENT_TYPE_CODESET        = 14
+         set RESULT_COMMENT_CDF          = "RES COMMENT" ;chartable
+         set RESULT_NOTE_CDF             = "RES NOTE"    ;non-chartable
+         set PRODUCT_STATES_CODESET      = 1610
+         set PRODUCT_STATES_16_CDF       = "16"
+         set DATA_MAP_TYPE_FLAG          = 0
+         declare result_comment_cd       = f8
+         declare result_note_cd          = f8
+         declare in_progress_cd          = f8
+         declare q_cnt                   = i4
+         declare a_cnt                   = i4
+         declare r_cnt                   = i4
+         declare max_q_cnt               = i4
+         declare max_a_cnt               = i4
+         declare max_r_cnt               = i4
+         declare max_reply_q_cnt         = i2
+         declare max_reply_a_cnt         = i2
+         declare stat                    = i4
+         
+         declare max_tempr_cnt           = i4
+         declare BB_RSLT_PROC_CS         = i4  with protect,   constant(1636)
+         declare AB_SCRN_INTP_CDF        = c12 with protect,   constant("AB SCRN INTP")
+         declare AB_TITER_CDF            = c12 with protect,   constant("AB TITER")
+         declare ABID_INTERP_CDF         = c12 with protect,   constant("ABID INTERP")
+         declare ABSC_CI                 = c12 with protect,   constant("ABSC CI")
+         declare absc_interp_cd          = f8  with protect, noconstant(0.0)
+         declare ab_titer_cd             = f8  with protect, noconstant(0.0)
+         declare ab_id_interp_cd         = f8  with protect, noconstant(0.0)
+         declare absc_comp_interp_cd     = f8  with protect, noconstant(0.0)
+         declare o_cnt                   = i4  with protect, noconstant(0)
+
+         set reply->status_data.status = "F"
+         set q_cnt = 0
+         set a_cnt = 0
+         set r_cnt = 0
+         set o_cnt = 0
+         set max_q_cnt = 0
+         set max_a_cnt = 0
+         set max_r_cnt = 0
+         set max_reply_q_cnt = 0
+         set max_reply_a_cnt = 0
+;001 begin
+         set cdf_meaning = fillstring(12," ")
+         set code_value = 0.0
+         set uar_failed = 0
+
+      /***********************************************************************
+      * Load code values                                                     *
+      ***********************************************************************/
+         set cdf_meaning = RESULT_NOTE_CDF
+         set stat = uar_get_meaning_by_codeset(comment_type_codeset,cdf_meaning,1,code_value)
+         if (stat = 1)
+             set uar_failed = 1
+             go to SKIP_REST
+         else
+             set result_note_cd = code_value
+         endif
+         set cdf_meaning = RESULT_COMMENT_CDF
+         set stat = uar_get_meaning_by_codeset(comment_type_codeset,cdf_meaning,1,code_value)
+         if (stat = 1)
+             set uar_failed = 1
+             go to SKIP_REST
+         else
+             set result_comment_cd = code_value
+         endif
+         set cdf_meaning = PRODUCT_STATES_16_CDF
+         set stat = uar_get_meaning_by_codeset(product_states_codeset,cdf_meaning,1,code_value)
+         if (stat = 1)
+             set uar_failed = 1
+             go to SKIP_REST
+         else
+             set in_progress_cd = code_value
+         endif
+         
+         set cdf_meaning = AB_SCRN_INTP_CDF
+         set stat = uar_get_meaning_by_codeset(BB_RSLT_PROC_CS,nullterm(cdf_meaning),1,code_value)
+         if (stat = 1)
+             set uar_failed = 1
+             go to SKIP_REST
+         else
+             set absc_interp_cd = code_value
+         endif
+         
+         set cdf_meaning = AB_TITER_CDF
+         set stat = uar_get_meaning_by_codeset(BB_RSLT_PROC_CS,nullterm(cdf_meaning),1,code_value)
+         if (stat = 1)
+             set uar_failed = 1
+             go to SKIP_REST
+         else
+             set ab_titer_cd = code_value
+         endif
+         
+         set cdf_meaning = ABID_INTERP_CDF
+         set stat = uar_get_meaning_by_codeset(BB_RSLT_PROC_CS,nullterm(cdf_meaning),1,code_value)
+         if (stat = 1)
+             set uar_failed = 1
+             go to SKIP_REST
+         else
+             set ab_id_interp_cd = code_value
+         endif
+         
+         set cdf_meaning = ABSC_CI
+         set stat = uar_get_meaning_by_codeset(BB_RSLT_PROC_CS,nullterm(cdf_meaning),1,code_value)
+         if (stat = 1)
+             set uar_failed = 1
+             go to SKIP_REST
+         else
+             set absc_comp_interp_cd = code_value
+         endif
+         
+#SKIP_REST
+        if (uar_failed = 1)
+            set reply->status_data->status = "F"
+            go to exit_script
+        endif
+;001 end
+
+      /***********************************************************************
+      * Determine if all related orderable procedures for the accession      *
+      * relating to the order_id passed should be returned.  Otherwise, load *
+      * only the ordered procedure specified by the order_id passed.         *
+      ***********************************************************************/
+         if (request->entire_accession_ind = 1)
+            ;* Load all orderables for the accession
+            select into "nl:"
+               aor1.order_id,
+               aor1.accession,
+               aor2.accession,
+               aor2.order_id,
+               o.order_id,
+               o.catalog_cd,
+               o.order_mnemonic
+
+            from
+               accession_order_r aor1,
+               accession_order_r aor2,
+               orders o
+
+            plan aor1 where aor1.order_id = request->order_id and aor1.primary_flag = 0
+            join aor2 where aor2.accession = aor1.accession
+            join o    where o.order_id = aor2.order_id
+
+            order by
+               o.catalog_cd
+
+            head report
+               q_cnt = 0
+
+            detail
+               q_cnt = q_cnt + 1
+               if (mod(q_cnt,10) = 1)
+                  stat = alterlist(temp->qual, q_cnt + 9)
+               endif
+               temp->qual[q_cnt].order_id = o.order_id
+               temp->qual[q_cnt].catalog_cd = o.catalog_cd
+               temp->qual[q_cnt].order_mnemonic = o.order_mnemonic
+               temp->qual[q_cnt].assays_cnt = 0
+
+            foot report
+               stat = alterlist(temp->qual, q_cnt)
+
+            with nocounter
+
+         else
+
+            ;* Load the specific ordered procedure based on the order_id
+            select into "nl:"
+               o.order_id,
+               o.catalog_cd,
+               o.order_mnemonic
+
+            from
+               orders o
+
+            plan o where o.order_id = request->order_id
+
+            head report
+               q_cnt = 0
+
+            detail
+               q_cnt = q_cnt + 1
+               stat = alterlist(temp->qual, q_cnt)
+               temp->qual[q_cnt].order_id = o.order_id
+               temp->qual[q_cnt].catalog_cd = o.catalog_cd
+               temp->qual[q_cnt].order_mnemonic = o.order_mnemonic
+               temp->qual[q_cnt].assays_cnt = 0
+
+            with nocounter
+         endif
+
+         if (q_cnt > 0)
+            set max_q_cnt = q_cnt
+         else
+            set reply->status_data.status = "Z"   ;Zero qualified
+            go to Exit_Script
+         endif
+
+      /***********************************************************************
+      * Load phase_group task assays associate with each order               *
+      ***********************************************************************/
+         select into "nl:"
+            d.seq,
+            bop.seq,
+            pg.seq,
+            pg.sequence,
+            dta.bb_result_processing_cd,
+            r.bb_result_id
+
+            /* Selected fields:
+            d.seq,
+            bop.order_id,
+            pg.seq,
+            pg.task_assay_cd,
+            pg.sequence
+            */
+
+         from
+            (dummyt d with seq = value(max_q_cnt)),
+            bb_order_phase bop,
+            phase_group pg,
+            discrete_task_assay dta,
+            result r
+
+         plan    d
+         join    bop where bop.order_id = temp->qual[d.seq].order_id
+         join    pg  where pg.phase_group_cd = bop.phase_grp_cd
+                       and pg.active_ind = 1
+         join    dta where dta.task_assay_cd = pg.task_assay_cd
+         join    r   where r.order_id      = outerjoin(temp->qual[d.seq].order_id)
+                       and r.task_assay_cd = outerjoin(pg.task_assay_cd)
+
+         order by
+            d.seq,
+            r.bb_result_id,
+            pg.sequence
+
+         head report
+            q_cnt = 0,
+            a_cnt = 0,
+            r_cnt = 0
+
+         head d.seq
+            q_cnt = d.seq,
+            a_cnt = 0
+            o_cnt = 0
+
+         head pg.sequence
+            a_cnt = a_cnt + 1
+            if (mod(a_cnt,10) = 1)
+                stat = alterlist(temp->qual[q_cnt].assays, a_cnt + 9)
+            endif
+            if (a_cnt > max_a_cnt)
+               max_a_cnt = a_cnt
+            endif
+            temp->qual[q_cnt].assays_cnt                              = a_cnt
+            temp->qual[q_cnt].assays[a_cnt].task_assay_cd             = pg.task_assay_cd
+            temp->qual[q_cnt].assays[a_cnt].task_assay_disp           = uar_get_code_display(pg.task_assay_cd)
+            temp->qual[q_cnt].assays[a_cnt].sequence                  = pg.sequence
+            temp->qual[q_cnt].assays[a_cnt].bb_result_processing_cd   = dta.bb_result_processing_cd
+            temp->qual[q_cnt].assays[a_cnt].bb_result_processing_disp = uar_get_code_display(dta.bb_result_processing_cd)
+            r_cnt = 0
+            
+         detail 
+            o_cnt = o_cnt + 1
+            r_cnt = r_cnt + 1
+            if (r_cnt > max_tempr_cnt)
+                max_tempr_cnt = r_cnt
+            endif
+            if (size(temp->qual[q_cnt].assays[a_cnt].result, 5) < r_cnt)
+                stat = alterlist(temp->qual[q_cnt].assays[a_cnt].result, r_cnt)
+            endif
+            temp->qual[q_cnt].assays[a_cnt].result_cnt                 = r_cnt
+            temp->qual[q_cnt].assays[a_cnt].result[r_cnt].bb_result_id = r.bb_result_id
+            temp->qual[q_cnt].assays[a_cnt].result[r_cnt].orv_sequence = o_cnt
+              
+         foot pg.sequence
+            stat = alterlist(temp->qual[q_cnt].assays[a_cnt].result, r_cnt)
+            
+         foot d.seq
+            stat = alterlist(temp->qual[q_cnt].assays, a_cnt)
+         with
+            nocounter
+
+      /***********************************************************************
+      * Load profile_task_r task assays associate with each order            *
+      ***********************************************************************/
+         select into "nl:"
+            d.seq,
+            ptr.sequence,
+            dta.bb_result_processing_cd,
+            r.bb_result_id
+
+            /* Selected fields:
+            d.seq,
+            ptr.task_assay_cd,
+            ptr.sequence
+            */
+
+         from
+            (dummyt d with seq = value(max_q_cnt)),
+            profile_task_r ptr,
+            discrete_task_assay dta,
+            result r
+
+         plan    d
+         join    ptr where ptr.catalog_cd    = temp->qual[d.seq].catalog_cd
+         join    dta where dta.task_assay_cd = ptr.task_assay_cd
+         join    r   where r.order_id        = outerjoin(temp->qual[d.seq].order_id)
+                       and r.task_assay_cd   = outerjoin(ptr.task_assay_cd)
+
+         order by
+            d.seq,
+            ptr.sequence,
+            r.bb_result_id
+
+         head report
+            q_cnt = 0,
+            a_cnt = 0,
+            r_cnt = 0,
+            loop_cnt = 0,
+            bmatch_found = "F"
+            
+         head d.seq
+            q_cnt = d.seq,
+            a_cnt = temp->qual[q_cnt].assays_cnt
+
+         head ptr.sequence            
+            a_cnt = a_cnt + 1
+            if (size(temp->qual[q_cnt].assays, 5) <= a_cnt)
+                stat = alterlist(temp->qual[q_cnt].assays, a_cnt + 9)
+            endif
+            if (a_cnt > max_a_cnt)
+               max_a_cnt = a_cnt
+            endif
+            temp->qual[q_cnt].assays_cnt                              = a_cnt
+            temp->qual[q_cnt].assays[a_cnt].task_assay_cd             = ptr.task_assay_cd
+            temp->qual[q_cnt].assays[a_cnt].task_assay_disp           = uar_get_code_display(ptr.task_assay_cd)
+            temp->qual[q_cnt].assays[a_cnt].sequence                  = a_cnt
+            temp->qual[q_cnt].assays[a_cnt].bb_result_processing_cd   = dta.bb_result_processing_cd
+            temp->qual[q_cnt].assays[a_cnt].bb_result_processing_disp = uar_get_code_display(dta.bb_result_processing_cd)
+            r_cnt = 0
+         
+         head r.bb_result_id
+            bmatch_found = "F"
+            o_cnt = o_cnt + 1
+            r_cnt = r_cnt + 1
+            if (r_cnt > max_tempr_cnt)
+                max_tempr_cnt = r_cnt
+            endif
+            if (size(temp->qual[q_cnt].assays[a_cnt].result, 5) < r_cnt)
+                stat = alterlist(temp->qual[q_cnt].assays[a_cnt].result, r_cnt)
+            endif
+            temp->qual[q_cnt].assays[a_cnt].result_cnt                 = r_cnt
+            temp->qual[q_cnt].assays[a_cnt].result[r_cnt].bb_result_id = r.bb_result_id
+            
+            if (r.bb_result_id = 0)
+              if (dta.bb_result_processing_cd in (absc_interp_cd, ab_titer_cd, ab_id_interp_cd, absc_comp_interp_cd))
+                  temp->qual[q_cnt].assays[a_cnt].result[r_cnt].orv_sequence = o_cnt
+              else
+                  temp->qual[q_cnt].assays[a_cnt].result[r_cnt].orv_sequence = 0
+                  o_cnt = o_cnt - 1
+              endif
+            else
+              for (loop_1 = 1 to temp->qual[q_cnt].assays_cnt)
+                for (loop_2 = 1 to temp->qual[q_cnt].assays[loop_1].result_cnt)
+                  if (r.bb_result_id = temp->qual[q_cnt].assays[loop_1].result[loop_2].bb_result_id)
+                    if (temp->qual[q_cnt].assays[loop_1].result[loop_2].orv_sequence = 0)
+                         temp->qual[q_cnt].assays[a_cnt].result[r_cnt].orv_sequence = r_cnt
+                    else
+                        temp->qual[q_cnt].assays[a_cnt].result[r_cnt].orv_sequence =
+                         temp->qual[q_cnt].assays[loop_1].result[loop_2].orv_sequence
+                        bmatch_found = "T"
+                    endif
+                  endif
+                endfor
+              endfor
+              if (bmatch_found = "F")
+                temp->qual[q_cnt].assays[a_cnt].result[r_cnt].orv_sequence = o_cnt
+              endif
+            endif
+         
+         detail
+           row + 0
+              
+         foot d.seq
+            stat = alterlist(temp->qual[q_cnt].assays, a_cnt)
+
+         with
+            nocounter
+
+         if (max_q_cnt = 0
+         or  max_a_cnt = 0)
+            set reply->status_data.status = "Z"   ;Zero qualified
+            go to Exit_Script
+         endif
+
+      /***********************************************************************
+      * Load result information                                              *
+      ***********************************************************************/
+         select into "nl:"
+            d1.seq,
+            order_id      = temp->qual[d1.seq]->order_id,
+            d2.seq,
+            task_assay_cd = temp->qual[d1.seq]->assays[d2.seq]->task_assay_cd,
+            sequence      = temp->qual[d1.seq].assays[d2.seq].result[d_orv.seq].orv_sequence,
+            sequence2     = temp->qual[d1.seq].assays[d2.seq].sequence,
+            d3.seq,
+            r.seq,
+            r.bb_result_id,
+            r.result_id,
+            pr.seq,
+            pnl.seq,
+            table_ind       = decode(boc.seq, "boc", pe.seq, "pe ", "xxx"),
+            product_id      = decode(p_boc.seq, p_boc.product_id, p_pe.seq, p_pe.product_id, 0.0),
+            product_nbr     = decode(p_boc.seq, p_boc.product_nbr, p_pe.seq, p_pe.product_nbr, " "),
+            product_sub_nbr = decode(p_boc.seq, p_boc.product_sub_nbr, p_pe.seq, p_pe.product_sub_nbr, " "),
+            normal_low_null_ind  = nullind(pr.normal_low),
+            normal_high_null_ind = nullind(pr.normal_high)
+         from
+            (dummyt d1    with seq = value(max_q_cnt)),
+            (dummyt d2    with seq = value(max_a_cnt)),
+            (dummyt d_orv with seq = value(max_tempr_cnt)),
+            (dummyt d3    with seq = 1),
+            result r,
+            perform_result pr,
+            result_event re,
+            prsnl pnl,
+            (dummyt d4 with seq = 1),
+            bb_order_cell boc,
+            (dummyt d_p_boc with seq = 1),
+            product p_boc,
+            product_event pe,
+            product p_pe
+
+         plan    d1
+         join    d2  where d2.seq    <= temp->qual[d1.seq].assays_cnt
+         join d_orv  where d_orv.seq <= temp->qual[d1.seq].assays[d2.seq].result_cnt
+         join   (d3  where d3.seq = 1
+           join  r  where r.order_id = temp->qual[d1.seq].order_id
+                       and r.task_assay_cd = temp->qual[d1.seq].assays[d2.seq].task_assay_cd
+                       and r.bb_result_id  = temp->qual[d1.seq].assays[d2.seq].result[d_orv.seq].bb_result_id
+           join  pr where pr.result_id = r.result_id
+                      and pr.result_status_cd = r.result_status_cd
+           join  re where re.result_id     = r.result_id
+                      and re.event_type_cd = r.result_status_cd
+           join  pnl  where pnl.person_id = re.event_personnel_id)
+           join  (d4 where d4.seq = 1
+                join (boc where boc.order_id = r.order_id
+                                and boc.bb_result_id = r.bb_result_id
+                                and boc.bb_result_id != NULL
+                                and boc.bb_result_id > 0
+                    join (d_p_boc where d_p_boc.seq = 1
+                        join p_boc where p_boc.product_id = boc.product_id
+                                        and p_boc.product_id != NULL
+                                        and p_boc.product_id > 0))
+                orjoin (pe where pe.order_id = r.order_id
+                                    and pe.bb_result_id = r.bb_result_id
+                                    and pe.event_type_cd = in_progress_cd
+                                    and pe.bb_result_id != NULL
+                                    and pe.bb_result_id > 0
+                                    and pe.product_id != NULL
+                                    and pe.product_id > 0
+                    join p_pe where p_pe.product_id = pe.product_id))
+
+         order by order_id, 
+                  sequence,
+                  sequence2,
+                  task_assay_cd, 
+                  r.result_id,
+                  re.event_sequence
+
+         head report
+            q_cnt = 0
+            a_cnt = 0
+            r_cnt = 0
+
+        head order_id
+            q_cnt = q_cnt + 1
+            if (mod(q_cnt, 10) = 1)
+                stat = alterlist(reply->qual, q_cnt + 9)
+            endif
+            if (q_cnt > max_reply_q_cnt)
+                max_reply_q_cnt = q_cnt
+            endif
+
+            reply->qual[q_cnt]->order_id = temp->qual[d1.seq]->order_id
+            reply->qual[q_cnt]->catalog_cd = temp->qual[d1.seq]->catalog_cd
+            reply->qual[q_cnt]->order_mnemonic = temp->qual[d1.seq]->order_mnemonic
+            reply->qual[q_cnt]->assays_cnt = temp->qual[d1.seq]->assays_cnt
+            a_cnt = 0
+            
+        head sequence
+            row + 0
+        
+        head sequence2
+            row + 0
+
+        head task_assay_cd
+            a_cnt = a_cnt + 1
+            if (mod(a_cnt, 10) = 1)
+                stat = alterlist(reply->qual[q_cnt]->assays, a_cnt + 9)
+            endif
+            if (a_cnt > max_reply_a_cnt)
+               max_reply_a_cnt = a_cnt
+            endif
+            reply->qual[q_cnt]->assays[a_cnt]->task_assay_cd         = temp->qual[d1.seq]->assays[d2.seq]->task_assay_cd
+            reply->qual[q_cnt].assays[a_cnt].task_assay_disp         = temp->qual[d1.seq].assays[d2.seq].task_assay_disp
+            reply->qual[q_cnt]->assays[a_cnt]->sequence              = temp->qual[d1.seq]->assays[d2.seq]->sequence
+            reply->qual[q_cnt].assays[a_cnt].bb_result_processing_cd = temp->qual[d1.seq].assays[d2.seq].bb_result_processing_cd
+            
+            r_cnt = 0
+
+        head r.result_id
+            r_cnt = r_cnt + 1
+            if (r_cnt > max_r_cnt)
+               max_r_cnt = r_cnt
+            endif
+            stat = alterlist(reply->qual[q_cnt].assays[a_cnt].result, r_cnt)
+             reply->qual[q_cnt].assays[a_cnt].result_cnt                 = r_cnt
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].result_id    = r.result_id
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].bb_result_id = r.bb_result_id
+             if (table_ind = "boc")
+                 reply->qual[q_cnt].assays[a_cnt].result[r_cnt].bb_control_cell_cd   = boc.cell_cd
+                 reply->qual[q_cnt].assays[a_cnt].result[r_cnt].bb_control_cell_disp = uar_get_code_display(boc.cell_cd)
+             else
+                 reply->qual[q_cnt].assays[a_cnt].result[r_cnt].bb_control_cell_cd   = r.bb_control_cell_cd
+                 reply->qual[q_cnt].assays[a_cnt].result[r_cnt].bb_control_cell_disp = uar_get_code_display(r.bb_control_cell_cd)
+             endif
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].product_id           = product_id
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].product_nbr          = product_nbr
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].result_status_cd     = r.result_status_cd
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].service_resource_cd  = pr.service_resource_cd
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].long_text_id         = pr.long_text_id
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].result_type_cd       = pr.result_type_cd
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].result_value_dt_tm   = cnvtdatetime(pr.result_value_dt_tm)
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].result_value_numeric = pr.result_value_numeric
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].numeric_raw_value    = pr.numeric_raw_value
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].less_great_flag      = pr.less_great_flag
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].result_value_alpha   = pr.result_value_alpha
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].ascii_text           = pr.ascii_text
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].result_code_set_cd   = pr.result_code_set_cd
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].normal_cd            = pr.normal_cd
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].critical_cd          = pr.critical_cd
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].review_cd            = pr.review_cd
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].delta_cd             = pr.delta_cd
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].notify_cd            = pr.notify_cd
+            
+             if (normal_low_null_ind = 0
+             and normal_high_null_ind = 1)
+                ;* Normal low only exists
+                reply->qual[q_cnt].assays[a_cnt].result[r_cnt].normal_range_flag = 1
+             elseif (normal_low_null_ind = 1
+             and normal_high_null_ind = 0)
+                ;* Normal high only exists
+                reply->qual[q_cnt].assays[a_cnt].result[r_cnt].normal_range_flag = 2
+             elseif (normal_low_null_ind = 0
+             and normal_high_null_ind = 0)
+                ;* Both normal low and high exists
+                reply->qual[q_cnt].assays[a_cnt].result[r_cnt].normal_range_flag = 3
+             else
+                reply->qual[q_cnt].assays[a_cnt].result[r_cnt].normal_range_flag = 0
+             endif
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].normal_low = pr.normal_low
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].normal_high = pr.normal_high
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].normal_alpha = pr.normal_alpha
+             
+        detail
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].perform_dt_tm        = cnvtdatetime(re.event_dt_tm)
+             reply->qual[q_cnt].assays[a_cnt].result[r_cnt].perform_personnel_id = re.event_personnel_id
+             if (reply->qual[q_cnt].assays[a_cnt].result[r_cnt].perform_personnel_id > 0.0)
+                reply->qual[q_cnt].assays[a_cnt].result[r_cnt].name_full_formatted = pnl.name_full_formatted
+             endif
+
+        foot task_assay_cd
+             stat = alterlist(reply->qual[q_cnt]->assays[a_cnt]->result, r_cnt)
+
+        foot order_id
+            stat = alterlist(reply->qual[q_cnt]->assays, a_cnt)
+            reply->qual[q_cnt].assays_cnt = a_cnt
+        foot report
+            stat = alterlist(reply->qual, q_cnt)
+
+         with
+            nocounter,
+            outerjoin = d3,
+            outerjoin = d4,
+            outerjoin = d_p_boc,
+            orahintcbo("index(r XIE2RESULT)")
+
+ /* finish up select - get data map, comments and text, if exists */
+         select into "nl:"
+            d1.seq,
+            d2.seq,
+            d3.seq,
+            lt1.seq,
+            d4.seq,
+            data_map_resource_exists1 = decode(dm1.seq, "Y", "N"),
+            dm1.seq,
+            d5.seq,
+            data_map_group_exists1 = decode(dmg1.seq, "Y", "N"),
+            dmg1.seq,
+            d6.seq,
+            rc1_exists = decode(rc1.seq, "Y", "N"),
+            rc1.seq
+
+         from
+            (dummyt d1 with seq = value(max_reply_q_cnt)),
+            (dummyt d2 with seq = value(max_reply_a_cnt)),
+            (dummyt d3 with seq = value(max_r_cnt)) ,
+            long_text lt1,
+            dummyt d4,
+            data_map dm1,
+            dummyt d5,
+            data_map dmg1,
+            dummyt d6,
+            result_comment rc1
+
+         plan  d1
+         join  d2   where d2.seq <= reply->qual[d1.seq].assays_cnt
+         join  d3   where d3.seq <= reply->qual[d1.seq]->assays[d2.seq].result_cnt
+         join  lt1  where lt1.long_text_id = reply->qual[d1.seq]->assays[d2.seq]->result[d3.seq].long_text_id
+         join  d4   where d4.seq = 1
+         join  dm1  where dm1.service_resource_cd = reply->qual[d1.seq]->assays[d2.seq]->result[d3.seq].service_resource_cd
+                     and dm1.task_assay_cd = reply->qual[d1.seq]->assays[d2.seq].task_assay_cd
+                     and dm1.data_map_type_flag = DATA_MAP_TYPE_FLAG
+                     and dm1.active_ind = 1
+                     and dm1.beg_effective_dt_tm <=
+                                           cnvtdatetime(curdate,curtime3)
+                     and dm1.end_effective_dt_tm >=
+                                            cnvtdatetime(curdate,curtime3)
+         join  d5   where d5.seq = 1
+         join  dmg1 where dmg1.service_resource_cd = 0.0
+                     and dmg1.task_assay_cd = reply->qual[d1.seq]->assays[d2.seq].task_assay_cd
+                     and dmg1.data_map_type_flag = DATA_MAP_TYPE_FLAG
+                     and dmg1.active_ind = 1
+                     and dmg1.beg_effective_dt_tm <=
+                                             cnvtdatetime(curdate,curtime3)
+                     and dmg1.end_effective_dt_tm >=
+                                             cnvtdatetime(curdate,curtime3)
+
+         join  d6   where d6.seq = 1
+         join  rc1  where rc1.result_id = reply->qual[d1.seq]->assays[d2.seq]->result[d3.seq].result_id
+                      and rc1.comment_type_cd in (result_comment_cd,
+                                                   result_note_cd)
+         detail
+            q_cnt = d1.seq
+            a_cnt = d2.seq
+            r_cnt = d3.seq
+
+            if (lt1.long_text_id > 0.0)
+               reply->qual[q_cnt].assays[a_cnt].result[r_cnt].rtf_text =
+                  lt1.long_text
+            endif
+            if (data_map_resource_exists1 = "Y")
+               reply->qual[q_cnt].assays[a_cnt].result[r_cnt]
+                 .data_map_ind = 1
+               reply->qual[q_cnt].assays[a_cnt].result[r_cnt]
+                 .max_digits = dm1.max_digits
+               reply->qual[q_cnt].assays[a_cnt].result[r_cnt]
+                 .min_digits = dm1.min_digits
+               reply->qual[q_cnt].assays[a_cnt].result[r_cnt]
+                 .min_decimal_places = dm1.min_decimal_places
+            elseif (data_map_group_exists1 = "Y")
+               reply->qual[q_cnt].assays[a_cnt].result[r_cnt]
+                 .data_map_ind = 1
+               reply->qual[q_cnt].assays[a_cnt].result[r_cnt]
+                 .max_digits = dmg1.max_digits
+               reply->qual[q_cnt].assays[a_cnt].result[r_cnt]
+                 .min_digits = dmg1.min_digits
+               reply->qual[q_cnt].assays[a_cnt].result[r_cnt]
+                 .min_decimal_places = dmg1.min_decimal_places
+            else
+               reply->qual[q_cnt].assays[a_cnt].result[r_cnt]
+                 .data_map_ind = 0
+            endif
+            ;Make sure we don't bring back the zero row
+            if (rc1_exists = "Y" and rc1.result_id > 0)
+               reply->qual[q_cnt].assays[a_cnt].result[r_cnt]
+                 .result_comment_ind = 1
+            else
+               reply->qual[q_cnt].assays[a_cnt].result[r_cnt]
+                 .result_comment_ind = 0
+            endif
+
+
+         with
+            nocounter ,
+            outerjoin = d4,
+            dontcare = dm1,
+            outerjoin = d5,
+            outerjoin = d6,
+            dontcare = dmg1,
+            dontcare = rc1,
+            maxqual(rc1,1)
+            
+         if (max_q_cnt > 0)
+            set reply->status_data.status = "S"   ;Successful
+         else
+            set reply->status_data.status = "Z"   ;Zero qualified
+         endif
+
+      #Exit_Script
+;for (x = 1 to size(reply->qual,5))
+;    call echo(build(x, "..",
+;        reply->qual[x]->order_id                  , "/",
+;        reply->qual[x]->catalog_cd                , "/",
+;        reply->qual[x]->order_mnemonic            , "/",
+;        reply->qual[x]->assays_cnt                ))
+;    for (y = 1 to size(reply->qual[x]->assays, 5))
+;        call echo(build(".....", y,
+;           reply->qual[x]->assays[y]->task_assay_cd             , "/",
+;           reply->qual[x]->assays[y]->task_assay_disp           , "/",
+;           reply->qual[x]->assays[y]->sequence                  , "/",
+;           reply->qual[x]->assays[y]->result_cnt                ))
+;        for (z = 1 to size(reply->qual[x]->assays[y]->result, 5))
+;        call echo(build("..........", z,
+;              reply->qual[x]->assays[y]->result[z]->result_id                , "/",
+;              reply->qual[x]->assays[y]->result[z]->bb_result_id             , "/",
+;              reply->qual[x]->assays[y]->result[z]->bb_control_cell_cd       , "/",
+;              reply->qual[x]->assays[y]->result[z]->bb_control_cell_disp     , "/",
+;              reply->qual[x]->assays[y]->result[z]->product_id               , "/",
+;              reply->qual[x]->assays[y]->result[z]->product_nbr              , "/",
+;              reply->qual[x].assays[y].result[z].name_full_formatted))
+;        endfor
+;    endfor
+;endfor
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

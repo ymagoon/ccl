@@ -1,0 +1,259 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBT_GET_PRODUCT_ANTIGENS/BBT_GET_PROD_ANTIGEN.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       BBT_GET_PROD_ANTIGEN.PRG
+        Object name:            bbt_get_prod_antigen
+        Request #:              225024
+
+        Product:                Blood Bank Transfusion/Donor
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Return all antigens for the product(s) requested
+
+        Tables read:            SPECIAL_TESTING
+
+        Tables updated:         N/A
+
+        Executing from:         Result Entry
+
+        Special Notes:          N/A
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 09/04/96 Linda DeJong         Initial Release                     *
+;     002 12/08/03 Ronda Zheng          Check opposite antigen (CAPEP00110263)*
+;     003 02/17/05 Ronda Zheng          Fixed defect CAPEP00154466. Need to *
+;                                       return product attributes for the   *
+;                                       product that doesn't have opposite antigens*
+;     004 03/28/10 Ronda Zheng          retrieve antigen ISBT meaning       *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+        drop program bbt_get_prod_antigen:dba go
+        create program bbt_get_prod_antigen:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+        /*
+        record request
+        (
+          1  qual[x]
+             2  product_id = f8          
+        )
+        */
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+        record reply
+        (
+          1  qual[*]
+             2  product_id = f8
+             2  qual2[*]
+                3  special_testing_cd = f8
+                3  special_testing_disp = c40
+                3  special_testing_desc = vc
+                3  special_testing_mean = c12
+                3  special_isbt    = vc
+             2 opposite_qual[*]
+                3  special_testing_cd   = f8
+                3  special_testing_disp = c40
+                3  opposite_cd          = f8
+                3  opposite_disp        = c40
+             
+%I CCLSOURCE:STATUS_BLOCK.INC
+        )
+
+/****************************************************************************
+*       Initialize Variables                                                *
+*****************************************************************************/
+declare SPECIAL_TESTING_CODE_SET = i4 	with protect, constant(1612)
+declare opposite_cnt             = i2   with protect, noconstant(0)
+declare max_qual2_cnt            = i2   with protect, noconstant(0)
+
+        set err_cnt = 0 
+        set qual_cnt = 0
+        set qual2_cnt = 0
+        set reply->status_data.status = "F"
+        set nbr_of_products = size(request->qual,5)
+        set y = 0
+        set idx = 0
+        set failed = "F"
+
+/****************************************************************************
+*       Read special_testing table for each product                         *
+*****************************************************************************/
+        select into "nl:"
+           d.seq,
+           st.special_testing_cd
+
+        from 
+           (dummyt d with seq = value(nbr_of_products)),
+            special_testing st,
+            bb_isbt_attribute_r biar,
+            bb_isbt_attribute   bia
+
+        plan d
+        
+        join st   where st.product_id = request->qual[d.seq].product_id
+                    and st.active_ind = 1
+                   
+        join biar where biar.attribute_cd = outerjoin (st.special_testing_cd)
+                    and biar.active_ind   = outerjoin(1)
+        
+        join bia  where bia.bb_isbt_attribute_id = outerjoin(biar.bb_isbt_attribute_id)
+                    and bia.active_ind = outerjoin(1)
+        
+        order by st.product_id 
+        
+        head report
+              err_cnt = 0
+        
+        head st.product_id 
+        
+              qual_cnt = qual_cnt + 1,
+              qual2_cnt = 0,
+              stat = alterlist(reply->qual, qual_cnt),
+              stat = alterlist(reply->qual[qual_cnt].qual2, qual2_cnt),
+                reply->qual[qual_cnt].product_id 
+                        = request->qual[d.seq].product_id
+
+        detail
+              qual2_cnt = qual2_cnt + 1
+              if (qual2_cnt > max_qual2_cnt)
+                max_qual2_cnt = qual2_cnt                
+              endif
+              stat = alterlist(reply->qual[qual_cnt].qual2, qual2_cnt)
+              reply->qual[qual_cnt]->qual2[qual2_cnt].special_testing_cd 
+                = st.special_testing_cd
+                
+              reply->qual[qual_cnt]->qual2[qual2_cnt].special_isbt
+                = bia.standard_display
+
+          with nocounter
+
+          if (curqual = 0)
+              set err_cnt = err_cnt + 1
+              set reply->status_data->subeventstatus[err_cnt]->OperationName
+                 = "select"
+              set reply->status_data->subeventstatus[err_cnt]->OperationStatus
+                 = "F"
+              set reply->status_data->subeventstatus[err_cnt]->TargetObjectName
+                 = "special_testing"
+              set reply->status_data->subeventstatus[err_cnt]->TargetObjectValue 
+                 = "unable to return product antigens specified"
+              set reply->status_data.status = "Z"
+           endif
+           
+
+/****************************************************************************
+Check if opposite exists on the antigen. Compare the current antigen to
+previous antigen to see if any opposite exists.
+*****************************************************************************/
+
+        select into "nl:"
+          dProductId = reply->qual[d1.seq].product_id 
+          
+        from 
+           (dummyt d1 with seq = value(size(reply->qual, 5))),
+           (dummyt d2 with seq = value(max_qual2_cnt)),
+            code_value cv,
+            code_value_extension cve
+
+        plan d1
+        
+        join d2 where d2.seq <= size(reply->qual[d1.seq].qual2, 5)
+        
+        join cv  where cv.code_set = SPECIAL_TESTING_CODE_SET
+                   and cv.code_value = reply->qual[d1.seq].qual2[d2.seq].special_testing_cd
+                   and (cv.cdf_meaning = "-"
+                        or cv.cdf_meaning = "+")
+
+        join cve where cve.code_set = cv.code_set
+                   and cve.code_value = cv.code_value
+                   and cve.field_name = "Opposite"                        
+        
+        order by dProductId
+        
+        head dProductId
+              opp_cnt = 0
+              opposite_cnt = 0
+              stat = alterlist(reply->qual[d1.seq].opposite_qual, opposite_cnt)
+              dFieldValue = 0.0
+              cnt = 0
+              cnt2 = 0
+              nOppositeExist = 0
+
+        detail
+              ; Check if opposite exists on the antigen. Compare the current antigen to
+              ; previous antigen to see if any opposite exists.
+              nOppositeExist = 0
+              dFieldValue = cnvtreal(cve.field_value)
+              if (dFieldValue > 0) ;The antigen has opposite defined
+                cnt2 = size(reply->qual[d1.seq].qual2, 5)
+                for (cnt = 1 to cnt2) ;Loop through the antigens
+                  if (dFieldValue = reply->qual[d1.seq].qual2[cnt].special_testing_cd)
+                      for (opp_cnt = 1 to opposite_cnt)
+                          ;Check if the opposite is already existing in the opposite_qual array. 
+                          ;(eg. C+, C- on the product will be loop through twice in detail section.)
+                          if (reply->qual[d1.seq].opposite_qual[opp_cnt].special_testing_cd = dFieldValue
+                              and reply->qual[d1.seq].opposite_qual[opp_cnt].opposite_cd = 
+                              reply->qual[d1.seq].qual2[d2.seq].special_testing_cd)
+                              nOppositeExist = 1
+                              opp_cnt = opposite_cnt
+                          endif
+                      endfor
+                      if (nOppositeExist = 0)
+                          ;If the opposite is already existing in the opposite_qual array, don't add duplicates.
+                          opposite_cnt = opposite_cnt + 1
+                          stat = alterlist(reply->qual[d1.seq].opposite_qual, opposite_cnt)
+                          reply->qual[d1.seq].opposite_qual[opposite_cnt].special_testing_cd = 
+                              reply->qual[d1.seq].qual2[d2.seq].special_testing_cd
+                          reply->qual[d1.seq].opposite_qual[opposite_cnt].opposite_cd = dFieldValue
+                      endif
+                  endif
+                endfor
+              endif         
+                        
+
+        with nocounter
+        
+        set reply->status_data.status = "S"     
+        
+/****************************************************************************
+*       exit_script                                                         *
+*****************************************************************************/
+#EXIT_SCRIPT
+
+           end go
+
+
+
+
+;Generated by GNU enscript 1.6.4.

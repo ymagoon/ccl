@@ -1,0 +1,217 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_av_procs/glb_get_av_procs.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_AV_PROCS.PRG
+        Object name:            GLB_GET_AV_PROCS
+        Request #:              250200
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrive the procedures that are available for
+                                the user to turn on/off auto verification for
+
+        Tables read:            service_resource
+                                resource_group
+                                auto_verify
+
+        Executing from:         General Lab AVStatus.dll
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 09/21/00 Gary Runde           Initial Release                     *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_AV_PROCS:dba go
+      create program GLB_GET_AV_PROCS:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+        1  service_resource_cd          = f8
+        1  av_status_ind                = i2   0 = user turning off
+                                               1 = user turning on
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+        1  num_assays                = i4
+        1  assays[*]
+           2  service_resource_cd    = f8
+           2  service_resource_disp  = vc
+           2  task_assay_cd          = f8
+           2  task_assay_disp        = vc
+%I cclsource:status_block.inc
+      )
+
+      record sr
+      (
+        1  nbr_sr                     = i4
+        1  sr_list[2]
+           2  service_resource_cd     = f8
+      )
+
+
+     #Script
+      set reply->status_data->status = "F"
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+      
+      set cnt = 0
+
+      set sr_cnt = 1
+      set sr->sr_list[1]->service_resource_cd = request->service_resource_cd
+
+/********************************************************************/
+/*  Get the necessary resources if this is a subsection             */
+/********************************************************************/
+
+      select into "nl:"
+         r.child_service_resource_cd,
+         s.service_resource_cd
+      from
+         resource_group r,
+         service_resource s
+      plan r where
+          request->service_resource_cd = r.parent_service_resource_cd
+          and r.root_service_resource_cd = 0.0
+      join s where
+          s.service_resource_cd = r.child_service_resource_cd
+          and s.activity_type_cd in
+            (
+            select
+              cvat.code_value
+            from
+              code_value cvat
+            where cvat.cdf_meaning = ("GLB")
+              and cvat.code_set = 106
+            )
+      order by
+         r.parent_service_resource_cd
+      head report
+         sr_cnt = 0
+      detail
+         sr_cnt = sr_cnt + 1
+         if (mod(sr_cnt,2) = 1)
+            stat = alter(sr->sr_list,sr_cnt + 2)
+         endif
+         sr->sr_list[sr_cnt]->service_resource_cd =
+            r.child_service_resource_cd
+         sr->nbr_sr = sr_cnt
+      WITH
+         nocounter
+
+      if (sr->nbr_sr = 0)
+         set sr->nbr_sr = 1
+      endif
+      set stat = alter(sr->sr_list, sr->nbr_sr)
+      set nbr_sr = size(sr->sr_list,5)
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+/********************************************************************/
+/*  Get the assays that qualify                                     */
+/********************************************************************/
+      ;we want to retrieve the assays from the auto_verify table that have
+      ;the prev_verf_ind a zero and the av_status_flag the oposite of what the 
+      ;user is doing
+      select into "nl:"
+         d1.seq,
+         d2.seq,
+         av.av_status_flag,
+         av.prev_verf_ind,
+         av.service_resource_cd,
+         av.task_assay_cd,
+         resource_assay = build(av.service_resource_cd, av.task_assay_cd),
+         av_exists = decode(av.seq, "Y", "N")
+      from 
+         (dummyt d1 with seq = value(nbr_sr)),
+         (dummyt d2 with seq = 1),
+         auto_verify av
+      plan d1
+      join d2
+         where d2.seq = 1
+      join av 
+         where av.service_resource_cd = sr->sr_list[d1.seq]->service_resource_cd
+           and av.prev_verf_ind = 0
+           and cnvtdatetime(curdate, curtime3) between av.beg_effective_dt_tm and
+                                                       av.end_effective_dt_tm
+           and av.active_ind = 1
+      order by resource_assay
+      head report
+         cnt = 0
+      head resource_assay
+         ;if user is turning av off and the current value is on
+         ;or if the user is turning av on and the current value is off
+         ;then get the assay/resource
+         if (((request->av_status_ind = 0 and av.av_status_flag = 1) or
+              (request->av_status_ind = 1 and av.av_status_flag = 0) or
+              (request->av_status_ind = 1 and av.av_status_flag = 2)) and
+              (av_exists = "Y"))
+            cnt = cnt + 1
+            if (mod(cnt, 5) = 1)
+               stat = alterlist(reply->assays, cnt + 5)
+            endif
+            reply->assays[cnt].service_resource_cd = av.service_resource_cd
+            reply->assays[cnt].task_assay_cd = av.task_assay_cd
+         endif
+      foot report
+         if (cnt > 0)
+            stat = alterlist(reply->assays, cnt)
+         endif
+      with nocounter, outerjoin = d2
+      
+      if (cnt > 0)         
+         set reply->status_data->status = "S"
+         set reply->num_assays = cnt
+      else
+         set reply->status_data->status = "Z"
+      endif
+
+call echorecord(reply)
+
+#EXIT_SCRIPT
+END
+GO
+
+;Generated by GNU enscript 1.6.4.

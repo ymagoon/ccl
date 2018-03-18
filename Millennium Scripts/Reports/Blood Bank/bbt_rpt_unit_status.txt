@@ -1,0 +1,703 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_unit_status.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-2005 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+ 
+        Source file name:       bbt_rpt_unit_status.prg
+        Object name:            bbt_rpt_unit_status
+        Request #:              225248
+ 
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Report the status of units nearing their
+                                expiration date
+ 
+        Tables read:            product, code_value, product_event, person,
+                                person_alias, blood_product, derivative
+ 
+        Tables updated:         none
+ 
+        Executing from:         VB
+ 
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 09/30/96 Brian Franke         Initial Release                     *
+;     002 03/10/97 Jon Weekes           Modified to page break only on product
+;       category instead of category and type.  Also, removed product type
+;       from page header and moved to body of report.
+;     003 03/24/97 Martin Olson         Modified for running out of operations
+;     004 04/24/97 Martin Olson         Modified operations parameter batch_
+;                                       selection to indicate the number of
+;                                       days in the future to look ahead for
+;                                       expiration dates
+;     005 06/12/97 Doug Saus            Modified to select owner and inventory
+;                                       areas
+;     006 03/24/98 Matt Benson          Modified to retrieve Institution
+;                                       name from preferences
+;     007 12/16/98 Shellie Ninemire     Added logic to print the location name
+;                                       and address.  Added the address_location_cd to request.
+;                                       Added bbt_get_location_info.inc
+;                                       Added bbt_print_location_info.inc
+;                                       Added uar calls in place of code_value joins
+;                                       (Removed 6 code_value table joins)
+;                                       Removed the institution name logic.
+;     008 05/21/99 Jose Suarez          change cer_temp to cer_print        *
+;     009 09/09/99 Badari Kopparapu     Modified to use bbt_ops_owninvloc.inc
+;                                       for processing owner area, inventory*
+;                                       area & location address from batch  *
+;                                       selection field in Ops Job Templates*
+;                                       Modified to use ops_date for computing
+;                                       the report date range.              *
+;     010 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       removed bbt_ops_owninvloc.inc and   *
+;                                       added bbt_ops_parm_passed.inc       *
+;     011 08/09/00 Lawrence Dsouza      internationalized date and time     *
+;     012 02/27/01 Rob Peterson         Internationalize script             *
+;     013 09/12/01 John Rieck           Modified to not print products which*
+;                                       have active disposed, transfused, or*
+;                                       destroyed events.                   *
+;     014 07/26/02 Jason Osborn			Unique RPT filename project			*
+;     015 04/26/04 Jim Jensen           Allow for longer ABORH field and use*
+;                                       cnvtalias for MRN.
+;     016 06/24/04 David Fifer          Rearranged the report to handle a 25*
+;                                       character eurocode product number   *
+;                                       and set the maximum columns to 125. *
+;     017 10/11/05 Jason Coy            Updated report to display the       *
+;                                       front end username.                 *
+;     018 02/12/12 Sachin Yadav         Fixed derivative lot # issue        *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program bbt_rpt_unit_status:dba go
+create program bbt_rpt_unit_status:dba
+ 
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+        /*
+        record request
+        (
+          1  beg_dt_tm = di8
+          1  end_dt_tm = di8
+          1  batch_selection = c100
+          1  output_dist = c100
+          1  ops_date = dq8
+          1  cur_owner_area_cd  = f8
+          1  cur_inv_area_cd    = f8
+          1  address_location_cd = f8 
+       )
+       */
+ 
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+        record reply
+        (
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+        )
+ 
+%i cclsource:bbt_get_username.inc
+
+declare reportByUsername = vc with protect, noconstant("")
+set reportByUsername = GET_USERNAME(reqinfo->updt_id)
+
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+ 
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+record captions
+(
+  1  rpt_title                  = vc
+  1  rpt_time                   = vc
+  1  rpt_as_of_date             = vc
+  1  user                       = vc
+  1  blood_bank_owner           = vc
+  1  inventory_area             = vc
+  1  product_class              = vc
+  1  product_category           = vc
+  1  begin_exp_date             = vc
+  1  ending_exp_date            = vc
+  1  expire                     = vc
+  1  prod_number                = vc
+  1  prod_type                  = vc
+  1  aborh                      = vc
+  1  quantity                   = vc
+  1  date_time                  = vc
+  1  status                     = vc
+  1  name                       = vc
+  1  mrn                        = vc
+  1  rpt_id                     = vc
+  1  rpt_page                   = vc
+  1  printed                    = vc
+  1  end_of_report              = vc
+  1  all                        = vc
+  1  not_on_file                = vc
+)
+ 
+set captions->rpt_title = uar_i18ngetmessage(i18nHandle,
+  "rpt_title", "U N I T   S T A T U S   R E P O R T")
+set captions->rpt_time = uar_i18ngetmessage(i18nHandle,
+  "rpt_time", "Time:")
+set captions->rpt_as_of_date = uar_i18ngetmessage(i18nHandle,
+  "rpt_as_of_date", "As of Date:")
+set captions->user = uar_i18ngetmessage(i18nHandle,
+  "user", "User:")
+set captions->blood_bank_owner = uar_i18ngetmessage(i18nHandle,
+  "blood_bank_owner", "Blood Bank Owner: ")
+set captions->inventory_area = uar_i18ngetmessage(i18nHandle,
+  "inventory_area", "Inventory Area: ")
+set captions->product_class = uar_i18ngetmessage(i18nHandle,
+  "product_class", "Product Class:")
+set captions->product_category = uar_i18ngetmessage(i18nHandle,
+  "product_category", "Product Category:")
+set captions->begin_exp_date = uar_i18ngetmessage(i18nHandle,
+  "begin_exp_date", "Beginning Expiration Date:")
+set captions->ending_exp_date = uar_i18ngetmessage(i18nHandle,
+  "ending_exp_date", "Ending Expiration Date:")
+set captions->expire = uar_i18ngetmessage(i18nHandle,
+  "expire", "Expire")
+set captions->prod_number = uar_i18ngetmessage(i18nHandle,
+  "prod_number",  "Product Number")
+set captions->prod_type = uar_i18ngetmessage(i18nHandle,
+  "prod_type", "Product Type")
+set captions->aborh = uar_i18ngetmessage(i18nHandle,
+  "aborh", "ABO/Rh")
+set captions->quantity = uar_i18ngetmessage(i18nHandle,
+  "quantity", "Qty")
+set captions->date_time = uar_i18ngetmessage(i18nHandle,
+  "date_time", "Date/Time")
+set captions->status = uar_i18ngetmessage(i18nHandle,
+  "status", "Status")
+set captions->name = uar_i18ngetmessage(i18nHandle,
+  "name", "Name")
+set captions->mrn = uar_i18ngetmessage(i18nHandle,
+  "mrn", "MRN")
+set captions->rpt_id = uar_i18ngetmessage(i18nHandle,
+  "rpt_id", "Report ID: BBT_RPT_UNIT_STATUS")
+set captions->rpt_page = uar_i18ngetmessage(i18nHandle,
+  "rpt_page", "Page:")
+set captions->printed = uar_i18ngetmessage(i18nHandle,
+  "printed", "Printed:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+set captions->all = uar_i18ngetmessage(i18nHandle,
+  "all", "(All)")
+set captions->not_on_file = uar_i18ngetmessage(i18nHandle,
+  "not_on_file", "<Not on file>")
+ 
+/*****************************************************************************
+* Variable declarations                                                      *
+*****************************************************************************/
+ 
+DECLARE nProductCount	= i2 WITH noconstant(0)
+DECLARE nAddProduct		= i2 WITH noconstant(0)
+DECLARE nderValidEvent	= i2 WITH noconstant(0)
+DECLARE nderInvalidEvent= i2 WITH noconstant(0)
+ 
+/*****************************************************************************
+* Script                                                                     *
+*****************************************************************************/
+ 
+if (trim(request->batch_selection) > "")
+   set temp_string = cnvtupper(trim(request->batch_selection))
+   set days_look_ahead = 0
+   ;The value enclosed in RANGEOFDAYS[ ] is 'days to look ahead'
+   call CHECK_RANGEOFDAYS_OPT ("bbt_rpt_unit_status")
+   if (days_look_ahead > 0)
+      set begin_date_time =  CNVTDATETIME(request->ops_date)
+      set end_date_time = CNVTDATETIME(DATETIMEADD(request->ops_date, days_look_ahead))
+   else
+          ;fail script
+          set reply->status = "F"
+          set reply->status_data->status = "F"
+          set reply->status_data->subeventstatus[1].OperationName = "bbt_rpt_unit_status"
+          set reply->status_data->subeventstatus[1].OperationStatus = "F"
+          set reply->status_data->subeventstatus[1].TargetObjectValue = "no value in string"
+          set reply->status_data->subeventstatus[1].TargetObjectName = "parse look ahead days"
+          go to EXIT_SCRIPT
+   endif
+ 
+  call CHECK_OWNER_CD ("bbt_rpt_unit_status")
+  call CHECK_INVENTORY_CD ("bbt_rpt_unit_status")
+  call CHECK_LOCATION_CD ("bbt_rpt_unit_status")
+ 
+else
+  ;set the beginning and ending dates from the request
+   set begin_date_time = CNVTDATETIME(request->beg_dt_tm)
+   set end_date_time = CNVTDATETIME(request->end_dt_tm)
+endif
+ 
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+%i cclsource:bbt_get_location_info.inc
+ 
+/* Retrieve display values for requested Owner Area and Inventory Area */
+set cur_owner_area_disp = fillstring(40," ")
+set cur_inv_area_disp = fillstring(40, " ")
+if (request->cur_owner_area_cd = 0.0)
+   set cur_owner_area_disp = captions->all
+else
+   set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+endif
+ 
+if (request->cur_inv_area_cd = 0.0)
+   set cur_inv_area_disp = captions->all
+else
+   set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+endif
+ 
+set line               = fillstring(125,"_")
+ 
+set mrn_code = 0.0
+set dispose_code = 0.0
+set transfuse_code = 0.0
+set destroy_code = 0.0
+set code_cnt = 1
+
+set derivative_class_cd = 0.0
+set cdf_meaning = fillstring(12," ")
+set cdf_meaning = "DERIVATIVE"
+set stat = uar_get_meaning_by_codeset(1606,cdf_meaning,1,derivative_class_cd)
+ 
+set stat = uar_get_meaning_by_codeset(319, "MRN", code_cnt, mrn_code)
+set stat = uar_get_meaning_by_codeset(1610, "5", code_cnt, dispose_code)
+set stat = uar_get_meaning_by_codeset(1610, "7", code_cnt, transfuse_code)
+set stat = uar_get_meaning_by_codeset(1610, "14", code_cnt, destroy_code)
+if (mrn_code = 0.0 OR dispose_code = 0.0 OR transfuse_code = 0.0 OR destroy_code = 0.0 OR derivative_class_cd = 0.0)
+        set reply->status = "F"
+        go to exit_script
+endif
+ 
+record aborh
+(
+ 1  aborh_list[*]
+    2  aborh_display = c13	
+    2  abo_code      = f8
+    2  rh_code       = f8
+)
+ 
+set stat = alterlist(aborh->aborh_list, 10)
+ 
+set aborh_index = 0
+select into "nl:"
+from    code_value cv1,
+        code_value_extension cve1,
+        code_value_extension cve2,
+        (dummyt d1 with seq = 1),
+        code_value cv2,
+        (dummyt d2 with seq = 1),
+        code_value cv3
+plan    cv1 where cv1.code_set = 1640 and
+        cv1.active_ind = 1
+join    cve1 where cve1.code_set = 1640 and
+        cv1.code_value = cve1.code_value and
+        cve1.field_name = "ABOOnly_cd"
+join    cve2 where cve2.code_set = 1640 and
+        cv1.code_value = cve2.code_value and
+        cve2.field_name = "RhOnly_cd"
+join    d1 where d1.seq = 1
+join    cv2 where cv2.code_set = 1641 and
+        cnvtint(cve1.field_value) = cv2.code_value
+join    d2 where d2.seq = 1
+join    cv3 where cv3.code_set = 1642 and
+        cnvtint(cve2.field_value) = cv3.code_value
+order   cve1.field_value,
+        cve2.field_value
+detail
+        aborh_index = aborh_index + 1
+        if (mod(aborh_index, 10) = 1 and aborh_index != 1)
+          stat = alterlist(aborh->aborh_list, aborh_index + 9)
+        endif
+        aborh->aborh_list[aborh_index]->aborh_display = substring(1,13,cv1.display)
+        aborh->aborh_list[aborh_index]->abo_code = cv2.code_value
+        aborh->aborh_list[aborh_index]->rh_code  = cv3.code_value
+with    outerjoin (d1),
+        outerjoin (d2),
+        check,
+        nocounter
+ 
+if (curqual > 0)
+  set stat = alterlist(aborh->aborh_list, aborh_index)
+endif
+ 
+set select_ok_ind = 0
+set rpt_cnt = 0
+ 
+execute cpm_create_file_name_logical "bbt_unit_status", "txt", "x"
+ 
+; Create a record structure to hold a list of products which do not have
+; active disposed, transfused, or destroyed events.
+ 
+RECORD Product
+(
+ 1  product_list[*]
+    2  product_id		= f8
+)
+ 
+; Initialize the record structure to zero
+SET stat = ALTERLIST(Product->product_list, 0)
+ 
+SELECT INTO "nl:"
+	p.product_id,
+	pe.event_type_cd
+ 
+FROM
+	product p,
+	product_event pe
+ 
+PLAN p WHERE (p.cur_expire_dt_tm BETWEEN
+				  CNVTDATETIME(begin_date_time) AND
+				  CNVTDATETIME(end_date_time))
+			AND ((request->cur_owner_area_cd > 0.0
+			  AND request->cur_owner_area_cd = p.cur_owner_area_cd)
+			 OR (request->cur_owner_area_cd = 0.0))
+			AND ((request->cur_inv_area_cd > 0.0
+			  AND request->cur_inv_area_cd = p.cur_inv_area_cd)
+			 OR (request->cur_inv_area_cd = 0.0))
+			AND p.active_ind = 1
+			AND p.product_id > 0.0
+ 
+JOIN pe WHERE pe.product_id = p.product_id
+			 AND pe.active_ind = 1
+ 
+HEAD p.product_id
+	; Reset the indicator which signals to add the product to the
+	; product list record structure
+	nAddProduct = 1
+	nderValidEvent = 0
+	nderInvalidEvent = 0
+ 
+DETAIL
+ 
+	; If the product cannot been added to the record structure,
+	; then we do not have to continue processing the next IF statement
+	IF (nAddProduct = 1)
+		; If the product has an active disposed, transfused, or destroyed
+		; event, then do not add the product to the record structure
+		IF (p.product_class_cd = derivative_class_cd)  
+			IF ((pe.event_type_cd != dispose_code) AND (pe.event_type_cd != transfuse_code) AND (pe.event_type_cd != destroy_code))			
+				nderValidEvent = nderValidEvent + 1	
+			ENDIF	
+		ELSE 
+			IF ((pe.event_type_cd = dispose_code) OR (pe.event_type_cd = transfuse_code) OR (pe.event_type_cd = destroy_code))
+				nAddProduct = 0
+			ENDIF	
+		ENDIF
+	ENDIf	
+ 
+FOOT p.product_id
+	if (p.product_class_cd = derivative_class_cd) 			
+		if (nderValidEvent > 0)
+			nAddProduct = 1	
+		else 
+			nAddProduct = 0	
+		endif
+	endif		
+	; Add the product to the record structure if the indicator is set to 1	
+	IF (nAddProduct = 1)
+		nProductCount = nProductCount + 1
+		IF (mod(nProductCount,10) = 1)
+			stat = ALTERLIST(Product->product_list,nProductCount + 9)
+		ENDIF
+ 
+		; Add the product
+		Product->product_list[nProductCount].product_id = p.product_id
+	ENDIF
+ 
+WITH nocounter
+ 
+; Resize the record structure
+SET stat = ALTERLIST(Product->product_list, nProductCount)
+ 
+select into cpm_cfn_info->file_name_logical
+      d_flg = decode(bp.seq,"BP",de.seq,"DE","XX"),
+      pr.product_id,
+      pr.product_nbr,
+      pr.product_sub_nbr,
+      pr.product_cat_cd,
+      pr.cur_expire_dt_tm,
+      product_class_display = uar_get_code_display(pr.product_class_cd),
+      product_cat_display = uar_get_code_display(pr.product_cat_cd),
+      product_display = uar_get_code_display(pr.product_cd),
+      pe.person_id,
+      pe.product_event_id,
+      pe.event_type_cd,
+      event_type_display = uar_get_code_display(pe.event_type_cd) "###############",
+      bp.cur_abo_cd,
+      bp.cur_rh_cd,
+      de.cur_avail_qty,
+      per.name_full_formatted "#########################",
+      n_f_f =
+          decode(per.name_full_formatted , per.name_full_formatted, fillstring(20, " ")) "####################",
+      alias = decode(ea.seq, "Y", "N")
+from
+		(dummyt d with seq = VALUE(nProductCount)),
+		product pr,
+      product_event pe,
+      (dummyt d4 with seq = 1),
+      person per,
+      (dummyt d5 with seq = 1),
+      encntr_alias ea,
+      (dummyt d1 with seq = 1),
+      blood_product bp,
+      derivative de
+ 
+plan d where nProductCount > 0
+ 
+join 	pr	 where pr.product_id = Product->product_list[d.seq]->product_id
+ 
+join  pe  where pr.product_id = pe.product_id and
+                pe.active_ind = 1
+ 
+join  (d4 where d4.seq = 1
+join  per where pe.person_id  > 0 and
+                pe.person_id  = per.person_id)
+join  (d5 where d5.seq = 1
+join   ea where pe.encntr_id > 0 and
+                ea.encntr_id = pe.encntr_id and
+                ea.encntr_alias_type_cd = mrn_code and
+                ea.active_ind = 1)
+ 
+join  (d1  where d1.seq = 1
+             join  bp  where pr.product_id = bp.product_id
+             orjoin  de  where pr.product_id = de.product_id)
+order by
+      product_class_display,
+      product_cat_display,
+      product_display,
+      cnvtdatetime(pr.cur_expire_dt_tm),
+      pr.product_id,
+      pr.product_nbr,
+      pr.product_sub_nbr,
+      event_type_display
+ 
+head  report
+      new_report = "Y"
+      product_cd_hd = 0.0
+      select_ok_ind = 0
+      mrn = fillstring(20, " ")
+ 
+head  page
+      new_page = "Y"
+      ROW 0
+      call center(captions->rpt_title,1,125)                        
+      col 104, captions->rpt_time                                 
+      col 118, curtime "@TIMENOSECONDS;;M",
+      row + 1
+      col 104, captions->rpt_as_of_date                         
+      col 118, curdate "@DATECONDENSED;;d",
+      row + 1
+      col 104, captions->user                            
+      col 111, reportByUsername "###############;R"
+%i cclsource:bbt_print_location_info.inc
+      row + 1
+      col  1, captions->blood_bank_owner                
+      col 19, cur_owner_area_disp,
+      row + 1
+      col  1, captions->inventory_area                   
+      col 17, cur_inv_area_disp
+      row + 2
+      col   4, captions->product_class                    
+      col  22, product_class_display 
+      beg_dt_tm = cnvtdatetime(begin_date_time)
+ 
+     row + 1
+      col   4, captions->product_category                 
+      col  22, product_cat_display
+    
+      end_dt_tm = cnvtdatetime(end_date_time)
+ 
+      row + 2
+      col 20,  captions->begin_exp_date                               
+      col 47, beg_dt_tm "@DATETIMECONDENSED;;d"
+      col 72,  captions->ending_exp_date                          
+      col 96,  end_dt_tm "@DATETIMECONDENSED;;d"
+ 
+      row + 2
+      call center(captions->expire, 59, 70)	
+      row + 1
+      call center(captions->prod_number, 1, 25)	
+      col  27, captions->prod_type				
+      call center(captions->aborh, 40, 52)		
+      col  54, captions->quantity				
+      call center(captions->date_time, 59, 70)	
+      call center(captions->status, 72, 84)		
+      call center(captions->name, 86, 105)		
+      call center(captions->mrn, 107, 125)		
+      row + 1
+      col   1, "-------------------------"		
+      col  27, "------------"					
+      col  40, "-------------"					
+      col  54, "----"							
+      col  59, "------------" 					
+      col  72, "-------------"					
+      col  86, "--------------------"			
+      col 107, "-------------------"		
+      row + 1
+ 
+head product_cat_display
+      if (new_report = "Y")
+        new_report = "N"
+      else
+        break
+      endif
+ 
+head  pr.product_id
+      new_prod_id = "Y"
+ 
+detail
+      if (new_page != "Y")
+            row + 1
+            if (row > 56) break endif
+      endif
+      if (pr.product_cd != product_cd_hd)
+            product_cd_hd = pr.product_cd
+      endif
+      new_page = "N"
+      if (new_prod_id = "Y")
+        new_prod_id = "N"
+        if (pr.product_sub_nbr > " ")
+          prod_nbr_display = concat(trim(bp.supplier_prefix), trim(pr.product_nbr), " ", trim(pr.product_sub_nbr))
+        else
+          prod_nbr_display = concat(trim(bp.supplier_prefix), trim(pr.product_nbr))
+        endif
+        col  1, prod_nbr_display "#########################"
+        col 27, product_display "############"
+ 
+        if (d_flg = "BP")
+          idx_a = 1
+          finish_flag = "N"
+          while ((idx_a <= aborh_index) and (finish_flag = "N"))
+            if ((bp.cur_abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                (bp.cur_rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+              col 40, aborh->aborh_list[idx_a]->aborh_display  "#############"	
+              finish_flag = "Y"
+            else
+              idx_a = idx_a + 1
+            endif
+          endwhile
+        endif
+ 
+        if (d_flg = "DE")
+          qty = trim(cnvtstring(de.cur_avail_qty,4,0,r))
+           col 54, qty										
+        endif
+ 
+        dt_tm = cnvtdatetime(pr.cur_expire_dt_tm)
+        col  59, dt_tm "@DATETIMECONDENSED;;d"				
+        col  72, event_type_display
+        if (n_f_f > " ")
+          col  86, n_f_f									
+        endif
+        if (alias = "Y")
+          mrn = cnvtalias(ea.alias, ea.alias_pool_cd)
+          col 107, mrn "###################"				
+        else
+          if (pe.person_id != NULL and pe.person_id > 0)
+              col 107, captions->not_on_file			
+          endif
+        endif
+      else
+        col  72, event_type_display
+        if (n_f_f > " ")
+          col  86, n_f_f							
+        endif
+ 
+        if (alias = "Y")
+          mrn = cnvtalias(ea.alias, ea.alias_pool_cd)
+          col 107, mrn "###################"			
+        else
+          if (pe.person_id != NULL and pe.person_id > 0)
+              col 107, captions->not_on_file				
+          endif
+        endif
+      endif
+ 
+foot  pr.product_id
+      row + 1
+      if (row > 56) break endif
+ 
+foot page
+      row  57
+      col   1, line
+      row + 1
+      col   1, captions->rpt_id                            
+      col  58, captions->rpt_page                             
+      col  64, curpage "###"
+      col 100, captions->printed                        
+      col 110, curdate  "@DATECONDENSED;;d"
+      col 120, curtime  "@TIMENOSECONDS;;M"
+ 
+foot report
+      row  60
+      call center(captions->end_of_report, 1, 125)               
+      select_ok_ind = 1
+ 
+with  nocounter,
+      nullreport,
+      maxrow = 61,
+      dontcare (per),
+      dontcare (ea),
+      compress, nolandscape 
+ 
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+ 
+if (trim(request->batch_selection) > "")
+   ;print out the file
+   SET SPOOL value(reply->rpt_list[rpt_cnt].rpt_filename) VALUE(request->Output_Dist)
+   ;set the reply flag so the operations application doesn't show an error
+   set reply->status_data->status = "S"
+endif
+ 
+if (select_ok_ind = 1)
+    set reply->status_data->status = "S"
+endif
+ 
+#exit_script
+        if(reply->status = "F")
+                set reply->status_data.status = "F"
+        else
+                set reply->status_data->status = "S"
+        endif
+ 
+; Free the product list record structure
+FREE SET Product
+ 
+end
+go
+
+;Generated by GNU enscript 1.6.4.

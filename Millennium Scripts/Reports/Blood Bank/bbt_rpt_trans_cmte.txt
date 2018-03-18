@@ -1,0 +1,2208 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/bbt_rpt_trans_cmte/bbt_rpt_trans_cmte.prg Turn on black mode
+
+/*BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2005 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Author:                 Jon Weekes
+        Date Written:           01/07/97
+
+        Source file name:       bbt_rpt_trans_cmte.prg
+        Object name:            bbt_rpt_trans_cmte
+        Request #:              225282
+
+        Product:                Transfusion
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Print Transfustion Committee Report
+
+        Tables read:            product, product_event, orders, result....
+        Tables updated:
+        Executing from:         VB--Report Selection
+
+        Special Notes:          ?
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *001 01/08/97 Jon Weekes           Initial Release                     *
+;    *002 03/23/98 Matt Benson          Modified to retrieve Institution    *
+;    *  Name from preferences                                               *
+;    *003 05/21/99 Jose Suarez          change cer_temp to cer_print        *
+;    *004 09/10/99 Badari Kopparapu     Corrected inappropriate usage of    *
+;    *                                  alterlist(..) for records > 100.    *
+;     005 09/28/99 Jose Suarez          Added logic to print the location name                   *
+;                                       and address.  Added the address_location_cd to request.  *
+;                                       Added bbt_get_location_info.inc                          *
+;                                       Added bbt_print_location_info.inc                        *
+;    *006 09/01/99 Badari Kopparapu     Modified to use bbt_ops_owninvloc.inc
+;    *                                  for processing owner area, inventory*
+;    *                                  area & location address from batch  *
+;    *                                  selection field in Ops Job Templates*
+;    *                                  Modified to use ops_date for computing
+;    *                                  the report date range. Modified to  *
+;    *                                  check for an non-empty batch_selection
+;    *                                  field to determine if running from  *
+;    *                                  operations.                         *
+;     007 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       added bbt_ops_parm_passed.inc       *
+;     008 08/09/00 Lawrence Dsouza      internationalized date and time     *
+;     009 02/27/01 Rob Peterson         Internationalize script             *
+;     010 01/15/02 SD4221               Use UAR's. No changes made for the  *
+;                                       order by because only 10 fields are *
+;                                       allowed.                            *
+;     011 07/26/02 Jason Osborn			Unique RPT filename project			*
+;     012 09/26/02 Ronda Zheng          Change date/time format for order_time
+;                                       so trans_time and order_time use same
+;                                       format and can be compared.         *
+;     013 04/28/03 Jason Osborn         Own/Inv area updates                *
+;     014 09/08/03 Jason Osborn         Lined up STATUS, RESULT, PRODUCT TYPE
+;                                       PRODUCT NUMBER and DATE/TIME colums.*
+;     015 04/12/04 Jim Jensen           Increase size of ABORh display and  *
+;                                       add CNVTALIAS for mrn display. Add  *
+;                                       CNVTACC to format accession numbers.*
+;     016 07/09/04 David Fifer          Rearranged the report to handle a 25*
+;                                       character eurocode product number.  *
+;     017 10/11/05 Jason Coy            Updated report to display the       *
+;                                       front end username.                 *
+;     018 12/17/07 Matt Cummings        Added multifacility, patient,       *
+;                                       physician, ABO/Rh, and product      *
+;                                       category filtering. Fixed CRs       *
+;                                       1-319387608, 1-319114032 and        *
+;                                       1-1240044063.                       *
+;     019 08/20/10 AS019178             Fix for CR 1-4112965511,to populate *
+;					                    reply structure by qualifying       * 
+;                                       on primary accession for the order  *
+;~DE~************************************************************************
+
+drop program bbt_rpt_trans_cmte:dba go
+create program bbt_rpt_trans_cmte:dba
+
+/*
+record request
+(
+ 1  beg_dt_tm           = dq8
+ 1  end_dt_tm           = dq8
+ 1  report_format       = c20   ; "PATIENT" = Alpha by patient name, "PHYSICIAN" = Alpha by Dispense Provider,
+                                ; "MEDICAL SERVICE" = Alpha by Medical Service
+ 1  individual_id       = f8    ; _id of individual Physician or Medical Service to be reported
+ 1  ops_date            = dq8
+ 1  batch_selection     = c100
+ 1  output_distribution = c100
+ 1  address_location_cd = f8
+ 1  cur_owner_area_cd   = f8
+ 1  cur_inv_area_cd     = f8
+ 1  physician_id        = f8
+ 1  abo_cd              = f8
+ 1  rh_cd               = f8
+ 1  product_cat_cd      = f8
+)
+*/
+%I CCLSOURCE:PCS_SUBEVENT.INC
+
+free set tc_rec
+record tc_rec
+(
+ 1  trns_cmte[*]
+     2  product_cd              = f8
+     2  found_ind               = i2
+     2  trans_commit_id         = f8
+     2  assoc_assays_exist      = i2
+)
+
+free set tca_rec
+record tca_rec
+(
+ 1  tca[*]
+     2  product_cd              = f8
+     2  task_assay_cd           = f8
+     2  detail_mnemonic         = c20
+     2  pre_hours               = i4
+     2  post_hours              = i4
+)
+
+free set pe_rec
+record pe_rec
+(
+ 1  pe[*]
+     2  encntr_id               = f8
+     2  person_id               = f8
+     2  product_event_id        = f8
+     2  event_dt_tm             = dq8
+     2  trans_time              = f8
+     2  product_id              = f8
+     2  product_cd              = f8
+     2  product_disp            = c24
+     2  product_nbr             = c26
+     2  abo_cd                  = f8
+     2  abo_disp                = c10
+     2  rh_cd                   = f8
+     2  rh_disp                 = c8
+     2  quantity                = i4
+     2  iu                      = i4
+     2  dispense_prov_id        = f8
+     2  physician_name          = c30
+     2  related_product_event_id = f8
+)
+ 
+free set trans_cat_rec
+record trans_cat_rec
+(
+ 1  trans_cat[*]
+     2  encntr_id               = f8
+     2  person_id               = f8
+     2  dispense_prov_id        = f8
+     2  trans_time              = f8
+     2  catalog_cd              = f8
+     2  pre_hours               = i4
+     2  post_hours              = i4
+)
+
+free set rpt_pe_rec
+record rpt_pe_rec
+(
+ 1  trans_time                  = f8
+ 1  pe[*]
+     2  product_cd              = f8
+     2  product_disp            = c24
+     2  product_nbr             = c26
+     2  abo_rh_disp             = c18
+     2  quantity                = i4
+     2  iu                      = i4
+     2  event_dt_tm             = dq8
+     2  physician_name          = c30
+)
+ 
+ 
+free set dta_rec
+record dta_rec
+(
+ 1  dta[*]
+     2  product_cd              = f8
+     2  task_assay_cd           = f8
+     2  mnemonic                = c15
+     2  pre_time                = f8
+     2  post_time               = f8
+)
+
+free set per_rec
+record per_rec
+(
+ 1  per[*]
+     2  person_id       = f8
+     2  patient_name            = c40
+     2  patient_name_sort       = c32
+     2  encntr_id               = f8
+     2  mrn_alias               = c20
+     2  fin_alias               = c20
+     2  dispense_prov_id        = f8
+     2  physician_name          = c30
+     2  physician_name_sort     = c32
+     2  related_product_event_id = f8
+     2  birth_dt_tm             = dq8
+)
+
+free set cat_task_rec
+record cat_task_rec
+(
+ 1  cat_task[*]
+     2  catalog_cd      = f8
+     2  task_assay_cd   = f8
+     2  mnemonic        = c15
+)
+
+free set ord_rec
+record ord_rec
+(
+ 1 ord[*]
+     2  encntr_id               = f8
+     2  person_id               = f8
+     2  trans_time              = f8
+     2  order_id                = f8
+     2  catalog_cd              = f8
+     2  accession               = c20
+     2  order_mnemonic          = c20
+     2  collected_dt_tm         = dq8
+     2  collected_time          = f8
+     2  order_status_cd         = f8
+     2  order_status_disp       = c15
+)
+
+free set report_ord_rec
+record rpt_ord_rec
+(
+ 1 ord[*]
+     2  catalog_cd              = f8
+     2  accession               = c20
+     2  order_mnemonic          = c20
+     2  collected_dt_tm         = dq8
+     2  order_status_disp       = c15
+     2  rslt_cnt                = i4
+     2  results[*]
+         3  task_assay_cd       = f8
+         3  mnemonic            = c20
+         3  event_dt_tm         = dq8
+         3  result_status_disp  = c15
+         3  result              = c17
+         3  result_flags        = c4
+)
+
+free set rslt_rec
+record rslt_rec
+(
+ 1  rslt[*]
+     2  encntr_id               = f8
+     2  person_id               = f8
+     2  order_id                = f8
+     2  result_id               = f8
+     2  task_assay_cd           = f8
+     2  mnemonic                = c15
+     2  sequence                = i4
+     2  result_status_cd        = f8
+     2  result_status_disp      = c15
+     2  perform_result_id       = f8
+     2  result_value_alpha      = c15
+     2  result_code_set_cd      = f8
+     2  result_code_set_disp    = c15
+     2  result_value_numeric    = f8
+     2  ascii_text              = c15
+     2  nomenclature_id         = f8
+     2  long_text_id            = f8
+     2  normal_cd               = f8
+     2  normal_disp             = c1
+     2  critical_cd             = f8
+     2  critical_disp           = c1
+     2  review_cd               = f8
+     2  review_disp             = c1
+     2  delta_cd                = f8
+     2  delta_disp              = c1
+     2  event_dt_tm             = dq8
+     2  arg_min_digits          = i4
+     2  arg_max_digits          = i4
+     2  arg_min_dec_places      = i4
+     2  arg_less_great_flag     = i2
+)
+
+record reply
+(
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+)
+
+%i cclsource:bbt_get_username.inc
+
+declare reportByUsername = vc with protect, noconstant("")
+set reportByUsername = GET_USERNAME(reqinfo->updt_id)
+
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+ 
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+record captions
+(
+  1  medical_record_num         = vc
+  1  financial_num              = vc
+  1  pre_transfusion_tests      = vc
+  1  no_pre_transfusion         = vc
+  1  transfusion                = vc
+  1  physician                  = vc
+  1  product_type               = vc
+  1  product_number             = vc
+  1  date_time                  = vc
+  1  post_transfusion_tests     = vc
+  1  no_post_transfusion        = vc
+  1  not_resulted               = vc
+  1  rpt_id                     = vc
+  1  rpt_page                   = vc
+  1  printed                    = vc
+  1  printed_by                 = vc
+  1  transfusion_report         = vc
+  1  patient                    = vc
+  1  physician_filter           = vc
+  1  med_service                = vc
+  1  begin_date                 = vc
+  1  end_date                   = vc
+  1  ordered_procedure          = vc
+  1  patient_name               = vc
+  1  accession                  = vc
+  1  detailed_procedure         = vc
+  1  date_time2                 = vc
+  1  status                     = vc
+  1  result                     = vc
+  1  flag                       = vc
+  1  end_of_report              = vc
+  1  collected                  = vc
+  1  not_on_file                = vc
+  1  date_of_birth              = vc
+  1  all                        = vc
+  1  abo                        = vc
+  1  rh                         = vc
+  1  owner_area                 = vc
+  1  inv_area                   = vc
+  1  product_category           = vc
+  1  product_aborh              = vc
+)
+ 
+set captions->medical_record_num = uar_i18ngetmessage(i18nHandle,
+  "medical_record_num", "Medical Record #:")
+set captions->financial_num = uar_i18ngetmessage(i18nHandle,
+  "financial_num", "FINANCIAL #:")
+set captions->pre_transfusion_tests = uar_i18ngetmessage(i18nHandle,
+  "pre_transfusion_tests", "PRE-TRANSFUSION TESTS")
+set captions->no_pre_transfusion = uar_i18ngetmessage(i18nHandle,
+  "no_pre_transfusion", "(no pre-transfusion tests)")
+set captions->transfusion = uar_i18ngetmessage(i18nHandle,
+  "transfusion", "TRANSFUSION:")
+set captions->physician = uar_i18ngetmessage(i18nHandle,
+  "physician", "PHYSICIAN        ")
+set captions->product_type = uar_i18ngetmessage(i18nHandle,
+  "product_type", "    PRODUCT TYPE    ")
+set captions->product_number = uar_i18ngetmessage(i18nHandle,
+  "product_number", "PRODUCT NUMBER")
+set captions->date_time = uar_i18ngetmessage(i18nHandle,
+  "date_time", "DATE/TIME")
+set captions->post_transfusion_tests = uar_i18ngetmessage(i18nHandle,
+  "post_transfusion_tests", "POST-TRANSFUSION TESTS")
+set captions->no_post_transfusion = uar_i18ngetmessage(i18nHandle,
+  "no_post_transfusion", "(no post-transfusion tests)")
+set captions->not_resulted = uar_i18ngetmessage(i18nHandle,
+  "not_resulted", "<not resulted>")
+set captions->rpt_id = uar_i18ngetmessage(i18nHandle,
+  "rpt_id", "Report ID: BBT_RPT_TRANS_CMTE")
+set captions->rpt_page = uar_i18ngetmessage(i18nHandle,
+  "rpt_page", "Page:")
+set captions->printed = uar_i18ngetmessage(i18nHandle,
+  "printed", "Printed:")
+set captions->printed_by = uar_i18ngetmessage(i18nHandle,
+  "printed_by", "By:")
+set captions->transfusion_report = uar_i18ngetmessage(i18nHandle,
+  "transfusion_report",
+  "T R A N S F U S I O N   C O M M I T T E E   R E P O R T")
+set captions->patient = uar_i18ngetmessage(i18nHandle,
+  "patient", "Patient:")
+set captions->physician_filter = uar_i18ngetmessage(i18nHandle,
+  "physician_filter", "Physician:")
+set captions->med_service = uar_i18ngetmessage(i18nHandle,
+  "med_service", "Medical Service:")
+set captions->begin_date = uar_i18ngetmessage(i18nHandle,
+  "begin_date", "Beginning Date:")
+set captions->end_date = uar_i18ngetmessage(i18nHandle,
+  "end_date", "Ending Date:")
+set captions->ordered_procedure = uar_i18ngetmessage(i18nHandle,
+  "ordered_procedure", "ORDERED PROCEDURE")
+set captions->accession = uar_i18ngetmessage(i18nHandle,
+  "accession", "     ACCESSION      ")
+set captions->detailed_procedure = uar_i18ngetmessage(i18nHandle,
+  "detailed_procedure", "  DETAILED PROCEDURE")
+set captions->date_time2 = uar_i18ngetmessage(i18nHandle,
+  "date_time2", "  DATE/TIME    ")
+set captions->status = uar_i18ngetmessage(i18nHandle,
+  "status", "STATUS      ")
+set captions->result = uar_i18ngetmessage(i18nHandle,
+  "result", "RESULT")
+set captions->flag = uar_i18ngetmessage(i18nHandle,
+  "flag", "FLAG")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+set captions->collected	= uar_i18ngetmessage(i18nHandle,
+  "collected", "Collected")
+set captions->not_on_file = uar_i18ngetmessage(i18nHandle,
+  "not_on_file", "<Not on File>")
+set captions->date_of_birth = uar_i18ngetmessage(i18nHandle,
+  "date_of_birth", "Date of Birth:")
+set captions->all = uar_i18ngetmessage(i18nHandle,
+  "all", "(All)")
+set captions->abo = uar_i18ngetmessage(i18nHandle,
+  "abo", "ABO:")
+set captions->rh = uar_i18ngetmessage(i18nHandle,
+  "rh", "Rh:")
+set captions->owner_area = uar_i18ngetmessage(i18nHandle,
+  "owner_area", "Blood Bank Owner:")
+set captions->inv_area = uar_i18ngetmessage(i18nHandle,
+  "inv_area", "Inventory Area:")
+set captions->product_category = uar_i18ngetmessage(i18nHandle,
+  "product_category", "Product Category:")
+set captions->product_aborh = uar_i18ngetmessage(i18nHandle,
+  "product_aborh", "PRODUCT ABO/RH")
+;End 009
+
+/******************************************************
+ * Initialize Constants                               *
+ ******************************************************/
+
+    declare product_state_code_set       = i4  with public, constant(1610)
+    declare transfused_cdf_meaning       = c12 with public, constant("7")
+    declare encntr_alias_type_code_set   = i4  with public, constant(319)
+    declare mrn_alias_cdf_meaning        = c12 with public, constant("MRN")
+    declare fin_alias_cdf_meaning        = c12 with public, constant("FIN NBR")
+    declare SERV_RES_SUBSECTION_CDF      = c12 with protect, constant("SUBSECTION")
+    declare serv_res_subsection_cd       = f8
+
+/*
+ * Initialize Global Variables
+ */
+    set SERVICE_RESOURCE_TYPE_CODESET = 223
+    set by_patient_ind = " "
+    set by_physician_ind = " "
+    set individual_id = 0.0
+    set individual_name = fillstring(50, " ")
+    set physician_name_filter = fillstring(50, " ")
+    set physician_id = 0.0
+    set abo_disp = fillstring(10, " ")
+    set rh_disp = fillstring(8, " ")
+    set owner_area_disp = fillstring(20, " ")
+    set inv_area_disp = fillstring(20, " ")
+    set product_cat_disp = fillstring(30, " ")
+ 
+    ;set reply->status_data->status = "F"
+    set count1 = 0
+    set ops_ind                 = "N"
+    set ops_cnvt_dt_tm          = cnvtdatetime(curdate, curtime3)
+    set report_complete_ind     = "N"
+    set detail_cnt              = 0
+    set transfused_event_type_cd = 0.0
+    set mrn_alias_type_cd       = 0.0
+    set fin_alias_type_cd       = 0.0
+    set tc_cnt = 0
+    set tca_cnt = 0
+    set pe_cnt = 0
+    set p_cnt = 0
+    set encntr_cnt = 0
+    set encntr_cat_cnt = 0
+    set ord_cnt = 0
+    set ord = 0
+    set per_cnt = 0
+    set cat_task_cnt = 0
+    set rslt_cnt = 0
+    set trans_cat_cnt = 0
+    set dta_cnt = 0
+
+/*
+ * Initialize subroutine global variables
+ */
+    set gsub_dummy = ""
+    set gsub_code_value = 0.0
+    set gsub_cdf_meaning = "            "
+
+/* Determine if running from OPS and set beg/end_dt_tm from ops_date accordingly */
+if (trim(request->batch_selection) > " ")
+  set ops_ind     = "Y"
+  set begday = request->ops_date
+  set endday = request->ops_date
+  set temp_string = cnvtupper(trim(request->batch_selection))
+  CALL CHECK_OPT_DATE_PASSED("bbt_rpt_trans_cmte")
+  if (reply->status_data->status != "F")
+        set request->beg_dt_tm = begday
+        set request->end_dt_tm = endday
+  endif
+ 
+  set sort_selection = fillstring(20," ")
+  call CHECK_SORT_OPT ("bbt_rpt_trans_cmte")
+  if (trim(sort_selection) > " ")
+     set request->report_format = trim(sort_selection)
+  else
+     set request->report_format = " "
+  endif
+
+  call CHECK_LOCATION_CD ("bbt_rpt_trans_cmte")
+endif
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+
+%i cclsource:bbt_get_location_info.inc
+
+/* Determine report format and set individual_id */
+    if (cnvtupper(request->report_format) = "PATIENT")
+        set by_patient_ind = "Y"
+    elseif (cnvtupper(request->report_format) = "PHYSICIAN")
+        set by_physician_ind = "Y"
+    else
+        set count1 = count1 + 1
+        if (count1 > 1)
+            set stat = alter(reply->status_data->subeventstatus, count1+1)
+        endif
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[count1]->OperationName = "determine report format"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_trans_cmte"
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue
+            = build("invalid requested report format:", request->report_format)
+        go to EXIT_SCRIPT
+    endif
+    if (request->physician_id != NULL
+    and request->physician_id > 0)
+        set physician_id = request->physician_id
+        /* Retrieve name_full_formatted for physician_id */
+        select into "nl:"
+            per.name_full_formatted
+        from
+            prsnl per
+        where   per.person_id       = physician_id
+
+        detail
+            physician_name_filter   = per.name_full_formatted
+ 
+        with    nocounter
+
+        if (curqual = 0)
+            set count1 = count1 + 1
+            if (count1 > 1)
+                set stat = alter(reply->status_data->subeventstatus, count1+1)
+            endif
+            set reply->status_data->status = "F"
+            set reply->status_data->subeventstatus[count1]->OperationName = "retrieve physician name"
+            set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+            set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_trans_cmte"
+            set errmsg
+                = concat("invalid requested individual ", trim(request->report_format), ".  Requested _id =")
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = build(errmsg, physician_id)
+            go to EXIT_SCRIPT
+        endif
+    else
+        set physician_id = 0.0
+        set physician_name_filter = ""
+    endif
+    
+    if (request->individual_id != NULL
+    and request->individual_id > 0)
+        set individual_id = request->individual_id
+        /* Retrieve name_full_formatted for individual_id */
+        select into "nl:"
+            per.name_full_formatted
+        from
+            person per
+        where   per.person_id       = individual_id
+
+        detail
+            individual_name         = per.name_full_formatted
+ 
+        with    nocounter
+
+        if (curqual = 0)
+            set count1 = count1 + 1
+            if (count1 > 1)
+                set stat = alter(reply->status_data->subeventstatus, count1+1)
+            endif
+            set reply->status_data->status = "F"
+            set reply->status_data->subeventstatus[count1]->OperationName = "retrieve individual name"
+            set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+            set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_trans_cmte"
+            set errmsg
+                = concat("invalid requested individual ", trim(request->report_format), ".  Requested _id =")
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = build(errmsg, individual_id)
+            go to EXIT_SCRIPT
+        endif
+    else
+        set individual_id = 0.0
+        set individual_name = ""
+    endif
+
+    if (trim(request->batch_selection) > " ")
+        call CHECK_OWNER_CD("bbt_rpt_trans_cmte.prg")
+        call CHECK_INVENTORY_CD("bbt_rpt_trans_cmte.prg")
+    endif
+
+    if ( request->abo_cd > 0 )
+        set abo_disp = uar_get_code_display( request->abo_cd )
+    endif
+    if ( request->rh_cd > 0 )
+        set rh_disp = uar_get_code_display( request->rh_cd )
+    endif
+    
+    if ( request->cur_owner_area_cd > 0 )
+        set owner_area_disp = uar_get_code_display( request->cur_owner_area_cd )
+    endif
+    if ( request->cur_inv_area_cd > 0 )
+        set inv_area_disp = uar_get_code_display( request->cur_inv_area_cd )
+    endif
+
+    if ( request->product_cat_cd > 0 )
+        set product_cat_disp = uar_get_code_display( request->product_cat_cd )
+    endif
+
+/* Get serv_res_subsection_cd  */
+set stat = uar_Get_meaning_by_codeset(SERVICE_RESOURCE_TYPE_CODESET,
+                       SERV_RES_SUBSECTION_CDF,1, serv_res_subsection_cd)
+
+/* Get transfused event_type_cd */
+
+set stat = uar_get_meaning_by_codeset(product_state_code_set, transfused_cdf_meaning, 1, transfused_event_type_cd)
+if (transfused_event_type_cd = 0.0)
+    set failed = "T"
+    call subevent_add("UAR","F", product_state_code_set, "transfused_event_type_cd")
+    go to EXIT_SCRIPT
+endif
+
+/* Get mrn_alias_type_cd */
+
+set stat = uar_get_meaning_by_codeset(encntr_alias_type_code_set, mrn_alias_cdf_meaning, 1, mrn_alias_type_cd)
+if (mrn_alias_type_cd = 0.0)
+    set failed = "T"
+    call subevent_add("UAR","F", encntr_alias_type_code_set, "mrn_alias_type_cd")
+    go to EXIT_SCRIPT
+endif
+
+/* Get fin_alias_type_cd */
+
+set stat = uar_get_meaning_by_codeset(encntr_alias_type_code_set, fin_alias_cdf_meaning, 1, fin_alias_type_cd)
+if (fin_alias_type_cd = 0.0)
+    set failed = "T"
+    call subevent_add("UAR","F", encntr_alias_type_code_set, "fin_alias_type_cd")
+    go to EXIT_SCRIPT
+endif
+
+/* Load Transfusion_Committee and Trans_Commit_Assay table values into internal record structures */
+select into "nl:"
+    tc.trans_commit_id
+    , tc.product_cd
+    , tca.trans_commit_assay_id
+    , tca.task_assay_cd
+    , tca.pre_hours
+    , tca.post_hours
+    , dta.mnemonic
+
+from
+    transfusion_committee tc
+    , trans_commit_assay tca
+    , discrete_task_assay dta
+
+plan    tc  where   tc.trans_commit_id > 0.0 and tc.active_ind = 1
+                    and ((tc.owner_cd = request->cur_owner_area_cd)
+                      or (tc.owner_cd = 0.0))
+                    and ((tc.inv_area_cd = request->cur_inv_area_cd)
+                      or (tc.inv_area_cd = 0.0))
+join    tca where   tca.trans_commit_assay_id > outerjoin(0.0)
+                      and tca.trans_commit_id = outerjoin(tc.trans_commit_id)
+                      and tca.active_ind    = outerjoin(1)
+join    dta where   dta.task_assay_cd       = outerjoin(tca.task_assay_cd)
+
+order by   tc.product_cd, tc.owner_cd DESC, tc.inv_area_cd DESC,tca.task_assay_cd
+
+head report
+    tc_cnt = 0
+    stat = alterlist(tc_rec->trns_cmte, 100)
+    tca_cnt = 0
+    stat = alterlist(tca_rec->tca, 5)
+    tc_id = 0.0
+
+head tc.product_cd
+    tc_cnt = tc_cnt + 1
+    if (mod(tc_cnt, 100) = 1 and tc_cnt != 1)
+        stat = alterlist(tc_rec->trns_cmte, tc_cnt + 99)
+    endif
+    tc_rec->trns_cmte[tc_cnt]->product_cd           = tc.product_cd
+    tc_rec->trns_cmte[tc_cnt]->trans_commit_id      = tc.trans_commit_id
+    tc_id = tc.trans_commit_id
+
+head tca.task_assay_cd
+    if( tc_id = tca.trans_commit_id )
+        tc_rec->trns_cmte[tc_cnt]->assoc_assays_exist = 1
+        tca_cnt = tca_cnt + 1
+        if (mod(tca_cnt, 5) = 1 and tca_cnt != 1)
+            stat = alterlist(tca_rec->tca, tca_cnt + 4)
+        endif
+        tca_rec->tca[tca_cnt]->product_cd       = tc.product_cd
+        tca_rec->tca[tca_cnt]->task_assay_cd    = tca.task_assay_cd
+        tca_rec->tca[tca_cnt]->detail_mnemonic  = dta.mnemonic
+        tca_rec->tca[tca_cnt]->pre_hours        = tca.pre_hours
+        tca_rec->tca[tca_cnt]->post_hours       = tca.post_hours
+    endif
+
+foot report
+    stat = alterlist(tc_rec->trns_cmte, tc_cnt)
+    stat = alterlist(tca_rec->tca, tca_cnt)
+
+with    nocounter
+
+if (curqual = 0)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alter(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get transfusion_committee"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_trans_cmte"
+    ;This status_data value is used from the ReportSelection frontend to discern when the
+    ;previous query did not find any parameter rows. If this changes, then the corresponding value
+    ;that R.S. is looking for must change to match this.
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue
+        = "select failed for transfusion_committee/trans_commit_assay"
+    go to EXIT_SCRIPT
+endif
+
+/* Load all product_event rows which for tracked product_cd's which fall into date range */
+select into "nl:" ; into table "bbt_pe_wk"
+    pe.encntr_id
+    , pe.person_id
+    , pe.product_event_id
+    , pe.product_id
+    , pe.event_dt_tm ";;f"
+    , trans_time = cnvtmin2(cnvtdate2(format(pe.event_dt_tm,"mm/dd/yyyy;;d"),"mm/dd/yyyy"),
+        cnvtint(format(pe.event_dt_tm,"hhmmss;;m")),2)
+    , pe.product_id
+    , p.product_cd
+    , product_disp = uar_get_code_display(p.product_cd)
+    , cur_abo_disp = decode(bp.seq, uar_get_code_display(bp.cur_abo_cd), " ")
+    , cur_rh_disp = decode(bp.seq, uar_get_code_display(bp.cur_rh_cd), " ")
+    , bp.supplier_prefix
+    , product_nbr = concat(trim(p.product_nbr), " ", trim(p.product_sub_nbr))
+    , tfn.cur_transfused_qty
+    , pd.dispense_prov_id
+    , physician_name = trim(per_doc.name_full_formatted) ; "#########################"
+    , pe.related_product_event_id
+
+from
+    (dummyt d_tc with seq = value(tc_cnt))
+    , product_event pe
+    , transfusion tfn
+    , product p
+    , product_index pi
+    , patient_dispense pd
+    , person per_doc
+    , blood_product bp
+
+
+plan    d_tc
+join    pe  where   pe.event_type_cd  = transfused_event_type_cd
+                      and pe.active_ind     = 1
+                      and pe.person_id      != NULL
+                      and pe.person_id      > 0
+                      and pe.event_dt_tm    between cnvtdatetime(request->beg_dt_tm)
+                                              and cnvtdatetime(request->end_dt_tm)
+                      and (pe.person_id = individual_id or individual_id = 0)
+join    tfn where   tfn.product_event_id    = pe.product_event_id
+join    p   where   p.product_id            = pe.product_id
+                      and p.product_cd      = tc_rec->trns_cmte[d_tc.seq]->product_cd
+              and ((request->cur_owner_area_cd > 0.0
+                and request->cur_owner_area_cd = p.cur_owner_area_cd)
+                or (request->cur_owner_area_cd = 0.0))
+              and ((request->cur_inv_area_cd > 0.0
+                and request->cur_inv_area_cd = p.cur_inv_area_cd)
+                or (request->cur_inv_area_cd = 0.0))
+join    pi  where pi.product_cd = p.product_cd and
+                    ( (request->product_cat_cd = 0) 
+                    or (request->product_cat_cd = pi.product_cat_cd)
+                    )
+join    pd      where   pd.product_event_id     = pe.related_product_event_id
+                          and (pd.dispense_prov_id = physician_id or physician_id = 0)
+join    per_doc where   per_doc.person_id       = pd.dispense_prov_id
+join    bp  where   (bp.product_id = p.product_id)
+                 or (bp.product_id = 0.0)
+
+order by   pe.encntr_id, pe.event_dt_tm, pe.product_event_id,bp.product_id DESC
+
+head report
+    pe_cnt = 0
+    stat = alterlist(pe_rec->pe, 500)
+
+head pe.product_event_id
+    if( (bp.product_id = 0.0 and request->rh_cd = 0.0 and request->abo_cd = 0.0)
+     or (request->abo_cd = 0 and request->rh_cd = 0)
+     or (request->abo_cd > 0 and request->rh_cd = 0
+         and request->abo_cd = bp.cur_abo_cd)
+     or (request->abo_cd = 0 and request->rh_cd > 0
+         and request->rh_cd = bp.cur_rh_cd)
+     or (request->abo_cd = bp.cur_abo_cd and request->rh_cd = bp.cur_rh_cd)
+      )
+        pe_cnt = pe_cnt + 1
+        if (mod(pe_cnt, 500) = 1 and pe_cnt != 1)
+            stat = alterlist(pe_rec->pe, pe_cnt + 499)
+        endif
+        pe_rec->pe[pe_cnt]->encntr_id               = pe.encntr_id
+        pe_rec->pe[pe_cnt]->person_id               = pe.person_id
+        pe_rec->pe[pe_cnt]->product_event_id        = pe.product_event_id
+        pe_rec->pe[pe_cnt]->event_dt_tm             = cnvtdatetime(pe.event_dt_tm)
+        pe_rec->pe[pe_cnt]->trans_time              = trans_time
+        pe_rec->pe[pe_cnt]->product_id              = pe.product_id
+        pe_rec->pe[pe_cnt]->product_cd              = p.product_cd
+        pe_rec->pe[pe_cnt]->product_disp            = product_disp
+        if (bp.product_id > 0.0)
+            pe_rec->pe[pe_cnt]->product_nbr         = concat(trim(bp.supplier_prefix), trim(product_nbr))
+            pe_rec->pe[pe_cnt]->abo_cd              = bp.cur_abo_cd
+            pe_rec->pe[pe_cnt]->abo_disp            = cur_abo_disp
+            pe_rec->pe[pe_cnt]->rh_cd               = bp.cur_rh_cd
+            pe_rec->pe[pe_cnt]->rh_disp             = cur_rh_disp
+            pe_rec->pe[pe_cnt]->quantity            = 0
+            pe_rec->pe[pe_cnt]->iu                  = 0
+        else
+            pe_rec->pe[pe_cnt]->product_nbr         = product_nbr
+            pe_rec->pe[pe_cnt]->abo_cd              = 0
+            pe_rec->pe[pe_cnt]->abo_disp            = " "
+            pe_rec->pe[pe_cnt]->rh_cd               = 0
+            pe_rec->pe[pe_cnt]->rh_disp             = " "
+            pe_rec->pe[pe_cnt]->quantity            = tfn.cur_transfused_qty
+            pe_rec->pe[pe_cnt]->iu                  = tfn.transfused_intl_units
+        endif
+        pe_rec->pe[pe_cnt]->dispense_prov_id        = pd.dispense_prov_id
+        pe_rec->pe[pe_cnt]->related_product_event_id = pe.related_product_event_id
+        pe_rec->pe[pe_cnt]->dispense_prov_id        = pd.dispense_prov_id
+        pe_rec->pe[pe_cnt]->physician_name          = physician_name
+        tc_rec->trns_cmte[d_tc.seq]->found_ind       = 1
+    endif
+
+foot report
+    stat = alterlist(pe_rec->pe, pe_cnt)
+
+with    nocounter
+
+if (curqual = 0)
+    set reply->status_data->status = "S"
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alter(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->subeventstatus[count1]->OperationName = "get person data"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "Z"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_trans_cmte"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue
+        = "ZERO:  No data found for specified date range"
+    go to OUTPUT_REPORT
+endif
+
+/* Create table of all necessary task_assay_cd's to limit number of results retrieved */
+select into "nl:"
+    ptr.catalog_cd
+    , tca.task_assay_cd
+    , mnemonic = uar_get_code_display(tca.task_assay_cd)
+
+from
+    (dummyt d_tc with seq = value(tc_cnt))
+    , trans_commit_assay tca
+    , profile_task_r ptr
+plan    d_tc
+join    tca     where   tca.trans_commit_assay_id > 0
+                    and tca.trans_commit_id = tc_rec->trns_cmte[d_tc.seq].trans_commit_id 
+                    and tca.active_ind = 1 
+                    and tc_rec->trns_cmte[d_tc.seq].found_ind = 1
+join    ptr     where   ptr.task_assay_cd = tca.task_assay_cd
+                          and ptr.active_ind          = 1
+                          and ptr.beg_effective_dt_tm   <= cnvtdatetime(curdate, curtime3)
+                          and ptr.end_effective_dt_tm   >= cnvtdatetime(curdate, curtime3)
+ 
+ 
+order by    ptr.catalog_cd, tca.task_assay_cd
+
+head report
+    cat_task_cnt = 0
+    stat = alterlist(cat_task_rec->cat_task, 100)
+
+head ptr.catalog_cd
+    row 0
+
+head tca.task_assay_cd
+    cat_task_cnt = cat_task_cnt + 1
+    if (mod(cat_task_cnt, 100) = 1 and cat_task_cnt != 1)
+        stat = alterlist(cat_task_rec->cat_task, cat_task_cnt + 99)
+    endif
+    cat_task_rec->cat_task[cat_task_cnt]->catalog_cd    = ptr.catalog_cd
+    cat_task_rec->cat_task[cat_task_cnt]->task_assay_cd = tca.task_assay_cd
+    cat_task_rec->cat_task[cat_task_cnt]->mnemonic      = mnemonic
+
+foot report
+    stat = alterlist(cat_task_rec->cat_task, cat_task_cnt)
+
+with    nocounter
+
+/*
+ * Create table of encntr_id/trans_time/catalog_cds to determine max pre/post hours
+ * for a catalog_cd for all transfusions associated with a single "transfusion time".
+ * Used to associate orders/results to trans_time.
+ */
+select into "nl:"
+    encntr_id = pe_rec->pe[d_pe.seq]->encntr_id
+    , dispense_prov_id = pe_rec->pe[d_pe.seq]->dispense_prov_id
+    , trans_time = pe_rec->pe[d_pe.seq]->trans_time
+    , product_cd = tca_rec->tca[d_tca.seq]->product_cd
+    , task_assay_cd = tca_rec->tca[d_tca.seq]->task_assay_cd
+    , pre_hours = tca_rec->tca[d_tca.seq]->pre_hours
+    , post_hours = tca_rec->tca[d_tca.seq]->post_hours
+    , ptr.catalog_cd
+
+from
+    (dummyt d_pe with seq = value(pe_cnt))
+    , (dummyt d_tca with seq = value(tca_cnt))
+    , profile_task_r ptr
+
+plan    d_pe
+join    d_tca   where   tca_rec->tca[d_tca.seq]->product_cd = pe_rec->pe[d_pe.seq]->product_cd
+join    ptr     where   ptr.task_assay_cd               = tca_rec->tca[d_tca.seq]->task_assay_cd
+                          and ptr.active_ind            = 1
+                          and ptr.beg_effective_dt_tm   <= cnvtdatetime(curdate, curtime3)
+                          and ptr.end_effective_dt_tm   >= cnvtdatetime(curdate, curtime3)
+
+order by    encntr_id, dispense_prov_id, trans_time, ptr.catalog_cd
+
+head report
+    trans_cat_cnt = 0
+    stat = alterlist(trans_cat_rec->trans_cat, 1000)
+
+head encntr_id
+    row 0
+
+head dispense_prov_id
+    row 0
+
+head trans_time
+    max_pre_hours = 0
+    max_post_hours = 0
+
+detail  ; task_catalog_cd
+    if (pre_hours > max_pre_hours)
+        max_pre_hours = pre_hours
+    endif
+    if (post_hours > max_post_hours)
+        max_post_hours = post_hours
+    endif
+
+foot ptr.catalog_cd
+    trans_cat_cnt = trans_cat_cnt + 1
+    if (mod(trans_cat_cnt, 1000) = 1 and trans_cat_cnt != 1)
+        stat = alterlist(trans_cat_rec->trans_cat, trans_cat_cnt + 999)
+    endif
+    trans_cat_rec->trans_cat[trans_cat_cnt]->encntr_id  = pe_rec->pe[d_pe.seq]->encntr_id
+    trans_cat_rec->trans_cat[trans_cat_cnt]->person_id  = pe_rec->pe[d_pe.seq]->person_id
+    trans_cat_rec->trans_cat[trans_cat_cnt]->dispense_prov_id = pe_rec->pe[d_pe.seq]->dispense_prov_id
+    trans_cat_rec->trans_cat[trans_cat_cnt]->trans_time = pe_rec->pe[d_pe.seq]->trans_time
+    trans_cat_rec->trans_cat[trans_cat_cnt]->catalog_cd = ptr.catalog_cd
+    trans_cat_rec->trans_cat[trans_cat_cnt]->pre_hours  = max_pre_hours
+    trans_cat_rec->trans_cat[trans_cat_cnt]->post_hours = max_post_hours
+
+foot report
+    stat = alterlist(trans_cat_rec->trans_cat, trans_cat_cnt)
+
+with    nocounter
+
+/* Create table of person/encntr data */
+select into "nl:" ; into table "bbt_per_wk"
+    per.person_id
+    , patient_name = trim(per.name_full_formatted) ; "##################################################"
+    , encntr_id = pe_rec->pe[d_pe.seq]->encntr_id
+    , mrn_alias = decode(ea_mrn.alias, ea_mrn.alias, captions->not_on_file) ; "####################"
+    , fin_alias = decode(ea_fin.alias, ea_fin.alias, captions->not_on_file) ; "####################"
+    , dispense_prov_id = pe_rec->pe[d_pe.seq]->dispense_prov_id
+    , physician_name = trim(per_doc.name_full_formatted) ; "#########################"
+
+from
+    (dummyt d_pe with seq = value(pe_cnt))
+    , person per
+    , (dummyt d_ea_mrn with seq = 1)
+    , encntr_alias ea_mrn
+    , (dummyt d_ea_fin with seq = 1)
+    , encntr_alias ea_fin
+    , patient_dispense pd
+    , person per_doc
+
+plan    d_pe
+join    per     where   per.person_id                   = pe_rec->pe[d_pe.seq]->person_id
+join    pd      where   pd.product_event_id     = pe_rec->pe[d_pe.seq]->related_product_event_id
+                          and (physician_id = 0 or physician_id = pd.dispense_prov_id)
+join    per_doc where   per_doc.person_id       = pd.dispense_prov_id
+join    d_ea_mrn    where  d_ea_mrn.seq                 = 1
+join    ea_mrn  where   ea_mrn.encntr_id                = pe_rec->pe[d_pe.seq]->encntr_id
+                      and ea_mrn.encntr_id              != NULL
+                      and ea_mrn.encntr_id              > 0
+                      and ea_mrn.encntr_alias_type_cd   = mrn_alias_type_cd
+                      and ea_mrn.active_ind             = 1
+                      and ea_mrn.beg_effective_dt_tm    <= cnvtdatetime(curdate, curtime3)
+                      and ea_mrn.end_effective_dt_tm    >= cnvtdatetime(curdate, curtime3)
+join    d_ea_fin    where  d_ea_fin.seq                 = 1
+join    ea_fin  where   ea_fin.encntr_id                = pe_rec->pe[d_pe.seq]->encntr_id
+                      and ea_fin.encntr_id              != NULL
+                      and ea_fin.encntr_id              > 0
+                      and ea_fin.encntr_alias_type_cd   = fin_alias_type_cd
+                      and ea_fin.active_ind             = 1
+                      and ea_fin.beg_effective_dt_tm    <= cnvtdatetime(curdate, curtime3)
+                      and ea_fin.end_effective_dt_tm    >= cnvtdatetime(curdate, curtime3)
+
+order by    encntr_id, dispense_prov_id
+
+head report
+    per_cnt = 0
+    stat = alterlist(per_rec->per, 300)
+
+head encntr_id
+    row 0
+
+head dispense_prov_id
+    per_cnt = per_cnt + 1
+    if (mod(per_cnt, 300) = 1 and per_cnt != 1)
+        stat = alterlist(per_rec->per, per_cnt + 299)
+    endif
+    per_rec->per[per_cnt]->person_id            = per.person_id
+    per_rec->per[per_cnt]->patient_name         = patient_name
+    per_rec->per[per_cnt]->patient_name_sort
+       = concat(substring(1, 18, per.name_full_formatted),
+            format(pe_rec->pe[d_pe.seq]->encntr_id, "###########.##;p0;f"))
+    per_rec->per[per_cnt]->encntr_id            = encntr_id
+    per_rec->per[per_cnt]->mrn_alias            = cnvtalias(mrn_alias, ea_mrn.alias_pool_cd)
+    per_rec->per[per_cnt]->fin_alias            = cnvtalias(fin_alias, ea_fin.alias_pool_cd)
+    per_rec->per[per_cnt]->dispense_prov_id     = pd.dispense_prov_id
+    per_rec->per[per_cnt]->related_product_event_id = pe_rec->pe[d_pe.seq]->related_product_event_id
+    per_rec->per[per_cnt]->physician_name          = physician_name
+    per_rec->per[per_cnt]->physician_name_sort
+        = concat(substring(1, 18, per_doc.name_full_formatted),
+            format(pd.dispense_prov_id, "###########.##;p0;f"))
+    per_rec->per[per_cnt]->birth_dt_tm = cnvtdatetime(per.birth_dt_tm)
+
+foot report
+    stat = alterlist(per_rec->per, per_cnt)
+
+with    nocounter, dontcare(ea_mrn), outerjoin(d_ea_mrn), dontcare(ea_fin), outerjoin(d_ea_fin)
+
+/* Create table of all orders for encntr_id/product_cd/catalog_cd */
+select into "nl:" 
+    encntr_id = trans_cat_rec->trans_cat[d_tc.seq]->encntr_id
+    , person_id = trans_cat_rec->trans_cat[d_tc.seq]->person_id
+    , trans_time = trans_cat_rec->trans_cat[d_tc.seq]->trans_time
+    , catalog_cd = trans_cat_rec->trans_cat[d_tc.seq]->catalog_cd
+    , pre_hours = trans_cat_rec->trans_cat[d_tc.seq]->pre_hours
+    , post_hours = trans_cat_rec->trans_cat[d_tc.seq]->post_hours
+    , o.order_id
+    , c.drawn_dt_tm ";;f"
+    , collected_time = cnvtmin2(cnvtdate2(format(c.drawn_dt_tm,"mm/dd/yyyy;;d"),"mm/dd/yyyy"),
+        cnvtint(format(c.drawn_dt_tm,"hhmmss;;m")), 2)
+
+    , o.order_status_cd
+    , order_status_disp = uar_get_code_display(o.order_status_cd)
+    , o.order_mnemonic
+    , aor.accession
+
+from
+    (dummyt d_tc with seq = value(trans_cat_cnt))
+    , orders o
+    , accession_order_r aor
+    , order_container_r ocr
+    , container c
+
+
+plan    d_tc
+join    o       where   o.person_id             = trans_cat_rec->trans_cat[d_tc.seq]->person_id
+                          and o.catalog_cd      = trans_cat_rec->trans_cat[d_tc.seq]->catalog_cd
+join    aor     where   aor.order_id = o.order_id
+                  and   aor.primary_flag = 0        
+join    ocr     where   ocr.order_id = o.order_id
+join    c       where   c.container_id = ocr.container_id
+ 
+order by    encntr_id, trans_time, collected_time, o.order_id
+
+head report
+    ord_cnt = 0
+    stat = alterlist(ord_rec->ord, 1000)
+
+head o.order_id
+    if (collected_time >= trans_time - (trans_cat_rec->trans_cat[d_tc.seq]->pre_hours * 60)
+    and collected_time <= trans_time + (trans_cat_rec->trans_cat[d_tc.seq]->post_hours * 60))
+        ord_cnt = ord_cnt + 1
+        if (mod(ord_cnt, 1000) = 1 and ord_cnt != 1)
+            stat = alterlist(ord_rec->ord, ord_cnt + 999)
+        endif
+        ord_rec->ord[ord_cnt]->encntr_id                = encntr_id
+        ord_rec->ord[ord_cnt]->person_id                = person_id
+        ord_rec->ord[ord_cnt]->trans_time               = trans_time
+        ord_rec->ord[ord_cnt]->order_id                 = o.order_id
+        ord_rec->ord[ord_cnt]->catalog_cd               = o.catalog_cd
+        ord_rec->ord[ord_cnt]->accession                = cnvtacc(aor.accession)
+        ord_rec->ord[ord_cnt]->order_mnemonic           = o.order_mnemonic
+        ord_rec->ord[ord_cnt]->collected_dt_tm          = cnvtdatetime(c.drawn_dt_tm)
+        ord_rec->ord[ord_cnt]->collected_time           = collected_time
+        ord_rec->ord[ord_cnt]->order_status_cd          = o.order_status_cd
+        ord_rec->ord[ord_cnt]->order_status_disp        = order_status_disp
+    endif
+
+foot report
+    stat = alterlist(ord_rec->ord, ord_cnt)
+
+with    nocounter
+
+if (ord_cnt = 0)
+    go to OUTPUT_REPORT
+endif
+
+/* Create table of results for orders */
+select into "nl:" 
+    encntr_id = ord_rec->ord[d_o.seq]->encntr_id
+    , person_id = ord_rec->ord[d_o.seq]->person_id
+    , r.order_id
+    , r.result_id
+    , r.result_status_cd
+    , result_status_disp = uar_get_code_display(r.result_status_cd)
+    , dta.mnemonic
+    , ptr.sequence
+    , pr.perform_result_id
+    , pr.result_value_alpha
+    , pr.result_code_set_cd
+    , result_code_set_disp = uar_get_code_display(pr.result_code_set_cd)
+    , pr.result_value_numeric
+    , pr.ascii_text
+    , pr.long_text_id
+    , pr.normal_cd
+    , normal_disp = uar_get_code_display(pr.normal_cd)
+    , pr.critical_cd
+    , critical_disp = uar_get_code_display(pr.critical_cd)
+    , pr.review_cd
+    , review_disp = uar_get_code_display(pr.review_cd)
+    , pr.delta_cd
+    , delta_disp = uar_get_code_display(pr.delta_cd)
+    , re.event_dt_tm
+    , dm.service_resource_cd
+    , data_map_exists = decode(dm.seq, "Y", "N")
+    , rg_exists = decode(rg.seq, "Y", "N")
+
+from
+    (dummyt d_o with seq = value(ord_cnt))
+    , (dummyt d_t with seq = value(cat_task_cnt))
+    , result r
+    , discrete_task_assay dta
+    , profile_task_r ptr
+    , perform_result pr
+    , result_event re
+    , (dummyt d_dm with seq = 1)
+    , data_map dm
+    , (dummyt d_rg with seq = 1)
+    , resource_group rg
+plan    d_o
+join    d_t     where   cat_task_rec->cat_task[d_t.seq]->catalog_cd = ord_rec->ord[d_o.seq]->catalog_cd
+join    r       where   r.order_id              = ord_rec->ord[d_o.seq]->order_id
+                          and r.task_assay_cd   = cat_task_rec->cat_task[d_t.seq]->task_assay_cd
+join    dta     where   dta.task_assay_cd       = r.task_assay_cd
+join    ptr     where   ptr.task_assay_cd       = dta.task_assay_cd
+                          and ptr.catalog_cd    = r.catalog_cd
+join    pr      where   pr.result_id                = r.result_id
+                          and pr.result_status_cd   = r.result_status_cd
+join    re      where   re.perform_result_id        = pr.perform_result_id
+                          and re.result_id          = r.result_id
+                          and re.event_type_cd      = pr.result_status_cd
+join    d_dm    where   d_dm.seq                = 1
+join dm         where dm.task_assay_cd  = cat_task_rec->cat_task[d_t.seq]->task_assay_cd
+                  and dm.data_map_type_flag = 0
+                  and dm.active_ind = 1
+join d_rg where d_rg.seq = 1
+join rg   where rg.parent_service_resource_cd = dm.service_resource_cd
+            and rg.child_service_resource_cd = pr.service_resource_cd
+            and rg.resource_group_type_cd = serv_res_subsection_cd
+            and rg.root_service_resource_cd+0 = 0.0
+order by  r.order_id, r.result_id, d_dm.seq
+
+head report
+    rslt_cnt = 0
+    stat = alterlist(rslt_rec->rslt, 5000)
+    data_map_level = 0
+
+head r.result_id
+    rslt_cnt = rslt_cnt + 1
+    if (mod(rslt_cnt, 5000) = 1 and rslt_cnt != 1)
+        stat = alterlist(rslt_rec->rslt, rslt_cnt + 4999)
+    endif
+    rslt_rec->rslt[rslt_cnt]->encntr_id                 = encntr_id
+    rslt_rec->rslt[rslt_cnt]->person_id                 = person_id
+    rslt_rec->rslt[rslt_cnt]->order_id                  = r.order_id
+    rslt_rec->rslt[rslt_cnt]->result_id                 = r.result_id
+    rslt_rec->rslt[rslt_cnt]->task_assay_cd             = r.task_assay_cd
+    rslt_rec->rslt[rslt_cnt]->mnemonic                  = dta.mnemonic
+    rslt_rec->rslt[rslt_cnt]->sequence                  = ptr.sequence
+    rslt_rec->rslt[rslt_cnt]->result_status_cd          = r.result_status_cd
+    rslt_rec->rslt[rslt_cnt]->result_status_disp        = result_status_disp
+    rslt_rec->rslt[rslt_cnt]->perform_result_id         = pr.perform_result_id
+    rslt_rec->rslt[rslt_cnt]->result_value_alpha        = pr.result_value_alpha
+    rslt_rec->rslt[rslt_cnt]->result_code_set_cd        = pr.result_code_set_cd
+    rslt_rec->rslt[rslt_cnt]->result_code_set_disp      = result_code_set_disp
+    rslt_rec->rslt[rslt_cnt]->result_value_numeric      = pr.result_value_numeric
+    rslt_rec->rslt[rslt_cnt]->ascii_text                = pr.ascii_text
+    rslt_rec->rslt[rslt_cnt]->nomenclature_id           = pr.nomenclature_id
+    rslt_rec->rslt[rslt_cnt]->long_text_id              = pr.long_text_id
+    rslt_rec->rslt[rslt_cnt]->normal_cd                 = pr.normal_cd
+    rslt_rec->rslt[rslt_cnt]->normal_disp               = normal_disp
+    rslt_rec->rslt[rslt_cnt]->critical_cd               = pr.critical_cd
+    rslt_rec->rslt[rslt_cnt]->critical_disp             = critical_disp
+    rslt_rec->rslt[rslt_cnt]->review_cd                 = pr.review_cd
+    rslt_rec->rslt[rslt_cnt]->review_disp               = review_disp
+    rslt_rec->rslt[rslt_cnt]->delta_cd                  = pr.delta_cd
+    rslt_rec->rslt[rslt_cnt]->delta_disp                = delta_disp
+    rslt_rec->rslt[rslt_cnt]->event_dt_tm               = cnvtdatetime(re.event_dt_tm)
+    rslt_rec->rslt[rslt_cnt]->arg_less_great_flag       = pr.less_great_flag
+ 
+    rslt_rec->rslt[rslt_cnt]->arg_min_digits = 1
+    rslt_rec->rslt[rslt_cnt]->arg_max_digits = 8
+    rslt_rec->rslt[rslt_cnt]->arg_min_dec_places = 0
+    data_map_level = 0
+ 
+detail
+    if (data_map_exists = "Y")  /* Data_Map found, now we'll check to see if we can use it */
+       if (data_map_level <= 2 and dm.service_resource_cd > 0 and
+           dm.service_resource_cd = pr.service_resource_cd)  ;Exact match found
+           data_map_level = 3
+          rslt_rec->rslt[rslt_cnt]->arg_min_digits = dm.min_digits
+          rslt_rec->rslt[rslt_cnt]->arg_max_digits = dm.max_digits
+          rslt_rec->rslt[rslt_cnt]->arg_min_dec_places = dm.min_decimal_places
+       endif
+ 
+       if (data_map_level <= 1 and dm.service_resource_cd > 0.0
+          and rg_exists = "Y" and rg.parent_service_resource_cd = dm.service_resource_cd
+          and rg.child_service_resource_cd = pr.service_resource_cd)
+          data_map_level = 2
+          rslt_rec->rslt[rslt_cnt]->arg_min_digits = dm.min_digits
+          rslt_rec->rslt[rslt_cnt]->arg_max_digits = dm.max_digits
+          rslt_rec->rslt[rslt_cnt]->arg_min_dec_places = dm.min_decimal_places
+       endif
+ 
+       if (data_map_level = 0 and dm.service_resource_cd = 0)
+          data_map_level = 1
+          rslt_rec->rslt[rslt_cnt]->arg_min_digits = dm.min_digits
+          rslt_rec->rslt[rslt_cnt]->arg_max_digits = dm.max_digits
+          rslt_rec->rslt[rslt_cnt]->arg_min_dec_places = dm.min_decimal_places
+       endif
+    endif
+ 
+foot report
+    stat = alterlist(rslt_rec->rslt, rslt_cnt)
+
+with    nocounter, outerjoin(d_dm), outerjoin(d_rg)
+
+#OUTPUT_REPORT
+
+declare no_flag = c1
+
+set select_ok_ind = 0
+set rpt_cnt = 0
+
+execute cpm_create_file_name_logical "bbt_trans_cmte", "txt", "x"
+
+select
+    if (by_patient_ind = "Y")
+        order by    patient_name_sort, trans_time, table_ind, pe_trans_time,
+                    o_trans_time, collected_time, order_id_sort, dispense_prov_id_sort, ptr_sequence_sort, result_id_sort
+    elseif (by_physician_ind = "Y")
+        order by    physician_name_sort, patient_name_sort, trans_time, table_ind, pe_trans_time,
+                    o_trans_time, collected_time, order_id_sort, dispense_prov_id_sort, result_id_sort
+    endif
+ 
+    into cpm_cfn_info->file_name_logical
+
+    table_ind = decode(d_o.seq, "2o ", d_pe.seq, "1pe", "9xxx")
+    , trans_time = decode(d_pe.seq, pe_rec->pe[d_pe.seq]->trans_time,
+        d_o.seq, ord_rec->ord[d_o.seq]->trans_time, 999999999999999.9)
+    , sort_time = decode(d_pe.seq, pe_rec->pe[d_pe.seq]->trans_time,
+        d_o.seq, ord_rec->ord[d_o.seq]->collected_time, 999999999999999.9)
+    , patient_name_sort = per_rec->per[d_per.seq]->patient_name_sort
+    , encntr_id = per_rec->per[d_per.seq]->encntr_id
+    , person_id = per_rec->per[d_per.seq]->person_id
+    , dispense_prov_id = per_rec->per[d_per.seq]->dispense_prov_id
+    , dispense_prov_id_sort = decode(d_per.seq,format(per_rec->per[d_per.seq]->dispense_prov_id,"##################;p0"),
+                "000000000000000000")
+    , physician_name_sort = per_rec->per[d_per.seq]->physician_name_sort
+    , product_event_id = pe_rec->pe[d_pe.seq]->product_event_id
+    , pe_trans_time = pe_rec->pe[d_pe.seq]->trans_time
+    , trans_dt_tm = pe_rec->pe[d_pe.seq]->event_dt_tm
+    , order_id = ord_rec->ord[d_o.seq]->order_id
+    , order_id_sort = decode(d_o.seq,format(ord_rec->ord[d_o.seq]->order_id,"##################;p0"),
+                "000000000000000000")
+    , accession = ord_rec->ord[d_o.seq]->accession
+    , o_trans_time = ord_rec->ord[d_o.seq]->trans_time
+    , collected_time = ord_rec->ord[d_o.seq]->collected_time
+    , collected_dt_tm  = ord_rec->ord[d_o.seq]->collected_dt_tm
+    , ptr.sequence
+    , ptr_sequence_sort = decode(ptr.sequence,format(ptr.sequence, "##########;p0"),
+                "0000000000")
+    , result_ind = decode(d_r.seq, "Y", "N")
+    , result_id = rslt_rec->rslt[d_r.seq]->result_id
+    , result_id_sort = decode(d_r.seq,format(rslt_rec->rslt[d_r.seq]->result_id,"##################;p0"),
+                "000000000000000000")
+    , detail_mnemonic = rslt_rec->rslt[d_r.seq]->mnemonic
+    , minimize_order_by_for_physician = concat
+        (
+        format(ord_rec->ord[d_o.seq]->order_id, "##################.##;p0;f"),
+        " ",
+        format(per_rec->per[d_per.seq]->dispense_prov_id, "##################.##;p0;f"),
+        " ",
+        format(rslt_rec->rslt[d_r.seq]->result_id, "##################.##;p0;f")
+        )
+ 
+from
+    (dummyt d_per with seq = value(per_cnt))
+    , (dummyt d1 with seq = 1)
+    , (dummyt d_pe with seq = value(pe_cnt))
+    , (dummyt d_tc with seq = value(trans_cat_cnt))
+    , (dummyt d_o with seq = value(ord_cnt))
+    , (dummyt d_r_r with seq = 1)
+    , (dummyt d_r with seq = value(rslt_cnt))
+    , profile_task_r ptr
+
+plan    d_per
+join    (d1      where   d1.seq = 1
+    join        d_pe    where   pe_rec->pe[d_pe.seq]->encntr_id = per_rec->per[d_per.seq]->encntr_id
+                                    and pe_rec->pe[d_pe.seq]->dispense_prov_id
+                                        = per_rec->per[d_per.seq]->dispense_prov_id
+    orjoin      (d_tc   where   trans_cat_rec->trans_cat[d_tc.seq]->encntr_id
+                                        = per_rec->per[d_per.seq]->encntr_id
+                                    and trans_cat_rec->trans_cat[d_tc.seq]->dispense_prov_id
+                                        = per_rec->per[d_per.seq]->dispense_prov_id
+        join    d_o     where   ord_rec->ord[d_o.seq]->encntr_id
+                                    = trans_cat_rec->trans_cat[d_tc.seq]->encntr_id
+                                  and ord_rec->ord[d_o.seq]->trans_time
+                                    = trans_cat_rec->trans_cat[d_tc.seq]->trans_time
+                                  and ord_rec->ord[d_o.seq]->catalog_cd
+                                    = trans_cat_rec->trans_cat[d_tc.seq]->catalog_cd
+        join      (d_r_r where  d_r_r.seq = 1
+            join  d_r   where   rslt_rec->rslt[d_r.seq]->order_id = ord_rec->ord[d_o.seq]->order_id
+            join  ptr   where   ptr.task_assay_cd = rslt_rec->rslt[d_r.seq]->task_assay_cd
+                                  and ptr.catalog_cd = ord_rec->ord[d_o.seq]->catalog_cd)))
+
+
+ 
+head report
+    dispense_prov_id_hd = 0.0
+    new_physician_ind   = "N"
+    print_physician_ind = "Y"
+
+    person_id_hd        = 0.0
+    new_person_ind      = "N"
+    print_person_ind    = "N"
+    encntr_id_hd        = 0.0
+    new_encntr_ind      = "N"
+    patient_name        = fillstring(40, " ")
+    birth_dt_tm         = cnvtdatetime(NULL)
+ 
+    mrn_alias           = fillstring(20, " ")
+    fin_alias           = fillstring(20, " ")
+
+    first_trans_ind     = "Y"
+    trans_time_hd       = 0.0
+    new_trans_time_ind  = "N"
+    trans_row_cnt       = 0
+    rpt_pe_cnt          = 0
+    dta                 = 0
+    tca                 = 0
+
+    order_id_hd         = 0.0
+    new_order_ind       = "N"
+    rpt_ord_cnt         = 0
+    pre_cnt             = 0
+    post_cnt            = 0
+
+    result_id_hd        = 0.0
+    new_result_ind      = "N"
+    rslt_cnt            = 0
+    rslt                = 0
+
+
+    chk_row_cnt         = 0
+    beg_dt_tm           = cnvtdatetime(request->beg_dt_tm)
+    end_dt_tm           = cnvtdatetime(request->end_dt_tm)
+    underscore_line     = fillstring(130, "_")
+    dash_line = concat("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - ",
+        "- - - - - - - - - - - - - - - - - - - - -")
+    solid_dash_line = fillstring(130, "-")
+    equal_line = fillstring(130, "=")
+
+    last_trans_row = 0
+    select_ok_ind = 0
+    result_value = fillstring(17, " ")
+    
+    tc_prod_idx = 0
+    tc_search_idx = 0
+    tc_with_assoc_assays_exists = 0
+
+macro(FOOT_TRANS_TIME)
+    if (rpt_pe_cnt > 0)
+        if (print_person_ind = "Y")
+            print_person_ind = "N"
+
+            ; ** Determine if patient, encounter data and first pre-test accession will fit on current page
+            chk_row_cnt = 5                 ; 5 = rows required for person information + first pre-test accn row
+            ;  * add rows for first pre-test accession, if exists
+            if (rpt_ord_cnt > 0
+            and pre_cnt > 0)
+                if (rpt_ord_rec->ord[1]->rslt_cnt > 0)
+                    chk_row_cnt = chk_row_cnt + rpt_ord_rec->ord[1]->rslt_cnt
+                else
+                    chk_row_cnt = chk_row_cnt + 1
+                endif
+            endif
+            if (chk_row_cnt + row > 58)
+                row + 1
+                if (by_physician_ind
+                and print_physician_ind = "Y")
+                    col 001,        equal_line
+                    print_physician_ind = "N"
+                else
+                    col 001,        solid_dash_line
+                endif
+                FOOT_PAGE
+                break
+            endif
+
+            row + 1
+            ; ** If new page, print "=====" line after column heading line
+            if (new_page_ind = "Y")
+                new_page_ind = "N"
+                col 001,    equal_line
+
+            ; ** ElseIf NOT by physician or by physician but NOT new physician, print "------" line
+            elseif (by_physician_ind != "Y"
+            or (by_physician_ind = "Y"
+            and print_physician_ind != "Y"))
+                col 001,    solid_dash_line
+
+            ; ** ElseIf BY physician and NEW physicain, print "=====" line
+            elseif (by_physician_ind = "Y"
+            and print_physician_ind = "Y")
+                col 001,    equal_line
+                print_physician_ind = "N"
+            endif
+
+            ; ** Print patient name
+            row + 1
+            col 001,    patient_name
+            col 046,    captions->date_of_birth
+            col 061,    birth_dt_tm "@DATETIMECONDENSED;;d"
+        endif
+
+        ; ** Determine if encounter data and first pre-test accn will print on current page
+        chk_row_cnt = 4             ; 4 = "- - - " line + encounter data + first pre-test accession row
+        if (rpt_ord_cnt > 0
+        and pre_cnt > 0)
+            if (rpt_ord_rec->ord[1]->rslt_cnt > 0)
+                chk_row_cnt = chk_row_cnt + rpt_ord_rec->ord[1]->rslt_cnt
+            else
+                chk_row_cnt = chk_row_cnt + 1   ; 1 = <Not resulted> row
+            endif
+        endif
+        if (chk_row_cnt + row > 58)
+            row + 1
+            col 001,    dash_line
+            FOOT_PAGE
+            break
+        endif
+
+        row + 1
+        ; ** If new page print "=====" after column heading row
+        if (new_page_ind = "Y")
+            new_page_ind = "N"
+            col 001,    equal_line
+
+        ; ** Else print "- - -" line
+        else
+            col 001,    dash_line
+        endif
+
+        ; ** Print encounter data
+        row + 1
+ 
+
+        col 003, captions->medical_record_num                    
+
+        col 022,    mrn_alias "####################"
+
+        col 047, captions->financial_num                      
+        col 061,    fin_alias "####################"
+ 
+        new_encntr_ind = "N"
+
+        ; ** Print pre-transfusion tests                      
+        if (pre_cnt > 0)
+            tc_with_assoc_assays_exists = 1
+            row + 2
+            col 003, captions->pre_transfusion_tests
+            for (ord = 1 to pre_cnt)
+                if (ord = 1)
+                    chk_row_cnt = 0     ; Row already incremented for first pre-test
+                else
+                    chk_row_cnt = 1     ; Row will be incremented in PRINT_ORDERS
+                endif
+                if (rpt_ord_rec->ord[ord]->rslt_cnt > 0)
+                    chk_row_cnt = chk_row_cnt + rpt_ord_rec->ord[ord]->rslt_cnt
+                else
+                    chk_row_cnt = chk_row_cnt + 1       ; 1 = <Not resulted> row
+                endif
+                if (row + chk_row_cnt > 58)
+                    FOOT_PAGE
+                    break
+                    new_page_ind = "N"
+                    row + 1
+                    col 001,    equal_line
+                endif
+                PRINT_ORDER
+            endfor
+        else
+            ;If any of the product codes in this transfusion time have any parameters that define
+            ;assays that must be shown, then show a row that indicates that no valid assays were
+            ;found for these products.
+            tc_with_assoc_assays_exists = 0
+            for (pe = 1 to rpt_pe_cnt)
+                tc_prod_idx = locateval(tc_search_idx,1,tc_cnt,rpt_pe_rec->pe[pe]->product_cd,
+                                        tc_rec->trns_cmte[tc_search_idx].product_cd)
+                if (tc_rec->trns_cmte[tc_prod_idx].assoc_assays_exist = 1)
+                    row + 2
+                    col 003, captions->pre_transfusion_tests
+                    col 028, captions->no_pre_transfusion
+                    pe = rpt_pe_cnt
+                    tc_with_assoc_assays_exists = 1
+                endif
+            endfor
+        endif
+
+        ; ** Print transfusions
+        ; ** Determine if transfusion headings and first transfusion will fit on current page
+        row + 2                 ; 2 = blank row and row for transfusion heading
+        if (row + 1 > 58)       ; row + 1 = transfusion heading and first transfusion
+            FOOT_PAGE
+            break
+            new_page_ind = "N"
+            row + 1
+            col 001,    equal_line
+            row + 1
+        endif
+        
+        ; ** Print transfusion headings
+        col 003, captions->transfusion                                
+                 col 017, captions->physician                         
+                 col 044, captions->product_type                       
+                 col 073, captions->product_aborh
+                 col 092, captions->product_number                     
+                 col 119, captions->date_time
+        ; ** Print transfusions
+        for (pe = 1 to rpt_pe_cnt)
+            ; ** Determine if transfusion will fit on current page
+            if (row + 1 > 58)
+                FOOT_PAGE
+                break
+                row + 1
+                col 001,    equal_line
+            endif
+            row + 1
+            col 017,    rpt_pe_rec->pe[pe]->physician_name
+            col 048,    rpt_pe_rec->pe[pe]->product_disp
+            col 073,    rpt_pe_rec->pe[pe]->abo_rh_disp
+            col 092,    rpt_pe_rec->pe[pe]->product_nbr
+            col 119,    rpt_pe_rec->pe[pe]->event_dt_tm "@DATETIMECONDENSED;;d"	
+ 
+        endfor
+
+        ; ** Print post-transfusion tests
+        row + 1         ; 2 = blank row and "PRE-TRANSFUSION TESTS"/ORDER(ACCESSION) row
+        ;  * Determine if first post-transfusion will fit on the current page
+        chk_row_cnt = 1             ; 1 = blank row before post-transfusion tests
+        if (rpt_ord_cnt > 0
+        and post_cnt > 0)
+            if (ord = pre_cnt + 1)
+                chk_row_cnt = chk_row_cnt       ; first post-transfusion test prints on same line as "POST-TRANSFU.."
+            else
+                chk_row_cnt = chk_row_cnt + 1
+            endif
+            if (rpt_ord_rec->ord[pre_cnt + 1]->rslt_cnt > 0)
+                chk_row_cnt = chk_row_cnt + rpt_ord_rec->ord[pre_cnt + 1]->rslt_cnt
+            else
+                chk_row_cnt = chk_row_cnt + 1   ; 1 = <Not resulted> row
+            endif
+        endif
+
+        if (chk_row_cnt + row > 58)
+            FOOT_PAGE
+            break
+            new_page_ind = "N"
+            row + 1
+            col 001,    equal_line
+        endif
+                    
+        if (post_cnt > 0)
+            row + 1
+            col 003, captions->post_transfusion_tests
+            for (ord = (pre_cnt + 1) to rpt_ord_cnt)
+                if (ord = pre_cnt + 1)
+                    chk_row_cnt = 0
+                else
+                    chk_row_cnt = 1
+                endif
+                if (rpt_ord_rec->ord[ord]->rslt_cnt > 0)
+                    chk_row_cnt = chk_row_cnt + rpt_ord_rec->ord[ord]->rslt_cnt
+                else
+                    chk_row_cnt = chk_row_cnt + 1       ; 1 = <Not resulted> row
+                endif
+                if (row + chk_row_cnt > 58)
+                    FOOT_PAGE
+                    break
+                    new_page_ind = "N"
+                    row + 1
+                    col 001,    equal_line
+                endif
+                PRINT_ORDER
+            endfor
+        else
+            ;If any of the product codes in this transfusion time have any parameters that define
+            ;assays that must be shown, then show a row that indicates that no valid assays were
+            ;found for these products.
+            if (tc_with_assoc_assays_exists = 1)
+                row + 1
+                col 003, captions->post_transfusion_tests
+                col 028, captions->no_post_transfusion                
+                pe = rpt_pe_cnt
+            endif
+        endif
+
+        last_trans_row = row
+    endif
+endmacro
+
+macro(PRINT_ORDER)
+    if (ord != 1
+    and ord != pre_cnt + 1)
+        row + 1
+    endif
+
+    col 028,    rpt_ord_rec->ord[ord]->accession
+    col 050,    rpt_ord_rec->ord[ord]->order_mnemonic
+    col 072,    rpt_ord_rec->ord[ord]->collected_dt_tm  "@DATETIMECONDENSED;;d"
+    col 089,    captions->collected
+
+    if (rpt_ord_rec->ord[ord]->rslt_cnt > 0)
+        rslt = 0
+        for (rslt = 1 to rpt_ord_rec->ord[ord]->rslt_cnt)
+            row + 1
+            col 052,    rpt_ord_rec->ord[ord]->results[rslt]->mnemonic
+            col 074,    rpt_ord_rec->ord[ord]->results[rslt]->event_dt_tm "@DATETIMECONDENSED;;d"
+            col 091,    rpt_ord_rec->ord[ord]->results[rslt]->result_status_disp
+            col 108,    rpt_ord_rec->ord[ord]->results[rslt]->result
+            col 127,    rpt_ord_rec->ord[ord]->results[rslt]->result_flags
+        endfor
+    else
+        row + 1
+        col 074, captions->not_resulted                              
+    endif       
+endmacro
+
+macro(FOOT_PAGE)
+    row 59,     col 001,    underscore_line
+        row + 1 col 001, captions->rpt_id                             
+                col 060, captions->rpt_page                            
+                col 067,    curpage "###"
+                col 108,    captions->printed                         
+                col 117,    curdate "@DATECONDENSED;;d"
+                col 126,    curtime "@TIMENOSECONDS;;M"
+    row + 1,    col 113,    captions->printed_by                      
+                col 117,    reportByUsername "##############" 
+endmacro
+
+
+head page
+    new_page_ind = "Y"
+    row 0
+
+    call center(captions->transfusion_report,1,132)          
+
+%i cclsource:bbt_print_location_info.inc
+    
+    row + 1
+    col  34,    captions->begin_date                         
+                    col  50, beg_dt_tm "@DATETIMECONDENSED;;d"
+                    col  73,    captions->end_date                
+                    col  86, end_dt_tm "@DATETIMECONDENSED;;d"
+    
+    row + 2
+    col 001, captions->owner_area
+    if ( request->cur_owner_area_cd > 0 )
+        col 019, owner_area_disp
+    else
+        col 019, captions->all
+    endif
+    col 040, captions->inv_area
+    if ( request->cur_inv_area_cd > 0 )
+        col 056, inv_area_disp
+    else
+        col 056, captions->all
+    endif
+    row + 2
+    col 001, captions->product_category
+    if ( request->product_cat_cd > 0 )
+        col 019, product_cat_disp
+    else
+        col 019, captions->all
+    endif
+    col 051, captions->abo
+    if ( request->abo_cd > 0 )
+        col 056, abo_disp
+    else
+        col 056, captions->all
+    endif
+    col 070, captions->rh
+    if ( request->rh_cd > 0 )
+        col 074, rh_disp
+    else
+        col 074, captions->all
+    endif
+    row + 2
+    col 001,    captions->patient
+    if (individual_id > 0)                         
+        col 010,    individual_name
+    else
+        col 010,    captions->all
+    endif
+    col 045,    captions->physician_filter
+    if (physician_id > 0)
+        col 056,    physician_name_filter
+    else
+        col 056,    captions->all
+    endif
+    row + 2
+    col 050,    captions->ordered_procedure                            
+
+    row + 1
+    col 001,    captions->patient_name                                
+    col 028,    captions->accession                   
+    col 050,    captions->detailed_procedure         
+    col 072,    captions->date_time2                  
+    col 089,    captions->status                    
+    col 108,    captions->result                     
+    col 124,    captions->flag
+                      
+head dispense_prov_id
+    if (dispense_prov_id != dispense_prov_id_hd
+    and by_physician_ind = "Y")
+        new_physician_ind = "Y"
+        dispense_prov_id_hd = dispense_prov_id
+
+        ; ** Cause remaining heads to process
+        person_id_hd = 0.0
+        encntr_id_hd = 0.0
+        trans_time_hd = 0.0
+        order_id_hd = 0.0
+        result_id_hd = 0.0
+    endif
+
+head person_id
+    if (person_id != person_id_hd)
+        new_person_ind = "Y"
+        person_id_hd = person_id
+
+        ; ** Cause remaining heads to process
+        encntr_id_hd = 0.0
+        trans_time_hd = 0.0
+        order_id_hd = 0.0
+        result_id_hd = 0.0
+    endif
+
+head encntr_id
+    if (encntr_id != encntr_id_hd)
+        new_encntr_ind = "Y"
+
+        ; ** Cause remaining heads to process
+        encntr_id_hd = encntr_id
+        trans_time_hd = 0.0
+        order_id_hd = 0.0
+        result_id_hd = 0.0
+    endif
+
+head trans_time
+    if (trans_time != trans_time_hd)
+        if (first_trans_ind = "Y")
+            first_trans_ind = "N"
+        else
+            FOOT_TRANS_TIME
+        endif
+
+        new_trans_time_ind = "Y"
+        trans_time_hd = trans_time
+
+        rpt_ord_cnt = 0
+        valid_order_ind = "N"
+        stat = alterlist(rpt_ord_rec->ord, 0)
+        stat = alterlist(rpt_ord_rec->ord, 10)
+        pre_cnt = 0
+        post_cnt = 0
+
+        rpt_pe_cnt = 0
+        stat = alterlist(rpt_pe_rec->pe, 0)
+        stat = alterlist(rpt_pe_rec->pe, 10)
+
+        rpt_pe_rec->trans_time = trans_time
+
+        dta_cnt = 0
+        dta = 0
+        stat = alterlist(dta_rec->dta, 0)
+        stat = alterlist(dta_rec->dta, 10)
+        tca = 0
+
+        ; ** Cause remaining heads to process
+        order_id_hd = 0.0
+        result_id_hd = 0.0
+    endif
+
+head order_id
+    if (trim(table_ind) = "2o")
+        if (order_id != order_id_hd)
+            new_order_ind = "Y"
+            order_id_hd = order_id
+
+            ; ** Cause remaining heads to process
+            result_id_hd = 0.0
+        endif
+    endif
+
+head result_id
+    if (trim(table_ind) = "2o")
+        if (result_id != result_id_hd)
+            new_result_ind = "Y"
+            result_id_hd = result_id
+        endif
+    endif
+ 
+detail
+    if (new_physician_ind = "Y")
+        print_physician_ind = "Y"
+        new_physician_ind = "N"
+    endif
+
+    if (new_person_ind = "Y")
+        new_person_ind = "N"
+        print_person_ind = "Y"
+    endif
+    patient_name    = per_rec->per[d_per.seq]->patient_name
+    birth_dt_tm     = cnvtdatetime(per_rec->per[d_per.seq]->birth_dt_tm)
+
+    new_encntr_ind = "N"
+    mrn_alias       = per_rec->per[d_per.seq]->mrn_alias
+    fin_alias       = per_rec->per[d_per.seq]->fin_alias
+
+    new_trans_time_ind = "N"
+
+
+    if (trim(table_ind) = "1pe")
+        if (pe_rec->pe[d_pe.seq]->product_event_id > 0
+        and pe_rec->pe[d_pe.seq]->product_event_id != NULL)
+            rpt_pe_cnt = rpt_pe_cnt + 1
+            if (mod(rpt_pe_cnt, 10) = 1 and rpt_pe_cnt != 1)
+                stat = alterlist(rpt_pe_rec->pe, rpt_pe_cnt + 9)
+            endif
+            rpt_pe_rec->pe[rpt_pe_cnt]->product_cd       = pe_rec->pe[d_pe.seq]->product_cd
+            rpt_pe_rec->pe[rpt_pe_cnt]->product_disp     = pe_rec->pe[d_pe.seq]->product_disp
+            rpt_pe_rec->pe[rpt_pe_cnt]->product_nbr      = pe_rec->pe[d_pe.seq]->product_nbr
+            rpt_pe_rec->pe[rpt_pe_cnt]->abo_rh_disp      = concat(trim(pe_rec->pe[d_pe.seq]->abo_disp)," ",
+                                                                 trim(pe_rec->pe[d_pe.seq]->rh_disp))
+            rpt_pe_rec->pe[rpt_pe_cnt]->quantity         = pe_rec->pe[d_pe.seq]->quantity
+            rpt_pe_rec->pe[rpt_pe_cnt]->iu               = pe_rec->pe[d_pe.seq]->iu
+            rpt_pe_rec->pe[rpt_pe_cnt]->event_dt_tm      = cnvtdatetime(pe_rec->pe[d_pe.seq]->event_dt_tm)
+            rpt_pe_rec->pe[rpt_pe_cnt]->physician_name   = pe_rec->pe[d_pe.seq]->physician_name
+        endif
+
+        ; ** Collect task_assay_cd's associated with product_cd's in trans_time for determining if results should
+        ; ** print on report
+
+ 
+        ; ** Determine if product_cd previously added for another transfusion in same trans_time
+        product_found_ind = "N"
+        dta = 0
+        for (dta = 1 to dta_cnt)
+            if (dta_rec->dta[dta]->product_cd = pe_rec->pe[d_pe.seq]->product_cd)
+                product_found_ind = "Y"
+                dta = dta_cnt
+            endif
+        endfor
+        if (product_found_ind = "N")
+            ; ** Find product in tca and add associated task_assay data
+
+            for (tca = 1 to tca_cnt)
+                if (tca_rec->tca[tca]->product_cd = pe_rec->pe[d_pe.seq]->product_cd)
+                    ;  * Determine if task_assays_cd previously collected from another transfusion in trans_time
+
+                    product_found_ind = "Y"
+
+
+                    dta_cnt = dta_cnt + 1
+                    if (mod(dta_cnt, 10) = 1 and dta_cnt != 1)
+                        stat = alterlist(dta_rec->dta, dta_cnt + 9)
+                    endif
+                    dta_rec->dta[dta_cnt]->product_cd = tca_rec->tca[tca]->product_cd
+                    dta_rec->dta[dta_cnt]->task_assay_cd = tca_rec->tca[tca]->task_assay_cd
+                    dta_rec->dta[dta_cnt]->mnemonic = tca_rec->tca[tca]->detail_mnemonic
+                    dta_rec->dta[dta_cnt]->pre_time = trans_time - (tca_rec->tca[tca]->pre_hours * 60)
+                    dta_rec->dta[dta_cnt]->post_time = trans_time + (tca_rec->tca[tca]->post_hours * 60)
+                elseif (product_found_ind = "Y")
+                    tca = tca_cnt
+                endif
+            endfor
+        endif
+
+    elseif (trim(table_ind) = "2o")
+        if (new_order_ind = "Y")
+
+            ; ** Determine if task_assay_cds associated with catalog_cd are also associated with product_cd
+            ; ** collected just above in "if (trim(table_ind) = "1pe").  Also, determine if order date
+            ; ** is >< pre/post time for at least one of the associated task_assay_cds
+            valid_order_ind = "N"
+
+            ; ** Find task_assays associated with catalog_cd
+            cat = 0
+            catalog_found_ind = "N"
+            for (cat = 1 to cat_task_cnt)
+                if (cat_task_rec->cat_task[cat]->catalog_cd = ord_rec->ord[d_o.seq]->catalog_cd)
+                    catalog_found_ind = "Y"
+
+                    ; ** Find product_cd's associated with task_assay_cd/catalog_cd
+                    dta = 0
+                    for (dta = 1 to dta_cnt)
+                        if (dta_rec->dta[dta]->task_assay_cd = cat_task_rec->cat_task[cat]->task_assay_cd)
+                            if (collected_time >= dta_rec->dta[dta]->pre_time
+                            and collected_time <= dta_rec->dta[dta]->post_time)
+                                valid_order_ind = "Y"
+                                dta = dta_cnt
+                            endif
+                        endif
+                    endfor
+                elseif (catalog_found_ind = "Y")
+                    cat = cat_task_cnt
+                endif
+            endfor
+        endif
+
+        if (new_order_ind = "Y"
+        and valid_order_ind = "Y")
+            new_order_ind = "N"
+
+            ; Increment pre/post counts to determine which orders are pre and post
+            if (collected_time <= trans_time)
+                pre_cnt = pre_cnt + 1
+            else
+                post_cnt = post_cnt + 1
+            endif
+
+            ; Load order array
+            rpt_ord_cnt = rpt_ord_cnt + 1
+
+            if (mod(rpt_ord_cnt, 10) = 1 and rpt_ord_cnt != 1)
+                stat = alterlist(rpt_ord_rec->ord, rpt_ord_cnt + 9)
+            endif
+            rpt_ord_rec->ord[rpt_ord_cnt]->accession
+                = ord_rec->ord[d_o.seq]->accession
+            rpt_ord_rec->ord[rpt_ord_cnt]->order_mnemonic
+                = ord_rec->ord[d_o.seq]->order_mnemonic
+            rpt_ord_rec->ord[rpt_ord_cnt]->collected_dt_tm
+                = cnvtdatetime(ord_rec->ord[d_o.seq]->collected_dt_tm )
+            rpt_ord_rec->ord[rpt_ord_cnt]->order_status_disp
+                = ord_rec->ord[d_o.seq]->order_status_disp
+            rslt_cnt = 0
+            stat = alterlist(rpt_ord_rec->ord[rpt_ord_cnt]->results, 10)
+        endif
+
+        ; Process results
+        if (new_result_ind = "Y"
+        and result_ind = "Y"
+        and valid_order_ind = "Y")
+            new_result_ind = "N"
+
+            ; ** Determine if result task_assay_cd should print on report
+
+            ;  * Find task_assay_cd in dta_rec.  Since task_assay_cd could be associated with multiple products
+            ;  * process all entries to make sure all allociations of the task_assay_cd with all product_cds are evaluated and
+            ;  * collect the maximum pre and post time of all associations of product_cd/task_assay_cd
+            dta_found_ind = "N"
+            dta_pre_time = 0.0
+            dta_post_time = 0.0
+            for (dta = 1 to dta_cnt)
+                if (dta_rec->dta[dta]->task_assay_cd = rslt_rec->rslt[d_r.seq]->task_assay_cd) 
+                    dta_found_ind = "Y"
+
+                    ; Determine max pre/post time
+                    if (dta_rec->dta[dta]->pre_time > dta_pre_time)
+                        dta_pre_time = dta_rec->dta[dta]->pre_time
+                    endif
+                    if (dta_rec->dta[dta]->post_time > dta_post_time)
+                        dta_post_time = dta_rec->dta[dta]->post_time
+                    endif
+                endif
+            endfor
+
+            if (dta_found_ind = "Y")
+
+                if (ord_rec->ord[d_o.seq]->collected_time >= dta_pre_time
+                and ord_rec->ord[d_o.seq]->collected_time <= dta_post_time)
+
+            rslt_cnt = rslt_cnt + 1
+            if (mod(rslt_cnt, 10) = 1 and rslt_cnt != 1)
+                stat = alterlist(rpt_ord_rec->ord[rpt_ord_cnt]->results, rslt_cnt + 9)
+            endif
+            rpt_ord_rec->ord[rpt_ord_cnt]->rslt_cnt = rslt_cnt
+
+            ; Initialize result flags (normal, critical, review, delta)
+            n = ""
+            c = ""
+            r = ""
+            d = ""
+
+            rpt_ord_rec->ord[rpt_ord_cnt]->results[rslt_cnt]->mnemonic
+                = rslt_rec->rslt[d_r.seq]->mnemonic
+            rpt_ord_rec->ord[rpt_ord_cnt]->results[rslt_cnt]->event_dt_tm
+                = cnvtdatetime(rslt_rec->rslt[d_r.seq]->event_dt_tm)
+            rpt_ord_rec->ord[rpt_ord_cnt]->results[rslt_cnt]->result_status_disp
+                = rslt_rec->rslt[d_r.seq]->result_status_disp
+
+            ; Determine result type
+            ; if ALPHA RESULT
+            if (trim(rslt_rec->rslt[d_r.seq]->result_value_alpha) > "")
+                rpt_ord_rec->ord[rpt_ord_cnt]->results[rslt_cnt]->result
+                    = rslt_rec->rslt[d_r.seq]->result_value_alpha
+
+            ; elseif NUMERIC RESULT
+            elseif (rslt_rec->rslt[d_r.seq]->result_value_numeric != 0
+            and rslt_rec->rslt[d_r.seq]->result_value_numeric != NULL)
+               arg_min_digits = rslt_rec->rslt[d_r.seq]->arg_min_digits
+               arg_max_digits = rslt_rec->rslt[d_r.seq]->arg_max_digits
+               arg_min_dec_places = rslt_rec->rslt[d_r.seq]->arg_min_dec_places
+               arg_less_great_flag = rslt_rec->rslt[d_r.seq]->arg_less_great_flag
+               arg_raw_value = rslt_rec->rslt[d_r.seq]->result_value_numeric
+               result_value = fillstring(17, " ")
+               result_value =
+               uar_fmt_result(arg_min_digits, arg_max_digits,
+                            arg_min_dec_places, arg_less_great_flag, arg_raw_value)
+                rpt_ord_rec->ord[rpt_ord_cnt]->results[rslt_cnt]->result
+                    = result_value
+
+            ; elseif ASCII TEXT RESULT
+            elseif (trim(rslt_rec->rslt[d_r.seq]->ascii_text) > "")
+                rpt_ord_rec->ord[rpt_ord_cnt]->results[rslt_cnt]->result
+                    = rslt_rec->rslt[d_r.seq]->ascii_text
+
+            ; elseif CODE_VALUE RESULT
+            elseif (rslt_rec->rslt[d_r.seq]->result_code_set_cd > 0
+            and rslt_rec->rslt[d_r.seq]->result_code_set_cd != NULL)
+                rpt_ord_rec->ord[rpt_ord_cnt]->results[rslt_cnt]->result
+                    = rslt_rec->rslt[d_r.seq]->result_code_set_disp
+
+            ; elseif LONG_TEXT RESULT
+            elseif (rslt_rec->rslt[d_r.seq]->long_text_id > 0
+            and rslt_rec->rslt[d_r.seq]->long_text_id != NULL)
+                rpt_ord_rec->ord[rpt_ord_cnt]->results[rslt_cnt]->result
+                    = "<Text,check online>"
+
+            ; elseif BLANK
+            elseif (rslt_rec->rslt[d_r.seq]->nomenclature_id <= 0)
+                rpt_ord_rec->ord[rpt_ord_cnt]->results[rslt_cnt]->result
+                    = "<Blank>"
+ 
+            ; else UNKNOWN
+            else
+                rpt_ord_rec->ord[rpt_ord_cnt]->results[rslt_cnt]->result
+                    = "<Unknown>"
+            endif
+
+            ; Set result_flags
+            if (rslt_rec->rslt[d_r.seq]->normal_cd > 0)
+                n = rslt_rec->rslt[d_r.seq]->normal_disp
+            endif
+            if (rslt_rec->rslt[d_r.seq]->critical_cd > 0)
+                c = rslt_rec->rslt[d_r.seq]->critical_disp
+            endif
+            if (rslt_rec->rslt[d_r.seq]->review_cd > 0)
+                r = rslt_rec->rslt[d_r.seq]->review_disp
+            endif
+            if (rslt_rec->rslt[d_r.seq]->delta_cd > 0)
+                d = rslt_rec->rslt[d_r.seq]->delta_disp
+             endif
+             rpt_ord_rec->ord[rpt_ord_cnt]->results[rslt_cnt]->result_flags
+                 = concat(n, c, r, d)
+
+                endif   ; endif collected_time >< dta-pre/post_time
+            endif       ; endif dta_found_ind
+        endif           ; endif new_results_ind
+    endif               ; endif table_ind
+
+foot report
+    FOOT_TRANS_TIME
+    if (last_trans_row > 0)
+        row last_trans_row + 1
+    else
+        row + 1
+    endif
+    col 001,    equal_line
+    FOOT_PAGE
+
+    row  62,    col 053, captions->end_of_report                
+    report_complete_ind = "Y"
+    select_ok_ind = 1
+
+
+with    nocounter, outerjoin(d_r_r), maxrow = 9999, nullreport, nolandscape, compress
+
+if (curqual = 0)
+    set reply->status_data->status = "S"
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alter(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->subeventstatus[count1]->OperationName = "get product_event rows"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "Z"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_trans_cmte"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue
+        = "ZERO:  No data found for specified date range"
+    go to EXIT_SCRIPT
+endif
+
+
+set count1 = count1 + 1
+if (count1 > 1)
+    set stat = alter(reply->status_data->subeventstatus, count1 + 1)
+endif
+set reply->status_data->subeventstatus[count1]->OperationName = "print transfusion committee report"
+set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_rpt_trans_cmte"
+if (report_complete_ind = "Y")
+    set reply->status_data->status = "S"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "S"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue
+        = "SUCCESS"
+else
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue
+        = "SCRIPT ERROR:  Report ended abnormally"
+endif
+
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+
+if (select_ok_ind = 1)
+    set reply->status_data->status = "S"
+endif
+
+if (ops_ind = "Y")
+    set spool value(reply->rpt_list[rpt_cnt].rpt_filename) value(request->output_dist)
+endif
+ 
+go to EXIT_SCRIPT
+
+#EXIT_SCRIPT
+
+end go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,306 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/SCRIPTCORRECTINVENTORY/BBT_GET_MAX_PRODUCT_EXPIRATION.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-2005 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_get_max_product_expiration.prg
+        Object name:            bbt_get_max_product_expiration
+        Request #:
+
+        Product:                Pathnet
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        To retrieve the maximum expiration date and time
+                                for a given product.  Also retrieves the
+                                current expiration date and time for all components
+                                of a pooled product.
+
+        Tables read:            product
+                                product_index
+                                blood_product
+                                product_event
+
+        Tables updated:         None
+
+        Executing from:         CorrectInventory.exe
+
+        Special Notes:          None
+
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 01/23/02 Scott Farrimond      Initial Release
+;     002 04/17/05 Jason Osborn         Updated to set expire time to 23:59 *
+;                                       if max_expire_hours = 0.            *
+;     003 08/01/05 Jason Osborn         Updated request to hold product_cd  *
+;                                       if the product type has changed.    *
+;                                       This will be used to calculate max  *
+;                                       expire time for the new product.    *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+DROP PROGRAM   bbt_get_max_product_expiration:dba GO
+CREATE PROGRAM bbt_get_max_product_expiration:dba
+
+%i cclsource:pcs_subevent.inc
+
+/****************************************************************************
+*    Request Structure                                                      *
+****************************************************************************/
+/*
+Record request
+(
+  1 product_id                         = f8
+  1 new_receive_dt_tm                  = dq8
+  1 product_cd                         = f8
+)
+*/
+
+/****************************************************************************
+*    Reply Structure                                                        *
+****************************************************************************/
+Record reply
+(
+  1 max_product_expire_dt_tm           = dq8
+  1 create_dt_tm                       = dq8
+  1 component_qual[*]
+    2  product_nbr                     = c30
+    2  current_expire_dt_tm            = dq8
+%i cclsource:status_block.inc
+)
+
+Record product_info
+(
+  1 pooled_product_ind                 = i2
+  1 modified_product_ind               = i2
+  1 day_interval                       = c10
+  1 hour_interval                      = c10
+  1 recv_dt_tm                         = dq8
+  1 drawn_dt_tm                        = dq8
+  1 create_dt_tm                       = dq8
+)
+
+SET reply->status_data.status = "F"
+
+/****************************************************************************
+*    Declarations                                                           *
+****************************************************************************/
+DECLARE dPooledEventTypeCd             = f8  WITH noconstant(0.0)
+DECLARE nCodeCnt                       = i2  WITH noconstant(1)
+DECLARE nDaysInd                       = i2  WITH noconstant(0)
+DECLARE nHoursInd                      = i2  with noconstant(0)
+
+/****************************************************************************
+*    Retrieve Event Type Codes                                              *
+****************************************************************************/
+SET stat = UAR_GET_MEANING_BY_CODESET(1610,"18",VALUE(nCodeCnt),dPooledEventTypeCd)
+IF (nCodeCnt > 1)
+    CALL subevent_add("SELECT","F","CODE_VALUE",
+                      "Selecting for cdf_meaning of 18 (cs 1610) returned multiple values.")
+    GO TO exit_script
+ELSEIF (nCodeCnt = 0)
+    CALL subevent_add("SELECT","F","CODE_VALUE",
+                      "Selecting for cdf_meaning of 18 (cs 1610) returned no values.")
+    GO TO exit_script
+ENDIF
+
+/****************************************************************************
+*    Retrieve Product Information                                           *
+****************************************************************************/
+SELECT if (request->product_cd > 0.0)
+          PLAN p
+             WHERE p.product_id = request->product_id
+          JOIN pi WHERE pi.product_cd = request->product_cd
+          JOIN bp
+              WHERE bp.product_id = outerjoin(p.product_id)
+       endif
+
+INTO "nl:"
+  p.product_id
+
+FROM
+  product p,
+  product_index pi,
+  blood_product bp
+
+PLAN p
+  WHERE p.product_id = request->product_id
+
+JOIN pi
+  WHERE pi.product_cd = p.product_cd
+
+JOIN bp
+  WHERE bp.product_id = outerjoin(p.product_id)
+
+DETAIL
+  product_info->pooled_product_ind = p.pooled_product_ind
+  product_info->modified_product_ind = p.modified_product_ind
+  product_info->day_interval = BUILD(pi.max_days_expire,",D")
+  product_info->hour_interval = BUILD(pi.max_hrs_expire,",H")
+  if (pi.max_hrs_expire > 0)
+     nHoursInd = 1
+  endif
+  if (pi.max_days_expire > 0)
+     nDaysInd = 1
+  endif
+  IF (request->new_receive_dt_tm > 0)
+    product_info->recv_dt_tm = request->new_receive_dt_tm
+  ELSE
+    product_info->recv_dt_tm = p.recv_dt_tm
+  ENDIF
+  product_info->drawn_dt_tm = bp.drawn_dt_tm
+  product_info->create_dt_tm = p.create_dt_tm
+  reply->create_dt_tm = p.create_dt_tm
+WITH nocounter
+
+IF (curqual = 0)
+  CALL subevent_add("SELECT","F","PRODUCT","No product found for product id passed in.")
+  GO TO exit_script
+ENDIF
+
+/****************************************************************************
+*    Determine max expiration date and time if drawn_dt_tm or recv_dt_tm    *
+*    are defined.                                                           *
+****************************************************************************/
+IF (product_info->drawn_dt_tm > 0)
+  SET reply->max_product_expire_dt_tm = CNVTLOOKAHEAD(product_info->day_interval,product_info->drawn_dt_tm)
+  if (nHoursInd = 1) ; Hours > 0
+     SET reply->max_product_expire_dt_tm = CNVTLOOKAHEAD(product_info->hour_interval,reply->max_product_expire_dt_tm)
+  else ;Hours = 0, set to 23:59
+     if (nDaysInd = 1) ;If days and hours are both 0, don't set to 23:59
+        set reply->max_product_expire_dt_tm = cnvtdatetime(cnvtdate(reply->max_product_expire_dt_tm), 2359)
+     endif
+  endif
+ELSEIF (product_info->recv_dt_tm > 0)
+  SET reply->max_product_expire_dt_tm = CNVTLOOKAHEAD(product_info->day_interval,product_info->recv_dt_tm)
+  if (nHoursInd = 1) ; Hours > 0
+     SET reply->max_product_expire_dt_tm = CNVTLOOKAHEAD(product_info->hour_interval,reply->max_product_expire_dt_tm)
+  else ;Hours = 0, set to 23:59
+     if (nDaysInd = 1) ;If days and hours are both 0, don't set to 23:59
+        set reply->max_product_expire_dt_tm = cnvtdatetime(cnvtdate(reply->max_product_expire_dt_tm), 2359)
+     endif
+  endif
+ENDIF
+
+/****************************************************************************
+*    Determine max expiration date and time for pooled product as well      *
+*    as the current expiration date and time for the components             *
+****************************************************************************/
+IF (product_info->pooled_product_ind = 1)
+  IF (reply->max_product_expire_dt_tm = 0)
+    SELECT INTO "nl:"
+      pe.product_event_id
+
+    FROM
+      product_event pe
+
+    PLAN pe
+      WHERE pe.product_id = request->product_id
+        AND pe.event_type_cd = dPooledEventTypeCd
+    DETAIL
+      reply->max_product_expire_dt_tm = CNVTLOOKAHEAD(product_info->day_interval,pe.event_dt_tm)
+      reply->max_product_expire_dt_tm = CNVTLOOKAHEAD(product_info->hour_interval,reply->max_product_expire_dt_tm)
+
+    WITH nocounter
+
+    IF (reply->max_product_expire_dt_tm = 0)
+      CALL subevent_add("SELECT","F","PRODUCT_EVENT","No POOLED PRODUCT event found for pooled product.")
+      GO TO exit_script
+    ENDIF
+  ENDIF
+
+  SELECT INTO "nl:"
+    p.product_id
+
+  FROM
+    product p,
+    blood_product bp
+
+  PLAN p
+    WHERE p.pooled_product_id = request->product_id
+
+  JOIN bp
+    WHERE bp.product_id = outerjoin(p.product_id)
+
+  HEAD REPORT
+    nCompCnt = 0
+
+  DETAIL
+    nCompCnt = nCompCnt + 1
+    IF (MOD(nCompCnt,5) = 1)
+      stat = alterlist(reply->component_qual,nCompCnt + 4)
+    ENDIF
+    reply->component_qual[nCompCnt].product_nbr =
+      CONCAT(bp.supplier_prefix,p.product_nbr," ",p.product_sub_nbr)
+    reply->component_qual[nCompCnt].current_expire_dt_tm = p.cur_expire_dt_tm
+
+  FOOT REPORT
+    stat = alterlist(reply->component_qual,nCompCnt)
+
+  WITH nocounter
+
+  IF (curqual = 0)
+    CALL subevent_add("SELECT","F","PRODUCT","No component products found for pooled product.")
+    GO TO exit_script
+  ENDIF
+ENDIF
+
+/****************************************************************************
+*    If the max_product_expire_dt_tm is still not filled out then use the   *
+*    create_dt_tm to calculate.                                             *
+****************************************************************************/
+IF (reply->max_product_expire_dt_tm = 0)
+  SET reply->max_product_expire_dt_tm = CNVTLOOKAHEAD(product_info->day_interval,product_info->create_dt_tm)
+  if (nHoursInd = 1) ; Hours > 0
+     SET reply->max_product_expire_dt_tm = CNVTLOOKAHEAD(product_info->hour_interval,reply->max_product_expire_dt_tm)
+  else ;Hours = 0, set to 23:59
+     if (nDaysInd = 0) ;If days and hours are both 0, don't set to 23:59
+        set reply->max_product_expire_dt_tm = cnvtdatetime(cnvtdate(reply->max_product_expire_dt_tm), 2359)
+     endif
+  endif
+ENDIF
+
+/****************************************************************************
+*    If the max_product_expire_dt_tm is still not filled out then use the   *
+*    create_dt_tm to calculate.                                             *
+****************************************************************************/
+IF (reply->max_product_expire_dt_tm = 0)
+  CALL subevent_add("SELECT","F","PRODUCT","No valid max expirt date time found.")
+  GO TO exit_script
+ENDIF
+
+SET reply->status_data.status = "S"
+
+/****************************************************************************
+*    Script Exit                                                            *
+****************************************************************************/
+#exit_script
+
+FREE SET product_info
+
+END
+GO
+
+;Generated by GNU enscript 1.6.4.

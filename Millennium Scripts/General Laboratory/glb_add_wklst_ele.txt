@@ -1,0 +1,589 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_add_wklst_ele/glb_add_wklst_ele.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_ADD_WORKLIST_ELE.PRG
+        Object name:            GLB_ADD_WORKLIST_ELE
+        Request #:              250085
+
+        Product:                General Lab           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Insert a new worklist                 
+                                into the database
+
+        Tables read:            n/a
+
+        Tables updated:         worklist         
+                                worklist_element         
+                                worklist_order_r
+                                worklist_accession_r
+
+        Executing from:         General Lab worklist request           
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     500 05/17/96 Newton Hughes        Initial Release                     *
+;     501 01/26/98 Kurt Gugler          add sequence identifiers            *
+;    *502 04/19/00 Hal Patchen          Check for valid reply record        * 
+;    *003 05/01/06 Scott Sundahl        Added template/event history logic  ********
+;    *004 05/05/06 Joe Troy             Add ability to auto assign worklist alias. *
+;    *005 01/30/07 Paul Lessin          Add sequence identifier columns     *
+;    *006 02/05/07 Scott Sundahl        Change position insert logic        ********
+;    *007 09/02/10 Steve Hendrick       Add qc_group_id field               *
+;    *008 09/27/10 Ryan Manuel          Fix issue with worklist_alias       *
+;~DE~*******************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ***************************
+
+      DROP PROGRAM glb_add_wklst_ele:dba GO
+      CREATE PROGRAM glb_add_wklst_ele:dba
+
+/*
+      RECORD request
+      (
+        1 worklist_prsnl_id		   = f8
+        1 status_cd			         = f8
+        1 service_resource_cd    = f8
+        1 worklist_ref_id		     = f8
+        1 worklist_type_flag	   = i4
+        1 worklist_alias		     = c25
+        1 components[x]
+          2 worklist_seq		     = i4
+          2 catalog_cd			     = f8
+          2 task_assay_cd		     = f8
+        1 orders[x]
+          2 order_id			       = f8
+          2 accession_id		     = f8
+          2 sequence			       = i4
+          2 sequence_ident       = c20
+          2 positions[*]
+            3 position_id        = f8
+          2 qc_group_id          = f8
+        1 template_ind           = i2
+        1 auto_assign_ind        = i2
+        1 seq_ident_ind          = i2 
+        1 seq_ident_start_nbr    = i4    
+        1 seq_ident_beg_range_nbr= i4
+        1 seq_ident_end_range_nbr= i4
+        1 positions[*]
+          2 sequence             = i4
+          2 order_id             = f8
+          2 accession_id         = f8
+          2 person_accession_ind = i2
+          2 position_id          = f8
+      )	
+*/
+
+	  RECORD worklist_element
+	  (
+	  	1 qual[*]
+	  		2 worklist_id    = f8
+	  		2 catalog_cd     = f8
+	  		2 task_assay_cd  = f8
+	  		2 order_id       = f8
+	  )
+	  
+	  record m_dm2_seq_stat
+    (
+      1 n_status    = i4
+      1 s_error_msg = vc
+    ) with protect
+	  
+      IF (validate(reply->worklist_id, -1) = -1)
+      RECORD reply
+      (
+%i cclsource:glb_add_wklst_ele_rep.inc
+      )
+      ENDIF 
+/**************************************************************
+; DECLARED VARIABLES
+**************************************************************/ 
+
+DECLARE lOrder_cnt          = i4 with protect, constant(value(size(request->orders, 5)))  
+DECLARE worklist_id         = f8 with protect, noconstant(0.0) 
+DECLARE lWklstCnt           = i4 with protect, noconstant(0)
+declare sErrorMessage       = vc with protect, noconstant(" ")
+declare lErrorCode          = i4 with protect, noconstant(0)  
+declare lLoopCount          = i4 with protect, noconstant(0)
+declare lLoopCount2         = i4 with protect, noconstant(0)
+declare nNextSeq            = i4 with protect, noconstant(0)
+declare sDisplay            = vc with protect, noconstant(" ")
+declare wklst_position_id   = f8 with protect, noconstant(0.0)
+declare bConvert            = i2 with protect, noconstant(false)
+declare lPositionCount      = i4 with protect, noconstant(0)
+
+/*************************************************************/    
+
+#script
+
+      SET reply->status_data->status = "F"
+      SET failed = "F"
+
+/*******************************************************************/
+/* Handle potentially outdated position logic                      */
+/*******************************************************************/ 
+
+for (lLoopCount = 1 to lOrder_cnt)
+  if (size(request->orders[lLoopCount].positions, 5) > 0)
+    call echo(build("order index: ", lLoopCount))
+    set bConvert = true
+    set lLoopCount = lOrder_cnt + 1
+  endif
+endfor
+
+if (bConvert = true)
+  for (lLoopCount = 1 to lOrder_cnt)
+    for (lLoopCount2 = 1 to size(request->orders[lLoopCount].positions, 5))
+      set lPositionCount = lPositionCount + 1
+      set stat = alterlist(request->positions, lPositionCount)
+      set request->positions[lPositionCount].sequence = request->orders[lLoopCount].sequence
+      set request->positions[lPositionCount].order_id = request->orders[lLoopCount].order_id
+      set request->positions[lPositionCount].accession_id = request->orders[lLoopCount].accession_id
+      set request->positions[lPositionCount].person_accession_ind = 0
+      set request->positions[lPositionCount].position_id = request->orders[lLoopCount].positions[lLoopCount2].position_id
+    endfor
+  endfor
+endif
+
+call echorecord(request)
+
+/*******************************************************************/
+/* Generate next available worklist id                             */
+/*******************************************************************/  
+
+      SELECT INTO "nl:"
+        y = seq(reference_seq,nextval)
+
+      FROM 
+         dual
+      DETAIL
+         worklist_id = cnvtreal(y)
+      WITH
+         FORMAT,
+         COUNTER
+
+      IF (curqual = 0)
+        GO TO seq_failed
+      ENDIF
+
+/*******************************************************************/
+/* if auto assign, get next sequence number to concat with alias   */
+/*******************************************************************/
+  if(request->auto_assign_ind = 1)
+    ; get next available sequence number and increment it
+    select into "nl:"
+    from
+      worklist_ref wr
+    where
+      wr.worklist_ref_id = request->worklist_ref_id
+    detail
+      sDisplay = wr.display
+      if (wr.next_seq_number >= 2147483647 or 
+          wr.next_seq_number <= 0 or
+          size(build(sDisplay, "_", wr.next_seq_number + 1)) > 25)
+        nNextSeq = 1
+      else
+        nNextSeq = wr.next_seq_number + 1
+      endif
+    with nocounter
+    ; update the table with the incremented sequence number
+    update into worklist_ref wr
+    set
+      wr.next_seq_number = nNextSeq
+    where
+      wr.worklist_ref_id = request->worklist_ref_id
+    with nocounter
+    ; get out if error
+    if(curqual = 0) go to wr_update_failed endif
+    ; set the new alias and return in reply
+    set request->worklist_alias = build(sDisplay, "_", nNextSeq)
+  endif
+
+/*******************************************************************/
+/* insert row into worklist table                                  */
+/*******************************************************************/  
+ 
+      INSERT INTO worklist w      
+      SET
+        w.worklist_id = worklist_id
+        , w.worklist_type_flag = request->worklist_type_flag
+        , w.worklist_dt_tm = cnvtdatetime(curdate, curtime3)
+/* Need to set the id in VB at some point in the future */
+;        , w.worklist_prsnl_id = request->worklist_prsnl_id 
+        , w.worklist_prsnl_id =  if (request->status_cd > 0.0)
+                                    request->worklist_prsnl_id
+                                 else
+                                    reqinfo->updt_id
+                                 endif
+        , w.status_cd = request->status_cd
+        , w.service_resource_cd = request->service_resource_cd
+        , w.worklist_alias = request->worklist_alias
+        , w.worklist_ref_id = request->worklist_ref_id
+        , w.template_ind = request->template_ind
+        , w.seq_ident_ind = request->seq_ident_ind
+        , w.seq_ident_start_nbr = request->seq_ident_start_nbr
+        , w.seq_ident_beg_range_nbr = request->seq_ident_beg_range_nbr
+        , w.seq_ident_end_range_nbr = request->seq_ident_end_range_nbr
+        , w.updt_dt_tm = cnvtdatetime(curdate, curtime3)
+        , w.updt_id = reqinfo->updt_id
+        , w.updt_task = reqinfo->updt_task
+        , w.updt_cnt = 0
+        , w.updt_applctx = reqinfo->updt_applctx
+      WITH nocounter
+
+      IF (curqual = 0)
+        GO TO w_insert_failed
+      ENDIF
+
+      SET reply->worklist_id = worklist_id
+
+      CALL ECHO("new worklist id: ", 0)
+      CALL ECHO(worklist_id, 1)
+      CALL ECHO(" ", 1)
+/*******************************************************************/
+/* Select                                                          */
+/*******************************************************************/  
+      FOR (x = 1 to lOrder_cnt)
+      
+      	IF (request->orders[x].order_id > 0.0)
+      		
+      		SELECT INTO "nl:"
+      		
+      		FROM orders o
+      			, (dummyt d1 with seq = value(SIZE(request->components, 5)))
+      		
+      		PLAN d1
+      			WHERE request->components[d1.seq].catalog_cd > 0.0
+      		
+      		JOIN o
+      			WHERE o.order_id = request->orders[x].order_id
+      			AND o.catalog_cd = request->components[d1.seq].catalog_cd
+      		
+      		ORDER o.order_id
+      		
+      		HEAD o.order_id
+      			lWklstCnt = lWklstCnt + 1
+        		IF (lWklstCnt > SIZE(worklist_element->qual, 5))
+          			stat = alterlist(worklist_element->qual, lWklstCnt + 9)
+        		ENDIF
+        		worklist_element->qual[lWklstCnt].catalog_cd = o.catalog_cd
+        		worklist_element->qual[lWklstCnt].order_id = o.order_id
+        		worklist_element->qual[lWklstCnt].worklist_id = reply->worklist_id
+        	
+        	WITH NOCOUNTER
+        	
+        	
+        	SELECT INTO "nl:"
+        	
+        	FROM orders o
+        		, profile_task_r ptr
+        		, (dummyt d1 with seq = value(SIZE(request->components, 5)))
+        	
+        	PLAN d1
+        		WHERE request->components[d1.seq].task_assay_cd > 0
+        	
+        	JOIN o 
+        		WHERE o.order_id = request->orders[x].order_id
+        	
+        	JOIN ptr
+        		WHERE ptr.catalog_cd = o.catalog_cd
+        		AND ptr.task_assay_cd = request->components[d1.seq].task_assay_cd
+        	
+        	ORDER o.order_id, ptr.task_assay_cd
+        	
+        	HEAD o.order_id
+               row + 0
+        	
+        	HEAD ptr.task_assay_cd
+            lWklstCnt = lWklstCnt + 1
+        		IF (lWklstCnt > SIZE(worklist_element->qual, 5))
+          			stat = alterlist(worklist_element->qual, lWklstCnt + 9)
+        		ENDIF
+        		worklist_element->qual[lWklstCnt].task_assay_cd = ptr.task_assay_cd
+        		worklist_element->qual[lWklstCnt].order_id = o.order_id
+        		worklist_element->qual[lWklstCnt].worklist_id = reply->worklist_id
+        	
+        	WITH NOCOUNTER
+ 
+      	ENDIF
+      	
+      ENDFOR
+      
+      IF (lWklstCnt > 0)
+        SET stat = alterlist(worklist_element->qual, lWklstCnt)
+      ENDIF
+      
+
+      FOR (x = 1 to SIZE(worklist_element->qual, 5))
+        
+        INSERT INTO worklist_element we
+        
+        SET we.catalog_cd = worklist_element->qual[x].catalog_cd
+            ,we.worklist_element_id = seq(pathnet_seq, nextval) 
+            ,we.task_assay_cd = worklist_element->qual[x].task_assay_cd
+            ,we.order_id = worklist_element->qual[x].order_id
+            ,we.worklist_id = worklist_element->qual[x].worklist_id
+            ,we.updt_dt_tm = cnvtdatetime(curdate, curtime3)
+            ,we.updt_id = reqinfo->updt_id
+            ,we.updt_task = reqinfo->updt_task
+            ,we.updt_cnt = 0
+            ,we.updt_applctx = reqinfo->updt_applctx
+        
+        WITH NOCOUNTER
+      
+        set lErrorCode = error(sErrorMessage, 0)
+        if (lErrorCode > 0)
+            rollback
+            go to we_insert_failed
+        endif
+      
+      ENDFOR
+
+/*******************************************************************/
+/* insert rows into worklist order relation table                  */
+/*******************************************************************/  
+
+      INSERT INTO
+        worklist_order_r wo
+        , (dummyt d1 with seq = value(lOrder_cnt))
+      SET
+        wo.worklist_id = worklist_id
+        , wo.order_id = request->orders[d1.seq]->order_id
+        , wo.sequence = request->orders[d1.seq]->sequence
+        , wo.identifier = request->orders[d1.seq]->sequence_ident
+        , wo.create_dt_tm = cnvtdatetime(curdate, curtime3)
+        , wo.updt_dt_tm = cnvtdatetime(curdate, curtime3)
+        , wo.updt_id = reqinfo->updt_id
+        , wo.updt_task = reqinfo->updt_task
+        , wo.updt_cnt = 0
+        , wo.updt_applctx = reqinfo->updt_applctx
+      PLAN d1
+        WHERE request->orders[d1.seq]->order_id != 0.0
+      JOIN wo
+;        WHERE wo.order_id = request->orders[d1.seq]->order_id
+      WITH
+        NOCOUNTER
+
+      INSERT INTO
+        worklist_accession_r wa
+        , (dummyt d1 with seq = value(lOrder_cnt))
+      SET
+        wa.worklist_id = worklist_id
+        , wa.accession_id = request->orders[d1.seq]->accession_id
+        , wa.sequence = request->orders[d1.seq]->sequence                               
+        , wa.identifier = request->orders[d1.seq]->sequence_ident
+        , wa.create_dt_tm = cnvtdatetime(curdate, curtime3)
+        , wa.updt_dt_tm = cnvtdatetime(curdate, curtime3)
+        , wa.updt_id = reqinfo->updt_id
+        , wa.updt_task = reqinfo->updt_task
+        , wa.updt_cnt = 0
+        , wa.updt_applctx = reqinfo->updt_applctx
+        , wa.qc_group_id = request->orders[d1.seq]->qc_group_id
+      PLAN d1
+        WHERE request->orders[d1.seq]->order_id = 0.0
+      JOIN wa
+;        WHERE wa.accession_id = request->orders[d1.seq]->accession_id
+      WITH
+        NOCOUNTER
+
+/*******************************************************************/
+/* insert rows into worklist event table                           */
+/*******************************************************************/  
+
+      insert into worklist_event we
+
+      set we.worklist_event_id      = seq(pathnet_seq, nextval),
+          we.worklist_id            = worklist_id,
+          we.event_dt_tm            = cnvtdatetime(curdate, curtime3),
+          we.event_prsnl_id         = if (request->status_cd > 0.0)
+                                        request->worklist_prsnl_id
+                                      else
+                                        reqinfo->updt_id
+                                      endif
+          , we.event_type_flag        = evaluate(request->status_cd, 0.0, 2, 3), ; Set the event type to saved if we're
+                                                                               ; not in an auto-worklist, 
+									       ; and building otherwise
+          we.updt_dt_tm             = cnvtdatetime(curdate, curtime3),
+          we.updt_id                = reqinfo->updt_id,
+          we.updt_task              = reqinfo->updt_task,
+          we.updt_cnt               = 0,
+          we.updt_applctx           = reqinfo->updt_applctx
+
+      with nocounter
+
+/*******************************************************************/
+/* insert rows into worklist order position relationship table     */
+/*******************************************************************/  
+
+      if(request->template_ind > 0)
+
+        ; retrieve a batch of sequences for insert
+        free set new_ids
+        record new_ids
+        (
+          1 qual[*]
+            2 id = f8
+        )
+
+        set lNewIdCount = size(request->positions, 5)
+
+        if(lNewIdCount > 0)
+          execute dm2_dar_get_bulk_seq "new_ids->qual", lNewIdCount, "id", 1, "pathnet_seq"
+        
+          if( m_dm2_seq_stat->n_status != 1)
+            call echo(concat("Sequence retrieval error: ", m_dm2_seq_stat->s_error_msg))
+            go to seq_failed
+          endif
+          
+          call echorecord(new_ids)
+          
+          for(lLoopCount = 1 to lNewIdCount)
+            
+            call echo(build("***********************************loop number:", lLoopCount))
+            
+            insert into worklist_pos_order_r w
+            
+            set w.worklist_pos_order_r_id   = new_ids->qual[lLoopCount].id,
+                w.worklist_id               = worklist_id,
+                w.worklist_ref_pos_id       = request->positions[lLoopCount].position_id,
+                w.active_ind                = 1,
+                w.order_id                  = request->positions[lLoopCount].order_id,
+                w.accession_id              = request->positions[lLoopCount].accession_id,
+                w.accession_sequence        = request->positions[lLoopCount].sequence,
+                w.person_accession_ind      = request->positions[lLoopCount].person_accession_ind,
+                w.updt_dt_tm                = cnvtdatetime(curdate, curtime3),
+                w.updt_id                   = reqinfo->updt_id,
+                w.updt_task                 = reqinfo->updt_task,
+                w.updt_cnt                  = 0,
+                w.updt_applctx              = reqinfo->updt_applctx
+          
+            with nocounter
+            
+            set lErrorCode = error(sErrorMessage, 0)
+            if (lErrorCode > 0)
+              rollback
+              go to wp_insert_failed
+            endif
+          
+          endfor
+        
+        endif     
+        free set new_ids
+
+      endif
+
+
+      GO TO exit_script
+
+#seq_failed
+      SET reply->status_data->subeventstatus[1]->operationname = 
+         "seq"
+      SET reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      SET reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      SET reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "worklist_id"
+      SET failed = "T"
+      GO TO exit_script
+     
+#w_insert_failed
+      SET reply->status_data->subeventstatus[1]->operationname = 
+         "insert"
+      SET reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      SET reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      SET reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "worklist table"
+      SET failed = "T"
+      GO TO exit_script
+
+#we_insert_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "worklist_element table"
+      SET failed = "T"
+      GO TO exit_script
+
+#wo_insert_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "worklist_order_r table"
+      SET failed = "T"
+      GO TO exit_script
+
+#wp_insert_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "worklist_pos_order_r table"
+      SET failed = "T"
+      GO TO exit_script
+      
+#wr_update_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "update"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "worklist_ref"
+      SET failed = "T"
+      GO TO exit_script
+
+#exit_script
+
+      free set worklist_element
+
+      IF (failed = "F")
+         SET reply->status_data->status = "S"
+         ; return worklist_alias in case it was auto assigned
+         set reply->worklist_alias = request->worklist_alias
+         set reqinfo->commit_ind = 1
+      ELSE
+         set reqinfo->commit_ind = 0
+      ENDIF
+      END GO
+
+;Generated by GNU enscript 1.6.4.

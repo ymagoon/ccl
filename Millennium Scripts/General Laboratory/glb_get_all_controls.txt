@@ -1,0 +1,259 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_all_controls/glb_get_all_controls.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_ALL_CONTROLS.PRG
+        Object name:            GLB_GET_ALL_CONTROLS
+        Request #:              257508
+
+        Product:                General Lab/Quality Control
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieves all the control short descriptions
+                                for selecting.
+
+        Tables read:            control_material
+
+        Tables updated:         n/a
+
+        Executing from:         General Build/Maintain QC Material
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 07/03/96 Kevin Brunner        Initial Release                     *
+;     001 09/16/02 Mark Brooks          Added service resource security.    *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_ALL_CONTROLS:dba go
+      create program GLB_GET_ALL_CONTROLS:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 desc_begin                = vc
+         1 desc_end                  = vc
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+         1 controls[*]
+           2 short_description       = vc
+           2 control_id              = f8
+
+%i cclsource:status_block.inc
+      )
+
+      record controlList
+      (
+          1  controls[*]
+              2 short_description       = vc
+              2 control_id              = f8
+              2 lot_id                  = f8
+      )
+
+%i cclsource:pcs_resource_security.inc                                      
+
+     #Script
+      set reply->status_data->status = "F"
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+      declare dServiceResourceCd = f8 with protect, noconstant(0.0)         
+      declare lControlCnt = i4 with protect, noconstant(0)                  
+      declare lRepControlCnt = i4 with protect, noconstant(0)               
+      declare lResCheckCnt = i4  with protect, noconstant(0)                
+      declare lResCheckFailedCnt = i4  with protect, noconstant(0)          
+
+      /*
+         Initialize service resource security
+       */
+      call InitResourceSecurity(1)                                       
+
+      ;***********************************************************************
+      ;* First build list of controls and their most recent lot without      *
+      ;* regard to service resource security                                 *
+      ;***********************************************************************
+      select
+          if (request->desc_begin != "")
+              plan cm
+                  where cm.control_id > 0
+                      and cm.short_description between request->desc_begin
+                      and request->desc_end
+              join cl
+                  where cl.control_id = outerjoin(cm.control_id)
+          else
+              plan cm
+                  where cm.control_id > 0
+              join cl
+                  where cl.control_id = outerjoin(cm.control_id)
+          endif
+      into "nl:"
+      from
+          control_material cm,
+          control_lot cl
+      order by
+          cm.control_id,
+          cl.expiration_dt_tm desc
+
+      head cm.control_id
+          lControlCnt = lControlCnt + 1
+          if (mod(lControlCnt, 10) = 1)
+              stat = alterlist(controlList->controls, lControlCnt + 10)
+          endif
+          controlList->controls[lControlCnt].short_description =
+                  cm.short_description
+          controlList->controls[lControlCnt].control_id = cm.control_id
+          controlList->controls[lControlCnt].lot_id = cl.lot_id
+      detail
+          row+0
+
+      foot report
+          stat = alterlist(controlList->controls, lControlCnt)
+      with nocounter
+
+      if (lControlCnt = 0)
+          go to invalid_control
+      endif
+
+
+
+      ;***********************************************************************
+      ;* Apply resource security to the list of controls before adding them  *
+      ;* to the reply.                                                       *
+      ;***********************************************************************
+      select
+      into "nl:"
+      from
+          (dummyt d1 with seq = value(lControlCnt)),
+          control_material cm,
+          control_lot cl,
+          resource_lot_r rl
+      plan d1
+      join cm
+          where cm.control_id = controlList->controls[d1.seq].control_id
+      join cl
+          where cl.control_id = cm.control_id
+      join rl
+          where rl.lot_id = outerjoin(cl.lot_id)
+
+      order by
+          cm.control_id,
+          rl.service_resource_cd
+
+      head cm.control_id
+          lResCheckCnt = 0
+          lResCheckFailedCnt = 0
+
+      head rl.service_resource_cd
+          dServiceResourceCd = rl.service_resource_cd
+          if (dServiceResourceCd != 0)
+              lResCheckCnt = lResCheckCnt + 1
+              if (IsResourceViewable(dServiceResourceCd) = False)
+                  lResCheckFailedCnt = lResCheckFailedCnt + 1
+              endif
+          endif
+
+      detail
+          row+0
+
+      foot  cm.control_id
+
+          ; If all the resources checked were 0 or if all resources with cd > 0
+          ; did not fail resource security then add  control to reply
+          if ( ((lResCheckCnt != 0) and (lResCheckFailedCnt != lResCheckCnt)) or lResCheckCnt = 0)   
+              lRepControlCnt = lRepControlCnt + 1                               
+              if (mod(lRepControlCnt, 10) = 1)                              
+                  stat = alterlist(reply->controls, lRepControlCnt + 10)    
+              endif                                                         
+              reply->controls[lRepControlCnt]->short_description =
+                      controlList->controls[d1.seq].short_description       
+              reply->controls[lRepControlCnt]->control_id =
+                      controlList->controls[d1.seq].control_id              
+          endif                                                             
+
+      foot report
+          stat = alterlist(reply->controls, lRepControlCnt)                 
+
+      with nocounter                                                        
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+      IF (curqual = 0)
+         go to invalid_control
+      ELSE
+         set reply->status_data->status = "S"
+      ENDIF
+
+      go to exit_script
+
+/********************************************************************/
+/* Executed if requested description is not found.                  */
+/********************************************************************/
+      #invalid_control
+      set reply->status_data->subeventstatus[1]->operationname =
+         "get"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "S"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "control_material table"
+      set reply->status_data->status = "Z"
+
+      go to exit_script
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+      #exit_script
+
+      if ((reply->status_data->status != "F") and
+          (GetResourceSecurityStatus(0) != "S"))                          
+          call PopulateResSecStatusBlock(0)                               
+          set reply->status_data->status = GetResourceSecurityStatus(0)   
+      endif
+
+      free record controlList                                             
+END
+GO
+
+;Generated by GNU enscript 1.6.4.

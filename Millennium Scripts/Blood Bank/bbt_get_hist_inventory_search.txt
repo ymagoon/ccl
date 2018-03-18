@@ -1,0 +1,698 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Scriptinventorysearch/bbt_get_hist_inventory_search.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2002 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_hist_inventory_search.prg
+        Object name:            bbt_get_hist_inventory_search
+        Request #:              225914
+
+        Product:                Pathnet                        
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Retrieve historical inventory items for a search
+                                based on request.
+
+        Tables read:            PRODUCT, BLOOD_PRODUCT, DERIVATIVE, PRODUCT_EVENT,
+        								  SPECIAL_TESTING
+        
+        Tables updated:         <none>
+        
+        Executing from:         Inventory Search
+
+        Special Notes:          <none>
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 12/21/01 John Rieck           Initial Release                     *
+;     001 04/01/04 Jim Jensen           Add performance upgrade putting join*
+;                                       to dummyt after hitting the         *
+;                                       BBHIST_PRODUCT_EVENT table.         *
+;~DE~************************************************************************
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+Drop Program   bbt_get_hist_inventory_search : dba go
+Create Program  bbt_get_hist_inventory_search : dba
+
+
+/***********************************************************************
+*   Request Structure                                                  *
+***********************************************************************/
+
+/*
+Record request
+(
+  1  product_cd			= f8
+  1  abo_cd					= f8
+  1  rh_cd					= f8
+  1  location_cd			= f8
+  1  states_count			= i4
+  1  states_data[*]
+     2  states_cd			= f8
+  1  antigen_count		= i4
+  1  antigen_data[*]
+     2  antigen_cd		= f8
+  1  days_to_expire		= i4
+  1  cur_owner_area_cd	= f8
+  1  cur_inv_area_cd		= f8
+  1  cur_inv_device_id	= f8
+  1  search_type_flag	= i2
+  1  debug_ind				= i2
+)
+*/
+
+
+/***********************************************************************
+*   Reply Structure                                                    *
+***********************************************************************/
+
+Record  Reply
+(
+%i cclsource:bbt_inv_rep_struct.inc
+%i cclsource:status_block.inc
+)
+
+
+/***********************************************************************
+*   Variable Declarations                                              *
+***********************************************************************/
+
+DECLARE product_count			= i2 		WITH noconstant(0)
+DECLARE antigen_count			= i2 		WITH noconstant(0)
+DECLARE states_count			= i2 		WITH noconstant(0)
+DECLARE event_type_cdf			= c12		WITH noconstant(fillstring(12," "))
+DECLARE EVENT_TYPE_CS			= i4 		WITH constant(1610)
+DECLARE transferred_event_cd	= f8		WITH noconstant(0.0)
+DECLARE modified_event_cd		= f8		WITH noconstant(0.0)
+DECLARE received_event_cd		= f8		WITH noconstant(0.0)
+DECLARE shipped_event_cd		= f8		WITH noconstant(0.0)
+DECLARE pooled_event_cd			= f8		WITH noconstant(0.0)
+DECLARE pool_product_event_cd	= f8		WITH noconstant(0.0)
+DECLARE stat					= i2 		WITH noconstant(0)
+DECLARE error_message			= c132 	    WITH noconstant(FILLSTRING(132," "))
+DECLARE error_check 			= i2 		WITH noconstant(ERROR(error_message,1))
+DECLARE sScriptName				= c29 	    WITH constant("BBT_GET_HIST_INVENTORY_SEARCH")
+;DECLARE cnvt_days_to_expire	= q8		WITH noconstant(CNVTDATETIME(curdate,curtime3))
+
+;set cnvt_days_to_expire = datetimeadd(cnvtdatetime(curdate,curtime3), request->days_to_expire)
+set reply->status_data.status = "F"
+
+/***********************************************************************
+*   Select Based On Search Criteria                                    *
+***********************************************************************/
+
+select 
+
+if ((request->search_type_flag = 1) and (request->product_cd = 0.0))
+	; Search all of inventory with NO product category sent in
+		
+	into  "nl:"
+     	hp.product_id
+
+  	from
+		bbhist_product hp
+					
+	plan hp where hp.expire_dt_tm < datetimeadd(cnvtdatetime(curdate,curtime3), request->days_to_expire)
+				 and hp.product_id > 0.0
+				 and hp.active_ind = 1
+
+				 and ((request->cur_owner_area_cd > 0.0
+				   and hp.owner_area_cd = request->cur_owner_area_cd)
+				   or (request->cur_owner_area_cd = 0.0))
+				   
+				 and ((request->cur_inv_area_cd > 0.0
+				   and hp.inv_area_cd = request->cur_inv_area_cd)
+				   or (request->cur_inv_area_cd = 0.0))
+
+				 and ((request->abo_cd > 0.0
+					and hp.abo_cd = request->abo_cd)
+					or (request->abo_cd = 0.0))
+					
+				 and ((request->rh_cd > 0.0
+					and hp.rh_cd = request->rh_cd)
+					or (request->rh_cd = 0.0))
+
+
+elseif ((request->search_type_flag = 1) and (request->product_cd > 0.0))
+	; Search all of inventory with a product category sent in
+		
+	into  "nl:"
+     	hp.product_id
+
+  	from
+  		product_index pi
+		, bbhist_product hp
+					
+	plan pi where pi.product_cat_cd = request->product_cd
+						
+	join hp where hp.product_cd = pi.product_cd
+				 and hp.expire_dt_tm < datetimeadd(cnvtdatetime(curdate,curtime3), request->days_to_expire)
+				 and hp.product_id > 0.0
+				 and hp.active_ind = 1
+
+				 and ((request->cur_owner_area_cd > 0.0
+				   and hp.owner_area_cd = request->cur_owner_area_cd)
+				   or (request->cur_owner_area_cd = 0.0))
+				   
+				 and ((request->cur_inv_area_cd > 0.0
+				   and hp.inv_area_cd = request->cur_inv_area_cd)
+				   or (request->cur_inv_area_cd = 0.0))
+
+				 and ((request->abo_cd > 0.0
+					and hp.abo_cd = request->abo_cd)
+					or (request->abo_cd = 0.0))
+					
+				 and ((request->rh_cd > 0.0
+					and hp.rh_cd = request->rh_cd)
+					or (request->rh_cd = 0.0))						
+						
+						
+elseif ((request->search_type_flag = 2) and (request->product_cd = 0.0))
+	; Search by product event with NO product category sent in
+	
+	into "nl:"
+		hp.product_id
+
+	from
+		bbhist_product hp
+		, (dummyt d_hpe with seq = value(request->states_count))
+		, bbhist_product_event hpe		
+					
+	plan hp where hp.expire_dt_tm < datetimeadd(cnvtdatetime(curdate,curtime3), request->days_to_expire)
+				 and hp.product_id > 0.0
+				 and hp.active_ind = 1
+
+				 and ((request->cur_owner_area_cd > 0.0
+				   and hp.owner_area_cd = request->cur_owner_area_cd)
+				   or (request->cur_owner_area_cd = 0.0))
+				   
+				 and ((request->cur_inv_area_cd > 0.0
+				   and hp.inv_area_cd = request->cur_inv_area_cd)
+				   or (request->cur_inv_area_cd = 0.0))
+
+				 and ((request->abo_cd > 0.0
+					and hp.abo_cd = request->abo_cd)
+					or (request->abo_cd = 0.0))
+					
+				 and ((request->rh_cd > 0.0
+					and hp.rh_cd = request->rh_cd)
+					or (request->rh_cd = 0.0))					      
+	                  
+	join hpe where hpe.product_id = hp.product_id
+               and hpe.active_ind = 1
+	join d_hpe
+	         where request->states_data[d_hpe.seq]->states_cd = hpe.event_type_cd
+
+
+elseif ((request->search_type_flag = 2) and (request->product_cd > 0.0))
+	; Search by product event with a product category sent in
+	
+	into "nl:"
+		hp.product_id
+
+	from
+		product_index pi  
+		, bbhist_product hp
+		, (dummyt d_hpe with seq = value(request->states_count))
+		, bbhist_product_event hpe		
+
+	plan pi where pi.product_cat_cd = request->product_cd
+					
+	join hp where hp.product_cd = pi.product_cd
+				 and hp.expire_dt_tm < datetimeadd(cnvtdatetime(curdate,curtime3), request->days_to_expire)
+				 and hp.product_id > 0.0
+				 and hp.active_ind = 1
+
+				 and ((request->cur_owner_area_cd > 0.0
+				   and hp.owner_area_cd = request->cur_owner_area_cd)
+				   or (request->cur_owner_area_cd = 0.0))
+				   
+				 and ((request->cur_inv_area_cd > 0.0
+				   and hp.inv_area_cd = request->cur_inv_area_cd)
+				   or (request->cur_inv_area_cd = 0.0))
+
+				 and ((request->abo_cd > 0.0
+					and hp.abo_cd = request->abo_cd)
+					or (request->abo_cd = 0.0))
+					
+				 and ((request->rh_cd > 0.0
+					and hp.rh_cd = request->rh_cd)
+					or (request->rh_cd = 0.0))					
+									   
+	join hpe where hpe.product_id = hp.product_id
+               and hpe.active_ind = 1
+	join d_hpe 
+	         where request->states_data[d_hpe.seq]->states_cd = hpe.event_type_cd
+
+
+elseif ((request->search_type_flag = 3) and (request->product_cd = 0.0))
+	; Search by antigen with NO product category sent in
+	
+	into  "nl:"
+		hp.product_id
+
+	from  
+		(dummyt d_hst with seq = value(request->antigen_count))
+		, bbhist_special_testing hst
+		, bbhist_product hp
+
+	plan d_hst
+	  
+	join hst where hst.special_testing_cd = request->antigen_data[d_hst.seq]->antigen_cd
+				  and hst.product_id > 0.0
+				  and hst.active_ind = 1
+				 
+	join hp where hp.product_id = hst.product_id
+				 and hp.expire_dt_tm < datetimeadd(cnvtdatetime(curdate,curtime3), request->days_to_expire)
+				 and hp.active_ind = 1
+
+				 and ((request->cur_owner_area_cd > 0.0
+				   and hp.owner_area_cd = request->cur_owner_area_cd)
+				   or (request->cur_owner_area_cd = 0.0))
+				   
+				 and ((request->cur_inv_area_cd > 0.0
+				   and hp.inv_area_cd = request->cur_inv_area_cd)
+				   or (request->cur_inv_area_cd = 0.0))
+
+				 and ((request->abo_cd > 0.0
+					and hp.abo_cd = request->abo_cd)
+					or (request->abo_cd = 0.0))
+					
+				 and ((request->rh_cd > 0.0
+					and hp.rh_cd = request->rh_cd)
+					or (request->rh_cd = 0.0))					
+
+
+elseif ((request->search_type_flag = 3) and (request->product_cd > 0.0))
+	; Search by antigen with a product category sent in
+	
+	into  "nl:"
+		hp.product_id
+
+	from  
+		(dummyt d_hst with seq = value(request->antigen_count))
+		, bbhist_special_testing hst
+		, bbhist_product hp
+		, product_index pi
+
+	plan d_hst
+	  
+	join hst where hst.special_testing_cd = request->antigen_data[d_hst.seq]->antigen_cd
+				  and hst.product_id > 0.0
+				  and hst.active_ind = 1
+				 
+	join hp where hp.product_id = hst.product_id
+				 and hp.expire_dt_tm < datetimeadd(cnvtdatetime(curdate,curtime3), request->days_to_expire)
+				 and hp.active_ind = 1
+
+				 and ((request->cur_owner_area_cd > 0.0
+				   and hp.owner_area_cd = request->cur_owner_area_cd)
+				   or (request->cur_owner_area_cd = 0.0))
+				   
+				 and ((request->cur_inv_area_cd > 0.0
+				   and hp.inv_area_cd = request->cur_inv_area_cd)
+				   or (request->cur_inv_area_cd = 0.0))
+
+				 and ((request->abo_cd > 0.0
+					and hp.abo_cd = request->abo_cd)
+					or (request->abo_cd = 0.0))
+					
+				 and ((request->rh_cd > 0.0
+					and hp.rh_cd = request->rh_cd)
+					or (request->rh_cd = 0.0))					
+
+	join pi where pi.product_cd = hp.product_cd
+				 and pi.product_cat_cd = request->product_cd
+
+		
+elseif ((request->search_type_flag = 4) and (request->product_cd = 0.0))
+	; Search by product event and antigen with NO product category sent in
+
+	into  "nl:"
+		hp.product_id
+
+	from  
+		(dummyt d_hst with seq = value(request->antigen_count))
+		, bbhist_special_testing hst
+		, (dummyt d_hpe with seq = value(request->states_count))
+		, bbhist_product_event hpe
+		, bbhist_product hp
+
+	plan d_hst
+	
+	join hst where hst.special_testing_cd = request->antigen_data[d_hst.seq]->antigen_cd
+				  and hst.product_id > 0.0
+				  and hst.active_ind = 1
+
+	join hpe where hpe.product_id = hst.product_id
+				  and hpe.active_ind = 1
+
+    join d_hpe
+             where request->states_data[d_hpe.seq]->states_cd = hpe.event_type_cd
+   
+	join hp where hp.product_id = hpe.product_id
+				 and hp.expire_dt_tm < datetimeadd(cnvtdatetime(curdate,curtime3), request->days_to_expire)
+				 and hp.active_ind = 1
+				   
+				 and ((request->cur_owner_area_cd > 0.0
+				   and hp.owner_area_cd = request->cur_owner_area_cd)
+				   or (request->cur_owner_area_cd = 0.0))
+				   
+				 and ((request->cur_inv_area_cd > 0.0
+				   and hp.inv_area_cd = request->cur_inv_area_cd)
+				   or (request->cur_inv_area_cd = 0.0))
+
+				 and ((request->abo_cd > 0.0
+					and hp.abo_cd = request->abo_cd)
+					or (request->abo_cd = 0.0))
+					
+				 and ((request->rh_cd > 0.0
+					and hp.rh_cd = request->rh_cd)
+					or (request->rh_cd = 0.0))						
+
+
+else ;((request->search_type_flag = 4) and (request->product_cd > 0.0))
+	; Search by product event and antigen with a product category sent in
+
+	into  "nl:"
+		hp.product_id
+
+	from  
+		(dummyt d_hst with seq = value(request->antigen_count))
+		, bbhist_special_testing hst
+		, (dummyt d_hpe with seq = value(request->states_count))
+		, bbhist_product_event hpe
+		, bbhist_product hp
+		, product_index pi
+
+	plan d_hst
+	
+	join hst where hst.special_testing_cd = request->antigen_data[d_hst.seq]->antigen_cd
+				  and hst.product_id > 0.0
+				  and hst.active_ind = 1
+
+	join hpe where hpe.product_id = hst.product_id
+				  and hpe.active_ind = 1
+
+    join d_hpe
+             where request->states_data[d_hpe.seq]->states_cd = hpe.event_type_cd
+   
+	join hp where hp.product_id = hpe.product_id
+				 and hp.expire_dt_tm < datetimeadd(cnvtdatetime(curdate,curtime3), request->days_to_expire)
+				 and hp.active_ind = 1
+				   
+				 and ((request->cur_owner_area_cd > 0.0
+				   and hp.owner_area_cd = request->cur_owner_area_cd)
+				   or (request->cur_owner_area_cd = 0.0))
+				   
+				 and ((request->cur_inv_area_cd > 0.0
+				   and hp.inv_area_cd = request->cur_inv_area_cd)
+				   or (request->cur_inv_area_cd = 0.0))
+
+				 and ((request->abo_cd > 0.0
+					and hp.abo_cd = request->abo_cd)
+					or (request->abo_cd = 0.0))
+					
+				 and ((request->rh_cd > 0.0
+					and hp.rh_cd = request->rh_cd)
+					or (request->rh_cd = 0.0))
+
+	join pi where pi.product_cd = hp.product_cd
+				 and pi.product_cat_cd = request->product_cd
+		
+endif
+
+
+order by hp.product_id
+
+head report
+	product_count = 0
+	stat = alterlist(reply->qual,50)
+
+head hp.product_id
+	product_count = product_count  + 1
+		
+	if (mod(product_count,50) = 1)    
+		stat = alterlist (reply->qual,product_count+49)
+	endif
+		
+	reply->qual[product_count].product_id					= hp.product_id
+	reply->qual[product_count].product_number				= concat(trim(hp.supplier_prefix),
+																		  			trim(hp.product_nbr))	
+	reply->qual[product_count].product_sub					= hp.product_sub_nbr
+	reply->qual[product_count].abo_cd						= hp.abo_cd
+	reply->qual[product_count].rh_cd						= hp.rh_cd
+	reply->qual[product_count].product_cd					= hp.product_cd
+	reply->qual[product_count].exp_dt_tm					= hp.expire_dt_tm
+	reply->qual[product_count].unit_of_meas_cd			    = hp.unit_meas_cd
+	reply->qual[product_count].volume_display				= hp.volume
+	reply->qual[product_count].comment_ind      			= 0	
+	reply->qual[product_count].cur_owner_area_cd			= hp.owner_area_cd
+	reply->qual[product_count].cur_inv_area_cd  			= hp.inv_area_cd
+	reply->qual[product_count].alt_id_display   			= hp.alternate_nbr
+	reply->qual[product_count].electronic_entry_flag		= 0
+	; Reply fields in addition to the reply include file
+	reply->qual[product_count].contributor_system_cd	    = hp.contributor_system_cd
+	reply->qual[product_count].cross_reference  			= hp.cross_reference
+	reply->qual[product_count].upload_dt_tm   		 	    = hp.upload_dt_tm
+	
+foot hp.product_id
+	row+0					
+
+foot report
+	stat = alterlist(reply->qual, product_count)
+
+with nocounter	
+
+
+/***********************************************************************
+*   Select Error Checking                                              *
+***********************************************************************/
+
+set error_check = ERROR(error_message,0)   ;get error message
+
+if (error_check = 0)
+   if (CURQUAL = 0)
+      set reply->status_data.status = "Z"
+   else
+      set reply->status_data.status = "S"   
+   endif
+else
+   call ErrorHandler(sScriptName,
+   						"F",
+   						"BBHIST_PRODUCT select",
+   						error_message)
+   go to EXIT_SCRIPT   						
+endif
+
+; Now that a list of products has been retrieved based on the search criteria,
+; retrieve all antigens, events, and product notes for each product.
+
+
+/***********************************************************************
+*   Retrieve Antigens                                                  *
+***********************************************************************/
+
+if (product_count > 0)
+	select into  "nl:"
+		hst.special_testing_cd
+	
+	from 
+		(dummyt d with seq = value(product_count))
+		, bbhist_special_testing hst
+	
+	plan d
+		
+	join hst where hst.product_id = reply->qual[d.seq].product_id
+				  and hst.active_ind = 1
+	
+	order by hst.product_id
+	
+	head hst.product_id
+		antigen_count = 0
+		stat = alterlist(reply->qual[d.seq].antigens,5)		   
+	
+	detail 
+		antigen_count = antigen_count + 1
+			
+		if (mod(antigen_count,5) = 1)    
+			stat = alterlist (reply->qual[d.seq].antigens,antigen_count+4)
+		endif
+							
+		reply->qual[d.seq].antigens[antigen_count].antigen_cd = hst.special_testing_cd
+		
+	foot hst.product_id
+		stat = alterlist(reply->qual[d.seq].antigens,antigen_count)
+	
+	with nocounter
+	
+	
+	/***********************************************************************
+	*   Antigen Select Error Checking                                      *
+	***********************************************************************/
+	
+	set error_check = ERROR(error_message,0)   ;get error message
+	
+	if (error_check != 0)
+	   call ErrorHandler(sScriptName,
+	   						"F",
+	   						"BBHIST_SPECIAL_TESTING select",
+	   						error_message)
+      go to EXIT_SCRIPT	   						
+	else
+      set reply->status_data.status = "S"	
+	endif
+	
+	select into  "nl:"
+		hpe.event_type_cd
+	
+	from  
+		(dummyt d with seq = value(product_count))
+		, bbhist_product_event hpe
+	
+	plan d
+				
+	join hpe where hpe.product_id = reply->qual[d.seq].product_id 
+	 			  and hpe.active_ind = 1               
+	
+	head hpe.product_id
+		states_count = 0
+		stat = alterlist(reply->qual[d.seq].states,5)
+	
+	head hpe.event_type_cd
+		states_count = states_count + 1
+
+      if (mod(states_count,5) = 1)
+			stat = alterlist(reply->qual[d.seq].states,states_count+4)
+		endif
+			
+		reply->qual[d.seq].states[states_count].states_cd = hpe.event_type_cd
+	
+	foot hpe.product_id
+		stat = alterlist(reply->qual[d.seq].states, states_count)
+	
+	with nocounter
+	
+
+	/***********************************************************************
+	*   Event Select Error Checking                                        *
+	***********************************************************************/
+	
+	set error_check = ERROR(error_message,0)   ;get error message
+	
+	if (error_check != 0)
+	   call ErrorHandler(sScriptName,
+	   						"F",
+	   						"BBHIST_PRODUCT_EVENT select",
+	   						error_message)
+      go to EXIT_SCRIPT	   						
+	else
+      set reply->status_data.status = "S"	
+	endif
+		
+	/***********************************************************************
+	*   Retrieve Product Notes                                             *
+	***********************************************************************/
+	
+	select into  "nl:"
+		pn.product_id
+		, pn.active_ind
+	
+	from 
+		(dummyt d with seq = value(product_count))
+		, product_note pn
+	
+	plan d 
+	
+	join pn where pn.bbhist_product_id = reply->qual[d.seq]->product_id
+				 and pn.active_ind = 1
+	
+	order pn.bbhist_product_id
+	
+	detail
+		reply->qual[d.seq]->comment_ind = 1
+	
+	with nocounter
+	
+
+	/***********************************************************************
+	*   Product Note Select Error Checking                                 *
+	***********************************************************************/
+	
+	set error_check = ERROR(error_message,0)   ;get error message
+	
+	if (error_check != 0)
+	   call ErrorHandler(sScriptName,
+	   						"F",
+	   						"PRODUCT_NOTE select",
+	   						error_message)
+      go to EXIT_SCRIPT	   						
+	else
+      set reply->status_data.status = "S"	
+	endif	
+
+endif
+
+
+/***********************************************************************
+*   SUBROUTINE ErrorHandler                                            *
+***********************************************************************/
+
+DECLARE ErrorHandler(OperationName = c25,
+							OperationStatus = c1,
+							TargetObjectName = c25,
+							TargetObjectValue = vc) = NULL
+
+SUBROUTINE ErrorHandler(OperationName,
+								OperationStatus,
+								TargetObjectName,
+								TargetObjectValue)
+
+	set reply->status_data.status = "F"
+	set reply->status_data.subeventstatus[1].OperationName = OperationName
+	set reply->status_data.subeventstatus[1].OperationStatus = OperationStatus
+	set reply->status_data.subeventstatus[1].TargetObjectName = TargetObjectName
+	set reply->status_data.subeventstatus[1].TargetObjectValue = TargetObjectValue
+
+END
+
+
+/***********************************************************************
+*   Exit Script                                                        *
+***********************************************************************/
+#EXIT_SCRIPT
+
+if (request->debug_ind = 1)
+	call ECHORECORD(Request)
+	call ECHORECORD(Reply)
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

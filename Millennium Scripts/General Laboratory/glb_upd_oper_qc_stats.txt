@@ -1,0 +1,652 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_upd_oper_qc_stats/glb_upd_oper_qc_stats.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_UPD_OPER_QC_STATS.PRG
+        Object name:            GLB_UPD_OPER_QC_STATS
+        Request #:              257541
+
+        Product:                General Lab - Quality Control           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Calculate statistics for a given time period
+                                to be run out of operations
+
+        Tables read:            n/a
+
+        Tables updated:         qc_stat_period
+
+        Executing from:         General Lab QC Inquiry
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 01/06/97 Chad Moats           Initial Release                     *
+;    *001 12/12/97 Kevin Brunner        Add auto verify logic               *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_UPD_OPER_QC_STATS:dba go    
+      create program GLB_UPD_OPER_QC_STATS:dba
+     
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1  Batch_Selection              = vc
+         1  Output_Dist                  = vc
+         1  Ops_Date                     = dq8
+      )
+
+record reqinfo
+( 1 commit_ind  = i2
+  1 updt_id     = f8
+  1 position_cd = f8
+  1 updt_app    = i4
+  1 updt_task   = i4
+  1 updt_req    = i4
+  1 updt_applctx= i4
+)
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      ( 
+         1 status_data
+           2 status                = c1
+           2 subeventstatus[1]
+             3 OperationName       = c15
+             3 OperationStatus     = c1
+             3 TargetObjectName    = c15
+             3 TargetObjectValue   = vc
+      )
+
+/********************************************************************/
+/*  HoldStat Record - this is will hold the rows to be added to     */
+/*                    the table                                     */
+/********************************************************************/
+
+      record holdstats
+      ( 
+         1 stats[*]
+           2 control_id         = f8
+           2 service_resource_cd = f8
+           2 lot_id             = f8
+           2 lot_number         = vc
+           2 task_assay_cd      = f8
+           2 mnemonic           = vc
+           2 sum_of_results     = f8
+           2 sum_of_squares     = f8
+           2 count              = i4
+           2 expected_mean      = f8
+           2 expected_std_dev   = f8
+           2 alpha_flag         = i2
+           2 mean               = f8
+           2 std_dev            = f8
+           2 co_var             = f8
+           2 fval               = f8
+           2 zstat              = f8
+           2 normal_cnt         = i4
+           2 abnormal_cnt       = i4
+           2 review_cnt         = i4
+           2 arl_id		= f8
+           2 procs[*]
+             3 qc_result_id             = f8
+             3 perform_dt_tm            = dq8
+             3 result_type_cd           = f8
+             3 result_value_numeric     = f8
+             3 result_value_alpha       = vc       
+      )
+
+
+
+/********************************************************************/
+/*  cumrec Record                                                      */
+/********************************************************************/
+      record cumrec
+      (                                       
+         1 cums[*]
+           2 cum_sequence                 = i4
+           2 control_id                   = f8
+           2 service_resource_cd          = f8
+           2 control_name                 = c25
+           2 task_assay_cd                = f8
+           2 mnemonic                     = vc
+           2 lot_id                       = f8
+           2 lot_number                   = vc
+           2 lot_sequence                 = i4
+           2 cum_mean                     = f8
+           2 cum_sum_sqr                  = f8
+           2 cum_count                    = i4
+           2 expected_mean                = f8
+           2 expected_std_dev             = f8
+           2 normal_cnt                   = i4
+           2 abnormal_cnt                 = i4
+           2 review_cnt                   = i4
+       )
+
+
+     #Script
+      set failed = "F"
+      set reply->status_data->status = "F"
+      set s_cnt = 0
+      set x = 0
+      set RESULT_STATUS_CODESET       = 1901
+      set RESULT_STATUS_ACCEPT_CDF    = "ACCEPT"
+      set RESULT_STATUS_VERIFIED_CDF  = "VERIFIED"
+      set RESULT_STATUS_AUTO_VERF_CDF = "AUTOVERIFIED"  ;001
+      set RESULT_STATUS_REVIEWED_CDF = "REVIEWED"
+      set RESULT_STATUS_CORRECTED_CDF = "CORRECTED"
+      set RESULT_STATUS_CHANGED_CDF = "CHANGE"
+      set RESULT_STATUS_REJECTED_CDF = "REJECT"
+      declare ALPHA_CD = f8
+      declare NUMERIC_CD = f8
+      declare WITHIN_RANGE_CD = f8
+      declare ALP_NORMAL_CD = f8
+      declare ALP_ABNORMAL_CD = f8
+      declare ALP_REVIEW_CD = f8
+      declare result_status_accept_cd = f8
+      declare result_status_reviewed_cd  = f8
+      declare result_status_verified_cd  = f8
+      declare result_status_auto_verf_cd = f8  ;001
+      declare result_status_corrected_cd = f8
+      declare result_status_changed_cd = f8
+      declare result_status_rejected_cd = f8
+      declare nbr_days = i4
+      declare value = f8
+      declare mean = f8
+      declare std_dev = f8
+      declare variance1 = f8
+      declare variance2 = f8
+      declare cum_mean = f8 with protect, noconstant(0.0)
+      declare cum_std_dev = i4
+      set cum_std_dev = 0.0
+      set cum_cnt = 0
+      set lot_cnt = 0
+      set p_cnt = 0
+      set proc_cnt = 0
+      set mean = 0.00
+      set count = 0.0
+      set std_dev = 0.00
+      set variance1 = 0.00
+      set variance2 = 0.00
+      set value = 0.00
+      set stat_id = 0.0
+      declare currentmonth = c3
+      declare prevmonth = c3
+      declare currentyear = c4
+      declare prevyear = c4
+
+ /***********************************************************************
+ * Load code values                                                     *
+ ***********************************************************************/
+
+      SELECT 
+       into "nl:"
+         c.code_value
+      FROM
+         code_value c
+      WHERE 
+         (c.code_set = 289) or (c.code_set = 1902) and
+         c.cdf_meaning in ("2",
+                           "3",
+                           "WITHIN_RANGE",
+                           "ALP_NORMAL",
+                           "ALP_ABNORMAL",
+                           "ALP_REVIEW")
+         detail
+            case ( c.cdf_meaning )
+              of "2":
+                 ALPHA_CD = c.code_value
+              of "3":
+                 NUMERIC_CD = c.code_value
+              of "WITHIN_RANGE":
+                 WITHIN_RANGE_CD = c.code_value
+              of "ALP_NORMAL":
+                 ALP_NORMAL_CD = c.code_value
+              of "ALP_ABNORMAL":
+                 ALP_ABNORMAL_CD = c.code_value
+              of "ALP_REVIEW":
+                 ALP_REVIEW_CD = c.code_value
+            endcase
+      WITH
+         format,
+         nocounter
+
+ /***********************************************************************
+ * Load result status code set                                          *
+ ***********************************************************************/
+      select into "nl:"
+        cv.code_set,
+        cv.code_value
+
+      from code_value cv
+
+      where cv.code_set = RESULT_STATUS_CODESET
+      and cv.cdf_meaning in ( RESULT_STATUS_ACCEPT_CDF,
+                              RESULT_STATUS_REVIEWED_CDF,
+                              RESULT_STATUS_VERIFIED_CDF,
+                              RESULT_STATUS_AUTO_VERF_CDF,  ;001
+                              RESULT_STATUS_CHANGED_CDF,
+                              RESULT_STATUS_CORRECTED_CDF, 
+                              RESULT_STATUS_REJECTED_CDF ) 
+
+         detail
+            case ( cv.cdf_meaning )
+              of RESULT_STATUS_ACCEPT_CDF:
+                 result_status_accept_cd = cv.code_value
+              of RESULT_STATUS_REVIEWED_CDF:
+                 result_status_reviewed_cd = cv.code_value
+              of RESULT_STATUS_VERIFIED_CDF:
+                 result_status_verified_cd = cv.code_value
+              of RESULT_STATUS_AUTO_VERF_CDF:  ;001
+                 result_status_auto_verf_cd = cv.code_value  ;001
+              of RESULT_STATUS_CORRECTED_CDF:
+                 result_status_corrected_cd = cv.code_value
+              of RESULT_STATUS_CHANGED_CDF:
+                 result_status_changed_cd = cv.code_value
+              of RESULT_STATUS_REJECTED_CDF:
+                 result_status_rejected_cd = cv.code_value
+            endcase
+
+         with nocounter
+
+    if (trim(request->Batch_Selection) > " ")
+        set nbr_days = cnvtreal(trim(request->Batch_Selection))  
+        if (nbr_days < 1 or nbr_days > 365)
+            set reply->status_data->status = "F"                                 
+            set reply->status_data->subeventstatus[1]->operationname = "select" 
+            set reply->status_data->subeventstatus[1]->operationstatus = "F" 
+            set reply->status_data->subeventstatus[1]->targetobjectname = "Invalid Batch Selection" 
+            set reply->status_data->subeventstatus[1]->targetobjectvalue =          
+                                "The number of days must be between 1 and 365."  
+            go to exit_script      
+        endif
+        set enddate = cnvtdatetime(request->Ops_Date)
+        set nbr_days = nbr_days * -1
+        set begindate = datetimeadd(enddate, nbr_days)
+
+    else
+
+;        SET VAL_DT_TM = CNVTDATETIME(curdate,curtime) ; value that is dt_tm
+        set val_dt_tm = cnvtdatetime(request->Ops_Date)
+        SET TDATE1 = FORMAT(VAL_DT_TM, "YYYY/MM/DD;;D")     ; isolate just the date
+        SET CCDATE=CNVTDATE2(TDATE1,"YYYY/MM/DD")
+
+        ; could also use MONTH() and YEAR() functions
+        set cmonth = FORMAT(CNVTINT(SUBSTRING(1,2,FORMAT(CCDATE,"MMDDYY;;D"))),"##;P0")
+        set pmonth = FORMAT(CNVTINT(SUBSTRING(1,2,FORMAT(CCDATE,"MMDDYY;;D"))) - 1,"##;P0")
+
+        case (cmonth)
+          of "01":
+             set currentmonth = format("JAN","###")
+          of "02":
+             set currentmonth = format("FEB","###")
+          of "03":
+             set currentmonth = format("MAR","###")
+          of "04":
+             set currentmonth = format("APR","###")
+          of "05":
+             set currentmonth = format("MAY","###")
+          of "06":
+             set currentmonth = format("JUN","###")
+          of "07":
+             set currentmonth = format("JUL","###")
+          of "08":
+             set currentmonth = format("AUG","###")
+          of "09":
+             set currentmonth = format("SEP","###")
+          of "10":
+             set currentmonth = format("OCT","###")
+          of "11":
+             set currentmonth = format("NOV","###")
+          of "12":
+             set currentmonth = format("DEC","###")
+        endcase
+
+        case (pmonth)
+          of "01":
+             set prevmonth = format("JAN","###")
+          of "02":
+             set prevmonth = format("FEB","###")
+          of "03":
+             set prevmonth = format("MAR","###")
+          of "04":
+             set prevmonth = format("APR","###")
+          of "05":
+             set prevmonth = format("MAY","###")
+          of "06":
+             set prevmonth = format("JUN","###")
+          of "07":
+             set prevmonth = format("JUL","###")
+          of "08":
+             set prevmonth = format("AUG","###")
+          of "09":
+             set prevmonth = format("SEP","###")
+          of "10":
+             set prevmonth = format("OCT","###")
+          of "11":
+             set prevmonth = format("NOV","###")
+          of "12":
+             set prevmonth = format("DEC","###")
+        endcase
+
+
+        SET currentyear = SUBSTRING(1,4,FORMAT(CCDATE,"YYYYMMDD;;D"))
+
+        ; adjust for dec-jan overlap
+        IF (pmonth="00") 
+           set prevmonth = format("DEC","###") 
+           set prevyear=FORMAT(CNVTINT(currentyear) - 1, "####;P0")
+           set bdate = concat("01-",prevmonth,"-",prevyear," 00:00")
+           set edate = concat("01-",currentmonth,"-",currentyear," 00:00")
+        else 
+           SET bdate = CONCAT("01-",prevmonth,"-",currentyear," 00:00")
+           set edate = concat("01-",currentmonth,"-",currentyear," 00:00")
+        ENDIF
+        
+        SET begindate=cnvtdatetime(bdate)
+        SET enddate=cnvtdatetime(edate)
+
+    endif
+ 
+/********************************************************************/ 
+/* SELECT QC RESULTS                                                */
+/********************************************************************/
+
+    SELECT 
+       into "nl:"
+         c.lot_id,
+         c.lot_number,
+         arl.task_assay_cd,
+         q.qc_result_id,
+         q.task_assay_cd,
+         q.lot_id,
+         dta.task_assay_cd
+       FROM
+         control_lot c,     
+         assay_resource_lot arl,
+         qc_result q,   
+         discrete_task_assay dta
+       PLAN c
+        where ((c.receive_dt_tm between cnvtdatetime(begindate) and cnvtdatetime(enddate)) or
+        (c.expiration_dt_tm between cnvtdatetime(begindate) and cnvtdatetime(enddate)) or
+        (c.receive_dt_tm < cnvtdatetime(begindate) and c.expiration_dt_tm > cnvtdatetime(enddate)))
+       JOIN arl
+        where arl.lot_id = c.lot_id  ;rlr.lot_id and
+       
+       JOIN q
+         where q.arl_id = arl.arl_id and
+               q.task_assay_cd = arl.task_assay_cd and
+               q.control_id = c.control_id  and
+               q.service_resource_cd = arl.service_resource_cd and
+               ((q.perform_dt_tm between cnvtdatetime(begindate) and cnvtdatetime(enddate)) or
+               q.perform_dt_tm = cnvtdatetime(begindate) or q.perform_dt_tm = cnvtdatetime(enddate)) and
+               q.result_status_cd in ( result_status_accept_cd,
+                                       result_status_verified_cd,
+                                       result_status_auto_verf_cd,  ;001
+                                       result_status_reviewed_cd,
+                                       result_status_changed_cd,
+                                       result_status_corrected_cd,
+                                       result_status_rejected_cd)
+       JOIN dta
+         where dta.task_assay_cd = q.task_assay_cd
+       ORDER BY 
+         c.lot_id,
+         arl.service_resource_cd,
+         q.task_assay_cd
+      HEAD c.lot_id
+           lot_cnt = lot_cnt + 1
+           call echo("lot = ",0)
+           call echo(c.lot_id,0)
+           call echo(" ", 1)
+      HEAD arl.service_resource_cd
+           row + 0
+      HEAD arl.task_assay_cd
+           cum_cnt = cum_cnt + 1
+           s_cnt = cum_cnt
+           cum_mean = 0.0
+           cum_sum_sqr = 0.0
+           cum_count = 0
+           normal_cnt = 0
+           abnormal_cnt = 0
+           review_cnt = 0
+
+           call echo("  task_assay = ",0)
+           call echo(q.task_assay_cd,0)
+           call echo(" ", 1)
+
+       DETAIL
+;         for (x = 1 to cum_cnt)
+             if (q.result_type_cd != alpha_cd)               
+                cum_mean = cum_mean + q.result_value_numeric 
+                cum_sum_sqr = cum_sum_sqr + q.result_value_numeric ** 2
+                cum_count = cum_count + 1
+             else
+               cum_count = cum_count + 1
+               if (q.result_process_cd = ALP_NORMAL_CD or q.result_process_cd = WITHIN_RANGE_CD)
+                 normal_cnt = normal_cnt + 1
+               elseif (q.result_process_cd = ALP_ABNORMAL_CD)
+                 abnormal_cnt = abnormal_cnt + 1
+               elseif (q.result_process_cd = ALP_REVIEW_CD)
+                 review_cnt = review_cnt + 1
+               endif
+             endif
+ ;          endif
+ ;        endfor
+       FOOT arl.task_assay_cd
+           if (mod(s_cnt,5) = 1)
+              stat =  alterlist(holdstats->stats,s_cnt + 5)
+           endif    
+           holdstats->stats[cum_cnt].task_assay_cd = arl.task_assay_cd
+           holdstats->stats[cum_cnt].control_id = c.control_id
+           holdstats->stats[cum_cnt].service_resource_cd = arl.service_resource_cd
+           holdstats->stats[cum_cnt].arl_id = arl.arl_id
+           holdstats->stats[cum_cnt].lot_id = c.lot_id
+           holdstats->stats[cum_cnt].expected_mean = q.mean
+           holdstats->stats[cum_cnt].expected_std_dev = q.statistical_std_dev
+           if (q.result_type_cd != alpha_cd)
+             value = 0
+             count = cum_count
+             holdstats->stats[s_cnt].count = count
+;        CALL ECHO("    count = ", 0)
+;        CALL ECHO(", ", 0)
+;        CALL ECHO(count, 0)
+;        CALL ECHO(", ", 1)
+               holdstats->stats[s_cnt].sum_of_results = cum_mean
+;        CALL ECHO("    cum_mean = ", 0)
+;        CALL ECHO(", ", 0)
+;        CALL ECHO(cum_mean, 0)
+;        CALL ECHO(", ", 1)
+               holdstats->stats[s_cnt].sum_of_squares = cum_sum_sqr
+;        CALL ECHO("    sum sqr = ", 0)
+;        CALL ECHO(", ", 0)
+;        CALL ECHO(cum_sum_sqr, 0)
+;        CALL ECHO(", ", 1)
+               holdstats->stats[s_cnt].mean = round(cum_mean / count,2)
+;        CALL ECHO("    mean = ", 0)
+;        CALL ECHO(", ", 0)
+;        CALL ECHO(holdstats->stats[s_cnt].mean, 0)
+;        CALL ECHO(", ", 1)
+               stddev = (cum_sum_sqr - (cum_mean **2)/count)/(count-1)
+               stddev = stddev ** 0.5
+               holdstats->stats[s_cnt].std_dev = round(stddev,2)
+;        CALL ECHO("    std_dev = ", 0)
+;        CALL ECHO(", ", 0)
+;        CALL ECHO(holdstats->stats[s_cnt].std_dev, 0)
+;        CALL ECHO(", ", 1)
+               holdstats->stats[s_cnt].co_var = round((stddev / holdstats->stats[s_cnt].mean) * 100,2)
+;        CALL ECHO("    co_var = ", 0)
+;        CALL ECHO(", ", 0)
+;        CALL ECHO(holdstats->stats[s_cnt].co_var, 0)
+;        CALL ECHO(", ", 1)
+               variance1 = q.statistical_std_dev ** 2
+               variance2 = stddev ** 2
+               if (variance1 > variance2)
+                 holdstats->stats[s_cnt].fval = round(variance1 / variance2,2)
+               else
+                 holdstats->stats[s_cnt].fval = round(variance2 / variance1,2)
+               endif
+        CALL ECHO("    fval = ", 0)
+        CALL ECHO(", ", 0)
+        CALL ECHO(holdstats->stats[s_cnt].fval, 0)
+        CALL ECHO(", ", 1)
+
+               value = cum_mean / count - q.mean
+               holdstats->stats[s_cnt].zstat = round(value / q.statistical_std_dev,2)
+           else  
+             holdstats->stats[s_cnt].alpha_flag = 1
+             holdstats->stats[s_cnt].count = cum_count
+             holdstats->stats[s_cnt].normal_cnt = normal_cnt
+             holdstats->stats[s_cnt].abnormal_cnt = abnormal_cnt
+             holdstats->stats[s_cnt].review_cnt = review_cnt
+           endif
+;         endfor
+       WITH
+         nocounter
+        CALL ECHO("    cum_cnt = ", 0)
+        CALL ECHO(cum_cnt, 0)
+        CALL ECHO(", ", 1)
+
+
+/*******************************************************************/
+/* Get new stat_id.                                                 */
+/*******************************************************************/
+      for (x=1 to cum_cnt)
+        SELECT 
+          into "nl:"
+            y = seq(reference_seq,nextval) "##################;rp0"
+        FROM 
+          dual
+        DETAIL
+          stat_id = cnvtreal(y)
+          ;reply->lot_id = lot_id
+        WITH
+          format, counter
+        if (curqual = 0)
+          go to seq_failed
+        endif
+
+/********************************************************************/
+/* Insert row into qc_stat_period table.                           */
+/*******************************************************************/
+
+       INSERT
+           into qc_stat_period qsp
+       SET
+          qsp.qc_stat_id         = stat_id,
+          qsp.lot_id             = holdstats->stats[x].lot_id,
+          qsp.qc_stat_type_cd    = 0,   ;?????????
+          qsp.control_id         = holdstats->stats[x].control_id,
+          qsp.service_resource_cd = holdstats->stats[x].service_resource_cd,
+          qsp.service_resource_group_ind = 0,
+          qsp.task_assay_cd      = holdstats->stats[x].task_assay_cd,
+          qsp.beg_dt_tm          = cnvtdatetime(begindate),
+          qsp.end_dt_tm          = cnvtdatetime(enddate),
+          qsp.sum_of_results     = holdstats->stats[x].sum_of_results,
+          qsp.sum_of_squares     = holdstats->stats[x].sum_of_squares,
+          qsp.result_cnt         = holdstats->stats[x].count,
+          qsp.mean               = holdstats->stats[x].mean,
+          qsp.std_dev            = holdstats->stats[x].std_dev,
+          qsp.co_var             = holdstats->stats[x].co_var,
+          qsp.f_val              = holdstats->stats[x].fval,
+          qsp.z_stat             = holdstats->stats[x].zstat,
+          qsp.normal_cnt         = holdstats->stats[x].normal_cnt,
+          qsp.abnormal_cnt       = holdstats->stats[x].abnormal_cnt,
+          qsp.review_cnt         = holdstats->stats[x].review_cnt,
+          qsp.arl_id             = holdstats->stats[x].arl_id,
+          qsp.results_inc_flag   = 0,
+          qsp.ops_ind            = 1,
+          qsp.frequency_flag     = 1,  ;frequency flag: 1 = monthly
+          qsp.updt_dt_tm         = cnvtdatetime(curdate,curtime),
+          qsp.updt_cnt           = 0,
+          qsp.updt_task          = reqinfo->updt_task,
+          qsp.updt_id            = reqinfo->updt_id,
+          qsp.updt_applctx       = reqinfo->updt_applctx
+        WITH
+           nocounter
+     
+        if (curqual = 0)
+          go to qsp_insert_failed
+        endif     
+      endfor
+
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if sequence cannot be obtained.                         */
+/********************************************************************/
+     #seq_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "seq"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "stat_id"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if control_lot table insert is unsuccessful.            */
+/********************************************************************/
+     #qsp_insert_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "qc_stat_period table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+      if (failed = "F")
+         set reply->status_data->status = "S"
+         commit
+      elseif (failed = "Z")
+         set reply->status_data->status = "Z"
+      else
+         rollback
+      endif
+
+END
+GO     
+      
+
+;Generated by GNU enscript 1.6.4.

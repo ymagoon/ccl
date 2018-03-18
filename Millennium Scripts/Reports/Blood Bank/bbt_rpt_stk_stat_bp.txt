@@ -1,0 +1,904 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_stk_stat_bp.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-2005 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_rpt_stk_stat_bp.prg
+        Object name:            bbt_rpt_stk_stat_bp
+        Request #:              225188
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Report the quantity of blood products by product
+                                category, ABO/Rh and state
+
+        Tables read:            code_value, product_index, product, product_event,
+                                blood_product
+
+        Tables updated:         none
+
+        Executing from:         VB
+
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 09/30/96 Brian Franke         Initial Release                     *
+;     002 06/13/97 Doug Saus            Added select of owner and inventory *
+;                                       areas                               *
+;     003 03/24/98 Matt Benson          Modified to retrieve Institution    *
+;                                       name from preferences               *                         
+;     004 12/22/98 Jose Suarez          Added logic to print the location   *
+;                                       name and address.  Added the 		*
+;                                       address_location_cd to request.		*
+;                                       Added bbt_get_location_info.inc     *
+;                                       Added bbt_print_location_info.inc   *
+;     005 05/21/99 Jose Suarez          change cer_temp to cer_print        *
+;     006 08/20/99 Doug Saus            UAR changes							*
+;     007 09/08/99 Badari Kopparapu     Modified the report to run from Ops *
+;     008 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       removed bbt_ops_owninvloc.inc and   *
+;                                       added bbt_ops_parm_passed.inc       * 
+;     009 08/28/00 Lawrence Dsouza      internationalied date and time      * 
+;     010 02/27/01 Chris Noe            Internationalie text                *
+;     011 12/18/01 Jim Jensen			Feature 22888 - Correct Dispense and*
+;                                       Crossmatch columns, so that these 	*
+;                                       columns do not report zero units 	*
+;                                       when there should be units that 	*
+;                                       qualify.  Additionally, pages with	*
+;                                       an empty stock will populate the 	*
+;                                       Product Class, Product Category,	*
+;                                       and Product fields when the page is *
+;                                       printed. Correct printing report    *
+;                                       when sorting by a specific category *
+;                                       and a specific Rh type.				*
+;    012 07/26/02 Jason Osborn          Unique RPT filename project			*
+;    013 04/12/04 Jim Jensen            Remove "Select" for own/inv info and*
+;                                       use UAR, instead. Increase size of  *
+;                                       ABORh display.                      *
+;    014 06/01/04 Jim Jensen            Resolve	CAPEP00047715 (replace array*
+;                                       with record structure) and          *
+;                                       CAPEP00112553(only display active   *
+;                                       product types/categories.           *
+;    015 06/09/04 Jim Jensen            Rewrite script.                     *
+;    016 10/26/04 Jason Osborn          Added page break logic.             *
+;    017 10/11/05 Jason Coy             Updated report to display the       *
+;                                       front end username.                 *
+;    018 05/29/07 Matt Cummings         Fixed CR 1-1073161594               *
+;    019 01/08/09 Amy Gum               Handle Products with Pooled ABOrhs  *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_rpt_stk_stat_bp:dba go
+create program bbt_rpt_stk_stat_bp:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+        /*
+        record request
+        (
+          1  batch_selection    = c200  
+          1  ops_date           = dq8   
+          1  output_dist        = c200  
+          1  sss_product_cat_cd = f8
+          1  sss_cur_abo_cd     = f8
+          1  sss_cur_rh_cd      = f8
+          1  cur_owner_area_cd  = f8
+          1  cur_inv_area_cd    = f8
+          1  address_location_cd = f8
+        )
+        */
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+        record reply
+        (
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+        )
+
+%i cclsource:bbt_get_username.inc
+
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc                										  
+                                                                       
+set i18nHandle = 0                                                     
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)   
+
+record captions                                                        
+(                                                                      
+  1  stock_status        = vc
+  1  time                = vc
+  1  as_of_date          = vc
+  1  blood_products      = vc
+  1  bb_owner            = vc
+  1  inventory_area      = vc
+  1  product_class       = vc
+  1  product_category    = vc
+  1  products            = vc
+  1  aborh               = vc
+  1  avail               = vc
+  1  assign              = vc
+  1  auto_dir            = vc
+  1  quar                = vc
+  1  xmatch              = vc
+  1  dispense            = vc
+  1  total               = vc
+  1  no_aborh            = vc
+  1  report_id           = vc
+  1  page_no             = vc
+  1  printed             = vc
+  1  user                = vc
+  1  all                 = vc
+  1  aborh_space         = vc
+  1  end_of_report       = vc
+  1  paren_all           = vc
+  1  slash               = vc
+)
+
+set captions->stock_status = uar_i18ngetmessage(i18nHandle,				  
+  "stock_status",																		  
+  "S T O C K   S T A T U S   S U M M A R Y")									    
+set captions->time = uar_i18ngetmessage(i18nHandle,  		 		        
+  "time", "Time:")			    							  						  
+set captions->as_of_date = uar_i18ngetmessage(i18nHandle,        		  
+  "as_of_date", "As of Date:")  													  
+set captions->blood_products = uar_i18ngetmessage(i18nHandle,  		  
+  "blood_products", "(Blood Products)")								          
+set captions->bb_owner = uar_i18ngetmessage(i18nHandle,     			  
+  "bb_owner", "Blood Bank Owner: ")										        
+set captions->inventory_area = uar_i18ngetmessage(i18nHandle, 		     
+  "inventory_area", "Inventory Area: ")										  
+set captions->product_class = uar_i18ngetmessage(i18nHandle,		     
+  "product_class", "Product Class:")  											  
+set captions->product_category = uar_i18ngetmessage(i18nHandle,	     
+  "product_category", "Product Category:")  									  
+set captions->products = uar_i18ngetmessage(i18nHandle,			   	  
+  "products", "Products:")  														      
+set captions->aborh = uar_i18ngetmessage(i18nHandle,  					  
+  "aborh", "ABO/Rh")  													           
+set captions->avail = uar_i18ngetmessage(i18nHandle, 						    
+  "avail", "Avail") 											 			           
+set captions->assign = uar_i18ngetmessage(i18nHandle,					  	  
+  "assign", "Assign") 		 														  
+set captions->auto_dir = uar_i18ngetmessage(i18nHandle,  	    		    
+  "auto_dir", "Auto/Dir")  										              
+set captions->quar = uar_i18ngetmessage(i18nHandle,     					    
+  "quar", "Quar")  								   			       			  
+set captions->xmatch = uar_i18ngetmessage(i18nHandle,  		  			    
+  "xmatch", "X-Match")  									  				        
+set captions->dispense = uar_i18ngetmessage(i18nHandle, 					    
+  "dispense", "Dispense")  													     
+set captions->total = uar_i18ngetmessage(i18nHandle,  			  		    
+  "total", "Total")  															     
+set captions->no_aborh = uar_i18ngetmessage(i18nHandle,  				    
+  "no_aborh", "No ABORh")  														  
+set captions->report_id = uar_i18ngetmessage(i18nHandle,   		  	  	  
+  "report_id", "Report ID: BBT_RPT_STK_STAT_BP")		 				     
+set captions->page_no = uar_i18ngetmessage(i18nHandle,        		     
+  "page_no", "Page:")															     
+set captions->printed = uar_i18ngetmessage(i18nHandle,        		     
+  "printed", "Printed:")														       
+set captions->user = uar_i18ngetmessage(i18nHandle,  						    
+  "user", "User:")  																     
+set captions->all = uar_i18ngetmessage(i18nHandle,  						    
+  "all", "All")														  				  
+set captions->aborh_space = uar_i18ngetmessage(i18nHandle,  			    
+  "aborh_space", "ABO / RH:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,        	  
+  "end_of_report", "* * * End of Report * * *") 		     				  																  
+set captions->paren_all = uar_i18ngetmessage(i18nHandle,					  
+  "paren_all", "(All)")
+set captions->slash = uar_i18ngetmessage(i18nHandle,
+  "slash", "/")
+;End 010
+  
+if (trim(request->batch_selection) > " ")
+  ;default to all categories and all ABO Rh from Operations.
+  set request->sss_product_cat_cd = 0
+  set request->sss_cur_abo_cd     = 0
+  set request->sss_cur_rh_cd      = 0
+
+  set temp_string = cnvtupper(trim(request->batch_selection))
+  call CHECK_OWNER_CD ("bbt_rpt_stk_stat_bp")
+  call CHECK_INVENTORY_CD ("bbt_rpt_stk_stat_bp")
+  call CHECK_LOCATION_CD ("bbt_rpt_stk_stat_bp")
+endif
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+%i cclsource:bbt_get_location_info.inc  
+
+declare firsttime          = c1 with protected, noconstant("Y")
+declare aborh_total_qty    = i4 with protected, noconstant(0)
+declare aborh_index        = i4 with protected, noconstant(0)
+declare aborh_cnt          = i2 with protected, noconstant(0)
+declare prod_index         = i4 with protected, noconstant(0)
+declare match_found        = c1 with protected, noconstant("N")
+declare avail_hold         = c1 with protected, noconstant("N")
+declare assigned_hold      = c1 with protected, noconstant("N")
+declare autodir_hold       = c1 with protected, noconstant("N")
+declare xm_hold            = c1 with protected, noconstant("N")
+declare quar_hold          = c1 with protected, noconstant("N")
+declare dispense_hold      = c1 with protected, noconstant("N")
+declare dont_use_hold      = c1 with protected, noconstant("N")
+declare avail_cnt_total    = i4 with protected, noconstant(0)
+declare assigned_cnt_total = i4 with protected, noconstant(0)
+declare autodir_cnt_total  = i4 with protected, noconstant(0)
+declare xm_cnt_total       = i4 with protected, noconstant(0)
+declare quar_cnt_total     = i4 with protected, noconstant(0)
+declare dispense_cnt_total = i4 with protected, noconstant(0)
+declare code_index         = i4 with protected, noconstant(0)
+declare LINE               = vc with protected, constant(fillstring(125,"_"))
+declare product_disp_ind   = i2 with protected, noconstant(0)
+declare abo_rh_disp_ind    = i2 with protected, noconstant(0)
+declare reportByUsername   = vc with protect, noconstant("")
+
+declare A_POOL_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "APOOLRH"))
+declare O_POOL_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "OPOOLRH"))
+declare B_POOL_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "BPOOLRH"))
+declare AB_POOL_CD           = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "ABPOOLRH"))
+declare POOL_NEG_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "POOLABONEG"))
+declare POOL_POS_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "POOLABOPOS"))
+declare POOL_POOL_CD            = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "POOLABOPLRH"))
+declare POOL_ABO_CD           = f8   with protect, constant(UAR_GET_CODE_BY("MEANING", 1640, "POOLABO"))
+
+set reportByUsername = GET_USERNAME(reqinfo->updt_id)
+
+record aborh
+(
+  1 info[*]
+    2 abo_cd             = f8
+    2 rh_cd              = f8
+    2 aborh_cd           = f8
+    2 aborh_display      = vc
+    2 abo_display        = vc
+    2 rh_display         = vc
+    2 aborh_qty          = i4
+    2 avail_cnt          = i4
+    2 assigned_cnt       = i4
+    2 autodir_cnt        = i4
+    2 xm_cnt             = i4
+    2 quar_cnt           = i4
+    2 dispense_cnt       = i4
+    2 pooled_ind         = i2
+)
+
+record CodeInfo
+(
+  1 code_info  [*]
+        2 code = f8
+        2 rank = c2
+) 
+
+
+/* Retrieve display values for requested Owner Area and Inventory Area */
+set cur_owner_area_disp = fillstring(40, " ")
+set cur_inv_area_disp   = fillstring(40, " ")
+
+    if (request->cur_owner_area_cd = 0.0)
+       set cur_owner_area_disp = captions->paren_all	
+    else
+       set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+    endif
+    if (request->cur_inv_area_cd = 0.0)
+       set cur_inv_area_disp = captions->paren_all		
+    else
+       set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+    endif
+
+select into "nl:"
+      c.code_value
+from  code_value c
+where c.code_set = 1610 and
+      c.cdf_meaning != "19"
+head report
+      code_index = 0
+      stat = alterlist(CodeInfo->code_info,5)
+detail
+      code_index = code_index + 1
+      if (size(codeinfo->code_info, 5) <= code_index)
+        stat = alterlist(CodeInfo->code_info, code_index + 4)
+      endif
+      if (c.cdf_meaning = "1")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "3"
+      elseif (c.cdf_meaning = "2")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "6"
+      elseif (c.cdf_meaning = "3")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "5"
+      elseif (c.cdf_meaning = "4")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "7"
+      elseif (c.cdf_meaning = "5")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "0"
+      elseif (c.cdf_meaning = "6")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "0"
+      elseif (c.cdf_meaning = "7")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "0"
+      elseif (c.cdf_meaning = "8")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "0"
+      elseif (c.cdf_meaning = "9")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "1"
+      elseif (c.cdf_meaning = "10")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "4"
+      elseif (c.cdf_meaning = "11")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "4"
+      elseif (c.cdf_meaning = "12")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "2"
+      elseif (c.cdf_meaning = "13")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "1"
+      elseif (c.cdf_meaning = "14")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "0"
+      elseif (c.cdf_meaning = "15")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "0"
+      elseif (c.cdf_meaning = "16")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "0"
+      elseif (c.cdf_meaning = "17")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "0"
+      elseif (c.cdf_meaning = "18")
+        CodeInfo->code_info[code_index].code = c.code_value
+        CodeInfo->code_info[code_index].rank = "0"
+      endif
+
+foot report
+      stat = alterlist(CodeInfo->code_info,code_index)
+
+with  nullreport, nocounter, check
+
+set blood_product_class_cd = 0.0
+set cdf_meaning = fillstring(12," ")
+set cdf_meaning = "BLOOD"
+set stat = uar_get_meaning_by_codeset(1606, nullterm(cdf_meaning), 1, blood_product_class_cd)
+set prod_col = 20
+
+set prod_index = 0
+
+select
+    if ((request->sss_cur_abo_cd     = 0) and
+        (request->sss_cur_rh_cd      = 0))
+                plan    cv1 where cv1.code_set = 1640 and
+                        cv1.active_ind = 1
+                join    cve1 where cve1.code_set = 1640 and
+                        cv1.code_value = cve1.code_value and
+                        cve1.field_name = "ABOOnly_cd"
+                join    cve2 where cve2.code_set = 1640 and
+                        cv1.code_value = cve2.code_value and
+                        cve2.field_name = "RhOnly_cd"
+               
+    elseif ((request->sss_cur_abo_cd     = 0) and
+            (request->sss_cur_rh_cd      > 0))
+                plan    cv1 where cv1.code_set = 1640 and
+                        cv1.active_ind = 1
+                join    cve1 where cve1.code_set = 1640 and
+                        cv1.code_value = cve1.code_value and
+                        cve1.field_name = "ABOOnly_cd"
+                join    cve2 where cve2.code_set = 1640 and
+                        cv1.code_value = cve2.code_value and
+                        cve2.field_name = "RhOnly_cd" and
+                        cnvtint(cve2.field_value) = request->sss_cur_rh_cd
+                        
+    elseif ((request->sss_cur_abo_cd     > 0) and
+            (request->sss_cur_rh_cd      = 0))
+                plan    cv1 where cv1.code_set = 1640 and
+                        cv1.active_ind = 1
+                join    cve1 where cve1.code_set = 1640 and
+                        cv1.code_value = cve1.code_value and
+                        cve1.field_name = "ABOOnly_cd" and
+                        cnvtint(cve1.field_value) = request->sss_cur_abo_cd
+                join    cve2 where cve2.code_set = 1640 and
+                        cv1.code_value = cve2.code_value and
+                        cve2.field_name = "RhOnly_cd"
+
+    elseif ((request->sss_cur_abo_cd     > 0) and
+            (request->sss_cur_rh_cd      > 0))
+                plan    cv1 where cv1.code_set = 1640 and
+                        cv1.active_ind = 1
+                join    cve1 where cve1.code_set = 1640 and
+                        cv1.code_value = cve1.code_value and
+                        cve1.field_name = "ABOOnly_cd" and
+                        cnvtint(cve1.field_value) = request->sss_cur_abo_cd
+                join    cve2 where cve2.code_set = 1640 and
+                        cv1.code_value = cve2.code_value and
+                        cve2.field_name = "RhOnly_cd" and
+                        cnvtint(cve2.field_value) = request->sss_cur_rh_cd
+    endif
+     
+    into "nl:"
+        aborh_combined_display = uar_get_code_display(cv1.code_value)
+        , aborh_code = cnvtreal(cv1.code_value)
+        , abo_only_display = uar_get_code_display(cnvtreal(cve1.field_value))
+        , rh_only_display = uar_get_code_display(cnvtreal(cve2.field_value))
+        , abo_code = cnvtreal(cve1.field_value)
+        , rh_code = cnvtreal(cve2.field_value)
+from    
+        code_value cv1, 
+        code_value_extension cve1, 
+        code_value_extension cve2
+order   cve1.field_value,
+        cve2.field_value
+        
+head report
+        stat = alterlist(aborh->info, 10)
+detail
+        prod_index = prod_index + 1
+        if (size(aborh->info,5) <= prod_index)
+             stat = alterlist(aborh->info, prod_index + 9)
+        endif
+        aborh->info[prod_index].aborh_display = aborh_combined_display
+        aborh->info[prod_index].abo_display   = abo_only_display
+        aborh->info[prod_index].rh_display    = rh_only_display
+        aborh->info[prod_index].abo_cd        = abo_code
+        aborh->info[prod_index].rh_cd         = rh_code
+
+        if((aborh_code = O_POOL_CD) or (aborh_code = POOL_NEG_CD)
+            or (aborh_code = A_POOL_CD) or (aborh_code = POOL_POS_CD)
+            or (aborh_code = B_POOL_CD) or (aborh_code = POOL_POOL_CD)
+            or (aborh_code = AB_POOL_CD) or (aborh_code = POOL_ABO_CD))
+            aborh->info[prod_index].pooled_ind = 1
+        else
+            aborh->info[prod_index].pooled_ind = 0
+        endif
+        aborh_cnt = aborh_cnt + 1
+foot report
+        stat = alterlist(aborh->info, prod_index)
+with    check,
+        nocounter
+        
+set reply->status_data->status = "F"
+set select_ok_ind = 0 
+set rpt_cnt = 0
+ 
+execute cpm_create_file_name_logical "bbt_stck_stat_bp", "txt", "x"
+
+select
+     if (request->sss_product_cat_cd = 0)
+               plan    pi where pi.product_class_cd = blood_product_class_cd and
+                                pi.product_cat_cd   > 0 and
+                                pi.product_cd       > 0 and
+                                pi.active_ind       = 1
+               join    d1 where d1.seq = 1
+               join    pr where pi.product_cd       = pr.product_cd  
+                                         and ((request->cur_owner_area_cd > 0.0
+                                               and request->cur_owner_area_cd = pr.cur_owner_area_cd)
+                                           or (request->cur_owner_area_cd = 0.0))
+                                         and ((request->cur_inv_area_cd > 0.0
+                                               and request->cur_inv_area_cd = pr.cur_inv_area_cd)
+                                           or (request->cur_inv_area_cd = 0.0))
+               join    pe where pr.product_id       = pe.product_id and
+                                pe.active_ind       = 1
+               join    d2 where d2.seq = 1
+               join    bp where pr.product_id       = bp.product_id
+               
+               order by 
+                        pi.product_class_cd,
+                        pi.product_cat_cd,
+                        pi.product_cd,
+                        pe.product_id,
+                        pe.product_event_id     
+     
+     elseif (request->sss_product_cat_cd > 0)
+               plan    pi where pi.product_cat_cd = request->sss_product_cat_cd and
+                                pi.product_cat_cd > 0 and
+                                pi.product_class_cd = blood_product_class_cd and
+                                pi.active_ind       = 1
+               join    d1 where d1.seq = 1
+               join    pr where pi.product_cd       = pr.product_cd
+                                         and ((request->cur_owner_area_cd > 0.0
+                                               and request->cur_owner_area_cd = pr.cur_owner_area_cd)
+                                           or (request->cur_owner_area_cd = 0.0))
+                                         and ((request->cur_inv_area_cd > 0.0
+                                               and request->cur_inv_area_cd = pr.cur_inv_area_cd)
+                                           or (request->cur_inv_area_cd = 0.0))
+               join    pe where pr.product_id       = pe.product_id and
+                                pe.active_ind       = 1
+               join    d2 where d2.seq = 1
+               join    bp where pr.product_id       = bp.product_id
+               order by 
+                        pi.product_class_cd,
+                        pi.product_cat_cd,
+                        pi.product_cd,
+                        pe.product_id,
+                        pe.product_event_id
+     endif
+     
+     into cpm_cfn_info->file_name_logical
+       pi.product_class_cd,
+       pi.product_cat_cd,
+       pi.product_cd,
+       pe.product_id,
+       pe.product_event_id,
+       bp.cur_abo_cd,
+       bp.cur_rh_cd,
+       pe.event_type_cd,
+       pr.product_cd,
+       pr.product_cat_cd,
+       pr.product_class_cd,
+       product_type_display = uar_get_code_display(pi.product_cd),		  
+       product_cat_display = uar_get_code_display(pi.product_cat_cd),	  
+       product_class_display = uar_get_code_display(pi.product_class_cd), 
+       abo_display = uar_get_code_display(bp.cur_abo_cd),
+       rh_display = uar_get_code_display(bp.cur_rh_cd),       
+       decode_flag = decode(pe.seq, "PE", "NO")
+from   
+       product_index pi,
+       (dummyt d1 with seq = 1),
+       product pr,
+       product_event pe,
+       (dummyt d2 with seq = 1),
+       blood_product bp
+
+head report
+      select_ok_ind  = 0
+      idx            = 0
+      abo_rh_display = fillstring(25, " ")
+      product_disp_ind = 1
+      abo_rh_disp_ind = 0
+      prod_category_disp = fillstring(40,' ')
+
+head page
+      call center(captions->stock_status,1,125)					
+      col 104, captions->time,									
+      col 118, curtime "@TIMENOSECONDS;;M",
+      row + 1
+      col 104, captions->as_of_date,							
+      col 118, curdate "@DATECONDENSED;;d",
+
+%i cclsource:bbt_print_location_info.inc 
+      SAVE_ROW = ROW
+      ROW 1
+      call center(captions->blood_products,1,125)
+      ROW SAVE_ROW
+      ROW + 1
+      col 1, captions->bb_owner,								
+      col 19, cur_owner_area_disp,
+      row + 1
+      col 1, captions->inventory_area,							
+      col 17, cur_inv_area_disp
+      row + 2
+      col   1, captions->product_class,							
+      col  21, product_class_display 
+      row + 2
+
+      col   1, captions->product_category,
+      
+      if( size(  trim(prod_category_disp) ) = 0 )
+          prod_category_disp = product_cat_display		
+      endif				
+      col  21, prod_category_disp
+      row + 2
+      if (product_disp_ind = 1)      
+         col   1, captions->products								
+      elseif (abo_rh_disp_ind = 1)
+         call center(captions->aborh, 9, 23)
+         col  31, captions->avail,		
+         col  44, captions->assign,		
+         col  56, captions->auto_dir,	
+         col  71, captions->quar,		
+         col  82, captions->xmatch,		
+         col  95, captions->dispense,	
+         col 109, captions->total,		
+         row + 1
+         col  09, "---------------",
+         col  30, "--------",
+         col  43, "--------",
+         col  56, "--------",
+         col  69, "--------",
+         col  82, "--------",
+         col  95, "--------",
+         col 108, "--------",
+         row + 1
+      endif 
+      
+head  pi.product_class_cd
+      row + 0
+
+head  pi.product_cat_cd
+
+      prod_category_disp = product_cat_display
+
+      if (firsttime = "Y")
+        firsttime = "N"
+      else
+        break
+      endif
+
+head  pi.product_cd
+      row + 0
+
+head pe.product_id
+      row + 0
+
+head pe.product_event_id
+      row + 0
+
+detail
+      row + 0
+
+foot pe.product_event_id	
+      if (decode_flag = "PE")
+        code_index = 1
+        match_found = "N"
+        while ((match_found = "N") and (code_index < size(CodeInfo->code_info, 5))) 
+          if (pe.event_type_cd = CodeInfo->code_info[code_index].code)
+            match_found = "Y"
+            if (CodeInfo->code_info[code_index].rank = "0")
+              dont_use_hold = "Y"
+            elseif (CodeInfo->code_info[code_index].rank = "2")
+              avail_hold = "Y"
+            elseif (CodeInfo->code_info[code_index].rank = "3")
+              assigned_hold = "Y"
+            elseif (CodeInfo->code_info[code_index].rank = "4")
+              autodir_hold = "Y"
+            elseif (CodeInfo->code_info[code_index].rank = "5")
+              xm_hold = "Y"
+            elseif (CodeInfo->code_info[code_index].rank = "6")
+              quar_hold = "Y"
+            elseif (CodeInfo->code_info[code_index].rank = "7")
+              dispense_hold = "Y"
+            endif
+          else
+            code_index = code_index + 1
+          endif
+        endwhile
+      endif
+
+foot pe.product_id			
+      if ((decode_flag = "PE") and (dont_use_hold = "N"))
+        aborh_index = 1
+        match_found = "N"
+        while ((match_found = "N") and (aborh_index <= aborh_cnt))
+          if ((bp.cur_abo_cd = aborh->info[aborh_index].abo_cd) and
+              (bp.cur_rh_cd  = aborh->info[aborh_index].rh_cd))  
+            if (dispense_hold = "Y")
+              aborh->info[aborh_index].dispense_cnt = aborh->info[aborh_index].dispense_cnt + 1
+              aborh->info[aborh_index].aborh_qty    = aborh->info[aborh_index].aborh_qty + 1
+            elseif (quar_hold = "Y")
+              aborh->info[aborh_index].quar_cnt     = aborh->info[aborh_index].quar_cnt + 1
+              aborh->info[aborh_index].aborh_qty    = aborh->info[aborh_index].aborh_qty + 1
+            elseif (xm_hold = "Y")
+              aborh->info[aborh_index].xm_cnt       = aborh->info[aborh_index].xm_cnt + 1
+              aborh->info[aborh_index].aborh_qty    = aborh->info[aborh_index].aborh_qty + 1
+            elseif (autodir_hold = "Y")
+              aborh->info[aborh_index].autodir_cnt  = aborh->info[aborh_index].autodir_cnt + 1 
+              aborh->info[aborh_index].aborh_qty    = aborh->info[aborh_index].aborh_qty + 1
+            elseif (assigned_hold = "Y")
+              aborh->info[aborh_index].assigned_cnt = aborh->info[aborh_index].assigned_cnt + 1 
+              aborh->info[aborh_index].aborh_qty    = aborh->info[aborh_index].aborh_qty + 1
+            elseif (avail_hold = "Y")
+              aborh->info[aborh_index].avail_cnt    = aborh->info[aborh_index].avail_cnt + 1
+              aborh->info[aborh_index].aborh_qty    = aborh->info[aborh_index].aborh_qty + 1
+            endif
+            match_found = "Y"
+          else
+            aborh_index = aborh_index + 1
+          endif
+        endwhile
+      endif
+      dont_use_hold = "N"
+      avail_hold    = "N"
+      assigned_hold = "N"
+      autodir_hold =  "N"
+      xm_hold       = "N"
+      quar_hold     = "N"
+      dispense_hold = "N"
+
+foot  pi.product_cd
+      col   1
+      display_product = substring(1,22,product_type_display) 
+      col + prod_col, display_product,
+      if (prod_col > 80)
+        row + 1
+        if (row > 57)
+           product_disp_ind = 1
+           abo_rh_disp_ind = 0
+           break
+        endif
+        prod_col = 20
+      else
+        prod_col = prod_col + 25
+      endif
+             
+foot  pi.product_cat_cd
+      prod_col = 20
+      row + 3
+      if (row > 48)
+         product_disp_ind = 0
+         abo_rh_disp_ind = 0
+         break
+      endif
+      call center(captions->aborh, 9, 23)
+      col  31, captions->avail,		
+      col  44, captions->assign,		
+      col  56, captions->auto_dir,	
+      col  71, captions->quar,		
+      col  82, captions->xmatch,		
+      col  95, captions->dispense,	
+      col 109, captions->total,		
+      row + 1
+      col  09, "---------------",
+      col  30, "--------",
+      col  43, "--------",
+      col  56, "--------",
+      col  69, "--------",
+      col  82, "--------",
+      col  95, "--------",
+      col 108, "--------",
+      aborh_index = 1
+      while (aborh_index <=aborh_cnt)
+        if((aborh->info[aborh_index].aborh_qty > 0) or (aborh->info[aborh_index].pooled_ind = 0)) 
+            row + 1
+            if (row > 54)
+               product_disp_ind = 0
+               abo_rh_disp_ind = 1
+               break
+            endif
+            if (trim(aborh->info[aborh_index].aborh_display) = " ")
+              col 08, captions->no_aborh	
+            else
+              col  09, aborh->info[aborh_index].aborh_display
+            endif
+            col  32, aborh->info[aborh_index].avail_cnt    "####;p "       
+            col  45, aborh->info[aborh_index].assigned_cnt "####;p "       
+            col  58, aborh->info[aborh_index].autodir_cnt  "####;p "       
+            col  71, aborh->info[aborh_index].quar_cnt     "####;p "       
+            col  84, aborh->info[aborh_index].xm_cnt       "####;p "       
+            col  97, aborh->info[aborh_index].dispense_cnt "####;p "       
+            col 110, aborh->info[aborh_index].aborh_qty    "####;p "       
+            avail_cnt_total    = avail_cnt_total    + aborh->info[aborh_index].avail_cnt
+            assigned_cnt_total = assigned_cnt_total + aborh->info[aborh_index].assigned_cnt
+            autodir_cnt_total  = autodir_cnt_total  + aborh->info[aborh_index].autodir_cnt
+            xm_cnt_total       = xm_cnt_total       + aborh->info[aborh_index].xm_cnt
+            quar_cnt_total     = quar_cnt_total     + aborh->info[aborh_index].quar_cnt
+            dispense_cnt_total = dispense_cnt_total + aborh->info[aborh_index].dispense_cnt
+            aborh_total_qty    = aborh_total_qty    + aborh->info[aborh_index].aborh_qty
+        endif
+        aborh_index        = aborh_index        + 1
+     endwhile
+    
+      for (idx = 1 to aborh_cnt)
+        aborh->info[idx].aborh_qty     = 0
+        aborh->info[idx].avail_cnt     = 0
+        aborh->info[idx].assigned_cnt  = 0
+        aborh->info[idx].autodir_cnt   = 0
+        aborh->info[idx].xm_cnt        = 0
+        aborh->info[idx].quar_cnt      = 0
+        aborh->info[idx].dispense_cnt  = 0
+      endfor
+        
+      row + 1
+      col  30, "--------",
+      col  43, "--------",
+      col  56, "--------",
+      col  69, "--------",
+      col  82, "--------",
+      col  95, "--------",
+      col 108, "--------",
+      row + 1
+      col  32, avail_cnt_total    "####;p "       
+      col  45, assigned_cnt_total "####;p "       
+      col  58, autodir_cnt_total  "####;p "       
+      col  71, quar_cnt_total     "####;p "       
+      col  84, xm_cnt_total       "####;p "       
+      col  97, dispense_cnt_total "####;p "       
+      col 110, aborh_total_qty    "####;p "       
+      avail_cnt_total    = 0
+      assigned_cnt_total = 0
+      autodir_cnt_total  = 0
+      xm_cnt_total       = 0
+      quar_cnt_total     = 0
+      dispense_cnt_total = 0
+      aborh_total_qty    = 0
+      prod_index         = 0
+      product_disp_ind = 1
+
+foot  pi.product_class_cd	
+      row + 0
+
+foot page
+      row  61
+      col   1, LINE,
+      row + 1
+      col   1, captions->report_id,
+      col  58, captions->page_no,
+      col  64, curpage "###",
+      col 100, captions->printed,
+      col 110, curdate "@DATECONDENSED;;d"
+      col 120, curtime "@TIMENOSECONDS;;M"
+   
+
+foot report
+      row  58
+      col   1, captions->user
+      col  20, reportByUsername
+      row + 1
+      col   1, captions->product_category
+      if (request->sss_product_cat_cd > 0)
+         col  20, prod_category_disp
+      else
+         col  20, captions->all
+      endif
+      row + 1
+      if ((request->sss_cur_abo_cd = 0) and (request->sss_cur_rh_cd = 0))
+         abo_rh_display = concat(captions->all, " ", captions->slash, " ", captions->all)
+      elseif ((request->sss_cur_abo_cd > 0) and (request->sss_cur_rh_cd = 0))
+         abo_rh_display = concat(aborh->info[1].abo_display, " ", captions->slash, " ", captions->all)
+      elseif ((request->sss_cur_abo_cd = 0) and (request->sss_cur_rh_cd > 0))
+         abo_rh_display = concat(captions->all, " ", captions->slash, " ", aborh->info[1].rh_display)
+      elseif ((request->sss_cur_abo_cd > 0) and (request->sss_cur_rh_cd > 0))
+         abo_rh_display = concat(aborh->info[1].abo_display, " ", captions->slash, " ", aborh->info[1].rh_display)
+      endif
+      col   1, captions->aborh_space
+      col  20, abo_rh_display
+      row  64
+      col  51, captions->end_of_report
+      select_ok_ind = 1
+
+with  nullreport, 
+      nocounter,
+      outerjoin (d1),
+      outerjoin (d2),
+      maxrow = 65,
+      nolandscape,
+      compress
+
+#EXIT_SCRIPT
+
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+
+if (select_ok_ind = 1)
+    set reply->status_data->status = "S"
+    if (trim(request->batch_selection) > " ")
+        set spool value(reply->rpt_list[rpt_cnt].rpt_filename) value(request->output_dist)    
+    endif
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

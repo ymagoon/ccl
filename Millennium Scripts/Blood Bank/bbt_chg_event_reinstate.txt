@@ -1,0 +1,607 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Modifycrossmatch/BBT_CHG_EVENT_REINSTATE.PRG Turn on black mode
+
+ 
+/*~BB~************************************************************************
+      .                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2006 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved          *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner                                        *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~************************************************************************
+      *                   PathNet Blood Bank Transfusion                     *
+      *                           V500 Script                                *
+      *                     bbt_chg_event_release.prg                        *
+      *                                                                      *
+      * PURPOSE:          release crossmatch and assign events from a patient*
+      * LAST UPDATED BY:  mo2420                                             *
+      * DATE CREATED:     11/3/96                                            *
+      * LAST MODIFIED:    11/7/03                                            *
+      * TABLES USED:      product, product_event, derivative, assign,        *
+      *                   assign_release, crossmatch                         *
+      * PASSED IN:        record structure "request"                         *
+      * PASSED OUT:       record structure "reply"                           *
+      * ACTION#:                                                             *
+      * REQUEST#:         225222                                             *
+      * APPLICATION#:     225038                                             *
+      * SPECIAL NOTES:                                                       *
+      ***********************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *001 ?        ?                    ?
+;    *002 10/04/02 Ronda Zheng          Insert a new row on product_event and*
+;    *                                  crossmatch table instead of reactivating*
+;    *                                  existing row when reinstate.
+;    *003 10/17/03 Jason Osborn         Now returns the new product_event_id*
+;    *                                  of the XM in the reply structure    *
+;    *004 11/07/03 Jason Osborn         Adding BB_ID and XM_REASON_CD to new*
+;    *                                  crossmatch table row.               *
+;    *005 01/26/04 Ronda Zheng          In Check for Assign section, change *
+;    *                                  assign_event_id to assigned_event_cd*
+;    *006 07/15/05 Jeff Wain            Added declaration statements for id *
+;    *                                  fields                              *
+;    *007 08/07/06 Jason Coy            Update related_product_event_id on  *
+;    *                                  product_event table for new         *
+;    *                                  crossmatch row with previous        *
+;    *                                  product_event_id.                   *
+;    *008 10/05/06 Christi Ditmars      Add more_processing_ind             *
+;                                       check to prevent                    * 
+;    *                                  hard commits and unlock of prod     *
+;     015 04/11/10  AG017309		    Send status change messaged to 		*
+;										 interfaced device 				    *
+;    *010 06/21/11 Archita Subramanya   Declared success_cnt.               * 
+;~DE~************************************************************************
+      drop program bbt_chg_event_reinstate:dba go
+      create program bbt_chg_event_reinstate:dba
+ 
+       /*
+        record request
+        (
+          1 productlist[x]
+            2 product_id          = f8
+            2 product_event_id    = f8             ;xm product_event_id
+            2 xm_exp_dt_tm        = dq8
+            2 pe_xm_updt_cnt      = i4
+            2 xm_updt_cnt         = i4
+            2 p_updt_cnt          = i4             ;info for product table
+            2 reinstate_reason_cd = f8             ;info for updating the assign table
+          1 more_processing_ind   = i2               ;when this is true, do not unlock product and don't do hard commits
+        )
+        */
+ 
+ 
+        record reply
+        (
+%i cclsource:status_block.inc
+         1 results[1]
+           2 product_event_id      = f8
+           2 new_product_event_id  = f8
+           2 status                = c1
+           2 err_process           = vc
+           2 err_message           = vc
+        )
+
+        /* Initialize Variables */
+        declare this_prod_id      = f8 with protect, noconstant(0.0)
+        declare avail_event_id    = f8 with protect, noconstant(0.0)
+        declare assign_event_id   = f8 with protect, noconstant(0.0)
+        declare product_event_id = f8           with public, noconstant(0.0)
+        declare gsub_product_event_status = c2      with public, noconstant(fillstring(2, " "))
+        declare sub_product_event_id = f8           with public, noconstant(0.0) ; used to fix CCLQuery errors
+        declare XMDtTmChange                        = f8 with protect, noconstant(0.0)
+		declare statusFlag                                = i2 with protect,noconstant(0)
+        declare success_cnt     = i4 with protect, noconstant(0) ;count of number of successful updates
+         
+        set count1 = 0                                    ;count varible used in 'for' loop
+        set reply->status_data->status = "F"
+        set active_avail = "F"                            ;flag if the product has an active quarantine
+        set active_assign = "F"                           ;flag if the product has an active assignment
+        set multiple_xm = "F"                             ;flag for multiple crossmatches on a product
+        set error_process = "                                      "                ;holds process description to set reply
+        set error_message = "                                      "                ;holds error_message to set reply
+        set failure_occured = "F"                         ;flag to determine if any part of updates was unsuccessful
+        set quantity_val = 0                              ;variable for storing row information while locking row
+        set pe_avail_updt_cnt = 0                         ;update count for avialable product_event
+        set pe_assign_updt_cnt = 0                        ;update count for avialable product_event
+        set assign_updt_cnt = 0                           ;update count for assign table if event exists
+ 
+%i cclsource:bbt_add_product_event.inc
+end
+        ;internal structure to store product_event info so the info can be insert into product_event table.
+        record temp_pe
+        (
+          1 order_id                  = f8
+          1 bb_result_id              = f8
+          1 person_id                 = f8
+          1 encntr_id                 = f8
+          1 override_ind              = i2
+          1 override_reason_cd        = f8
+        )
+ 
+        ;internal structure to store crossmatch info so the info can be insert into crossmatch table.
+        record temp_xm
+        (
+          1 person_id                 = f8
+          1 crossmatch_qty            = i4
+          1 bb_id_nbr                 = vc
+          1 xm_reason_cd              = f8
+        )
+%i cclsource:bbt_send_status_change.inc        
+set sErrorMsg = FILLSTRING(255," ")
+set nErrorStatus = ERROR(sErrorMsg,1)
+ 
+        /* count the number of rows of blood product table that need to be updated - passed from the client app */
+        set nbr_to_update = cnvtint(size(request->productlist,5))
+ 
+        /* alter the reply array to accomodate nbr_to_update items */
+        set stat = alter(reply->results,nbr_to_update)
+        set stat = alter(reply->status_data->subeventstatus,nbr_to_update)
+ 
+ 
+        set uar_failed = 0
+        ;event_type_code value retrieved by script and inactivated if found for product
+        set avail_event_type_cd = 0.0
+        set xmtch_event_type_cd = 0.0
+        set assigned_event_type_cd = 0.0
+        set cdf_meaning = fillstring(12," ")
+ 
+ 
+        set cdf_meaning = "1"
+        set stat = uar_get_meaning_by_codeset(1610,cdf_meaning,1,assigned_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_REST
+        endif
+;        call echo(assigned_event_type_cd)
+        set cdf_meaning = "3"
+        set stat = uar_get_meaning_by_codeset(1610,cdf_meaning,1,xmtch_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_REST
+        endif
+;        call echo(xmtch_event_type_cd)
+        set cdf_meaning = "12"
+        set stat = uar_get_meaning_by_codeset(1610,cdf_meaning,1,avail_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_REST
+        endif
+;        call echo(avail_event_type_cd)
+#SKIP_REST
+        if (uar_failed = 1)
+           set reply->status_data->status = "F"
+           set error_process = "bbt_chg_event_reintstate"
+           set error_message = "code value not found"
+           set failure_occured = "T"
+           set reply->status_data->status = "F"
+           set reply->status_data->subeventstatus[1]->OperationName = "reinstate"
+           set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+           set reply->status_data->subeventstatus[1]->TargetObjectName = "uar_get_meaning_by_codeset failed"
+           set reply->status_data->subeventstatus[1]->TargetObjectValue = "F"
+        endif
+ 
+ 
+        /* Execute a for loop for every item in the array.  The loop cycle will lock the necessary rows on all the tables
+           and then update the tables.  The tables that are updated depend on the information passed in on  the request.
+           The plan and join clauses controll which tables are accessed and locked.
+           If any of these updates is unsuccessfull any changes made for this item (loop iteration) will be rolled back.
+           If all updates are successful for an item (loop iteration) a commit command is issued for all tables
+           If more_processing_ind = 1, then use reqinfo commit instead 
+         */
+        for (prod = 1 to nbr_to_update)
+            set failure_occured = "F"                ;set the failure flag to false
+            set active_avail = "F"                   ;default to no active avaibel event
+            set active_assign = "F"                  ;default to no active assignment
+            set this_prod_id = 0.0                     ;current product_id
+            set other_events = "F"                   ;flag if other events exist for this product_id
+            set avail_event_id = 0.0                   ;product_event_id for active avaible if exists
+            set assign_event_id = 0.0                  ;product_event_id for active assign if exists
+            set pe_avail_updt_cnt = 0                ;update count for avialable product_event
+            set pe_assign_updt_cnt = 0               ;update count for assign
+            set assign_updt_cnt = 0                  ;update count for assign table if event exists
+ 
+            ;clean up temp_pe structure
+            set temp_pe->order_id           = 0.0
+            set temp_pe->bb_result_id       = 0.0
+            set temp_pe->person_id          = 0.0
+            set temp_pe->encntr_id          = 0.0
+            set temp_pe->override_ind       = 0
+            set temp_pe->override_reason_cd = 0.0
+ 
+            ;clean up temp_xm structure
+            set temp_xm->person_id          = 0.0
+            set temp_xm->crossmatch_qty     = 0
+            set temp_xm->bb_id_nbr          = ""
+            set temp_xm->xm_reason_cd       = 0.0
+ 
+            /*************************************   CHECK THE ACTIVE STATES  **********************************************/
+            /* Search the product_event table for the available or assigned states.  If the product has an active          */
+            /* available state they will be inactivated later.                                                             */
+            /***************************************************************************************************************/
+            select into "nl:"
+                pe.product_event_id
+            from product_event pe
+            where (
+                   (pe.active_ind = 1)
+                   And (pe.product_id = request->productlist[prod]->product_id)
+                  )
+            detail
+                  if (pe.event_type_cd = avail_event_type_cd)
+                      active_avail = "T"
+                      avail_event_id = pe.product_event_id
+                      pe_avail_updt_cnt = pe.updt_cnt
+                  elseif (pe.event_type_cd = assigned_event_type_cd)
+                      active_assign = "T"
+                      assign_event_id = pe.product_event_id
+                      pe_assign_updt_cnt = pe.updt_cnt
+                  endif
+            with counter
+ 
+ 
+            /*********************************************   REINSTATE  CROSSMATCH ****************************************/
+            /*  Both reinstate and modify are performed with the same script.  All of the information that is used when   */
+            /*  updating the data base is flexed by the visual basic app.  The only real difference between the two is    */
+            /*  that a crossmatch for reintstatement will have an active_ind of 0, where the crossmatch to be modified    */
+            /*  will have an active_ind of 1                                                                              */
+            /**************************************************************************************************************/
+            If (failure_occured = "F")
+               select into "nl:"
+                      xm.product_id,
+                      xm.product_event_id
+               from crossmatch xm
+               where (xm.product_event_id = request->productlist[prod]->product_event_id)
+                            and (xm.product_id = request->productlist[prod]->product_id)
+                            and (xm.updt_cnt = request->productlist[prod]->xm_updt_cnt)
+               detail
+                  ;______________________store the info to temp_xm structure _____________________________
+                  temp_xm->person_id                 = xm.person_id
+                  temp_xm->crossmatch_qty            = xm.crossmatch_qty
+                  temp_xm->bb_id_nbr                 = xm.bb_id_nbr
+                  temp_xm->xm_reason_cd              = xm.xm_reason_cd
+               with nocounter, forupdate(xm)
+ 
+               if (curqual = 0)
+                  set error_process = "bbt_chg_event_reintstate"
+                  set error_message = "crossmatch not locked"
+                  set failure_occured = "T"
+                  go to end_script
+               else
+                  select into "nl:"
+                         pe.product_id,
+                         pe.product_event_id
+                  from product_event pe
+                  where (pe.product_event_id = request->productlist[prod]->product_event_id)
+                               And (pe.product_id = request->productlist[prod]->product_id)
+                               And (pe.updt_cnt = request->productlist[prod]->pe_xm_updt_cnt)
+                  detail
+                     ;______________________store the info to temp_pe structure _____________________________
+                     temp_pe->order_id                 = pe.order_id
+                     temp_pe->bb_result_id             = pe.bb_result_id
+                     temp_pe->person_id                = pe.person_id
+                     temp_pe->encntr_id                = pe.encntr_id
+                     temp_pe->override_ind             = pe.override_ind
+                     temp_pe->override_reason_cd       = pe.override_reason_cd
+                  with nocounter, forupdate(pe)
+               endif
+ 
+                  if (curqual = 0)
+                     set error_process = "bbt_chg_event_reintstate"
+                     set error_message = "product_event not locked"
+                     set failure_occured = "T"
+                     go to end_script
+                  else
+                     ;______________________________________ update tables ______________________________
+                  update into crossmatch xm
+                      set
+                         xm.active_ind       = 0,
+                         xm.active_status_cd = ReqData->inactive_status_cd,
+                         xm.updt_cnt         = xm.updt_cnt + 1,
+                         xm.updt_dt_tm       = cnvtdatetime(curdate,curtime3),
+                         xm.updt_task        = reqinfo->updt_task,
+                         xm.updt_id          = reqinfo->updt_id,
+                         xm.updt_applctx     = reqinfo->updt_applctx
+                  plan xm where (xm.product_event_id = request->productlist[prod]->product_event_id)
+                               And (xm.product_id = request->productlist[prod]->product_id)
+                               And (xm.updt_cnt = request->productlist[prod]->xm_updt_cnt)
+                  with counter
+ 
+                  set sError_Check = ERROR(sErrorMsg, 0)
+                  if (nErrorStatus != 0)
+                      set error_process = "bbt_chg_event_reintstate"
+                      set error_message = "update crossmatch failed."
+                      set failure_occured = "T"
+                   endif
+ 
+                     update into product_event pe
+                         set
+                             pe.active_ind = 0,
+                             pe.active_status_cd = ReqData->inactive_status_cd,
+                             pe.updt_cnt         = pe.updt_cnt + 1,
+                             pe.updt_dt_tm       = cnvtdatetime(curdate,curtime3),
+                             pe.updt_task        = reqinfo->updt_task,
+                             pe.updt_id          = reqinfo->updt_id,
+                             pe.updt_applctx     = reqinfo->updt_applctx
+                     plan pe where (pe.product_event_id = request->productlist[prod]->product_event_id)
+                                   And (pe.product_id = request->productlist[prod]->product_id)
+                                   And (pe.event_type_cd = xmtch_event_type_cd)
+                                   And (pe.updt_cnt = request->productlist[prod]->pe_xm_updt_cnt)
+                     with counter
+ 
+                     set sError_Check = ERROR(sErrorMsg, 0)
+                     if (nErrorStatus != 0)
+                        set error_process = "bbt_chg_event_reintstate"
+                        set error_message = "update crossmatch failed."
+                        set failure_occured = "T"
+                     endif
+ 
+                  ;____________________________________ insert a new row into tables ___________________________
+ 
+                  call add_product_event
+                      (
+                      /* product_id               */ request->productlist[prod]->product_id,
+                      /* person_id                */ temp_pe->person_id,
+                      /* encntr_id                */ temp_pe->encntr_id,
+                      /* order_id                 */ temp_pe->order_id,
+                      /* bb_result_id             */ temp_pe->bb_result_id,
+                      /* event_type_cd            */ xmtch_event_type_cd,
+                      /* event_dt_tm              */ cnvtdatetime(curdate,curtime3),
+                      /* event_prsnl_id           */ reqinfo->updt_id,
+                      /* event_status_flag        */ 0,
+                      /* override_ind             */ temp_pe->override_ind,
+                      /* override_reason_cd       */ temp_pe->override_reason_cd,
+                      /* related_product_event_id */ request->productlist[prod]->product_event_id,
+                      /* active_ind               */ 1,
+                      /* active_status_cd         */ reqdata->active_status_cd,
+                      /* active_status_dt_tm      */ cnvtdatetime(curdate,curtime3),
+                      /* active_status_prsnl_id   */ reqinfo->updt_id
+                     )
+                     ;         "FS" = get product_event_id (seq) failed
+                     ;         "FA" = add product_event failed
+                     ;         "OK" = add successful
+                  set sub_product_event_id = product_event_id ;global product_event_id used in add_product_event
+ 
+                  if (gsub_product_event_status = "FS" or
+                      gsub_product_event_status = "FA"  )
+                      set error_process = "bbt_chg_event_reintstate"
+                      if (gsub_product_event_status = "FS")
+                          set error_message = "Generate product event id failed."
+                      else
+                          set error_message = "Insert product event failed."
+                      endif
+                      set failure_occured = "T"
+                  else
+                      insert into crossmatch xm
+                      set
+                          xm.product_event_id     = sub_product_event_id,
+                          xm.product_id           = request->productlist[prod]->product_id,
+                          xm.person_id            = temp_xm->person_id,
+                          xm.crossmatch_qty       = temp_xm->crossmatch_qty,
+                          ;xm.release_dt_tm        = "",
+                          xm.release_prsnl_id     = 0,
+                          xm.release_reason_cd    = 0,
+                          xm.release_qty          = 0,
+                          xm.updt_cnt             = 0,
+                          xm.updt_dt_tm           = cnvtdatetime(curdate,curtime3),
+                          xm.updt_task            = reqinfo->updt_task,
+                          xm.updt_id              = reqinfo->updt_id,
+                          xm.updt_applctx         = reqinfo->updt_applctx,
+                          xm.active_ind           = 1,
+                          xm.active_status_cd     = ReqData->active_status_cd,
+                          xm.active_status_dt_tm  = cnvtdatetime(curdate,curtime3),
+                          xm.active_status_prsnl_id = reqinfo->updt_id,
+                          xm.crossmatch_exp_dt_tm = cnvtdatetime(request->productlist[prod]->xm_exp_dt_tm),
+                          xm.reinstate_reason_cd  = request->productlist[prod]->reinstate_reason_cd,
+                          xm.bb_id_nbr            = temp_xm->bb_id_nbr,
+                          xm.xm_reason_cd         = temp_xm->xm_reason_cd
+                      with nocounter
+                      if (curqual = 0)
+                          set error_process = "bbt_chg_event_reintstate"
+                          set error_message = "crossmatch not insert."
+                          set failure_occured = "T"
+                      endif
+                  endif ;insert into product_event success
+              endif   ;crossmatch row found
+            endif   ;failure occured = false
+            ;**********************************    CHECK FOR AVAILABLE   ****************************
+            If ((failure_occured = "F")
+                and (active_avail = "T")
+                and (avail_event_id > 0)
+               )
+               ;inactivate available event
+               update into product_event pe
+                 set
+                    pe.active_ind = 0,
+                    pe.active_status_cd = ReqData->inactive_status_cd,
+                    pe.updt_cnt               = pe.updt_cnt + 1,
+                    pe.updt_dt_tm             = cnvtdatetime(curdate,curtime3),
+                    pe.updt_task              = reqinfo->updt_task,
+                    pe.updt_id                = reqinfo->updt_id,
+                    pe.updt_applctx           = reqinfo->updt_applctx
+                 plan pe where (pe.product_event_id = avail_event_id)
+                                And (pe.product_id = request->productlist[prod]->product_id)
+                                And (pe.event_type_cd = avail_event_type_cd)
+                                And (pe.updt_cnt = pe_avail_updt_cnt)
+                 with counter
+               if (curqual = 0)
+                  set error_process = "bbt_chg_event_reintstate"
+                  set error_message = "available product_event row not inactivated"
+                  set failure_occured = "T"
+               endif   ;available product_event row not added
+            endif   ;check for available
+ 
+            ;**********************************    CHECK FOR ASSIGN   ****************************
+            If ((failure_occured = "F")
+                and (active_assign = "T")
+                and (assign_event_id > 0)
+               )
+ 
+               ;inactivate available event
+               update into product_event pe
+                 set
+                    pe.active_ind = 0,
+                    pe.active_status_cd = ReqData->inactive_status_cd,
+                    pe.updt_cnt               = pe.updt_cnt + 1,
+                    pe.updt_dt_tm             = cnvtdatetime(curdate,curtime3),
+                    pe.updt_task              = reqinfo->updt_task,
+                    pe.updt_id                = reqinfo->updt_id,
+                    pe.updt_applctx           = reqinfo->updt_applctx
+                 plan pe where (pe.product_event_id = assign_event_id)
+                                And (pe.product_id = request->productlist[prod]->product_id)
+                                And (pe.event_type_cd = assigned_event_type_cd)
+                                And (pe.updt_cnt = pe_assign_updt_cnt)
+                 with counter
+               if (curqual = 0)
+                  set error_process = "bbt_chg_event_reintstate"
+                  set error_message = "assign product_event row not inactivated"
+                  set failure_occured = "T";if there is an active assign inactivate the row on the assign table
+               else
+                  update into assign asg
+                     set
+                         asg.active_ind       = 1,
+                         asg.active_status_cd = ReqData->inactive_status_cd,
+                         asg.updt_cnt         = asg.updt_cnt + 1,
+                         asg.updt_dt_tm       = cnvtdatetime(curdate,curtime3),
+                         asg.updt_task        = reqinfo->updt_task,
+                         asg.updt_id          = reqinfo->updt_id,
+                         asg.updt_applctx     = reqinfo->updt_applctx
+                  where (asg.product_event_id = assign_event_id)
+                  with counter
+                  if (curqual = 0)
+                     set error_process = "bbt_chg_event_reintstate"
+                     set error_message = "available row not inactivated"
+                     set failure_occured = "T"
+                  endif   ;available row not updated
+               endif   ;assign product_event row not inactivated
+            endif   ;check for available
+ 
+ 
+            /*********************************************   UNLOCK PRODUCT ***************************************************/
+            /* This event will occur for every product in the request                                                        */
+            /*****************************************************************************************************************/
+            ;see if the product has other crossmatches/assignments associated with it that are to be released
+            ;if it does do not unlock the product
+            
+            
+            if (request->more_processing_ind = 0) 
+            
+                set this_prod_id = request->productlist[prod]->product_id
+                if (prod < nbr_to_update)
+                   for (count1 = (prod + 1) to nbr_to_update)
+                       if (this_prod_id = request->productlist[count1]->product_id)
+                           set other_events = "T"
+                       endif
+                   endfor
+                endif
+    
+    
+                if ((failure_occured = "F") and (other_events = "F"))
+                     select into "nl:"
+                      p.product_id
+                   from product p
+                   plan p  where (p.product_id = request->productlist[prod]->product_id) and
+                                 (p.updt_cnt = request->productlist[prod]->p_updt_cnt) and
+                                 (p.locked_ind = 1)
+                   with nocounter, forupdate(p)
+     
+                   if (curqual = 0)
+                      set error_process = "bbt_chg_event_reintstate"
+                      set error_message = "product not locked"
+                      set failure_occured = "T"
+                   else
+                      update into product p
+                          set p.locked_ind        = 0,
+                              p.updt_cnt          = p.updt_cnt + 1,
+                              p.updt_dt_tm        = cnvtdatetime(curdate, curtime3),
+                              p.updt_id           = ReqInfo->updt_id,
+                              p.updt_task         = ReqInfo->updt_task,
+                              p.updt_applctx      = ReqInfo->updt_applctx
+                      plan p where (p.product_id = request->productlist[prod]->product_id) and
+                                  (p.updt_cnt = request->productlist[prod]->p_updt_cnt) and
+                                  (p.locked_ind = 1)
+                      with counter
+     
+                      if (curqual = 0)
+                         set error_process = "bbt_chg_event_reintstate"
+                         set error_message = "product not updated to unlocked"
+                         set failure_occured = "T"
+                      endif  ;update failed
+                   endif   ;lock failed
+                endif   ; failure_occured = "F"
+            endif
+ 
+            ;commit the changes if a failure did not occur other wise roll back the chages
+            if (failure_occured = "F")
+               set reply->status_data->status = "S"
+               set reply->status_data->subeventstatus[prod]->OperationName = "Complete"
+               set reply->status_data->subeventstatus[prod]->OperationStatus = "S"
+               set reply->status_data->subeventstatus[prod]->TargetObjectName = "Tables Updated"
+               set reply->status_data->subeventstatus[prod]->TargetObjectValue = "S"
+               if (request->more_processing_ind = 0)
+                   commit
+               endif
+               set reply->results[prod]->product_event_id = request->productlist[prod]->product_event_id
+               set reply->results[prod]->new_product_event_id = sub_product_event_id
+               set reply->results[prod]->status = "S"
+               set reply->results[prod]->err_process = "complete"
+               set reply->results[prod]->err_message = "no errors"
+               set statusFlag = 0
+			    set XMDtTmChange = datetimediff(request->productlist[prod]->xm_exp_dt_tm , cnvtdatetime(curdate, curtime2), 5)
+			    if (XMDtTmChange <= 0)
+			    	set statusFlag = 1
+			    endif	
+				call echo(build("NO FAIL OCCURRED, ADD PROD TO LIST: ", request->productlist[prod]->product_id))
+               Call AddProductToChangedProducts(request->productlist[prod]->product_id, request->productlist[prod]->xm_exp_dt_tm,
+               									 request->productlist[prod]->reinstate_reason_cd, statusFlag)
+               set success_cnt = success_cnt + 1
+            else
+               if (request->more_processing_ind = 0)
+                   rollback
+               endif
+               set reply->status_data->subeventstatus[prod]->OperationName = error_process
+               set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+               set reply->status_data->subeventstatus[prod]->TargetObjectName = error_message
+               set reply->status_data->subeventstatus[prod]->TargetObjectValue = "F"
+               set reply->results[prod]->product_event_id = request->productlist[prod]->product_event_id
+               set reply->results[prod]->new_product_event_id = sub_product_event_id
+               set reply->results[prod]->status = "F"
+               set reply->results[prod]->err_process = error_process
+               set reply->results[prod]->err_message = error_message
+            endif
+        endfor
+ 
+/****************************************************  Wrap Up Information **************************************************/
+
+ 
+if (success_cnt = 0)
+   set reply->status_data->status = "F"
+elseif  (success_cnt < nbr_to_update)
+   set reply->status_data->status = "P"
+else
+   set reply->status_data->status = "S"
+endif
+Call SendStatusChangeMessage(NULL)
+#end_script
+free record temp_pe
+free record temp_xm
+end go
+ 
+ 
+ 
+
+;Generated by GNU enscript 1.6.4.

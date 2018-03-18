@@ -1,0 +1,1552 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBT_RDM_ADD_MOD_OPTIONS/BBT_RDM_ADD_MOD_OPTIONS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2003 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+    Source file name:       BBT_RDM_ADD_MOD_OPTIONS.prg
+    Object name:            BBT_RDM_ADD_MOD_OPTIONS
+    Request #:              n/a
+
+    Product:                PathNet Blood Bank
+    Product Team:           Blood Bank
+    HNA Version:            500
+    CCL Version:
+
+    Program purpose:        This readme will migrate the blood bank product
+                            modification schema which was used by the
+                            ModifyProduct and PoolProduct applications to the
+                            new modification schema which is used by the
+                            BBModifyProduct application.
+                            Since new option_id sequences are generated during
+                            the migration, the product and modification activity 
+                            tables will be updated to reflect the new option_ids.
+                            In addition, this readme will create modification
+                            rows for pool events.
+
+
+    Tables read,            TABLE_NAME              METHOD (UNIQUE, RANGE, FULL)
+    and access method:      --------------------    -----------------------------
+                            modify_option           FULL
+                            new_product             RANGE
+                            modify_option_testing   RANGE
+                            modify_option_device    RANGE
+                            pool_option             FULL
+                            component               RANGE
+                            pooled_product          RANGE
+                            product_event           FULL
+                            product                 FULL
+                            blood_product           UNIQUE           
+                            modification            RANGE
+
+    Tables updated:         bb_mod_option
+                            bb_mod_orig_product
+                            bb_mod_pool_nbr
+                            bb_mod_new_product
+                            bb_mod_special_testing
+                            bb_mod_device
+                            modification
+                            product
+
+
+    Executing from:
+
+    Special Notes:          Each section should clearly identify what the purpose
+                            of that README step is.
+
+    Run Occurance:          (select ONE of the following)
+                            -----------------------------
+                            [X] 1. RUN ONCE
+                            [ ] 2. RUN MANY
+
+    ReadMe Category:        (select ONE of the following)
+                            -----------------------------
+                            [ ] 1. Data Load
+                            [ ] 2. Data Conversion
+                            [X] 3. Data Migration
+
+    Execution Time:         (select ONE of the following)
+                            ------------------------------------
+                            [ ] 1. Uptime before uptime schema.
+                            [X] 2. Uptime after uptime schema.
+                            [ ] 3. Downtime before downtime schema.
+                            [ ] 4. Downtime after downtime schema.
+                            [ ] 5. Uptime after all other components.
+
+    Exec. Justification:    n/a
+
+    Parent Script:          n/a
+
+    Check Script:           n/a
+
+    Data file for import:   n/a
+
+    Execution Duration:     (select ONE of the following)
+                            ----------------------------------
+                            [ ] 1. Fixed Time
+                            [X] 2. Driver Table: modify_option
+
+******************************************************************************/
+;~DB~****************************************************************************************
+;*                      GENERATED MODIFICATION CONTROL LOG                                  *
+;********************************************************************************************
+;*                                                                                          *
+;*Mod Date     Engineer             ITN     Feature      Comment                            *
+;*--- -------- -------------------- ------- ------------ -----------------------------------*
+;*000 08/28/02 Hal Patchen          0100001 22267        Initial Release                    *
+;*001 03/31/03 Hal Patchen          0106020 30552        Inactivate option if all new       *
+;*                                                       product rows are inactive.         *
+;*002 05/05/03 Hal Patchen          0106020 30552        Always deactivate prompt for volume*
+;*003 10/16/03 Jason Osborn         0109742 36075        Resolve defect CAPEP00108860       *
+;*004 06/20/05 Jim Jensen           0116424 60615        Resolve defects: 1-319387287       *
+;*                                                                        1-358497811       *
+;~DE~****************************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ***********************************/
+
+drop program BBT_RDM_ADD_MOD_OPTIONS:dba go
+create program BBT_RDM_ADD_MOD_OPTIONS:dba
+
+/****************************************************************************
+* Variable declaration                                                      *
+*****************************************************************************/
+declare sREADME_NAME                   = c25 with constant("BBT_RDM_ADD_MOD_OPTIONS")
+declare failed_ind                     = i2 with noconstant(0)
+declare active_status_cd               = f8 with noconstant(0.0)
+declare inactive_status_cd             = f8 with noconstant(0.0)
+declare pooled_cd                      = f8 with noconstant(0.0)
+declare display_key                    = vc with noconstant(" ")
+declare mo_cnt                         = i4 with noconstant(0)
+declare op_cnt                         = i4 with noconstant(0)
+declare np_cnt                         = i4 with noconstant(0)
+declare mst_cnt                        = i4 with noconstant(0)
+declare md_cnt                         = i4 with noconstant(0)
+declare pn_cnt                         = i4 with noconstant(0)
+declare p_cnt                          = i4 with noconstant(0)
+declare e_cnt                          = i4 with noconstant(0)
+declare m_cnt                          = i4 with noconstant(0)
+declare cnt                            = i4 with noconstant(0)
+declare stat                           = i2 with noconstant(0)
+declare next_code                      = f8 with noconstant(0.0)
+declare msg                            = c132 with noconstant(fillstring(132," "))
+declare version_nbr                    = i4 with noconstant(0)	
+declare key_unique_ind                 = i2 with noconstant(0)	
+declare x                              = i4 with noconstant(0)	
+declare y                              = i4 with noconstant(0)
+declare hold_billitem_id               = f8 with protect, noconstant(0.0)
+
+%i cclsource:pathnet_ocd_subroutines.inc
+
+/**********************
+** Log Start Message **
+**                   **********************************
+** LOGSCRIPTSTART creates log row as:                **
+**    "Starting (<sREADME_NAME>) - [<date/time>]..." **
+******************************************************/
+#START_SCRIPT
+call LOGSCRIPTSTART(sREADME_NAME)
+
+/****************************************************************************
+* Internal record declaration                                               *
+****************************************************************************/
+free record mod
+free record pool
+free record modification_table
+
+record mod
+(
+   1  options[*]
+      2  option_id                     = f8  ;option id from modify_option/pool_option
+      2  new_option_id                 = f8  ;new option id for bb_mod_option
+      2  display                       = vc
+      2  display_key                   = vc  ;new display key for bb_mod_option
+      2  beg_effective_dt_tm           = dq8
+      2  end_effective_dt_tm           = dq8
+      2  new_product_ind               = i2
+      2  split_ind                     = i2
+      2  ad_hoc_ind                    = i2
+      2  change_attribute_ind          = i2
+      2  crossover_ind                 = i2
+      2  pool_product_ind              = i2
+      2  generate_prod_nbr_ind         = i2
+      2  prod_nbr_prefix               = c10
+      2  prod_nbr_ccyy_ind             = i2
+      2  prod_nbr_starting_nbr         = i4
+      2  dispose_orig_ind              = i2
+      2  chg_orig_exp_dt_ind           = i2
+      2  orig_nbr_days_exp             = f8
+      2  orig_nbr_hrs_exp              = f8
+      2  active_ind                    = i2
+      2  active_status_cd              = f8
+      2  active_status_dt_tm           = dq8
+      2  active_status_prsnl_id        = f8
+      2  updt_cnt                      = i4
+      2  updt_dt_tm                    = dq8
+      2  updt_id                       = f8
+      2  orig_prods[*]
+         3  orig_product_cd               = f8
+         3  updt_cnt                      = i4
+         3  updt_dt_tm                    = dq8
+         3  updt_id                       = f8
+      2  new_prods[*]
+         3  mod_new_prod_id               = f8
+         3  orig_product_cd               = f8
+         3  new_product_cd                = f8
+         3  quantity                      = f8
+         3  default_sub_id_flag           = i2  ;0-No Default, 1-Uppercase, 2-Lowercase, 3-Numeric
+         3  max_prep_hrs                  = f8
+         3  default_orig_exp_ind          = i2
+         3  calc_exp_drawn_ind            = i2
+         3  default_exp_days              = f8
+         3  default_exp_hrs               = f8
+         3  allow_extend_exp_ind          = i2
+         3  default_orig_vol_ind          = i2
+         3  default_volume                = f8
+         3  calc_vol_ind                  = i2
+         3  prompt_vol_ind                = i2
+         3  validate_vol_ind              = i2
+         3  default_unit_of_meas_cd       = f8
+         3  synonym_id                    = f8
+         3  require_assign_ind            = i2
+         3  bag_type_cd                   = f8
+         3  crossover_reason_cd           = f8
+         3  allow_no_aborh_ind            = i2
+         3  default_supplier_id           = f8
+         3  updt_cnt                      = i4
+         3  updt_dt_tm                    = dq8
+         3  updt_id                       = f8
+         3  spec_testings[*]
+            4  special_testing_cd            = f8
+            4  updt_cnt                      = i4
+            4  updt_dt_tm                    = dq8
+            4  updt_id                       = f8
+      2  devices[*]
+         3  device_type_cd                = f8
+         3  default_ind                   = i2
+         3  max_capacity                  = i2
+         3  start_stop_time_ind           = i2
+         3  modification_duration         = i2
+         3  updt_cnt                      = i4
+         3  updt_dt_tm                    = dq8
+         3  updt_id                       = f8
+      2  pool_nbrs[*]
+         3  mod_pool_nbr_id               = f8
+         3  prefix                        = c10
+         3  year                          = i2
+         3  seq_nbr                       = i4
+         3  updt_cnt                      = i4
+         3  updt_dt_tm                    = dq8
+         3  updt_id                       = f8
+)
+
+record pool
+(
+   1  products[*]
+      2  pooled_product_id             = f8
+      2  new_option_id                 = f8                
+      2  events[*]                               ;Component product events.
+         3  product_event_id              = f8
+         3  product_id                    = f8   ;From product_event table
+         3  orig_expire_dt_tm             = dq8  ;From blood_product table
+         3  orig_volume                   = i4   ;From blood_product table
+         3  orig_unit_meas_cd             = f8   ;From product table
+         3  cur_expire_dt_tm              = dq8  ;From product table
+)
+
+record modification_table
+(
+   1  events[*]
+      2  product_event_id              = f8
+      2  option_id                     = f8
+      2  new_option_id                 = f8
+)
+
+/****************************************************************************
+* Load active status code value since it wasn't filled out on the original  *
+* modify_option table.                                                      *
+****************************************************************************/
+select into "nl:"
+   cv.code_value
+
+from
+   code_value cv
+
+plan cv where cv.code_set = 48
+          and cv.cdf_meaning = "ACTIVE"
+          and cv.active_ind = 1
+          and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+          and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+
+detail
+   active_status_cd = cv.code_value
+
+with nocounter
+
+if (curqual = 0)
+   set failed_ind = 1
+   set msg = "Missing required code value for cdf_meaning = ACTIVE on code set 48"
+   call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+   go to EXIT_SCRIPT
+endif
+
+/****************************************************************************
+* Load inactive status code value since it wasn't filled out on the original*
+* modify_option table.                                                      *
+****************************************************************************/
+select into "nl:"
+   cv.code_value
+
+from
+   code_value cv
+
+plan cv where cv.code_set = 48
+          and cv.cdf_meaning = "INACTIVE"
+          and cv.active_ind = 1
+          and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+          and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+
+detail
+   inactive_status_cd = cv.code_value
+
+with nocounter
+
+if (curqual = 0)
+   set failed_ind = 1
+   set msg = "Missing required code value for cdf_meaning = INACTIVE on code set 48"
+   call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+   go to EXIT_SCRIPT
+endif
+
+/****************************************************************************
+* Load pooled status code value from code set 1610.                         *
+****************************************************************************/
+select into "nl:"
+   cv.code_value
+
+from
+   code_value cv
+
+plan cv where cv.code_set = 1610
+          and cv.cdf_meaning = "17"  ;Pooled
+          and cv.active_ind = 1
+          and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+          and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+
+detail
+   pooled_cd = cv.code_value
+
+with nocounter
+
+if (curqual = 0)
+   set failed_ind = 1
+   set msg = "Missing required code value for cdf_meaning = 17 on code set 1610"
+   call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+   go to EXIT_SCRIPT
+endif
+
+/****************************************************************************
+* Load modify options for new product, split, and crossover division types. *
+****************************************************************************/
+set mo_cnt = 0
+
+select into "nl:"
+   mo.option_id
+  ,np.new_product_cd
+
+from
+   modify_option mo
+  ,new_product np
+
+plan mo where mo.option_id > 0.0
+          and mo.division_type_flag in (1, 2, 4)
+join np where np.option_id = mo.option_id
+
+order by
+   mo.option_id
+  ,np.active_ind desc 
+
+head report
+   np_cnt = 0
+   migrate_active_np_ind = 0
+
+head mo.option_id
+   mo_cnt = mo_cnt + 1
+   if (mod(mo_cnt,10) = 1)
+      stat = alterlist(mod->options, mo_cnt + 9)
+   endif
+   mod->options[mo_cnt].option_id = mo.option_id
+   mod->options[mo_cnt].display = mo.description
+   mod->options[mo_cnt].display_key = cnvtupper(cnvtalphanum(mo.description))  
+   if (mo.active_ind = 1)
+      mod->options[mo_cnt].beg_effective_dt_tm = cnvtdatetime(mo.active_status_dt_tm)
+      mod->options[mo_cnt].end_effective_dt_tm = cnvtdatetime("31-DEC-2100 23:59:59.99")
+   else
+      mod->options[mo_cnt].beg_effective_dt_tm = cnvtdatetime(mo.active_status_dt_tm)
+      mod->options[mo_cnt].end_effective_dt_tm = cnvtdatetime(mo.updt_dt_tm)
+   endif
+   mod->options[mo_cnt].new_product_ind = 0
+   mod->options[mo_cnt].split_ind = 0
+   mod->options[mo_cnt].change_attribute_ind = 0
+   mod->options[mo_cnt].crossover_ind = 0
+   mod->options[mo_cnt].pool_product_ind = 0
+   mod->options[mo_cnt].generate_prod_nbr_ind = 0
+   mod->options[mo_cnt].prod_nbr_prefix = fillstring(10, " ")
+   mod->options[mo_cnt].prod_nbr_ccyy_ind = 0
+   mod->options[mo_cnt].prod_nbr_starting_nbr = 0
+   mod->options[mo_cnt].dispose_orig_ind = mo.dispose_orig_ind
+   mod->options[mo_cnt].chg_orig_exp_dt_ind = mo.chg_orig_exp_dt_ind
+   mod->options[mo_cnt].orig_nbr_days_exp = mo.orig_nbr_days_exp
+   mod->options[mo_cnt].orig_nbr_hrs_exp = mo.orig_nbr_hrs_exp
+   mod->options[mo_cnt].active_ind = mo.active_ind
+   if (mo.active_ind = 1)
+      mod->options[mo_cnt].active_status_cd = active_status_cd
+   else
+      mod->options[mo_cnt].active_status_cd = inactive_status_cd
+   endif
+   mod->options[mo_cnt].active_status_dt_tm = cnvtdatetime(mo.active_status_dt_tm)
+   mod->options[mo_cnt].active_status_prsnl_id = mo.active_status_prsnl_id
+   mod->options[mo_cnt].updt_cnt = mo.updt_cnt
+   mod->options[mo_cnt].updt_dt_tm = cnvtdatetime(mo.updt_dt_tm)
+   mod->options[mo_cnt].updt_id = mo.updt_id
+   stat = alterlist(mod->options[mo_cnt].orig_prods, 1)
+   mod->options[mo_cnt].orig_prods[1].orig_product_cd = mo.orig_product_cd
+   mod->options[mo_cnt].orig_prods[1].updt_cnt = 0
+   mod->options[mo_cnt].orig_prods[1].updt_dt_tm = cnvtdatetime(mo.updt_dt_tm)
+   mod->options[mo_cnt].orig_prods[1].updt_id = mo.updt_id
+   np_cnt = 0
+   migrate_active_np_ind = 0
+
+detail
+   ;* Determine if the first new product row is active for the modify option.
+   ;* If the new product row is active, migrate forward all active new product rows.
+   ;* If the new product row is inactive, migrate forward all the inactive new product
+   ;* rows and inactive the modify option.
+   if (migrate_active_np_ind = 0)
+      if (np.active_ind = 1)
+         migrate_active_np_ind = 1
+      else
+         migrate_active_np_ind = 0
+         mod->options[mo_cnt].active_ind = 0
+         mod->options[mo_cnt].active_status_cd = inactive_status_cd
+      endif
+   endif 
+   if ((migrate_active_np_ind = 1 and np.active_ind = 1)
+   or  (migrate_active_np_ind = 0 and np.active_ind = 0))
+      np_cnt = np_cnt + 1
+      if (mod(np_cnt,10) = 1)
+         stat = alterlist(mod->options[mo_cnt].new_prods, np_cnt + 9)
+      endif
+      case (mo.division_type_flag)
+        of 1:  ;New Product
+           ;* When defining a new product in the old Modify Tool, the app would allow
+           ;* one or more new products to be created from the original.  When the original
+           ;* product type matches the new product type or multiple new products are being
+           ;* created, a split is occurring and the split_ind should be activated on the
+           ;* new BB_MOD_OPTION table.
+
+           ;* Determine if the original product is setup to be converted into a new product.
+           if (np.new_product_cd != mo.orig_product_cd)
+              mod->options[mo_cnt].new_product_ind = 1
+           endif
+           ;* Determine if the original product is defined to be split into multiple
+           ;* new products.
+           if (np.new_product_cd = mo.orig_product_cd
+           or  np_cnt > 1)
+              mod->options[mo_cnt].split_ind = 1
+           endif
+        of 2:  ;Split
+           ;* When defining a split in the old Modify Tool, the app only allowed
+           ;* the product to be split into the same product type (i.e. Red Cells 500ml
+           ;* could be split into a quantity of 2 Red Cells 250ml).
+           mod->options[mo_cnt].split_ind = 1
+        of 4:  ;Crossover
+           ;* When defining a crossover in the old Modify Tool, the app allowed
+           ;* the new product could either be the same type as the original product or
+           ;* of a different type.
+           mod->options[mo_cnt].crossover_ind = 1
+      endcase
+      mod->options[mo_cnt].new_prods[np_cnt].orig_product_cd = mo.orig_product_cd
+      mod->options[mo_cnt].new_prods[np_cnt].new_product_cd = np.new_product_cd
+      mod->options[mo_cnt].new_prods[np_cnt].quantity = np.quantity
+      case (np.sub_prod_id_flag)
+        of 1:  ;Uppercase
+          mod->options[mo_cnt].new_prods[np_cnt].default_sub_id_flag = 1
+        of 2:  ;Lowercase
+          mod->options[mo_cnt].new_prods[np_cnt].default_sub_id_flag = 2
+        of 3:  ;Numeric
+          mod->options[mo_cnt].new_prods[np_cnt].default_sub_id_flag = 3
+        else  ;No Default
+          mod->options[mo_cnt].new_prods[np_cnt].default_sub_id_flag = 0
+      endcase
+      mod->options[mo_cnt].new_prods[np_cnt].max_prep_hrs = np.max_prep_hrs
+      if (np.default_exp_days = 0
+      and np.default_exp_hrs = 0)
+         mod->options[mo_cnt].new_prods[np_cnt].default_orig_exp_ind = 1
+      else
+         mod->options[mo_cnt].new_prods[np_cnt].default_orig_exp_ind = 0
+      endif  
+      mod->options[mo_cnt].new_prods[np_cnt].calc_exp_drawn_ind = mo.calc_exp_drawn_ind
+      mod->options[mo_cnt].new_prods[np_cnt].default_exp_days = np.default_exp_days
+      mod->options[mo_cnt].new_prods[np_cnt].default_exp_hrs = np.default_exp_hrs
+      mod->options[mo_cnt].new_prods[np_cnt].allow_extend_exp_ind = mo.allow_extend_exp_ind
+      mod->options[mo_cnt].new_prods[np_cnt].default_orig_vol_ind = np.dflt_orig_volume_ind
+      mod->options[mo_cnt].new_prods[np_cnt].default_volume = np.default_volume
+      mod->options[mo_cnt].new_prods[np_cnt].calc_vol_ind = 0
+      mod->options[mo_cnt].new_prods[np_cnt].prompt_vol_ind = 0
+      mod->options[mo_cnt].new_prods[np_cnt].validate_vol_ind = mo.validate_vol_ind
+      mod->options[mo_cnt].new_prods[np_cnt].default_unit_of_meas_cd = np.default_unit_measure_cd
+      mod->options[mo_cnt].new_prods[np_cnt].synonym_id = np.synonym_id
+      mod->options[mo_cnt].new_prods[np_cnt].require_assign_ind = 0
+      mod->options[mo_cnt].new_prods[np_cnt].bag_type_cd = mo.bag_type_cd
+      mod->options[mo_cnt].new_prods[np_cnt].crossover_reason_cd = mo.crossover_reason_cd
+      mod->options[mo_cnt].new_prods[np_cnt].allow_no_aborh_ind = 0
+      mod->options[mo_cnt].new_prods[np_cnt].default_supplier_id = 0.0
+      mod->options[mo_cnt].new_prods[np_cnt].updt_cnt = np.updt_cnt
+      mod->options[mo_cnt].new_prods[np_cnt].updt_dt_tm = cnvtdatetime(np.updt_dt_tm)
+      mod->options[mo_cnt].new_prods[np_cnt].updt_id = np.updt_id
+   endif
+
+foot mo.option_id
+   stat = alterlist(mod->options[mo_cnt].new_prods, np_cnt)
+
+with
+   nocounter
+
+/****************************************************************************
+* Load modify options for change attribute division type.                   *
+****************************************************************************/
+select into "nl:"
+   mo.option_id
+  ,mot.new_product_cd
+  ,mot.special_testing_cd
+
+from
+   modify_option mo
+  ,modify_option_testing mot
+
+plan mo  where mo.option_id > 0.0
+           and mo.division_type_flag = 3
+join mot where mot.option_id = mo.option_id
+
+order by
+   mo.option_id
+  ,mot.active_ind desc 
+  ,mot.new_product_cd
+
+head report
+   np_cnt = 0
+   mst_cnt = 0
+   migrate_active_np_ind = 0
+
+head mo.option_id
+   mo_cnt = mo_cnt + 1
+   if (mod(mo_cnt,10) = 1)
+      stat = alterlist(mod->options, mo_cnt + 9)
+   endif
+   mod->options[mo_cnt].option_id = mo.option_id
+   mod->options[mo_cnt].display = mo.description
+   mod->options[mo_cnt].display_key = cnvtupper(cnvtalphanum(mo.description)) 
+   if (mo.active_ind = 1)
+      mod->options[mo_cnt].beg_effective_dt_tm = cnvtdatetime(mo.active_status_dt_tm)
+      mod->options[mo_cnt].end_effective_dt_tm = cnvtdatetime("31-DEC-2100 23:59:59.99")
+   else
+      mod->options[mo_cnt].beg_effective_dt_tm = cnvtdatetime(mo.active_status_dt_tm)
+      mod->options[mo_cnt].end_effective_dt_tm = cnvtdatetime(mo.updt_dt_tm)
+   endif
+   mod->options[mo_cnt].new_product_ind = 0
+   mod->options[mo_cnt].split_ind = 0
+   mod->options[mo_cnt].change_attribute_ind = 0
+   mod->options[mo_cnt].crossover_ind = 0
+   mod->options[mo_cnt].pool_product_ind = 0
+   mod->options[mo_cnt].generate_prod_nbr_ind = 0
+   mod->options[mo_cnt].prod_nbr_prefix = fillstring(10, " ")
+   mod->options[mo_cnt].prod_nbr_ccyy_ind = 0
+   mod->options[mo_cnt].prod_nbr_starting_nbr = 0
+   mod->options[mo_cnt].dispose_orig_ind = mo.dispose_orig_ind
+   mod->options[mo_cnt].chg_orig_exp_dt_ind = mo.chg_orig_exp_dt_ind
+   mod->options[mo_cnt].orig_nbr_days_exp = mo.orig_nbr_days_exp
+   mod->options[mo_cnt].orig_nbr_hrs_exp = mo.orig_nbr_hrs_exp
+   mod->options[mo_cnt].active_ind = mo.active_ind
+   if (mo.active_ind = 1)
+      mod->options[mo_cnt].active_status_cd = active_status_cd
+   else
+      mod->options[mo_cnt].active_status_cd = inactive_status_cd
+   endif
+   mod->options[mo_cnt].active_status_dt_tm = cnvtdatetime(mo.active_status_dt_tm)
+   mod->options[mo_cnt].active_status_prsnl_id = mo.active_status_prsnl_id
+   mod->options[mo_cnt].updt_cnt = mo.updt_cnt
+   mod->options[mo_cnt].updt_dt_tm = cnvtdatetime(mo.updt_dt_tm)
+   mod->options[mo_cnt].updt_id = mo.updt_id
+   stat = alterlist(mod->options[mo_cnt].orig_prods, 1)
+   mod->options[mo_cnt].orig_prods[1].orig_product_cd = mo.orig_product_cd
+   mod->options[mo_cnt].orig_prods[1].updt_cnt = 0
+   mod->options[mo_cnt].orig_prods[1].updt_dt_tm = cnvtdatetime(mo.updt_dt_tm)
+   mod->options[mo_cnt].orig_prods[1].updt_id = mo.updt_id
+   np_cnt = 0
+   migrate_active_np_ind = 0
+
+head mot.new_product_cd
+   ;* Determine if the first new product row is active for the modify option.
+   ;* If the new product row is active, migrate forward all active new product rows.
+   ;* If the new product row is inactive, migrate forward all the inactive new product
+   ;* rows and inactive the modify option.
+   if (migrate_active_np_ind = 0)
+      if (mot.active_ind = 1)
+         migrate_active_np_ind = 1
+      else
+         migrate_active_np_ind = 0
+         mod->options[mo_cnt].active_ind = 0
+         mod->options[mo_cnt].active_status_cd = inactive_status_cd
+      endif
+   endif 
+   if ((migrate_active_np_ind = 1 and mot.active_ind = 1)
+   or  (migrate_active_np_ind = 0 and mot.active_ind = 0))
+      np_cnt = np_cnt + 1
+      if (mod(np_cnt,10) = 1)
+         stat = alterlist(mod->options[mo_cnt].new_prods, np_cnt + 9)
+      endif
+      ;* When defining a change attribute option in the old Modify Tool, the app
+      ;* allowed the new product could either be the same type as the original
+      ;* product or of a different type.
+      mod->options[mo_cnt].change_attribute_ind = 1
+      ;* Determine if the original product is setup to be converted into a new
+      ;* product type.
+      if (mot.new_product_cd != mo.orig_product_cd)
+         mod->options[mo_cnt].new_product_ind = 1
+      endif
+      mod->options[mo_cnt].new_prods[np_cnt].orig_product_cd = mo.orig_product_cd
+      mod->options[mo_cnt].new_prods[np_cnt].new_product_cd = mot.new_product_cd
+      mod->options[mo_cnt].new_prods[np_cnt].quantity = 1
+      mod->options[mo_cnt].new_prods[np_cnt].default_sub_id_flag = 0
+      mod->options[mo_cnt].new_prods[np_cnt].max_prep_hrs = mot.max_prep_hrs
+      if (mot.default_exp_days = 0
+      and mot.default_exp_hrs = 0)
+         mod->options[mo_cnt].new_prods[np_cnt].default_orig_exp_ind = 1
+      else
+         mod->options[mo_cnt].new_prods[np_cnt].default_orig_exp_ind = 0
+      endif  
+      mod->options[mo_cnt].new_prods[np_cnt].calc_exp_drawn_ind = mo.calc_exp_drawn_ind
+      mod->options[mo_cnt].new_prods[np_cnt].default_exp_days = mot.default_exp_days
+      mod->options[mo_cnt].new_prods[np_cnt].default_exp_hrs = mot.default_exp_hrs
+      mod->options[mo_cnt].new_prods[np_cnt].allow_extend_exp_ind = mo.allow_extend_exp_ind
+      mod->options[mo_cnt].new_prods[np_cnt].default_orig_vol_ind = 1
+      mod->options[mo_cnt].new_prods[np_cnt].default_volume = 0
+      mod->options[mo_cnt].new_prods[np_cnt].calc_vol_ind = 0
+      mod->options[mo_cnt].new_prods[np_cnt].prompt_vol_ind = 0
+      mod->options[mo_cnt].new_prods[np_cnt].validate_vol_ind = mo.validate_vol_ind
+      mod->options[mo_cnt].new_prods[np_cnt].default_unit_of_meas_cd = 0.0
+      mod->options[mo_cnt].new_prods[np_cnt].synonym_id = 0.0
+      mod->options[mo_cnt].new_prods[np_cnt].require_assign_ind = 0
+      mod->options[mo_cnt].new_prods[np_cnt].bag_type_cd = mo.bag_type_cd
+      mod->options[mo_cnt].new_prods[np_cnt].crossover_reason_cd = 0.0
+      mod->options[mo_cnt].new_prods[np_cnt].allow_no_aborh_ind = 0
+      mod->options[mo_cnt].new_prods[np_cnt].default_supplier_id = 0.0
+      mod->options[mo_cnt].new_prods[np_cnt].updt_cnt = mot.updt_cnt
+      mod->options[mo_cnt].new_prods[np_cnt].updt_dt_tm = cnvtdatetime(mot.updt_dt_tm)
+      mod->options[mo_cnt].new_prods[np_cnt].updt_id = mot.updt_id
+      mst_cnt = 0
+   endif
+
+detail
+   if ((migrate_active_np_ind = 1 and mot.active_ind = 1)
+   or  (migrate_active_np_ind = 0 and mot.active_ind = 0))
+      mst_cnt = mst_cnt + 1
+      if (mod(mst_cnt,10) = 1)
+         stat = alterlist(mod->options[mo_cnt].new_prods[np_cnt].spec_testings, mst_cnt + 9)
+      endif
+      mod->options[mo_cnt].new_prods[np_cnt].spec_testings[mst_cnt].special_testing_cd =
+         mot.special_testing_cd
+      mod->options[mo_cnt].new_prods[np_cnt].spec_testings[mst_cnt].updt_cnt =
+         mot.updt_cnt
+      mod->options[mo_cnt].new_prods[np_cnt].spec_testings[mst_cnt].updt_dt_tm =
+         cnvtdatetime(mot.updt_dt_tm)
+      mod->options[mo_cnt].new_prods[np_cnt].spec_testings[mst_cnt].updt_id =
+         mot.updt_id
+   endif
+
+foot mot.new_product_cd
+   if (mst_cnt > 0)
+      stat = alterlist(mod->options[mo_cnt].new_prods[np_cnt].spec_testings, mst_cnt)
+   endif
+
+foot mo.option_id
+   stat = alterlist(mod->options[mo_cnt].new_prods, np_cnt)
+
+with
+   nocounter
+
+;* Check for the existence of modificiation options.
+if (mo_cnt = 0)
+   go to LOAD_POOL_OPTIONS
+endif
+
+/****************************************************************************
+* Load modify option devices.                                               *
+****************************************************************************/
+select into "nl:"
+   d.seq
+  ,mod.option_device_id
+
+from
+   (dummyt d with seq = value(mo_cnt))
+  ,modify_option_device mod
+
+plan d   where d.seq <= mo_cnt
+join mod where mod.option_id = mod->options[d.seq].option_id
+           and mod.active_ind = 1
+
+order by
+   d.seq
+
+head report
+   cnt = 0
+   md_cnt = 0
+
+head d.seq
+   cnt = d.seq
+   md_cnt = 0
+
+detail
+   md_cnt = md_cnt + 1
+   if (mod(md_cnt,10) = 1)
+      stat = alterlist(mod->options[cnt].devices, md_cnt + 9)
+   endif
+   mod->options[cnt].devices[md_cnt].device_type_cd = mod.device_type_cd
+   ;* Set the first device as the default.
+   if (md_cnt = 1)
+      mod->options[cnt].devices[md_cnt].default_ind = 1
+   else
+      mod->options[cnt].devices[md_cnt].default_ind = 0
+   endif
+   mod->options[cnt].devices[md_cnt].max_capacity = mod.nbr_of_device
+   mod->options[cnt].devices[md_cnt].start_stop_time_ind = 0
+   mod->options[cnt].devices[md_cnt].modification_duration = 0
+   mod->options[cnt].devices[md_cnt].updt_cnt = mod.updt_cnt
+   mod->options[cnt].devices[md_cnt].updt_dt_tm = cnvtdatetime(mod.updt_dt_tm)
+   mod->options[cnt].devices[md_cnt].updt_id = mod.updt_id
+
+foot d.seq
+   stat = alterlist(mod->options[cnt].devices, md_cnt)
+
+with
+   nocounter
+
+
+/****************************************************************************
+* Load pool options.                                                        *
+****************************************************************************/
+#LOAD_POOL_OPTIONS
+select into "nl:"
+   po.option_id
+  ,c.product_cd
+
+from
+   pool_option po
+  ,component c
+
+plan po where po.option_id > 0.0
+join c  where c.option_id = po.option_id
+          and c.active_ind = 1
+
+order by
+   po.option_id
+
+head report
+   op_cnt = 0
+
+head po.option_id
+   mo_cnt = mo_cnt + 1
+   if (mod(mo_cnt,10) = 1)
+      stat = alterlist(mod->options, mo_cnt + 9)
+   endif
+   mod->options[mo_cnt].option_id = po.option_id
+   mod->options[mo_cnt].display = po.description
+   mod->options[mo_cnt].display_key = cnvtupper(cnvtalphanum(po.description))
+   if (po.active_ind = 1)
+      mod->options[mo_cnt].beg_effective_dt_tm = cnvtdatetime(po.active_status_dt_tm)
+      mod->options[mo_cnt].end_effective_dt_tm = cnvtdatetime("31-DEC-2100 23:59:59.99")
+   else
+      mod->options[mo_cnt].beg_effective_dt_tm = cnvtdatetime(po.active_status_dt_tm)
+      mod->options[mo_cnt].end_effective_dt_tm = cnvtdatetime(po.updt_dt_tm)
+   endif
+   mod->options[mo_cnt].new_product_ind = 0
+   mod->options[mo_cnt].split_ind = 0
+   mod->options[mo_cnt].change_attribute_ind = 0
+   mod->options[mo_cnt].crossover_ind = 0
+   mod->options[mo_cnt].pool_product_ind = 1
+   mod->options[mo_cnt].generate_prod_nbr_ind = po.generate_prod_nbr_ind
+   mod->options[mo_cnt].prod_nbr_prefix = po.product_nbr_prefix
+   mod->options[mo_cnt].prod_nbr_ccyy_ind = 0
+   mod->options[mo_cnt].prod_nbr_starting_nbr = 0
+   mod->options[mo_cnt].dispose_orig_ind = 1
+   mod->options[mo_cnt].chg_orig_exp_dt_ind = 0
+   mod->options[mo_cnt].orig_nbr_days_exp = 0
+   mod->options[mo_cnt].orig_nbr_hrs_exp = 0
+   mod->options[mo_cnt].active_ind = po.active_ind
+   if (po.active_ind = 1)
+      mod->options[mo_cnt].active_status_cd = active_status_cd
+   else
+      mod->options[mo_cnt].active_status_cd = inactive_status_cd
+   endif
+   mod->options[mo_cnt].active_status_dt_tm = cnvtdatetime(po.active_status_dt_tm)
+   mod->options[mo_cnt].active_status_prsnl_id = po.active_status_prsnl_id
+   mod->options[mo_cnt].updt_cnt = po.updt_cnt
+   mod->options[mo_cnt].updt_dt_tm = cnvtdatetime(po.updt_dt_tm)
+   mod->options[mo_cnt].updt_id = po.updt_id
+   stat = alterlist(mod->options[mo_cnt].new_prods, 1)
+   mod->options[mo_cnt].new_prods[1].orig_product_cd = 0.0
+   mod->options[mo_cnt].new_prods[1].new_product_cd = po.new_product_cd
+   mod->options[mo_cnt].new_prods[1].quantity = 1
+   mod->options[mo_cnt].new_prods[1].default_sub_id_flag = 0
+   mod->options[mo_cnt].new_prods[1].max_prep_hrs = 0
+   mod->options[mo_cnt].new_prods[1].default_orig_exp_ind = 0
+   mod->options[mo_cnt].new_prods[1].calc_exp_drawn_ind = 0
+   mod->options[mo_cnt].new_prods[1].default_exp_days = 0
+   mod->options[mo_cnt].new_prods[1].default_exp_hrs = po.default_exp_hrs
+   mod->options[mo_cnt].new_prods[1].allow_extend_exp_ind = 0
+   mod->options[mo_cnt].new_prods[1].default_orig_vol_ind = 0
+   mod->options[mo_cnt].new_prods[1].default_volume = 0
+   mod->options[mo_cnt].new_prods[1].calc_vol_ind = po.calculate_vol_ind
+   mod->options[mo_cnt].new_prods[1].prompt_vol_ind = 0  ;Don't carry forward prompt for volume.
+   mod->options[mo_cnt].new_prods[1].validate_vol_ind = 0
+   mod->options[mo_cnt].new_prods[1].default_unit_of_meas_cd = 0.0
+   mod->options[mo_cnt].new_prods[1].synonym_id = 0.0
+   mod->options[mo_cnt].new_prods[1].require_assign_ind = po.require_assign_ind
+   mod->options[mo_cnt].new_prods[1].bag_type_cd = 0.0
+   mod->options[mo_cnt].new_prods[1].crossover_reason_cd = 0.0
+   mod->options[mo_cnt].new_prods[1].allow_no_aborh_ind = po.allow_no_aborh_ind
+   mod->options[mo_cnt].new_prods[1].default_supplier_id = po.default_supplier_id
+   mod->options[mo_cnt].new_prods[1].updt_cnt = po.updt_cnt
+   mod->options[mo_cnt].new_prods[1].updt_dt_tm = cnvtdatetime(po.updt_dt_tm)
+   mod->options[mo_cnt].new_prods[1].updt_id = po.updt_id
+   op_cnt = 0
+
+detail
+   op_cnt = op_cnt + 1
+   if (mod(op_cnt,10) = 1)
+      stat = alterlist(mod->options[mo_cnt].orig_prods, op_cnt + 9)
+   endif
+   mod->options[mo_cnt].orig_prods[op_cnt].orig_product_cd = c.product_cd
+   mod->options[mo_cnt].orig_prods[op_cnt].updt_cnt = c.updt_cnt
+   mod->options[mo_cnt].orig_prods[op_cnt].updt_dt_tm = cnvtdatetime(c.updt_dt_tm)
+   mod->options[mo_cnt].orig_prods[op_cnt].updt_id = c.updt_id
+
+foot po.option_id
+   stat = alterlist(mod->options[mo_cnt].orig_prods, op_cnt)
+
+with
+   nocounter
+
+;* Resize options
+set stat = alterlist(mod->options, mo_cnt)
+
+;* Check for the existence of modificiation options.
+if (mo_cnt = 0)
+   set failed_ind = 0
+   call LOGMSG("No modify/pool options found for migration.", E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+   go to EXIT_SCRIPT
+endif
+
+
+/****************************************************************************
+* Load pool product numbers.                                                *
+****************************************************************************/
+select into "nl:"
+   d.seq
+  ,pp.pool_option_id
+
+from
+   (dummyt d with seq = value(mo_cnt))
+  ,pooled_product pp
+
+plan d   where d.seq <= mo_cnt
+           and mod->options[d.seq].pool_product_ind = 1
+join pp  where pp.pool_option_id = mod->options[d.seq].option_id
+           and pp.active_ind = 1
+order by
+   d.seq
+
+head report
+   cnt = 0
+   pn_cnt = 0
+   yr = 0
+   digits = 0
+   highest_yr = 0
+   nbr_digits = 0
+   starting_nbr = 0
+
+head d.seq
+   cnt = d.seq
+   pn_cnt = 0
+   yr = 0
+   digits = 0
+   highest_yr = 0
+   nbr_digits = 0
+   starting_nbr = 0
+
+detail
+   pn_cnt = pn_cnt + 1
+   if (mod(pn_cnt,10) = 1)
+      stat = alterlist(mod->options[cnt].pool_nbrs, pn_cnt + 9)
+   endif
+   mod->options[cnt].pool_nbrs[pn_cnt].prefix = mod->options[cnt].prod_nbr_prefix
+   ;* Find the highest year value and use the row to set the prod_nbr_ccyy_ind
+   ;* and prod_nbr_starting_nbr values on the BB_MOD_OPTION table.
+   ;* Year values may be either 2-digit or 4-digits.
+   ;* If the year is 2-digit, convert to a 4-digit year in order to find
+   ;* the highest value, but set the prod_nbr_ccyy_ind based on the digit length 
+   ;* of the highest year value found.
+   if (pp.year < 80)
+      yr = 2000 + pp.year
+      digits = 2
+   elseif (pp.year < 100)
+      yr = 1900 + pp.year
+      digits = 2
+   else
+      yr = pp.year
+      digits = 4
+   endif
+   if (yr > highest_yr)
+      highest_yr = yr
+      nbr_digits = digits
+      starting_nbr = pp.pool_nbr
+   endif
+   mod->options[cnt].pool_nbrs[pn_cnt].year = yr
+   mod->options[cnt].pool_nbrs[pn_cnt].seq_nbr = pp.pool_nbr
+   mod->options[cnt].pool_nbrs[pn_cnt].updt_cnt = pp.updt_cnt
+   mod->options[cnt].pool_nbrs[pn_cnt].updt_dt_tm = cnvtdatetime(pp.updt_dt_tm)
+   mod->options[cnt].pool_nbrs[pn_cnt].updt_id = pp.updt_id
+
+foot d.seq
+   if (nbr_digits = 4)
+      mod->options[cnt].prod_nbr_ccyy_ind = 1
+   else
+      mod->options[cnt].prod_nbr_ccyy_ind = 0
+   endif
+   mod->options[cnt].prod_nbr_starting_nbr = starting_nbr
+   stat = alterlist(mod->options[cnt].pool_nbrs, pn_cnt)
+
+with
+   nocounter
+
+/****************************************************************************
+* Check for duplicate display keys.  When duplicates are found version the  *
+* display and display key values.                                           *
+****************************************************************************/
+for (cnt = 1 to mo_cnt)
+   set version_nbr = 1
+   ;*
+   ;* Check for duplicate display key values.
+   ;*
+   for (x = cnt + 1 to mo_cnt)
+      if (mod->options[x].display_key = mod->options[cnt].display_key)
+         ;*
+         ;* Duplicate found.  Update the version number until the key is unique.
+         ;*
+         set key_unique_ind = 0
+         while (key_unique_ind = 0)
+            set version_nbr = version_nbr + 1
+            set display_key = build(mod->options[x].display_key, version_nbr)
+            ;*
+            ;* Determine if the proposed key causes a duplicate.
+            ;*
+            set key_unique_ind = 1
+            for (y = 1 to mo_cnt)
+               if (display_key = mod->options[y].display_key
+               and y != x)
+                  set key_unique_ind = 0
+               endif
+            endfor
+         endwhile
+         set mod->options[x].display = 
+           concat(mod->options[x].display, " (", build(version_nbr), ")")
+         set mod->options[x].display_key = build(mod->options[x].display_key, version_nbr)
+      endif
+   endfor
+endfor
+
+/****************************************************************************
+* Migrate modification options to the new table schema.                     *
+****************************************************************************/
+for (cnt = 1 to mo_cnt)
+   ;*
+   ;* Determine if modification option has already been migrated.  If so, 
+   ;* skip the modification option.
+   ;*
+   select into "nl:"
+      mo.display_key
+   from
+      bb_mod_option mo
+   plan mo where mo.display_key = mod->options[cnt].display_key
+   with
+      nocounter
+   if (curqual = 0)   
+      ;*   
+      ;* Generate new option_id sequence value
+      ;*   
+      set next_code = 0.0
+      execute cpm_next_code
+      if (next_code = 0.0)
+         set failed_ind = 1
+         rollback
+         call LOGMSG("Unable to generate a new reference sequence id", E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+         go to EXIT_SCRIPT
+      endif
+      set mod->options[cnt].new_option_id = next_code
+      ;*
+      ;* Insert bb modification options
+      ;*
+      insert into bb_mod_option mo
+      set
+         mo.option_id = mod->options[cnt].new_option_id,
+         mo.display = mod->options[cnt].display,
+         mo.display_key = cnvtupper(cnvtalphanum(mod->options[cnt].display)),
+         mo.beg_effective_dt_tm = cnvtdatetime(mod->options[cnt].beg_effective_dt_tm),
+         mo.end_effective_dt_tm = cnvtdatetime(mod->options[cnt].end_effective_dt_tm),
+         mo.new_product_ind = mod->options[cnt].new_product_ind,
+         mo.split_ind = mod->options[cnt].split_ind,
+         mo.ad_hoc_ind = mod->options[cnt].ad_hoc_ind,
+         mo.change_attribute_ind = mod->options[cnt].change_attribute_ind,
+         mo.crossover_ind = mod->options[cnt].crossover_ind,
+         mo.pool_product_ind = mod->options[cnt].pool_product_ind,
+         mo.generate_prod_nbr_ind = mod->options[cnt].generate_prod_nbr_ind,
+         mo.prod_nbr_prefix = mod->options[cnt].prod_nbr_prefix,
+         mo.prod_nbr_ccyy_ind = mod->options[cnt].prod_nbr_ccyy_ind,
+         mo.prod_nbr_starting_nbr = mod->options[cnt].prod_nbr_starting_nbr,
+         mo.dispose_orig_ind = mod->options[cnt].dispose_orig_ind,
+         mo.chg_orig_exp_dt_ind = mod->options[cnt].chg_orig_exp_dt_ind,
+         mo.orig_nbr_days_exp = mod->options[cnt].orig_nbr_days_exp,
+         mo.orig_nbr_hrs_exp = mod->options[cnt].orig_nbr_hrs_exp,
+         mo.active_ind = mod->options[cnt].active_ind,
+         mo.active_status_cd = mod->options[cnt].active_status_cd,
+         mo.active_status_dt_tm = cnvtdatetime(mod->options[cnt].active_status_dt_tm),
+         mo.active_status_prsnl_id = mod->options[cnt].active_status_prsnl_id,
+         mo.updt_applctx = 0,
+         mo.updt_task = reqinfo->updt_task,
+         mo.updt_cnt = mod->options[cnt].updt_cnt,
+         mo.updt_dt_tm = cnvtdatetime(mod->options[cnt].updt_dt_tm),
+         mo.updt_id = mod->options[cnt].updt_id
+      with
+         nocounter
+      if (curqual = 0)
+         set failed_ind = 1
+         rollback
+         set msg = build("BB_MOD_OPTION table insert FAILED for option =", mod->options[cnt].display)
+         call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+         go to EXIT_SCRIPT
+      endif
+      ;*
+      ;* Insert BB modification original products.
+      ;*
+      if (size(mod->options[cnt].orig_prods,5) > 0)
+         for (op_cnt = 1 to size(mod->options[cnt].orig_prods, 5))
+            insert into bb_mod_orig_product mop
+            set
+               mop.option_id = mod->options[cnt].new_option_id,
+               mop.orig_product_cd = mod->options[cnt].orig_prods[op_cnt].orig_product_cd,
+               mop.updt_applctx = 0,
+               mop.updt_task = reqinfo->updt_task,
+               mop.updt_cnt = mod->options[cnt].orig_prods[op_cnt].updt_cnt,
+               mop.updt_dt_tm = cnvtdatetime(mod->options[cnt].orig_prods[op_cnt].updt_dt_tm),
+               mop.updt_id = mod->options[cnt].orig_prods[op_cnt].updt_id
+            with
+               nocounter
+            if (curqual = 0)
+               set failed_ind = 1
+               rollback
+               set msg = build("BB_MOD_ORIG_PRODUCT table insert FAILED for option =", mod->options[cnt].display)
+               call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+               go to EXIT_SCRIPT
+            endif
+         endfor
+      endif
+      ;*
+      ;* Insert BB modification new products.
+      ;*
+      if (size(mod->options[cnt].new_prods,5) > 0)
+         for (np_cnt = 1 to size(mod->options[cnt].new_prods, 5))
+            set next_code = 0.0
+            execute cpm_next_code
+            if (next_code = 0.0)
+               set failed_ind = 1
+               rollback
+               call LOGMSG("Unable to generate a new reference sequence id", E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+               go to EXIT_SCRIPT
+            endif
+            set mod->options[cnt].new_prods[np_cnt].mod_new_prod_id = next_code
+            insert into bb_mod_new_product mnp
+            set
+               mnp.mod_new_prod_id = mod->options[cnt].new_prods[np_cnt].mod_new_prod_id,
+               mnp.option_id = mod->options[cnt].new_option_id,
+               mnp.orig_product_cd = mod->options[cnt].new_prods[np_cnt].orig_product_cd,
+               mnp.new_product_cd = mod->options[cnt].new_prods[np_cnt].new_product_cd,
+               mnp.quantity = mod->options[cnt].new_prods[np_cnt].quantity,
+               mnp.default_sub_id_flag = mod->options[cnt].new_prods[np_cnt].default_sub_id_flag,
+               mnp.max_prep_hrs = mod->options[cnt].new_prods[np_cnt].max_prep_hrs,
+               mnp.default_orig_exp_ind = mod->options[cnt].new_prods[np_cnt].default_orig_exp_ind,
+               mnp.calc_exp_drawn_ind = mod->options[cnt].new_prods[np_cnt].calc_exp_drawn_ind,
+               mnp.default_exp_days = mod->options[cnt].new_prods[np_cnt].default_exp_days,
+               mnp.default_exp_hrs = mod->options[cnt].new_prods[np_cnt].default_exp_hrs,
+               mnp.allow_extend_exp_ind = mod->options[cnt].new_prods[np_cnt].allow_extend_exp_ind,
+               mnp.default_orig_vol_ind = mod->options[cnt].new_prods[np_cnt].default_orig_vol_ind,
+               mnp.default_volume = mod->options[cnt].new_prods[np_cnt].default_volume,
+               mnp.calc_vol_ind = mod->options[cnt].new_prods[np_cnt].calc_vol_ind,
+               mnp.prompt_vol_ind = mod->options[cnt].new_prods[np_cnt].prompt_vol_ind,
+               mnp.validate_vol_ind = mod->options[cnt].new_prods[np_cnt].validate_vol_ind,
+               mnp.default_unit_of_meas_cd = mod->options[cnt].new_prods[np_cnt].default_unit_of_meas_cd,
+               mnp.synonym_id = mod->options[cnt].new_prods[np_cnt].synonym_id,
+               mnp.require_assign_ind = mod->options[cnt].new_prods[np_cnt].require_assign_ind,
+               mnp.bag_type_cd = mod->options[cnt].new_prods[np_cnt].bag_type_cd,
+               mnp.crossover_reason_cd = mod->options[cnt].new_prods[np_cnt].crossover_reason_cd,
+               mnp.allow_no_aborh_ind = mod->options[cnt].new_prods[np_cnt].allow_no_aborh_ind,
+               mnp.default_supplier_id = mod->options[cnt].new_prods[np_cnt].default_supplier_id,
+               mnp.updt_applctx = 0,
+               mnp.updt_task = reqinfo->updt_task,
+               mnp.updt_cnt = mod->options[cnt].new_prods[np_cnt].updt_cnt,
+               mnp.updt_dt_tm = cnvtdatetime(mod->options[cnt].new_prods[np_cnt].updt_dt_tm),
+               mnp.updt_id = mod->options[cnt].new_prods[np_cnt].updt_id
+            with
+               nocounter
+            if (curqual = 0)
+               set failed_ind = 1
+               rollback
+               set msg = build("BB_MOD_NEW_PRODUCT table insert FAILED for option =", mod->options[cnt].display)
+               call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+               go to EXIT_SCRIPT
+            endif
+            ;*
+            ;* Insert BB modification special testing attributes.
+            ;*
+            if (size(mod->options[cnt].new_prods[np_cnt].spec_testings,5) > 0)
+               for (mst_cnt = 1 to size(mod->options[cnt].new_prods[np_cnt].spec_testings, 5))
+                  insert into bb_mod_special_testing mst
+                  set
+                     mst.mod_new_prod_id = mod->options[cnt].new_prods[np_cnt].mod_new_prod_id,
+                     mst.special_testing_cd =
+                       mod->options[cnt].new_prods[np_cnt].spec_testings[mst_cnt].special_testing_cd,
+                     mst.updt_applctx = 0,
+                     mst.updt_task = reqinfo->updt_task,
+                     mst.updt_cnt =
+                       mod->options[cnt].new_prods[np_cnt].spec_testings[mst_cnt].updt_cnt,
+                     mst.updt_dt_tm =
+                       cnvtdatetime(mod->options[cnt].new_prods[np_cnt].spec_testings[mst_cnt].updt_dt_tm),
+                     mst.updt_id =
+                       mod->options[cnt].new_prods[np_cnt].spec_testings[mst_cnt].updt_id
+                  with
+                     nocounter
+                  if (curqual = 0)
+                     set failed_ind = 1
+                     rollback
+                     set msg = build("BB_MOD_SPECIAL_TESTING table insert FAILED for option =", mod->options[cnt].display)
+                     call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+                     go to EXIT_SCRIPT
+                  endif
+               endfor
+            endif
+         endfor
+      endif
+      ;*
+      ;* Insert BB modification devices.
+      ;*
+      if (size(mod->options[cnt].devices,5) > 0)
+         for (md_cnt = 1 to size(mod->options[cnt].devices, 5))
+            insert into bb_mod_device md
+            set
+               md.option_id = mod->options[cnt].new_option_id,
+               md.device_type_cd = mod->options[cnt].devices[md_cnt].device_type_cd,
+               md.default_ind = mod->options[cnt].devices[md_cnt].default_ind,
+               md.max_capacity = mod->options[cnt].devices[md_cnt].max_capacity,
+               md.start_stop_time_ind = mod->options[cnt].devices[md_cnt].start_stop_time_ind,
+               md.modification_duration = mod->options[cnt].devices[md_cnt].modification_duration,
+               md.updt_applctx = 0,
+               md.updt_task = reqinfo->updt_task,
+               md.updt_cnt = mod->options[cnt].devices[md_cnt].updt_cnt,
+               md.updt_dt_tm = cnvtdatetime(mod->options[cnt].devices[md_cnt].updt_dt_tm),
+               md.updt_id = mod->options[cnt].devices[md_cnt].updt_id
+            with
+               nocounter
+            if (curqual = 0)
+               set failed_ind = 1
+               rollback
+               set msg = build("BB_MOD_DEVICE table insert FAILED for option =", mod->options[cnt].display)
+               call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+               go to EXIT_SCRIPT
+            endif
+         endfor
+      endif
+      ;*
+      ;* Insert BB modification pool numbers.
+      ;*
+      if (size(mod->options[cnt].pool_nbrs,5) > 0)
+         for (pn_cnt = 1 to size(mod->options[cnt].pool_nbrs, 5))
+            set next_code = 0.0
+            execute cpm_next_code
+            if (next_code = 0.0)
+               set failed_ind = 1
+               rollback
+               call LOGMSG("Unable to generate a new reference sequence id", E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+               go to EXIT_SCRIPT
+            endif
+            set mod->options[cnt].pool_nbrs[pn_cnt].mod_pool_nbr_id = next_code
+            insert into bb_mod_pool_nbr pn
+            set
+               pn.mod_pool_nbr_id = mod->options[cnt].pool_nbrs[pn_cnt].mod_pool_nbr_id,
+               pn.option_id = mod->options[cnt].new_option_id,
+               pn.prefix = mod->options[cnt].pool_nbrs[pn_cnt].prefix,
+               pn.year = mod->options[cnt].pool_nbrs[pn_cnt].year,
+               pn.seq_nbr = mod->options[cnt].pool_nbrs[pn_cnt].seq_nbr,
+               pn.updt_applctx = 0,
+               pn.updt_task = reqinfo->updt_task,
+               pn.updt_cnt = mod->options[cnt].pool_nbrs[pn_cnt].updt_cnt,
+               pn.updt_dt_tm = cnvtdatetime(mod->options[cnt].pool_nbrs[pn_cnt].updt_dt_tm),
+               pn.updt_id = mod->options[cnt].pool_nbrs[pn_cnt].updt_id
+            with
+               nocounter
+            if (curqual = 0)
+               set failed_ind = 1
+               rollback
+               set msg = build("BB_MOD_POOL_NBR table insert FAILED for option =", mod->options[cnt].display)
+               call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+               go to EXIT_SCRIPT
+            endif
+         endfor
+      endif
+      ;*
+      ;* Update the BILL_ITEM table giving EXT_PARENT_REFERENCE_ID the new OPTION_ID from the BB_MOD_OPTION table
+      ;*
+      select into "nl:"
+         bi.bill_item_id
+      from bill_item bi
+      where bi.ext_parent_reference_id = mod->options[cnt].option_id
+        and bi.active_ind = 1
+      detail
+        hold_billitem_id = bi.bill_item_id
+      with forupdate(bi)
+
+      if (hold_billitem_id > 0.0)
+        update into bill_item bi
+          set bi.ext_parent_reference_id = mod->options[cnt].new_option_id,
+              bi.updt_task               = reqinfo->updt_task
+          where bi.bill_item_id = hold_billitem_id
+          with nocounter
+        if (curqual = 0)
+          set failed_ind = 1
+          rollback
+          set msg = build("BILL_ITEM table update FAILED for bill_item_id =", hold_billitem_id)
+          call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+          go to EXIT_SCRIPT
+        endif
+      endif
+   endif
+endfor
+
+commit
+call LOGMSG("Reference Data Migration Successful.", E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+
+
+/****************************************************************************
+* Load pooled product and component product events.                         *
+****************************************************************************/
+set p_cnt = 0
+set e_cnt = 0
+
+select into "nl:"
+   p.product_id
+  ,p2.pooled_product_id
+  ,bp.product_id
+  ,pe.product_event_id
+
+from
+   product p
+  ,product p2
+  ,blood_product bp
+  ,product_event pe
+
+plan p  where p.pool_option_id > 0.0
+join p2 where p2.pooled_product_id = p.product_id 
+join bp where bp.product_id = p2.product_id
+join pe where pe.product_id = p2.product_id
+          and pe.event_type_cd+0 = pooled_cd
+
+order by
+   p.product_id,
+   pe.product_event_id
+   
+head report
+   p_cnt = 0
+   e_cnt = 0
+   updt_prod_ind = 0
+
+head p.product_id
+   updt_prod_ind = 0
+   ;* Find option id to be updated.  If a match is found, the
+   ;* product row needs to be updated and the component product
+   ;* events need a modification table row created.
+   for (cnt = 1 to mo_cnt)
+      if (mod->options[cnt].option_id = p.pool_option_id)
+         updt_prod_ind = 1
+         p_cnt = p_cnt + 1
+         if (mod(p_cnt,10) = 1)
+            stat = alterlist(pool->products, p_cnt + 9)
+         endif
+         pool->products[p_cnt].pooled_product_id = p.product_id
+         pool->products[p_cnt].new_option_id = mod->options[cnt].new_option_id
+      endif
+   endfor
+   e_cnt = 0
+
+detail
+   if (updt_prod_ind = 1)
+      e_cnt = e_cnt + 1
+      if (mod(e_cnt,10) = 1)
+         stat = alterlist(pool->products[p_cnt].events, e_cnt + 9)
+      endif
+      pool->products[p_cnt].events[e_cnt].product_event_id = pe.product_event_id
+      pool->products[p_cnt].events[e_cnt].product_id = pe.product_id
+      pool->products[p_cnt].events[e_cnt].orig_expire_dt_tm = cnvtdatetime(bp.orig_expire_dt_tm)
+      pool->products[p_cnt].events[e_cnt].orig_volume = bp.orig_volume
+      pool->products[p_cnt].events[e_cnt].orig_unit_meas_cd = p2.orig_unit_meas_cd
+      pool->products[p_cnt].events[e_cnt].cur_expire_dt_tm = cnvtdatetime(p2.cur_expire_dt_tm)
+   endif
+   
+foot p.product_id
+   if (updt_prod_ind = 1)
+      stat = alterlist(pool->products[p_cnt].events, e_cnt)
+   endif
+   
+foot report
+   stat = alterlist(pool->products, p_cnt)
+
+with
+   nocounter
+
+
+/****************************************************************************
+* Update pool option id's on product table for the new product created from *
+* the pool modification and write pool events to the modification table for *
+* the component products.                                                   *
+****************************************************************************/
+if (p_cnt > 0)
+   for (cnt = 1 to p_cnt)
+      ;*
+      ;* Lock product row for update.
+      ;*
+      select into "nl:"
+         p.product_id
+      from
+         product p
+      where p.product_id = pool->products[cnt].pooled_product_id
+      with
+         nocounter,
+         forupdate(p)
+      if (curqual = 0)
+         set failed_ind = 1
+         rollback
+         call LOGMSG("PRODUCT table row lock Failed.", E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+         go to EXIT_SCRIPT
+      endif
+      ;*
+      ;* Update product table.
+      ;*
+      update into product p
+      set
+         p.pool_option_id = pool->products[cnt].new_option_id,
+         p.updt_task      = reqinfo->updt_task
+      where p.product_id = pool->products[cnt].pooled_product_id
+      with nocounter
+      if (curqual = 0)
+         set failed_ind = 1
+         rollback
+         set msg = build("PRODUCT table update FAILED for product_id =", 
+           pool->products[cnt].pooled_product_id)
+         call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+         go to EXIT_SCRIPT
+      endif
+      ;*
+      ;* Add pool events to modification table for the component products.
+      ;*
+      if (size(pool->products[cnt].events, 5) > 0)
+         for (e_cnt = 1 to size(pool->products[cnt].events, 5))
+            insert into modification m
+            set
+               m.product_event_id = pool->products[cnt].events[e_cnt].product_event_id,
+               m.product_id = pool->products[cnt].events[e_cnt].product_id,
+               m.orig_expire_dt_tm = cnvtdatetime(pool->products[cnt].events[e_cnt].orig_expire_dt_tm),
+               m.orig_volume = pool->products[cnt].events[e_cnt].orig_volume,
+               m.orig_unit_meas_cd = pool->products[cnt].events[e_cnt].orig_unit_meas_cd,
+               m.cur_expire_dt_tm = cnvtdatetime(pool->products[cnt].events[e_cnt].cur_expire_dt_tm),
+               m.cur_volume = 0,
+               m.cur_unit_meas_cd = 0.0,
+               m.modified_qty = 0,
+               m.option_id = pool->products[cnt].new_option_id,
+               m.crossover_reason_cd = 0.0,
+               m.active_ind = 1,
+               m.active_status_cd = active_status_cd,
+               m.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+               m.active_status_prsnl_id = 0.0,
+               m.updt_applctx = 0,
+               m.updt_task = reqinfo->updt_task,
+               m.updt_cnt = 0,
+               m.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+               m.updt_id = 0.0
+            where m.product_event_id = pool->products[cnt].events[e_cnt].product_event_id
+            with nocounter
+            if (curqual = 0)
+               set failed_ind = 1
+               rollback
+               set msg = build("MODIFICATION table insert FAILED for product_event_id =", 
+                 pool->products[cnt].events[e_cnt].product_event_id)
+               call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+               go to EXIT_SCRIPT
+            endif
+         endfor
+      endif
+      commit
+   endfor
+endif
+
+
+/****************************************************************************
+* Find associated modification option id's on modification activity table.  *
+****************************************************************************/
+select into "nl:"
+   m.option_id
+
+from
+   modification m
+
+plan m where m.product_event_id > 0.0
+
+head report
+   m_cnt = 0
+
+detail
+   ;* Determine if option id needs to be updated.
+   for (cnt = 1 to mo_cnt)
+      if (mod->options[cnt].option_id = m.option_id)
+         m_cnt = m_cnt + 1
+         if (mod(m_cnt,100) = 1)
+            stat = alterlist(modification_table->events, m_cnt + 99)
+         endif
+         modification_table->events[m_cnt].product_event_id = m.product_event_id
+         modification_table->events[m_cnt].option_id = m.option_id
+         modification_table->events[m_cnt].new_option_id = mod->options[cnt].new_option_id
+         cnt = mo_cnt
+      endif
+   endfor
+
+foot report
+   stat = alterlist(modification_table->events, m_cnt)
+
+with
+   nocounter
+
+
+/****************************************************************************
+* Update modification option id's on modification activity table.           *
+****************************************************************************/
+if (m_cnt > 0)
+   for (cnt = 1 to m_cnt)
+      ;*
+      ;* Lock modification row for update.
+      ;*
+      select into "nl:"
+         m.option_id
+      from
+         modification m
+      where m.product_event_id = modification_table->events[cnt].product_event_id
+        and m.option_id = modification_table->events[cnt].option_id
+      with
+         nocounter,
+         forupdate(m)
+      if (curqual = 0)
+         set failed_ind = 1
+         rollback
+         call LOGMSG("MODIFICATION table row lock Failed.", E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+         go to EXIT_SCRIPT
+      endif
+      ;*
+      ;* Update modification table.
+      ;*
+      update into modification m
+      set
+         m.option_id = modification_table->events[cnt].new_option_id,
+         m.updt_task = reqinfo->updt_task
+      where m.product_event_id = modification_table->events[cnt].product_event_id
+        and m.option_id = modification_table->events[cnt].option_id
+      with nocounter
+      if (curqual > 0)
+         commit
+      else
+         set failed_ind = 1
+         rollback
+         set msg = build("MODIFICATION table update FAILED for product_event_id =", 
+           modification_table->events[cnt].product_event_id)
+         call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+         go to EXIT_SCRIPT
+      endif
+   endfor
+endif
+
+call LOGMSG("Activity Data Update Successful.", E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+
+;---------------------------------------------------------
+#EXIT_SCRIPT
+/****************************
+**  LOG Execution Status.  **
+**                         ***************************************
+**  Note:  if you have a check script then you do not           **
+**  need to perform the LOGSTATUS in the RDM script.            **
+**  Explicit COMMIT and/or ROLLBACK must be perform             **
+**  In this section both in the README and the CHECK            **
+**  script.  For example:                                       **
+**     if (nCnt > 0)                                            **
+**       COMMIT  ;Just in case LOGSTATUS pulls an Oracle error. **
+**       CALL LOGSTATUS("Execution Successful.", "S")           **
+**     else                                                     **
+**       ROLLBACK                                               **
+**       CALL LOGSTATUS("Execution Failed because ...", "F")    **
+**     endif                                                    **
+**                                                              **
+*****************************************************************/
+if (failed_ind = 0)
+   commit  ;Just in case LOGSTATUS pulls an Oracle error.
+   call LOGSTATUS("Execution Successful.", "S")
+else
+   rollback
+   call LOGSTATUS("Execution Failed", "F")
+endif
+
+free record mod
+free record pool
+free record modification_table
+
+
+/********************
+** Log End Message **
+**                   ******************************************
+** LOGSCRIPTEND creates log row as:                          **
+**    "Execution (<sREADME_NAME>) Complete - [<date/time>]." **
+**************************************************************/
+call LOGSCRIPTEND(sREADME_NAME)
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,221 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_rr_scatter_results/GLB_GET_RR_SCATTER_RESULTS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_RR_SCATTER_RESULTS.PRG  
+        Object name:            GLB_GET_RR_SCATTER_RESULTS  
+        Request #:              250181
+
+        Product:                General Lab - Round Robin               
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Get the results for a set of resources to use
+				to calculate the meandiff for QCRRScatter.DLL
+
+        Tables read:            rr_result 
+				rr_perform_Result
+
+        Tables updated:         none
+
+        Executing from:         Round Robin Inquiry - QCRRScatter.DLL
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 01/22/99 Gary Runde           Initial Release                     *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_RR_SCATTER_RESULTS:DBA GO    
+      create program GLB_GET_RR_SCATTER_RESULTS:DBA           
+     
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request                                      
+      ( 
+	1  task_assay_cd 	= f8
+	1  beg_dt_tm		= dq8
+	1  end_dt_tm		= dq8
+	1  resources[*]
+		2  service_resource_cd  = f8
+      )
+*/
+
+
+      record reply
+      ( 
+	1  all_saved_ind			= i2
+	1  qual[*]
+	   2  accession_id         		= f8
+           2  results[*]
+	   	3  service_resource_cd		= f8
+	   	3  service_resource_disp	= vc
+	        3  result_value			= f8
+	   	3  perform_dt_tm		= dq8	   		
+%i cclsource:status_block.inc
+)
+
+
+     	#Script
+	set reply->status_data->status = "F"
+      
+        declare r_cnt = i4
+        declare q_cnt = i4
+      	declare result_status_autoverified_cd = f8
+      	declare result_status_verified_cd   = f8
+      	declare result_status_corr_cd   = f8
+
+      	set RESULT_STATUS_CODESET       = 1901
+      	set RESULT_STATUS_VERIFIED_CDF  = "VERIFIED"
+      	set RESULT_STATUS_AUTOVERIFIED_CDF = "AUTOVERIFIED"
+      	set RESULT_STATUS_CORR_CDF = "CORRECTED"
+
+	set numRes = value(size(request->resources, 5))
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+         set hSys = 0
+         set SysStat = 0
+         call uar_SysCreateHandle(hSys,SysStat)
+         set sText = fillstring(254, " ")
+
+
+      	/********************************************************************/
+      	/* Get the necessary result status codes                            */
+      	/********************************************************************/
+  
+      	select into "nl:"
+        	c.code_value,
+        	c.cdf_meaning
+      	from code_value c
+      	where c.code_set = result_status_codeset and
+            	c.cdf_meaning in (result_status_verified_cdf, 
+                                result_status_autoverified_cdf,
+				RESULT_STATUS_CORR_CDF)
+      	detail
+call echo(c.code_value)
+        	case (c.cdf_meaning)
+        	of result_status_verified_cdf:
+                	result_status_verified_cd = c.code_value
+        	of result_status_autoverified_cdf:
+                	result_status_autoverified_cd = c.code_value
+        	of result_status_corr_cdf:
+                	result_status_corr_cd = c.code_value
+        	endcase
+      	with nocounter
+
+   set error_check = ERROR(sErrorMsg,0)   ;get error message
+   if (error_check != 0)
+     set reply->status_data->status = "F"
+     set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+     go to exit_script
+   endif
+
+      	/********************************************************************/
+      	/* Get the accession_id and round robin id if needed                */
+      	/********************************************************************/
+
+	select into "nl:"
+		rr.rr_result_id,
+		pr.rr_perform_result_id,
+		rr.accession_id,
+		rr.service_resource_cd,
+		pr.numeric_result_value,
+		pr.perform_dt_tm
+	from
+		rr_result rr,
+		(dummyt d with seq = value(numRes)),
+		rr_perform_result pr
+	plan d
+	join rr where rr.service_resource_cd = 
+			request->resources[d.seq].service_resource_cd
+		and rr.task_assay_cd = request->task_assay_cd
+		and rr.result_status_cd in 
+			(result_status_verified_cd,
+			 result_status_autoverified_cd,
+			 result_status_corr_cd)
+	join pr where rr.rr_result_id = pr.rr_Result_id 
+		and rr.result_status_cd = pr.result_status_cd
+		and pr.perform_dt_tm between cnvtdatetime(request->beg_dt_tm)
+					and cnvtdatetime(request->end_dt_tm)
+	order by rr.accession_id, rr.service_resource_cd         
+  	head report
+		q_cnt = 0
+		reply->all_saved_ind = 1
+	head rr.accession_id              
+		q_cnt = q_cnt + 1
+		if (mod(q_cnt, 10) = 1)
+			stat = alterlist(reply->qual, q_cnt + 10)
+		endif	
+		reply->qual[q_cnt].accession_id = rr.accession_id              
+		r_cnt = 0
+	detail                                   
+		if (rr.saved_ind = 0)
+			reply->all_saved_ind = 0
+		endif
+		r_cnt = r_cnt + 1
+		if (mod(r_cnt, 10) = 1)
+			stat = alterlist(reply->qual[q_cnt].results, r_cnt + 10)
+		endif
+		reply->qual[q_cnt].results[r_cnt].result_value = pr.numeric_result_value
+		reply->qual[q_cnt].results[r_cnt].service_resource_cd = rr.service_resource_cd     
+		reply->qual[q_cnt].results[r_cnt].perform_dt_tm = pr.perform_dt_tm
+	foot rr.accession_id            
+		if (r_cnt > 0)
+			stat = alterlist(reply->qual[q_cnt].results, r_cnt)
+		endif
+	foot report
+		if (q_cnt > 0)
+			stat = alterlist(reply->qual, q_cnt)
+  		endif
+  	with nocounter
+   set error_check = ERROR(sErrorMsg,0)   ;get error message
+   if (error_check != 0)
+     set reply->status_data->status = "F"
+     set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+     go to exit_script
+   endif
+
+
+      	/********************************************************************/
+      	/* Exit Script                                                      */
+      	/********************************************************************/
+      	if (curqual = 0)
+        	set reply->status_data->status = "Z"
+      	else    
+         	set reply->status_data->status = "S"
+      	endif
+
+#exit_script
+call uar_SysDestroyHandle(hSys)
+end
+go      
+
+
+;Generated by GNU enscript 1.6.4.

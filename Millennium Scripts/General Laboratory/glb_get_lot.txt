@@ -1,0 +1,259 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_lot/glb_get_lot.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_LOT.PRG
+        Object name:            GLB_GET_LOT
+        Request #:              257509
+
+        Product:                General Lab/Quality Control           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Retrieve lot associated with
+                                the given short control
+
+        Tables read:            control_lot
+
+        Tables updated:         n/a
+
+        Executing from:         General Lab Build/Maintain Control Material
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 07/03/96 Chad Moats           Initial Release                     *
+;     001 01/15/99 Gary Runde		Add logic for warning message for   *
+;					Duplicate Lot Names
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_LOT:dba go    
+      create program GLB_GET_LOT:dba
+     
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request                                      
+      (                                       
+         1 control_id = f8
+	 1 lot_number = vc        ;001
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+         1 control_id                = f8
+	 1 no_active_lot_ind	     = i2
+         1 lots[*]
+           2 lot_id                  = f8
+           2 short_description       = c20
+           2 lot_number              = vc
+           2 receive_dt_tm           = dq8
+           2 expiration_dt_tm        = dq8
+           2 lot_flag                = i2 
+           2 prev_lot_id             = f8
+         1 status_data
+           2 status                  = c1
+           2 subeventstatus[1]
+             3 OperationName         = c15
+             3 OperationStatus       = c1
+             3 TargetObjectName      = c15
+             3 TargetObjectValue     = vc
+      )
+
+     #Script
+      set current_date = cnvtdatetime(curdate,curtime)
+      set reply->status_data->status = "F"
+      set PreActiveLot_cnt = 0
+      set ActiveLot_cnt = 0
+      set lot_cnt = 0
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+/********************************************************************/ ;001
+/* If the lot number is not empty check for dups                    */ ;001
+/********************************************************************/ ;001
+      if (request->lot_number > "")				;001
+        SELECT into "nl:"                                       ;001
+           cl.lot_id                                            ;001
+        FROM                                                    ;001
+           control_lot cl                                       ;001
+        PLAN cl                                                 ;001
+           where request->control_id = cl.control_id and        ;001
+                 cl.lot_number = request->lot_number            ;001
+        DETAIL                                                  ;001
+           lot_cnt = lot_cnt + 1                                ;001
+	WITH NOCOUNTER                                          ;001
+	if (lot_cnt = 0)                                        ;001
+	      set reply->status_data->status = "Z"	        ;001
+	else                                                    ;001
+	      set reply->status_data->status = "S"	        ;001
+	endif                                                   ;001
+	go to exit_script                                       ;001
+      endif                                                     ;001
+
+
+/********************************************************************/ 
+/* Select the active lot from control_lot table                     */
+/********************************************************************/
+
+      SELECT into "nl:"
+         cl.lot_id
+      FROM
+         control_lot cl
+      PLAN cl
+         where request->control_id = cl.control_id and
+               cl.lot_flag > 0 and
+	       cl.receive_dt_tm < cnvtdatetime(curdate, curtime) and
+	       cl.expiration_dt_tm > cnvtdatetime(curdate, curtime)
+      HEAD cl.lot_id
+         found_lot = "Y"
+         reply->control_id = cl.control_id
+         reply->no_active_lot_ind = 0
+      DETAIL
+         lot_cnt = lot_cnt + 1
+         IF (mod(lot_cnt, 5) = 1)
+           stat = alterlist(reply->lots, lot_cnt + 5)
+         ENDIF
+         reply->lots[lot_cnt].lot_id = cl.lot_id
+         reply->lots[lot_cnt].short_description = cl.short_description
+         reply->lots[lot_cnt].lot_number = cl.lot_number
+         reply->lots[lot_cnt].receive_dt_tm = cl.receive_dt_tm
+         reply->lots[lot_cnt].expiration_dt_tm = cl.expiration_dt_tm
+	 ;count the number of active/preactive lots to make sure only one 
+	 ;of each at most
+	 if (cl.lot_flag = 1)
+	 	ActiveLot_cnt = ActiveLot_cnt + 1
+	 elseif (cl.lot_flag = 2)
+		PreActiveLot_cnt = PreActiveLot_cnt + 1
+	 endif		
+         reply->lots[lot_cnt].lot_flag = cl.lot_flag
+         reply->lots[lot_cnt].prev_lot_id = cl.prev_lot_id
+      WITH
+         nocounter
+
+      if ((ActiveLot_cnt > 1) or (PreActiveLot_cnt > 1))
+      	set reply->status_data->subeventstatus[1]->operationname = 
+         	"get"
+      	set reply->status_data->subeventstatus[1]->operationstatus = 
+        	 "F"
+      	set reply->status_data->subeventstatus[1]->targetobjectname = 
+         	"table"
+      	set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         	"Found more than one preactive or active lot"
+      	go to exit_script
+      endif		
+      
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+/********************************************************************/ 
+/* If no active lots found, look for last inactive lot              */
+/********************************************************************/
+
+      if (lot_cnt = 0)
+        SELECT into "nl:"
+           cl.lot_id,
+	   cl.expiration_dt_tm
+        FROM
+           control_lot cl
+        PLAN cl
+           where request->control_id = cl.control_id
+        ORDER BY cl.expiration_dt_tm desc
+        HEAD cl.expiration_dt_tm
+	   if (lot_cnt = 0)
+             found_lot = "Y"
+             reply->control_id = cl.control_id
+             reply->no_active_lot_ind = 1
+             lot_cnt = lot_cnt + 1
+             IF (mod(lot_cnt, 5) = 1)
+               stat = alterlist(reply->lots, lot_cnt + 5)
+             ENDIF
+             reply->lots[lot_cnt].lot_id = cl.lot_id
+             reply->lots[lot_cnt].short_description = cl.short_description
+             reply->lots[lot_cnt].lot_number = cl.lot_number
+call echo(cl.lot_number, 1)
+             reply->lots[lot_cnt].receive_dt_tm = cl.receive_dt_tm
+             reply->lots[lot_cnt].expiration_dt_tm = cl.expiration_dt_tm
+             reply->lots[lot_cnt].lot_flag = cl.lot_flag
+             reply->lots[lot_cnt].prev_lot_id = cl.prev_lot_id
+	  endif
+        DETAIL
+	   row+0
+        WITH
+           nocounter
+
+        set error_check = ERROR(sErrorMsg,0)   ;get error message
+        if (error_check != 0)
+          set reply->status_data->status = "F"
+          set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+          go to exit_script
+        endif
+      endif
+      
+      if (curqual = 0)
+         go to lot_failed
+      else
+        set reply->status_data->status = "S"
+      endif
+
+      set stat = alterlist(reply->lots,lot_cnt)
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if control_lot table get is unsuccessful                */
+/********************************************************************/
+     #lot_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "get"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "control_lot table"
+      set reply->status_data->status = "Z"
+
+      go to exit_script
+
+/********************************************************************/ 
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+
+END GO     
+
+;Generated by GNU enscript 1.6.4.

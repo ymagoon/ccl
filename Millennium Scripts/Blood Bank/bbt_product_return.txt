@@ -1,0 +1,534 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/RETURNPRODUCTS/bbt_product_return.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1994 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~************************************************************************
+      *                   PathNet Blood Bank Return                          *
+      *                           V500 Script                                *
+      *                    CHG_DISPENSE_ASSGN_EVENT                          *
+      *                                                                      *
+      * PURPOSE:          Do the functional processing for returning a       *
+      *                   product to the blood bank.  This includes adding   * 
+      *                   a quarantine event, releasing a crossmatch or      *
+      *                   assignment, updating return information on the     *
+      *                   product event table                                *
+      * LAST UPDATED BY:  rp6285                                             *
+      * DATE CREATED:     05-24-96                                           *
+      * LAST MODIFIED:    10-01-01                                           *
+      * TABLES USED:      PRODUCT_EVENT, PATIENT_DISPENSE, ASSIGN,           *
+      *                   CROSSMATCH, QUARANTINE, PRODUCT, PN_RECOVERY,      *
+      *                   PN_RECOVERY_CHILD, PN_RECOVERY_DETAIL              *
+      * PASSED IN:        record structure "request"                         *
+      * PASSED OUT:       record structure "reply"                           *
+      * ACTION#:          225041                                             *
+      * REQUEST#:         225064                                             *
+      * APPLICATION#:     225015        BLOOD BANK RETURN                    *
+      * SPECIAL NOTES:    THIS SCRIPT UPDATES AND INSERTS INTO DIFFERENT     *
+      *                   TABLES IN ORDER TO COMMIT OR ROLL BACK ALL OF THE  *
+      *                   CHANGES AT ONCE                                    * 
+      ************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *001 10/01/01 Rob Peterson         Added Product Recovery Logic        *
+;    *002 11/19/02 Kevin Power          Resolved commit issue.              *
+;    *003 04/14/05 Jim Jensen           Correct Defect:  CR 1-319387292     *
+;    *004 06/2905  Jason Osborn         Populate transfused_dt_tm in reply. *
+;    *005 07/22/05 David Bireta         Changed declares for Feature 36252  * 
+;    *006 01/24/08 Rahul Deshpande      Enhancement: CR 1-319116741         *
+;	 *007 02/19/09 Sachin Yadav         Updated request field to display new*
+;                                       fiels return_temperatrure_txt       *
+;    *008 03/29/12 Sachin Yadav         added code for partial return of    *
+;                                       derivative products                 *
+;~DE~************************************************************************
+        drop program bbt_product_return:dba go
+        create program bbt_product_return:dba
+
+%I cclsource:glb_script_logging.inc
+%I cclsource:pn_populate_pn_recovery_tables.inc
+set log_program_name = "bbt_product_return"
+;set log_override_ind = 1
+
+        /***********************************************************
+         * Used to change information associated with the retun of a 
+         * product to the blood bank
+         ***********************************************************/
+        /*
+        record request
+        (
+          1 productlist[x]
+            2 product_id          = f8             ;information for each product                   
+            2 quar_flag           = vc             ; T = quarantine
+            2 rel_assign_flag     = vc             ; T = release assignment
+            2 rel_xmatch_flag     = vc             ; T = release crossmatch
+            2 transfuse_flag      = vc             ; T = product transfused process differently
+            2 product_type        = vc             ; B or D
+            2 return_temperature_value = f8		
+            2 return_temperature_txt = vc          ;return_temperature_value no longer used.
+            2 return_temperature_degree_cd = f8
+           
+            2 p_updt_cnt          = i4             ;info for product table
+            2 der_updt_cnt        = i4             ;update count for derivative 
+            2 pe_pd_updt_cnt      = i4             ;info for updating product_event
+            2 pe_as_updt_cnt      = i4
+  
+            2 return_dt_tm        = dq8            ;info for updating patient_dispense
+            2 return_qty          = i4
+            2 return_reason_cd    = f8
+            2 return_courier_id   = f8
+            2 return_courier_text = vc
+            2 return_vis_insp_cd  = f8            
+            2 pd_updt_cnt         = i4
+            2 pd_prod_event_id    = f8      
+
+            2 quarlist[y]  
+               3 quar_reason_cd     = f8             ; and product event table
+
+            2 release_reason_cd   = f8             ;info for updating the assign table
+            2 assgn_prod_event_id = f8
+            2 as_updt_cnt         = i4
+            2 trans_prod_event_id = f8
+            2 trans_updt_cnt      = i4
+            2 trans_pe_updt_cnt   = i4
+            2 fromInterfaceFlag   = i2
+        )
+        */
+
+
+        record reply
+        (
+%i cclsource:status_block.inc
+         1 results[1] 
+           2 product_id            = f8   
+           2 person_id             = f8
+           2 encntr_id             = f8
+           2 status                = c1
+           2 err_process           = vc
+           2 err_message           = vc         
+           2 pn_recovery_id        = f8         ;used for product recovery ;001
+           2 event_type_flag       = i2         ;used to denote return event type ;001
+           2 transfused_dt_tm      = dq8
+           2 unreturned_qty        = i4
+           2 unreturned_iu     = i4
+           2 trans_order_id              = f8
+           2 trans_personnel_id          = f8          
+        )
+        
+        record partialreturnrequest
+        (
+          1 qual[*]
+         	2 product_id          = f8             ;information for each product                   
+            2 product_type        = vc             ; B or D
+            2 trans_prod_event_id = f8
+        )
+        
+        record partialreturnreply
+        (
+          1 qual[*]
+          	2 product_id          = f8             ;information for each product
+          	2 unreturned_qty      = i4
+            2 unreturned_iu   = i4
+            2 trans_order_id            = f8
+            2 trans_personnel_id        = f8
+            2 encntr_id           = f8
+            2 person_id           = f8
+            2 transfused_dt_tm    = dq8
+        )
+
+        call log_message("---BBT_PRODUCT_RETURN STARTING", log_level_debug)
+
+        /* Initialize Variables */
+        declare bActiveAutoFlag = c1 with protect, noconstant("F")
+        declare bActiveDirFlag  = c1 with protect, noconstant("F")   
+        declare bDispOnlyFlag   = c1 with protect, noconstant("F")        
+        declare product_event_id = f8 with protect, noconstant(0.0)
+        declare dispense_return_id = f8 with protect, noconstant(0.0)
+        declare assign_release_id = f8 with protect, noconstant(0.0)
+        declare location_cd =f8 with protect, noconstant(0.0)    
+        
+        set count1 = 0                                    ;variable for loops
+        set count2 = 0                                    ;variable for loops
+        set partial_req_cnt = 0
+        set partial_rep_cnt = 0
+        set reply->status_data->status = "F"
+        ;set failed = "F"
+        set active_quar = "F"                             ;flag for if the product has an active quarantine 
+        set active_uncfrm = "F"                           ;flag for if the product has an active unconfirmed 
+        set error_process = "                                      "                ;holds process description to set reply
+        set error_message = "                                      "                ;holds error_message to set reply
+        set success_cnt = 0                               ;count of number of successful updates
+        set failure_occured = "F"                         ;flag to determine if any part of updates was unsuccessful
+        set multiple_events = "F"                         ;flag to determine if a derivative has multiple events to update
+        set this_id = 0.0                                 ;product_id when searching for multiple events on the same id
+        set nbr_quar_reasons = 0                          ;count for the number of quarantine reasons for a product
+        set quantity_val = 0                              ;variable for storing row information while locking row
+        set quantity_iu = 0                               ;variable for international units while updating tables
+        set unreturned_qty = 0
+        set unreturned_iu = 0
+        set gsub_product_event_status = "  "              ;(gsub = global subroutine variable)
+        set thistable =  "    "
+        set emergency_dispense = "F"                      ;flag to indicate if the product was emergency dispensed 
+        ;event_type_code values retrieved by script and used for inserting product events
+        set quar_event_type_cd = 0.0
+        set dispns_event_type_cd = 0.0
+        set assgn_event_type_cd = 0.0
+        set xmtch_event_type_cd = 0.0
+        set avail_event_type_cd = 0.0
+        set uncfrm_event_type_cd = 0.0
+        declare auto_event_type_cd = f8 with protect, noconstant(0.0)
+        declare dir_event_type_cd  = f8 with protect, noconstant(0.0)
+        set cdf_meaning = fillstring(12," ")
+        set uar_failed = 0
+        
+        set cdf_meaning = "10"
+        set stat = uar_get_meaning_by_codeset(1610,nullterm(cdf_meaning),1,auto_event_type_cd)
+        if (stat = 1) then
+            set uar_failed = 1
+            go to SKIP_REST
+        endif
+        
+        set cdf_meaning = "11"
+        set stat = uar_get_meaning_by_codeset(1610,nullterm(cdf_meaning),1,dir_event_type_cd)
+        if (stat = 1) then
+            set uar_failed = 1
+            go to SKIP_REST
+        endif
+
+        set cdf_meaning = "1"
+        set stat = uar_get_meaning_by_codeset(1610,nullterm(cdf_meaning),1,assgn_event_type_cd)
+        if (stat = 1) then
+            set uar_failed = 1
+            go to SKIP_REST
+        endif
+
+        set cdf_meaning = "2"
+        set stat = uar_get_meaning_by_codeset(1610,nullterm(cdf_meaning),1,quar_event_type_cd)
+        if (stat = 1) then
+            set uar_failed = 1
+            go to SKIP_REST
+        endif
+
+        set cdf_meaning = "3"
+        set stat = uar_get_meaning_by_codeset(1610,nullterm(cdf_meaning),1,xmtch_event_type_cd)
+        if (stat = 1) then
+            set uar_failed = 1
+            go to SKIP_REST
+        endif
+
+        set cdf_meaning = "4"
+        set stat = uar_get_meaning_by_codeset(1610,nullterm(cdf_meaning),1,dispns_event_type_cd)
+        if (stat = 1) then
+            set uar_failed = 1
+            go to SKIP_REST
+        endif
+
+        set cdf_meaning = "12"
+        set stat = uar_get_meaning_by_codeset(1610,nullterm(cdf_meaning),1,avail_event_type_cd)
+        if (stat = 1) then
+            set uar_failed = 1
+            go to SKIP_REST
+        endif
+
+        set cdf_meaning = "9"
+        set stat = uar_get_meaning_by_codeset(1610,nullterm(cdf_meaning),1,uncfrm_event_type_cd)
+        if (stat = 1) then
+            set uar_failed = 1
+            go to SKIP_REST
+        endif
+#SKIP_REST
+        if (uar_failed = 1) 
+           set reply->status_data->status = "F"
+           set reply->status_data->subeventstatus[1]->OperationName = "bbt_product_return"
+           set reply->status_data->subeventstatus[1]->OperationStatus = "F"
+           set reply->status_data->subeventstatus[1]->TargetObjectName = "uar failed"
+           set reply->status_data->subeventstatus[1]->TargetObjectValue = "F"
+           go to EXIT_SCRIPT
+        endif
+
+        /* count the number of rows of blood product table that need to be updated - passed from the client app */
+        set nbr_to_update = size(request->productlist,5)
+ 
+        /* alter the reply array to accomodate nbr_to_update items */
+        set stat = alter(reply->results,nbr_to_update)
+        set stat = alter(reply->status_data->subeventstatus,nbr_to_update)
+
+        /* Execute a for loop for every item in the array.  The loop cycle will lock the necessary rows on all the tables
+           and then update the tables.  The tables that are updated depend on the information passed in on  the request.
+           The plan and join clauses controll which tables are accessed and locked.
+           If any of these updates is unsuccessfull any changes made for this item (loop iteration) will be rolled back.
+           If all updates are successful for an item (loop iteration) a commit command is issued for all tables
+         */       
+        for (prod = 1 to nbr_to_update)           
+
+            set failure_occured = "F"                ;set the failure flag to false
+            set active_quar = "F"                    ;default the flags to false
+            set active_uncfrm = "F"     
+            set active_avail = "F"
+            set multiple_xm = "F"
+            set multiple_events = "F"
+            set emergency_dispense = "F"
+            set bActiveAutoFlag = "F"
+            set bActiveDirFlag = "F"
+            set bDispOnlyFlag = "F"
+ 
+            /***************************************************************************************************************/
+            /*  See if there is more than one event for the current product_id                                             */
+            /***************************************************************************************************************/
+            set this_id =  request->productlist[prod]->product_id
+            set count2 = prod + 1
+            if (count2 <= nbr_to_update)
+               for (count1 = count2 to nbr_to_update)
+                  if (this_id =  request->productlist[count1]->product_id)
+                     set multiple_events = "T"
+                  endif      
+               endfor
+            endif
+            
+            /***************************************************************************************************************/
+            /* Get the event_dt_tm of the transfused event.
+            /***************************************************************************************************************/
+            
+            select into "nl:"
+               pe.product_event_id
+            from product_event pe
+            where pe.product_event_id = request->productlist[prod].trans_prod_event_id
+            detail
+               reply->results[prod].transfused_dt_tm   = pe.event_dt_tm
+               reply->results[prod].trans_order_id     = pe.order_id
+               reply->results[prod].trans_personnel_id = pe.event_prsnl_id
+            with nocounter
+            
+            /***************************************************************************************************************/
+            /* Search the product_event table for the active states for this product and if there is an active quarantine  */
+            /* or unconfirmed state then set the proper flag, these flags will be checked before creating an available     */
+            /* event                                                                                                       */
+            /***************************************************************************************************************/
+            select into "nl:"
+                pe.product_event_id
+            from product_event pe               
+            where pe.active_ind = 1
+              And pe.product_id = request->productlist[prod]->product_id
+            order by pe.product_id
+            head pe.product_id
+              pr_cnt = 0
+            detail
+                  pr_cnt = pr_cnt + 1
+                  if (pe.event_type_cd = quar_event_type_cd)
+                      active_quar = "T"
+                  elseif (pe.event_type_cd = uncfrm_event_type_cd)
+                      active_uncfrm = "T"
+                  elseif (pe.event_type_cd = avail_event_type_cd)
+                      active_avail = "T"
+                  elseif ((pe.event_type_cd = xmtch_event_type_cd) 
+                      and (pe.product_event_id != request->productlist[prod]->assgn_prod_event_id))
+                      multiple_xm = "T"
+                  elseif (pe.event_type_cd = auto_event_type_cd)
+                      bActiveAutoFlag = "T"
+                  elseif (pe.event_type_cd = dir_event_type_cd)
+                      bActiveDirFlag = "T"
+                  endif
+            foot pe.product_id
+              if (pe.event_type_cd = dispns_event_type_cd and pr_cnt = 1)
+                  bDispOnlyFlag = "T"
+              endif
+            with counter
+
+            set nbr_quar_reasons = size(request->productlist[prod]->quarlist,5)      ;set the number of quarantine reasons 
+            /*********************************************   QUARANTINE PRODUCT ********************************************/
+           /*  insert a row into the Product Event table for the quarantine event if the quarantine flag is set            */ 
+           if ((request->productlist[prod]->quar_flag = "T") and (failure_occured = "F"))  
+%i cclsource:bbt_prod_ret_quarantine.inc
+           endif     ;quar_flag = "T"
+            
+            /*********************************************   RELEASE  PRODUCT ************************************************/
+            /*This event will occur only for products that have been transfused, (if the transfused flag is set).  This inc  */
+            /*will inactivate the transufed row on the product_event table and on the transfusion table for blood products.  */
+            /*If the product is a derivative depending on the ret_quantity value of the request will determine if the row are*/
+         /*inactivated or not, they cur_transfuse_qty will be updated.  If the user has selected  not to release the crossmatch*/
+            /*from the patient this inc file will reactivate the event on both the product_event and xmatch or assign table. */
+            /*The return_qty will be updated into the quantity field on the proper table.  NOTE: If the user does not release*/
+            /*the assignment for a derivative, but does quarantine the product the assignment will not be reactivated due to */
+            /*the data model constraint of one active state per group of derivatives                                         */
+            /*****************************************************************************************************************/
+            if ((request->productlist[prod]->transfuse_flag = "T") and (failure_occured = "F"))  
+%i cclsource:bbt_prod_ret_transfuse.inc
+            endif
+
+            /*********************************************   RELEASE  PRODUCT ************************************************/
+            /*This event will occur only for products that have been designated to have the assignment or crossmatch released*/
+            /*If the product is flagged to have the crossmatch/assign released the product is returned to available if there */
+            /*is not a quarantine put on the product. If the product is a derivative the inactivation of the rows depends on */
+            /*if the quantity returned = the cur_quantity fields on the respective tables.  If the product is assinged the   */
+            /*information is inserted on the assign_release table.                                                           */
+            /*NOTE: This is the only place an availalbe event is written, dispense will assign products to patients if there */
+            /*is not a crossmatch. So if there is no assignment or crossmatch and the product is returned 
+            /*****************************************************************************************************************/
+            ;release assign or crossmatch
+            if ((request->productlist[prod]->rel_assign_flag = "T") and (failure_occured = "F"))  
+%i cclsource:bbt_prod_ret_rel_assign.inc
+            elseif ((request->productlist[prod]->rel_xmatch_flag = "T")  and (failure_occured = "F")) 
+%i cclsource:bbt_prod_ret_rel_xmatch.inc
+            endif ;rel_assign_flag = "T"
+
+
+            /*********************************************   SET RETURN INFO *************************************************/
+            /* This event will occur for every product in the request.  The inc file inactivates the patient_dispense row on */
+            /* on the product_event table and patient_dispense tables.  If the product is a derivative the inactivation      */
+            /* depends on whether or not the quantity returned = the quantity dispensed. Regardless of derivative or blood   */
+            /* product the dispense_status_flag is set to 3 (returned) on the dispense table.  If the product is a derivative*/
+            /* the return_qty is added to the cur_avail_qty value on the derivative table, provided there was not a          */
+            /* quarantine event specified for the product.  This file will also check to see if the product did not have a   */
+            /* crossmatch or assignment associated with it.                                                                  */
+            /*****************************************************************************************************************/
+%i cclsource:bbt_prod_ret_return.inc
+            /*********************************************   UNLOCK PORDUCT ***************************************************/
+            /* This event will occur for every product in the request if there is not another event later in the request      */
+            /* If there is another event later in the array the product will not be unlocked                                  */
+            /*****************************************************************************************************************/
+            if ((failure_occured = "F") and (multiple_events = "F"))
+%i cclsource:bbt_prod_ret_unlock.inc
+            endif            
+            
+               
+              /************************************Transfused derivative product with partial quantity returned******************/
+            /* 	For each transfused derivative product with partial quantities returned add another record to the             */
+            /* request/reply and clear out the unreturned quantity/iu on the original product reply                           */
+            /*****************************************************************************************************************/
+   
+			if ((request->productlist[prod]->transfuse_flag = "T") and (request->productlist[prod]->product_type = "D") 
+			       and (unreturned_qty > 0) and (failure_occured = "F"))             
+            ; add partialreturnrequest to request
+          
+               set partial_req_cnt = partial_req_cnt + 1
+        	   set stat = alterlist(partialreturnrequest->qual, partial_req_cnt)
+        	   set partialreturnrequest->qual[partial_req_cnt]->product_id = request->productlist[prod]->product_id
+        	   set partialreturnrequest->qual[partial_req_cnt]->product_type = request->productlist[prod]->product_type
+        	   set partialreturnrequest->qual[partial_req_cnt]->trans_prod_event_id = request->productlist[prod].trans_prod_event_id
+            
+    		   ; add partialreturnreply to reply
+    		   set partial_rep_cnt = partial_rep_cnt + 1
+        	   set stat = alterlist(partialreturnreply->qual, partial_rep_cnt)
+        	   set partialreturnreply->qual[partial_rep_cnt]->product_id = request->productlist[prod]->product_id
+         	   set partialreturnreply->qual[partial_rep_cnt]->unreturned_qty = unreturned_qty
+         	   set partialreturnreply->qual[partial_rep_cnt]->unreturned_iu = unreturned_iu
+         	   set partialreturnreply->qual[partial_rep_cnt]->trans_order_id = reply->results[prod].trans_order_id
+         	   set partialreturnreply->qual[partial_rep_cnt]->trans_personnel_id = reply->results[prod].trans_personnel_id
+         	   set partialreturnreply->qual[partial_rep_cnt]->encntr_id = reply->results[prod].encntr_id
+         	   set partialreturnreply->qual[partial_rep_cnt]->person_id = reply->results[prod].person_id
+         	   set partialreturnreply->qual[partial_rep_cnt]->transfused_dt_tm = reply->results[prod].transfused_dt_tm         	   
+    		endif	       
+            
+            if (failure_occured = "F") 
+               ;if this point has been reached all of the tables have been modified 
+               set reply->status_data->status = "S"
+               set reply->status_data->subeventstatus[prod]->OperationName = "Complete"
+               set reply->status_data->subeventstatus[prod]->OperationStatus = "S"
+               set reply->status_data->subeventstatus[prod]->TargetObjectName = "Tables Updated"
+               set reply->status_data->subeventstatus[prod]->TargetObjectValue = "S" 
+               set reply->results[prod]->product_id = request->productlist[prod]->product_id
+               set reply->results[prod]->status = "S"
+               set reply->results[prod]->err_process = "complete"
+               set reply->results[prod]->err_message = "no errors"
+               set success_cnt = success_cnt + 1
+            endif  ;update failed
+            
+            if (failure_occured = "T")
+               set reply->status_data->subeventstatus[prod]->OperationName = error_process
+               set reply->status_data->subeventstatus[prod]->OperationStatus = "F"
+               set reply->status_data->subeventstatus[prod]->TargetObjectName = error_message
+               set reply->status_data->subeventstatus[prod]->TargetObjectValue = "F" 
+               set reply->results[prod]->product_id = request->productlist[prod]->product_id       
+               set reply->results[prod]->status = "F"
+               set reply->results[prod]->err_process = error_process
+               set reply->results[prod]->err_message = error_message
+            endif 
+        endfor 
+        
+        
+        
+              /************************************Transfused derivative product with partial quantity returned******************/
+            /* 	For each transfused derivative product with partial quantities returned add another record to the             */
+            /* request/reply and clear out the unreturned quantity/iu on the original product reply                           */
+            /*****************************************************************************************************************/
+        set prod = size(request->productlist,5)
+        set nbr_to_append_req = size(partialreturnrequest->qual,5)
+        set nbr_to_append_rep = size(partialreturnreply->qual,5)
+        if(nbr_to_append_req > 0)
+          set stat=alter2(request->productlist,(prod + nbr_to_append_req))   
+          set stat = alter(reply->results,(prod + nbr_to_append_req)) 
+             
+          for(count1 = 1 to nbr_to_append_req)    
+            set request->productlist[prod+count1]->product_id = partialreturnrequest->qual[count1]->product_id 
+            set request->productlist[prod+count1]->product_type = partialreturnrequest->qual[count1]->product_type
+            set request->productlist[prod+count1]->trans_prod_event_id = partialreturnrequest->qual[count1]->trans_prod_event_id 
+         
+            set reply->results[prod+count1]->product_id =  partialreturnreply->qual[count1]->product_id
+            set reply->results[prod+count1]->unreturned_qty = partialreturnreply->qual[count1]->unreturned_qty
+            set reply->results[prod+count1]->unreturned_iu = partialreturnreply->qual[count1]->unreturned_iu
+            set reply->results[prod+count1]->trans_order_id = partialreturnreply->qual[count1]->trans_order_id
+            set reply->results[prod+count1]->trans_personnel_id = partialreturnreply->qual[count1]->trans_personnel_id
+            set reply->results[prod+count1]->encntr_id = partialreturnreply->qual[count1]->encntr_id
+            set reply->results[prod+count1]->person_id = partialreturnreply->qual[count1]->person_id
+            set reply->results[prod+count1]->transfused_dt_tm = partialreturnreply->qual[count1]->transfused_dt_tm
+          endfor
+        endif
+
+        /*********  Call subroutine to fill out the pn_recovery* tables  *********/
+        if ((reply->status_data->status != "F") 
+             and (success_cnt = nbr_to_update))
+          set g_sub_event_type_flag = 2
+          set g_sub_num_products = size(request->productlist,5)
+          set stat = insert_pn_recovery_data (0)
+          if (stat = 1)    ;argument of 0 used to show that this is NOT an ops script
+            set reply->status_data->status = "S"
+            set ReqInfo->commit_ind = 1
+          elseif (stat = 2) ;no products available to return
+            set reply->status_data->status = "S"
+            set ReqInfo->commit_ind = 1
+          else
+            set reply->status_data->status = "F"
+            set ReqInfo->commit_ind = 0
+            go to exit_script
+          endif
+        else
+          set ReqInfo->commit_ind = 0
+        endif
+        /*********  Done filling out pn_recovery  *********/
+
+%i cclsource:bbt_add_product_event.inc           
+END             ; end subroutine ADD_PRODUCT_EVENT
+
+/********************************  Wrap Up Information *******************************/
+if (success_cnt = 0)
+   set reply->status_data->status = "F"
+elseif (success_cnt < nbr_to_update)
+   set reply->status_data->status = "P"
+else
+   set reply->status_data->status = "S"
+endif
+#EXIT_SCRIPT
+
+call log_message("---BBT_PRODUCT_RETURN ENDING", log_level_debug)
+call uar_SysDestroyHandle(hSys)
+
+end go
+
+;Generated by GNU enscript 1.6.4.

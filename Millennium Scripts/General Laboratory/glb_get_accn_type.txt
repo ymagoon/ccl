@@ -1,0 +1,223 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_accn_type/glb_get_accn_type.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_accn_type.prg
+        Object name:            glb_get_accn_type
+        Request #:              257527
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Validate accession and determine if
+                                accession is patient or qc.
+
+        Tables read:            accession
+
+        Tables updated:         None
+        Executing from:
+
+        Special Notes:
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 08/06/96 Kevin Brunner        Initial Release                     *
+;    *001 08/03/98 Hal Patchen          Allow for julian format cd of zeroes*
+;    *002 10/03/02 Chuck Figas          Added service resource security     *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program GLB_GET_ACCN_TYPE:dba go
+create program GLB_GET_ACCN_TYPE:dba
+
+%i cclsource:pcs_resource_security.inc
+
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  accession                    = c20
+         1  instr_xref                   = c20
+         1  instr_service_resource_cd    = f8
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      (
+         1  accession_id                 = f8
+         1  preactive_ind                = i2
+         1  accn_cdf_meaning             = c12
+         1  service_resource_cd          = f8
+         1  service_resource_disp        = vc
+%i cclsource:status_block.inc
+      )
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+         set failed = "F"
+
+         ;initialize resource security
+         declare dServResCd = f8 with protect, noconstant(0.0)
+         declare nPreactiveInd = i2 with protect, noconstant(0)
+         call InitResourceSecurity(1)
+
+      /***********************************************************************
+      * Select accession                                                     *
+      ***********************************************************************/
+      if (trim(request->instr_xref) > " ")
+         select into "nl:"
+            rar1.accession_id,
+            rar1.service_resource_cd,
+            rar1.instr_xref,
+            a1.accession,
+            a1.accession_id,
+            cv1.code_value,
+            cv1.cdf_meaning,
+            cv1.code_set
+
+         from
+            resource_accession_r rar1,
+            accession a1,
+            code_value cv1
+
+         plan    rar1
+                 where rar1.service_resource_cd =
+                       request->instr_service_resource_cd
+                   and rar1.instr_xref =
+                       request->instr_xref
+         join    a1
+                 where a1.accession_id = rar1.accession_id
+         join    cv1
+                 where cv1.code_value = a1.accession_format_cd
+                   and (cv1.code_value = 0.0 or cv1.code_set = 2057)
+
+         detail
+            reply->accession_id = a1.accession_id
+            if (cv1.code_value = 0.0)
+               reply->accn_cdf_meaning = "JULIANDATE"
+            else
+               reply->accn_cdf_meaning = cv1.cdf_meaning
+            endif
+            if (cv1.cdf_meaning in ("QC", "QP"))
+              reply->service_resource_cd = rar1.service_resource_cd
+              reply->preactive_ind = rar1.preactive_ind
+            else
+              reply->service_resource_cd = 0.0
+              reply->preactive_ind = 0
+            endif
+
+         with
+            nocounter
+
+      else
+
+         select into "nl:"
+            a.accession,
+            a.accession_id,
+            cv.code_value,
+            cv.cdf_meaning,
+            cv.code_set,
+            d1.seq,
+            rar.accession_id,
+            rar.service_resource_cd
+
+         from
+            accession a,
+            code_value cv,
+            dummyt d1,
+            resource_accession_r rar
+
+         plan    a
+                 where a.accession = request->accession
+         join    cv
+                 where cv.code_value = a.accession_format_cd
+                   and (cv.code_value = 0.0 or cv.code_set = 2057)
+         join    d1
+                 where d1.seq = 1
+         join    rar
+                 where rar.accession_id = a.accession_id
+
+         detail
+            if (cv.cdf_meaning in ("QC", "QP"))
+              dServResCd = rar.service_resource_cd
+              nPreactiveInd = a.preactive_ind
+            endif
+
+            if (IsResourceViewable(dServResCd) = TRUE)
+              reply->accession_id = a.accession_id
+              reply->preactive_ind = nPreactiveInd
+              reply->service_resource_cd = dServResCd
+
+              if (cv.code_value = 0.0)
+                reply->accn_cdf_meaning = "JULIANDATE"
+              else
+                reply->accn_cdf_meaning = cv.cdf_meaning
+              endif
+            endif
+
+         with
+            nocounter,
+            outerjoin = d1,
+            maxqual(a, 1)
+      endif
+
+      if (curqual = 0)
+         set failed = "Z"
+         go to exit_script
+      endif
+
+     /********************************************************************
+     * Script exit.                                                      *
+     *********************************************************************/
+     #exit_script
+      if (GetResourceSecurityStatus(0) != "S")
+         call PopulateResSecStatusBlock(0)
+         set reply->status_data->status = GetResourceSecurityStatus(0)
+      elseif (failed = "F")
+         set reply->status_data->status = "S"
+      elseif (failed = "Z")
+         set reply->status_data->status = "Z"
+      else
+         set reply->status_data->status = "F"
+      endif
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

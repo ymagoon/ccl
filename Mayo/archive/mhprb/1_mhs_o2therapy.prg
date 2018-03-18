@@ -1,0 +1,395 @@
+/*******************************************************************
+ 
+Report Name:  Oxygen Therapy
+Report Path:  /mayo/mhprd/prg/1_mhs_o2therapy
+Report Description:  Pulls patients with O2 documentation, and
+					includes defined order info.
+ 
+Created by:  Lisa Sword
+Created date:  2010
+ 
+Modified by:		Lisa Sword
+Modified date:		01/2011
+Modifications:		exclude documentation by providers with ED positions
+					exclude nursery locations
+ 
+Mod001 by:		Rob Banks
+Modified date:	10/25/2011
+Modifications:	Modify to use DB2
+ 
+Mod002 by:		Akcia - SE
+Modified date:	04/02/2012
+Modifications:	modifications for efficiency
+ 
+Mod003 by:		Lisa Sword
+Modified date:	04/24/2012
+Modifications:  documentation from midnight thought run time, not last 24 hours.
+ 
+Mod004 by:		Lisa Sword
+Modified date:	05/01/2012
+Modifications:  documentation time wasn't printing.
+ 
+Modified by:	Phil Landry Akcia
+Modified date:	2/27/2013
+Modifications:	Change mod for DB2 to lookup password in registry
+Mod number:     006
+ 
+ *******************************************************************/
+DROP PROGRAM 1_mhs_o2therapy GO
+CREATE PROGRAM 1_mhs_o2therapy
+ 
+prompt
+	"Output to File/Printer/MINE" = "MINE"
+	, "Locations:" = 0
+ 
+with OUTDEV, location
+ 
+;;;/*** START 001 ***/
+;;;;*********************************************************************
+;;;;*** If PROD / CERT then run as 2nd oracle instance to improve
+;;;;*** efficiency. Will auto Fail-over to Instance 1 if Instance 2 down.
+;;;;*********************************************************************
+;;;IF(CURDOMAIN = "PROD")
+;;;  FREE DEFINE oraclesystem
+;;;  DEFINE oraclesystem 'v500/fullmoon@mhprbrpt'
+;;;ELSEIF(CURDOMAIN = "MHPRD")
+;;;  FREE DEFINE oraclesystem
+;;;  DEFINE oraclesystem 'v500/fullmoon@mhprbrpt'
+;;;ELSEIF(CURDOMAIN="MHCRT")
+;;;  FREE DEFINE oraclesystem
+;;;  DEFINE oraclesystem 'v500/java4t2@mhcrtrpt'
+;;;ENDIF ;CURDOMAIN
+;;;;*** Write instance ccl ran in to the log file
+;;;;SET Iname = fillstring(10," ")
+;;;;SELECT INTO value("mayo_logfiles:mayo_instance2.log")
+;;;;  run_date = format(sysdate,";;q")
+;;;; ,Iname = substring(1,7,instance_name)
+;;;;FROM v$instance
+;;;;DETAIL
+;;;;  col  1 run_date
+;;;;  col +1 curprog
+;;;;  col +1 " *Instance="
+;;;;  col +1 Iname
+;;;;with nocounter
+;;;;   , format
+;;;;****************** End of INSTANCE 2 routine ************************
+;;;/*** END 001 ***/
+ 
+/*** Start 006 - New Code ****/
+;****************** Begin ORACLE INSTANCE 2 routine ****************
+;*** If PROD / CERT then run as 2nd oracle instance to improve
+;***   efficiency. Will auto Fail-over to Instance 1 if Instance 2 down.
+;***   Then after at the end, set the program back to instance 1.
+;******************************************************************************
+ 
+;*** This section calls an O/S scritp that reads the current v500 password
+;***   from the Millennium registry and stores it in a file named
+;***   $CCLUSERDIR/dbinfo.dat
+declare dcl_command = vc
+declare dcl_size = i4
+declare dcl_stat = i4
+ 
+set dcl_command = "/mayo/procs/req_query.ksh"
+set dcl_size = size(dcl_command)
+set dcl_stat = 0
+ 
+call dcl(dcl_command,dcl_size,dcl_stat)
+ 
+;*** Next the password is read from the dbinfo.dat file to variable 'pass'.
+FREE DEFINE RTL
+DEFINE RTL IS "dbinfo.dat"
+ 
+declare pass=vc
+ 
+SELECT DISTINCT INTO "NL:"
+  line = substring(1,30,R.LINE)   ; 9,9       10,9
+FROM RTLT R
+PLAN R
+ 
+detail
+ 
+if (line = "dbpw*")
+  pass_in=substring(9,15,line)
+  pass=trim(pass_in,3)
+endif
+ 
+with counter
+ 
+;*** Now we are finished with the dbinfo.dat file and will delete it.
+set dcl_command = ""
+set dcl_command = "rm $CCLUSERDIR/dbinfo.dat"
+set dcl_size = size(dcl_command)
+set dcl_stat = 0
+ 
+call dcl(dcl_command,dcl_size,dcl_stat)
+ 
+declare system=vc
+ 
+;*** This section redifines the OracleSystem variable pointing it to
+;***   database instance 2 using the password read in above.
+;*** This only applies to PRD and CRT, because they are the only domains
+;***   that have multiple instance databases.
+IF (curdomain = "MHPRD")
+  Free define oraclesystem
+  set system=build(concat('v500/', pass, '@mhprdrpt'))
+  DEFINE oraclesystem system
+ELSEIF (CURDOMAIN="MHCRT")
+    FREE DEFINE oraclesystem
+    set system=build(concat('v500/', pass, '@mhcrtrpt'))
+    DEFINE oraclesystem system
+ENDIF
+/*** END 006 - New Code ***/
+ 
+SET MaxSecs = 1800
+declare fin_cd = f8 with public, constant(uar_get_code_by("MEANING",319,"FIN NBR"))	;002
+ 
+SELECT DISTINCT INTO $outdev  ;ph1042  ;ph1080
+	E_LOC_NURSE_UNIT_DISP = UAR_GET_CODE_DISPLAY(E.LOC_NURSE_UNIT_CD)
+	, E_LOC_ROOM_DISP = UAR_GET_CODE_DISPLAY(E.LOC_ROOM_CD)
+	, C_EVENT_DISP = UAR_GET_CODE_DISPLAY(C.EVENT_CD)
+	, C.EVENT_END_DT_TM "@SHORTDATETIMENOSEC"     ;added line. 004
+ 
+/*002      E.ENCNTR_ID
+	, E_LOC_FACILITY_DISP = UAR_GET_CODE_DISPLAY(E.LOC_FACILITY_CD)
+	, C.EVENT_END_DT_TM "@SHORTDATETIMENOSEC"
+	, PE.NAME_FULL_FORMATTED
+	, C.EVENT_TAG
+	, O_CATALOG_DISP = UAR_GET_CODE_DISPLAY(O.CATALOG_CD)
+	, ORD_CATALOG_DISP = UAR_GET_CODE_DISPLAY(ORD.CATALOG_CD)
+	, EA.ALIAS
+	, EA_ALIAS_POOL_DISP = UAR_GET_CODE_DISPLAY(EA.ALIAS_POOL_CD)
+	, EA.ACTIVE_IND
+	, C.EVENT_ID
+	, O3_CATALOG_DISP = UAR_GET_CODE_DISPLAY(O3.CATALOG_CD)
+	, O3_ORDER_STATUS_DISP = UAR_GET_CODE_DISPLAY(O3.ORDER_STATUS_CD)
+	, O4_ORDER_STATUS_DISP = UAR_GET_CODE_DISPLAY(O4.ORDER_STATUS_CD)
+	, O4_CATALOG_DISP = UAR_GET_CODE_DISPLAY(O4.CATALOG_CD)
+	, O5_ORDER_STATUS_DISP = UAR_GET_CODE_DISPLAY(O4.ORDER_STATUS_CD)
+	, O5_CATALOG_DISP = UAR_GET_CODE_DISPLAY(O4.CATALOG_CD)
+	, P.NAME_FULL_FORMATTED
+	, P_POSITION_DISP = UAR_GET_CODE_DISPLAY(P.POSITION_CD)
+ 002*/
+ 
+FROM
+	nurse_unit   nu     		;002
+	, encntr_domain   ed
+	, CLINICAL_EVENT   C
+	, ENCOUNTER   E
+	, ENCNTR_ALIAS   EA
+	, PERSON   PE
+	, ORDERS   O
+	, ORDERS   ORD
+	, ORDERS   O3
+	, ORDERS   O4
+	, ORDERS   O5
+	, PRSNL   P
+ 
+/*002 start*/
+plan nu
+where nu.loc_facility_cd = $location
+  and nu.active_ind = 1
+ 
+join ed
+where ed.loc_nurse_unit_cd = nu.location_cd
+  and ed.end_effective_dt_tm+0 > sysdate
+  and ed.active_ind = 1
+ 
+;  plan e where E.LOC_FACILITY_CD = $location
+join e
+where e.encntr_id = ed.encntr_id
+/*002 end*/
+ and E.LOC_NURSE_UNIT_CD != 633869   ;lh ed
+ and E.LOC_NURSE_UNIT_CD != 43199228 ;lh ed obs
+ and E.LOC_NURSE_UNIT_CD != 7402782  ;lh dialysis london
+ and E.LOC_NURSE_UNIT_CD != 7402783  ;lh dialysis chippewa
+ and E.LOC_NURSE_UNIT_CD != 7402784  ;lh dialysis memomonie
+ and E.LOC_NURSE_UNIT_CD != 7402785  ;lh dialysis barron
+ and E.LOC_NURSE_UNIT_CD != 3186713  ;lh dialysis
+ and E.LOC_NURSE_UNIT_CD != 3186712  ;lh cath lab
+ and E.LOC_NURSE_UNIT_CD != 30792827 ;lh mri
+ and E.LOC_NURSE_UNIT_CD != 251331514 ;lh surgery center
+ and E.LOC_NURSE_UNIT_CD != 17447405 ;lh surg center teaching prep
+ and E.LOC_NURSE_UNIT_CD != 3186727 ;lh surg center prep rec
+ and E.LOC_NURSE_UNIT_CD != 177886319 ;lh fbc isonursery
+ and E.LOC_NURSE_UNIT_CD != 177893453	;lh fbc labor
+ and E.LOC_NURSE_UNIT_CD != 177890657	;lh fbc nursery
+ and E.LOC_NURSE_UNIT_CD != 179653105	;lh fbc spcare nursery
+ and E.LOC_NURSE_UNIT_CD != 177894544	;lh fbc triage
+ 
+join ea
+where Ea.ENCNTR_ID = E.ENCNTR_ID
+  and ea.encntr_alias_type_cd = fin_cd		;002
+  and ea.end_effective_dt_tm > sysdate		;002
+  and ea.active_ind = 1						;002
+ 
+join c where C.ENCNTR_ID = E.ENCNTR_ID
+ and C.EVENT_CD in (703569, 26150140, 703960)  ;Oxygen Flow Rate, FIO2, Oxygen Therapy
+; and C.UPDT_DT_TM > CNVTDATETIME(CURDATE-1, curtime3)
+  and C.UPDT_DT_TM > CNVTDATETIME(CURDATE, 0)    ;use 0, midnight through run time, per T.Devine.  L.Sword 4/2012
+ and c.valid_until_dt_tm > sysdate						;002
+; between CNVTDATETIME($startdate, 0) and CNVTDATETIME($enddate, 235959)
+ 
+join p where C.PERFORMED_PRSNL_ID = P.PERSON_ID
+ and P.POSITION_CD != 25008164	;P3 ED MD/NP
+ and P.POSITION_CD != 25008009	;P3 ED Medical/PA/NP Student
+ and P.POSITION_CD != 25007663	;P3 ED Nurse/CMA/Paramedic/LPN
+ and P.POSITION_CD != 25022845	;P3 ED PA
+ and P.POSITION_CD != 25008274	;P3 ED Scribe
+ 
+join pe where PE.PERSON_ID = C.PERSON_ID
+and PE.NAME_LAST_KEY != "TESTPATIENT"
+ 
+join O where O.ENCNTR_ID = outerjoin (C.ENCNTR_ID)
+and  O.CATALOG_CD+0 =  outerjoin (14628237.00)  ;RT-Oxygen/ Day
+and O.ORDER_STATUS_CD+0 = outerjoin (2550)		;Ordered
+ 
+join O4 where O4.ENCNTR_ID = outerjoin (C.ENCNTR_ID)
+and  O4.CATALOG_CD+0 =  outerjoin (3490693.00)    ;Oxygen/Day
+and  O4.ORDER_STATUS_CD+0 = outerjoin (2550)		;Ordered
+ 
+join O5 where O5.ENCNTR_ID = outerjoin (C.ENCNTR_ID)
+and  O5.CATALOG_CD+0 =  outerjoin (14628606.00)    ;RT - Pulse Oximetry - Daily
+and  O5.ORDER_STATUS_CD+0 = outerjoin (2550)		;Ordered
+ 
+join ORD where ORD.ENCNTR_ID = outerjoin (C.ENCNTR_ID)
+and ORD.CATALOG_CD+0 = outerjoin(3490703)   ;Pulse Oximetry - Daily (RT)
+and ORD.ORDER_STATUS_CD+0 = outerjoin (2550)		;Ordered
+ 
+join O3 where O3.ENCNTR_ID = outerjoin (C.ENCNTR_ID)
+and  O3.CATALOG_CD+0 = outerjoin(3490630)    ;Bipap/Cpap Subsequent Day
+and  O3.ORDER_STATUS_CD+0 = outerjoin (2550)
+ 
+ORDER BY
+	E_LOC_NURSE_UNIT_DISP
+	, E_LOC_ROOM_DISP
+	, C.EVENT_END_DT_TM
+	, C_EVENT_DISP
+ 
+Head Report
+	y_pos = 15
+SUBROUTINE OFFSET( yVal )
+	CALL PRINT( FORMAT( y_pos + yVal, "###" ))
+END
+ 
+Head Page
+	y_pos = 18
+	ROW + 1, "{F/9}{CPI/11}"
+	ROW + 1, CALL PRINT(CALCPOS(260,y_pos+1)) "OXYGEN THERAPY"
+ 
+	ROW + 1, "{F/8}{CPI/14}"
+	CALL PRINT(CALCPOS(20,y_pos+22)) "UNIT"
+	CALL PRINT(CALCPOS(79,y_pos+32)) "FIN"
+	CALL PRINT(CALCPOS(135,y_pos+32)) "NAME"
+ 
+	CALL PRINT(CALCPOS(33,y_pos+32)) "ROOM"
+	CALL PRINT(CALCPOS(400,y_pos+32)) "DOCUMENTED"
+	CALL PRINT(CALCPOS(470, y_pos+32)) "PROVIDER"
+ 
+	ROW + 1	y_val= 792-y_pos-56
+	^{PS/newpath 1 setlinewidth   20 ^, y_val, ^ moveto  591 ^, y_val, ^ lineto stroke 20 ^, y_val, ^ moveto/}^
+ 
+	ROW + 1, "{F/8}{CPI/14}"
+	ROW + 1, CALL PRINT(CALCPOS(520,y_pos+0)) curdate
+	ROW + 1, CALL PRINT(CALCPOS(520,y_pos+13)) "Page:"
+	ROW + 1, "{F/8}{CPI/14}"
+	ROW + 1, CALL PRINT(CALCPOS(558,y_pos+0)) curtime
+	ROW + 1, CALL PRINT(CALCPOS(536,y_pos+13)) curpage
+	ROW + 1
+	y_pos = y_pos + 46
+ 
+Head
+	E_LOC_NURSE_UNIT_DISP
+	E_LOC_NURSE_UNIT_DISP1 = SUBSTRING( 1, 15, E_LOC_NURSE_UNIT_DISP ),
+	ROW + 1, "{F/9}{CPI/12}"
+	CALL PRINT(CALCPOS(20,y_pos+1)) E_LOC_NURSE_UNIT_DISP1
+	ROW + 1
+	y_pos = y_pos + 11
+ 
+Head E_LOC_ROOM_DISP
+	if (( y_pos + 57) >= 770 ) y_pos = 0,  break endif
+	E_LOC_ROOM_DISP1 = SUBSTRING( 1, 8, E_LOC_ROOM_DISP ),
+	ALIAS1 = SUBSTRING( 1, 15, EA.ALIAS ),
+	NAME_FULL_FORMATTED1 = SUBSTRING( 1, 25, PE.NAME_FULL_FORMATTED ),
+	ROW + 1,
+	ROW + 1, "{F/9}{CPI/12}"
+	CALL PRINT(CALCPOS(33,y_pos+1)) E_LOC_ROOM_DISP1
+	CALL PRINT(CALCPOS(79,y_pos+1)) ALIAS1
+	CALL PRINT(CALCPOS(135,y_pos+2)) NAME_FULL_FORMATTED1
+ 
+	Orders =
+	if ((O.ORDER_ID > 0) or(ORD.ORDER_ID > 0) or (O3.ORDER_ID > 0)or (O4.ORDER_ID > 0))
+	(concat("Orders: ",
+	  (if(O.ORDER_ID > 0) ("Oxygen/Day")  else " " endif) , "   ",
+  	  (if(O4.ORDER_ID > 0) ("Oxygen/Day") else " " endif), "   ",
+	  (if(ORD.ORDER_ID > 0) ("Pulse Oximetry") else " " endif), "   ",
+   	  (if(O5.ORDER_ID > 0) ("Pulse Oximetry") else " " endif), "   ",
+	  (if(O3.ORDER_ID > 0) ("Bipap/Cpap") else " " endif) ))
+	ELSE "Orders: none"
+	ENDIF
+	ROW + 1,
+	ROW + 1, "{F/9}{CPI/14}"
+	CALL PRINT(CALCPOS(300,y_pos+0)) Orders
+	ROW + 1
+	y_pos = y_pos + 12
+ 
+Head C.EVENT_END_DT_TM
+	NAME_FULL_FORMATTED2 = SUBSTRING( 1, 25, P.NAME_FULL_FORMATTED ),
+	ROW + 1, "{F/8}{CPI/14}"
+	CALL PRINT(CALCPOS(400,y_pos+2)) C.EVENT_END_DT_TM
+	CALL PRINT(CALCPOS(470,y_pos+2)) NAME_FULL_FORMATTED2
+	ROW + 1
+ 
+Detail
+	if (( y_pos + 31) >= 770 ) y_pos = 0,  break endif
+	ROW + 1, "{F/8}{CPI/14}"
+	result = concat (trim
+	(trim(SUBSTRING( 1, 20,  C_EVENT_DISP))),  ": ",
+	trim(trim(SUBSTRING( 1, 39,   C.EVENT_TAG))) )
+	ROW + 1, CALL PRINT(CALCPOS(160,y_pos+2)) 	result
+	y_pos = y_pos + 13
+ 
+Foot C.EVENT_END_DT_TM
+	y_pos = y_pos + 0
+ 
+Foot E_LOC_ROOM_DISP
+	y_pos = y_pos + 12
+ 
+Foot E_LOC_NURSE_UNIT_DISP
+	y_pos = y_pos + 0
+ 
+WITH MAXCOL = 300, MAXROW = 300, DIO= 08, FORMAT = variable,
+NOHEADING, TIME= VALUE( MaxSecs )
+ 
+;;/*** START 001 ***/
+;;;*** After report put back to instance 1
+;;IF(CURDOMAIN = "PROD")
+;;  FREE DEFINE oraclesystem
+;;  DEFINE oraclesystem 'v500/fullmoon@mhprb1'
+;;ELSEIF(CURDOMAIN = "MHPRD")
+;;  FREE DEFINE oraclesystem
+;;  DEFINE oraclesystem 'v500/fullmoon@mhprb1'
+;;ELSEIF(CURDOMAIN="MHCRT")
+;;  FREE DEFINE oraclesystem
+;;  DEFINE oraclesystem 'v500/java4t2@mhcrt1'
+;;ENDIF ;CURDOMAIN
+;;/*** END 001 ***/
+ 
+/****Start 006 - New Code ***/
+;*** Restore the OracleSystem variable to its normal definition pointing
+;***   to instance 1.
+IF (curdomain = "MHPRD")
+  Free define oraclesystem
+  set system=build(concat('v500/', pass, '@mhprd1'))
+  DEFINE oraclesystem system
+ 
+ELSEIF (CURDOMAIN="MHCRT")
+    FREE DEFINE oraclesystem
+    set system=build(concat('v500/', pass, '@mhcrt1'))
+    DEFINE oraclesystem system
+ 
+ENDIF
+ 
+/***END 006 - New Code ***/
+ 
+END
+GO

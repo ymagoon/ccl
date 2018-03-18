@@ -1,0 +1,678 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Antibodyantigenreltool/bbt_chg_trans_req_r.prg Turn on black mode
+
+ 
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_chg_trans_req_r.prg
+        Object name:            bbt_chg_trans_req_r
+        Request #:              225044
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Change rows on the trans_req_r table
+
+        Tables read:            none
+        Tables updated:         trans_req_r,
+                                excld_trans_req_prod_cat_r
+        Executing from:         Antigen Negative Tool
+
+        Special Notes:          none
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 4/4/96   Teresa Davis         Initial Release                     *
+;     001 09/03/13 Fitsum Abebe         Support for making transfusion      *
+;                                       requirements inapplicable for a     *
+;                                       specific set of product categories. *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program bbt_chg_trans_req_r:dba go
+create program bbt_chg_trans_req_r:dba
+ 
+/**************************************************************
+*        Request Record
+**************************************************************/
+/*
+record request
+( 1 qual(1)
+    2 relationship_id           = f8
+    2 requirement_cd            = f8
+    2 special_testing_cd        = f8
+    2 warn_ind                  = i2
+    2 override_ind              = i2
+    2 updt_cnt                  = i4
+    2 updt_ind                  = i2
+  1 excluded_prod_cat_qual(*)
+    2 excld_trans_req_prod_cat_r_id = f8
+    2 requirement_cd            = f8
+    2 prod_cat_cd               = f8
+    2 updt_cnt                  = i4
+    2 updt_ind                  = i2
+)
+*/
+
+/*
+record reqinfo
+( 1 commit_ind  = i2
+  1 updt_id     = f8
+  1 position_cd = f8
+  1 updt_app    = i4
+  1 updt_task   = i4
+  1 updt_req    = i4
+  1 updt_applctx= i4
+) 
+*/
+
+/***************************************************************
+*        Reply Record
+***************************************************************/
+
+record reply
+( 1 qual[1]
+    2  relationship_id          = f8
+    2  requirement_cd           = f8
+    2  special_testing_cd       = f8
+    2  warn_ind                 = i2
+    2  override_ind             = i2
+    2  updt_cnt                 = i4
+    2  status                   = c1
+  1 status_data
+    2 status = c1
+    2 subeventstatus[1]
+      3 OperationName = c15
+      3 OperationStatus = c1
+      3 TargetObjectName = c15
+      3 TargetObjectValue = vc
+  1 excluded_prod_cat_qual[*]
+    2 excld_trans_req_prod_cat_r_id = f8
+    2 requirement_cd            = f8
+    2 prod_cat_cd               = f8
+    2 updt_cnt                  = i4
+    2 status                    = c1
+)
+/******************************************************
+*        Declare subroutines
+******************************************************/
+declare AddExcludedProdCatUpdateStatus(repIdx = i4, updt_cnt = i4, updt_status = c1) = null
+/******************************************************
+*        Initialize Variables
+******************************************************/
+set reply->status_data->status  = "F"
+set cur_updt_cn                 = 0
+set cur_active_ind              = 0
+set failed                      = "F"
+set count1                      = 0
+set nbr_to_chg                  = size(request->qual,5)
+set failures = 0
+set cur_updt_cnt = 0
+set x = 1
+set y = 1
+/******************************************************
+*        Instructions
+******************************************************/
+#start_loop
+for (y = y to nbr_to_chg)
+/**************************
+*   Lock rows to update
+**************************/
+
+   if (request->qual[y].relationship_id > 0)
+     select into "nl:"
+        t.*
+     from trans_req_r t
+
+;   where t.requirement_cd = request->qual[y].requirement_cd
+;     and t.special_testing_cd = request->qual[y].special_testing_cd
+     where t.relationship_id = request->qual[y].relationship_id
+     head report
+        count1 = 0
+     detail
+        cur_updt_cnt = t.updt_cnt
+        cur_active_ind = t.active_ind
+     with nocounter, forupdate(t)
+   endif 
+/**************************************
+*   If could not find record, Add it
+**************************************/
+   if (curqual = 0
+   or  request->qual[y].relationship_id = 0)
+%i cclsource:bbt_get_pathnet_seq.inc
+      insert into trans_req_r t
+      set
+         t.relationship_id            = new_pathnet_seq,
+         t.requirement_cd             = request->qual[y].requirement_cd,
+         t.special_testing_cd         = request->qual[y].special_testing_cd,
+         t.warn_ind                   = request->qual[y].warn_ind,
+         t.allow_override_ind         = request->qual[y].override_ind,
+         t.active_ind                 = 1,
+         t.active_status_dt_tm        = cnvtdatetime(curdate,curtime3),
+         t.active_status_cd           = reqdata->active_status_cd,
+         t.active_status_prsnl_id     = reqinfo->updt_id,
+         t.updt_dt_tm                 = cnvtdatetime(curdate,curtime3),
+         t.updt_id                    = reqinfo->updt_id,
+         t.updt_task                  = reqinfo->updt_task,
+         t.updt_applctx               = reqinfo->updt_applctx,
+         t.updt_cnt                   = 0
+      with nocounter
+
+      if (curqual = 0)
+         go to next_code
+      else
+         set count1 = count1 + 1
+         set stat = alter(reply->qual,count1)
+         set reply->qual[count1]->relationship_id 
+                                = request->qual[y]->relationship_id
+         set reply->qual[count1]->requirement_cd 
+                                = request->qual[y]->requirement_cd
+         set reply->qual[count1]->special_testing_cd 
+                                = request->qual[y]->special_testing_cd
+         set reply->qual[count1]->warn_ind = request->qual[y]->warn_ind
+         set reply->qual[count1]->override_ind = request->qual[y]->override_ind
+         set reply->qual[count1]->updt_cnt = 0
+         set reply->qual[count1]->status = "S"
+         commit
+         set y = y + 1
+         go to start_loop
+      endif
+
+   endif
+/**************************
+*   Check for changed rows
+**************************/
+   if (request->qual[y]->updt_cnt != cur_updt_cnt)
+         go to next_code
+   endif
+
+/**************************
+*   Update Table
+**************************/
+   update into trans_req_r t
+   set
+      t.active_ind         = (if (request->qual[y]->updt_ind = 2)
+                                0
+                              else
+                                1
+                              endif),
+      t.active_status_dt_tm       = (if (cur_active_ind = 1)
+                                t.active_status_dt_tm
+                              else
+                                cnvtdatetime(curdate,curtime3)
+                              endif),
+      t.active_status_cd   = reqdata->active_status_cd,
+      t.active_status_prsnl_id = reqinfo->updt_id,
+      t.warn_ind           = request->qual[y]->warn_ind,
+      t.allow_override_ind = request->qual[y]->override_ind,
+      t.updt_cnt           = t.updt_cnt + 1,
+      t.updt_dt_tm         = cnvtdatetime(curdate,curtime3),
+      t.updt_id            = reqinfo->updt_id,
+      t.updt_task          = reqinfo->updt_task,
+      t.updt_applctx       = reqinfo->updt_applctx
+   where t.relationship_id = request->qual[y]->relationship_id
+   with nocounter
+
+      if (curqual = 0)
+        ;log error
+        go to next_code
+      endif
+
+      set count1 = count1 + 1
+      set stat = alter(reply->qual,count1)
+      set reply->qual[count1]->requirement_cd 
+                = request->qual[y]->requirement_cd
+      set reply->qual[count1]->special_testing_cd 
+                = request->qual[y]->special_testing_cd
+      set reply->qual[count1]->warn_ind = request->qual[y]->warn_ind
+      set reply->qual[count1]->override_ind = request->qual[y]->override_ind
+      set reply->qual[count1]->updt_cnt = cur_updt_cnt + 1
+      set reply->qual[count1]->status = "S"
+      commit
+   endfor
+   go to start_prod_cat_assoc
+/****************************/
+/*      next_code           */
+/****************************/
+#next_code
+  set failures = failures + 1
+  if (failures > 1)
+    set stat = alter(reply->status_data->subeventstatus,failures)
+  endif
+
+  set count1 = count1 + 1
+  set stat = alter(reply->qual,count1)
+  set reply->qual[count1]->requirement_cd = request->qual[y]->requirement_cd
+  set reply->qual[count1]->special_testing_cd 
+        = request->qual[y]->special_testing_cd
+  set reply->qual[count1]->warn_ind = request->qual[y]->warn_ind
+  set reply->qual[count1]->override_ind = request->qual[y]->override_ind
+  set reply->qual[count1]->updt_cnt = cur_updt_cnt
+  set reply->qual[count1]->status = "F"
+
+  if (failed = "F")
+    set reply->status_data->subeventstatus[failures]->operationstatus = "F"
+  else
+    set reply->status_data->subeventstatus[failures]->operationstatus = "C"
+  endif
+  set reply->status_data->subeventstatus[failures]->targetobjectvalue = 
+                          cnvtstring(request->qual[y]->special_testing_cd,32,2)  
+  rollback
+  set y = y + 1
+  go to start_loop
+ 
+/**************************
+*  Update excluded product category info.
+*  Note: For concistency with the existing code, EXCLD_TRANS_REQ_PROD_CAT_R table records are locked before
+*        update; Also the updt_cnt column value is checked to provide appropriate notification to a user that
+*        is attempting to update records last(incase multiple users are attempting update a record concurrently ).
+*
+**************************/
+#start_prod_cat_assoc
+set nbr_to_chg = size(request->excluded_prod_cat_qual, 5)
+if(nbr_to_chg > 0)    
+    set stat = alterlist(reply->excluded_prod_cat_qual, nbr_to_chg)
+endif
+set y = 1
+#start_prod_cat_assoc_loop
+for (y = y to nbr_to_chg)
+
+    if (request->excluded_prod_cat_qual[y].excld_trans_req_prod_cat_r_id > 0)
+         /**************************
+         *   Lock rows to update
+         **************************/
+         select into "nl:"
+            etp.*
+         from excld_trans_req_prod_cat_r etp
+         where etp.excld_trans_req_prod_cat_r_id = request->excluded_prod_cat_qual[y].excld_trans_req_prod_cat_r_id
+         head report
+            count1 = 0
+         detail
+            cur_updt_cnt = etp.updt_cnt
+            cur_active_ind = etp.active_ind
+         with nocounter, forupdate(etp)
+    endif
+   /**************************************
+   *   If could not find record, Add it.
+   **************************************/
+   if (curqual = 0 or request->excluded_prod_cat_qual[y].excld_trans_req_prod_cat_r_id = 0)
+
+      ;generate new id from the appropriate sequence
+      set new_pathnet_seq = 0.0 
+      select into "nl:"
+        seqn = seq(pathnet_seq, nextval)
+      from dual
+      detail
+        new_pathnet_seq = seqn
+      with format, nocounter
+      
+      insert into excld_trans_req_prod_cat_r etp
+      set
+         etp.excld_trans_req_prod_cat_r_id = new_pathnet_seq,
+         etp.product_cat_cd             = request->excluded_prod_cat_qual[y].prod_cat_cd ,
+         etp.requirement_cd             = request->excluded_prod_cat_qual[y].requirement_cd,
+         etp.active_ind                 = 1,
+         etp.active_status_dt_tm        = cnvtdatetime(curdate,curtime3),
+         etp.active_status_cd           = reqdata->active_status_cd,
+         etp.active_status_prsnl_id     = reqinfo->updt_id,
+         etp.updt_dt_tm                 = cnvtdatetime(curdate,curtime3),
+         etp.updt_id                    = reqinfo->updt_id,
+         etp.updt_task                  = reqinfo->updt_task,
+         etp.updt_applctx               = reqinfo->updt_applctx,
+         etp.updt_cnt                   = 0
+      with nocounter
+ 
+      if (curqual = 0)
+         ;log error
+         go to prod_cat_assoc_updt_err
+      else
+         call AddExcludedProdCatUpdateStatus (y, 0, "S")
+         commit
+         set y = y + 1
+         go to start_prod_cat_assoc_loop
+      endif
+   endif
+   
+   /**************************
+   *   Check for changed rows
+   **************************/
+   if (request->excluded_prod_cat_qual[y]->updt_cnt != cur_updt_cnt)
+         ;log error
+         go to prod_cat_assoc_updt_err
+   endif
+ 
+   /**************************
+   *   Update Table by Id
+   **************************/
+   update into excld_trans_req_prod_cat_r etp
+   set
+      etp.active_ind = (if (request->excluded_prod_cat_qual[y]->updt_ind = 2)
+                          0
+                       else
+                          1
+                       endif),
+      etp.active_status_dt_tm = (if (cur_active_ind = 1)
+                            etp.active_status_dt_tm
+                          else
+                            cnvtdatetime(curdate,curtime3)
+                          endif),
+      etp.active_status_cd   = reqdata->active_status_cd,
+      etp.active_status_prsnl_id = reqinfo->updt_id,
+      etp.updt_cnt           = etp.updt_cnt + 1,
+      etp.updt_dt_tm         = cnvtdatetime(curdate,curtime3),
+      etp.updt_id            = reqinfo->updt_id,
+      etp.updt_task          = reqinfo->updt_task,
+      etp.updt_applctx       = reqinfo->updt_applctx
+    where etp.excld_trans_req_prod_cat_r_id = request->excluded_prod_cat_qual[y].excld_trans_req_prod_cat_r_id
+    with nocounter
+ 
+    if (curqual = 0)
+        ;log error
+        go to prod_cat_assoc_updt_err
+    endif
+    call AddExcludedProdCatUpdateStatus (y, cur_updt_cnt + 1, "S")
+    commit
+endfor
+go to exit_script
+/****************************/
+/* prod_cat_assoc_updt_err  */
+/****************************/
+#prod_cat_assoc_updt_err
+ 
+call AddExcludedProdCatUpdateStatus (y, cur_updt_cnt, "F")
+
+set failures = failures + 1
+if (failures > 1)
+    set stat = alter(reply->status_data->subeventstatus,failures)
+endif
+ 
+if (failed = "F")
+    set reply->status_data->subeventstatus[failures]->operationstatus = "F"
+else
+    set reply->status_data->subeventstatus[failures]->operationstatus = "C"
+endif 
+set reply->status_data->subeventstatus[failures]->TargetObjectName = "EXCLD_TRANS_REQ_PROD_CAT_R"
+set reply->status_data->subeventstatus[failures]->targetobjectvalue =
+                          build("Failed to insert or update record with product category id of (", 
+                          cnvtstring(request->excluded_prod_cat_qual[y]->prod_cat_cd,32,2), ") and requirement id of ( ",
+                          c ;;Solution_Test/script/PathNet -- BB Transfusion/Validappstates/BBT_CHG_VALID_APP_STATES.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       BBT_CHG_VALID_APP_STATES
+        Object name:            BBT_CHG_VALID_APP_STATES
+        Request #:              225053
+
+        Product:                PATHNET
+        Product Team:           BLOOD BANK
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        If the state record already exists, the active ind will be set appropriately.
+                                If the record does not exist, it will be inserted
+
+        Tables read:            na
+        Tables updated:         VALID STATE
+        Executing from:         ##
+
+        Special Notes:          NA
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 04/22/96 Yvonne Klipfel       Initial Release                     *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program bbt_chg_valid_app_states:dba go
+create program bbt_chg_valid_app_states:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+/*
+record request
+(
+   1 process_cd             = f8        ;table 1664
+   1 category_cd            = f8        ;table 1605
+   1 qual[x]
+     2 state_cd             = f8        ;table 1610
+     2 updt_cnt             = i4
+)
+*/
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+record reply
+( 1 qual[1]
+    2 state_cd  = f8
+    2 updt_cnt  = i4
+%I CCLSOURCE:STATUS_BLOCK.INC
+)
+
+/****************************************************************************
+*       Initialize Variables                                                *
+*****************************************************************************/
+set reply->status_data->status = "F"
+set number_to_chg = size(request->qual, 5)
+set cur_updt_cnt = 0
+set failed = "F"
+set count1 = 0
+set count2 = 0
+set cur_active_ind = 0
+set cur_active_dt_tm = cnvtdatetime(curdate, curtime3)
+set cur_inactive_dt_tm = cnvtdatetime(curdate, curtime3)
+set partial_update = "F"
+/****************************************************************************
+*       Lock row to update                                                 *
+*****************************************************************************/
+for (x = 1 to number_to_chg)
+   select into "nl:"
+       v.state_cd
+   from valid_state v
+   where v.process_cd            = request->process_cd and
+         v.category_cd           = request->category_cd and
+         v.state_cd              = request->qual[x]->state_cd
+   detail
+     cur_active_ind = v.active_ind
+     cur_updt_cnt = v.updt_cnt
+     cur_active_dt_tm = v.active_dt_tm
+     cur_inactive_dt_tm = v.inactive_dt_tm
+   with nocounter, forupdate(v)
+/****************************************************************************
+*       Determine if row previously existed                                 *
+*****************************************************************************/
+   if (curqual = 0)
+      insert into valid_state v set
+         v.process_cd            = request->process_cd,
+         v.category_cd           = request->category_cd,
+         v.state_cd              = request->qual[x]->state_cd,
+         v.active_ind            = 1,
+         v.active_dt_tm          = cnvtdatetime(curdate, curtime3),
+         v.updt_dt_tm            = cnvtdatetime(curdate, curtime3),
+         v.updt_id               = reqinfo->updt_id,
+         v.updt_task             = reqinfo->updt_task,
+         v.updt_applctx          = reqinfo->updt_applctx,
+         v.updt_cnt              = 0
+      with nocounter
+      if (curqual = 0)
+         set failed = "T"
+         set count1 = count1 + 1
+         if (count1 > 1)
+            set stat = alter(reply->status_data->subeventstatus, count1 + 1)
+         endif
+         set reply->status_data->subeventstatus[count1]->OperationName = "CHG"
+         set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+         set reply->status_data->subeventstatus[count1]->TargetObjectName = "Valid State"
+         set reply->status_data->subeventstatus[count1]->TargetObjectValue = "Insert failed"
+      else
+         set partial_update = "T"
+         set count2 = count2 + 1
+         if (count2 > 1)
+            set stat = alter(reply->qual, count2 + 1)
+         endif
+         set reply->qual[count2]->state_cd = request->qual[x]->state_cd
+         set reply->qual[count2]->updt_cnt = 0
+      endif
+   else
+/****************************************************************************
+*       Check to see if row already changed                                 *
+*****************************************************************************/
+     if (request->qual[x]->updt_cnt != cur_updt_cnt)
+        set failed = "T"
+        set count1 = count1 + 1
+        if (count1 > 1)
+           set stat = alter(reply->status_data->subeventstatus, count1 + 1)
+        endif
+        set reply->status_data->subeventstatus[count1]->OperationName = "CHG"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "Valid State"
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue = "Update count mismatch"
+     else
+/****************************************************************************
+*       Reset the row that already exists                                   *
+*****************************************************************************/
+        update into valid_state v set
+           v.active_ind          = (if (cur_active_ind = 1) 0 else 1 endif),
+           v.active_dt_tm        = (if (cur_active_ind = 0) 
+                                        cnvtdatetime(curdate,curtime3) 
+                                    else
+                                        cnvtdatetime(cur_active_dt_tm)
+                                    endif),
+           v.inactive_dt_tm      = (if (cur_active_ind = 1) 
+                                        cnvtdatetime(curdate,curtime3) 
+                                    else
+                                        cnvtdatetime(cur_inactive_dt_tm)
+                                    endif),
+           v.updt_cnt            = v.updt_cnt + 1,
+           v.updt_dt_tm          = cnvtdatetime(curdate,curtime3),
+           v.updt_id             = reqinfo->updt_id,
+           v.updt_task           = reqinfo->updt_task,
+           v.updt_applctx        = reqinfo->updt_applctx
+        where v.process_cd       = request->process_cd and
+              v.category_cd      = request->category_cd and
+              v.state_cd         = request->qual[x]->state_cd
+        with nocounter
+
+        if (curqual = 0)
+           set failed = "T"
+           set count1 = count1 + 1
+           if (count1 > 1)
+              set stat = alter(reply->status_data->subeventstatus, count1 + 1)
+           endif
+           set reply->status_data->subeventstatus[count1]->OperationName = "CHG"
+           set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+           set reply->status_data->subeventstatus[count1]->TargetObjectName = "Valid State"
+           set reply->status_data->subeventstatus[count1]->TargetObjectValue = "Update failed"
+        else
+           set partial_update = "T"
+           set count2 = count2 + 1
+           if (count2 > 1)
+              set stat = alter(reply->qual, count2 + 1)
+           endif
+           set reply->qual[count2]->state_cd = request->qual[x]->state_cd
+           set reply->qual[count2]->updt_cnt = request->qual[x]->updt_cnt + 1
+        endif
+     endif
+   endif
+endfor
+/****************************************************************************
+*       exit_script                                                         *
+*****************************************************************************/
+#exit_script
+set stat = alter(reply->qual, count2)
+if (failed = "T" and partial_update = "F")
+  set reqinfo->commit_ind = 0
+elseif (failed = "T" and partial_update = "T")
+  set reqinfo->commit_ind = 1
+  set reply->status_data->status = "P"
+else
+  set reqinfo->commit_ind = 1
+  set reply->status_data->status = "S"
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.
+nvtstring(request->excluded_prod_cat_qual[y]->requirement_cd,32,2), ").")
+            
+rollback
+set y = y + 1
+go to start_prod_cat_assoc_loop
+ 
+#exit_script
+if (failures > 0)
+   set reply->status_data->status = "P"
+else
+   set reply->status_data->status = "S"
+endif
+ 
+subroutine AddExcludedProdCatUpdateStatus (repIdx, updt_cnt, updt_status)
+    set reply->excluded_prod_cat_qual[repIdx]->excld_trans_req_prod_cat_r_id
+                                = request->excluded_prod_cat_qual[repIdx]->excld_trans_req_prod_cat_r_id
+    set reply->excluded_prod_cat_qual[repIdx]->prod_cat_cd
+                                = request->excluded_prod_cat_qual[repIdx]->prod_cat_cd
+    set reply->excluded_prod_cat_qual[repIdx]->requirement_cd
+                                = request->excluded_prod_cat_qual[repIdx]->requirement_cd
+    set reply->excluded_prod_cat_qual[repIdx]->updt_cnt = updt_cnt
+    set reply->excluded_prod_cat_qual[repIdx]->status = updt_status
+end
+ 
+end go
+
+;Generated by GNU enscript 1.6.4.

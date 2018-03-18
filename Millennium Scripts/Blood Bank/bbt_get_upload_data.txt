@@ -1,0 +1,428 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_get_upload_data.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 2001 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_upload_data.prg
+        Object name:            bbt_get_upload_data
+        Request #:              225911
+
+        Product:                Blood Bank Transfusion
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve the necessary data used to print the
+                                "Historical Product Review Report" from the
+                                Blood Bank Transfusion Report Selection Tool.
+
+        Tables read:            code_value,
+                                bbhist_product,
+                                organization,
+                                bbhist_special_testing,
+                                long_text,
+                                person,
+                                person_alias,
+                                bbhist_product_event
+                                address
+
+        Tables updated:         None
+        
+        Executing from:         ReportSelection
+
+        Special Notes:          None
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 07/09/01 Gary Runde           Initial Release                     *
+;    *001 04/09/03 Ronda Zheng          UTC phase II, add birth_tz to reply *
+;    *002 06/30/05 Jeff Wain            Long sequence fixes on addr_type_cd *
+;    *003 08/30/13 Gayatri Samala       providing owner/inventory area filtering*
+;                                       as part of CR 1-7227572991          *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program BBT_GET_UPLOAD_DATA:dba go
+      create program BBT_GET_UPLOAD_DATA:dba
+
+
+; I18N INCLUDE FILE
+%i cclsource:i18n_uar.inc
+
+%i cclsource:glb_script_logging.inc
+set LOG_PROGRAM_NAME = "BBT_GET_UPLOAD_DATA"
+
+  /***********************************************************************
+  * Request Record                                                       *
+  ***********************************************************************/
+  /*
+  record request
+  (
+     1  start_dt_tm              = dq8
+     1  end_dt_tm                = dq8
+     1  address_location_cd      = f8
+     1  cur_owner_area_cd        = f8
+ 	 1  cur_inv_area_cd          = f8
+  ) */
+
+  /***********************************************************************
+  * Reply Record                                                         *
+  ***********************************************************************/
+  record reply
+  (
+    1 location_cd                 = f8
+    1 location_disp               = vc
+    1 location_found_ind          = i2    ;0 - address info not found  1-address found
+    1 street_addr                 = vc
+    1 street_addr2                = vc
+    1 street_addr3                = vc
+    1 street_addr4                = vc
+    1 city                        = vc
+    1 state                       = vc
+    1 zipcode                     = c25
+    1 country                     = vc
+    1 products[*]
+      2 supplier                    = vc
+      2 supplier_prefix             = vc
+      2 product_nbr                 = vc
+      2 product_sub_nbr             = vc
+      2 product_cd                  = f8
+      2 product_disp                = vc
+      2 abo_cd                      = f8
+      2 abo_disp                    = vc
+      2 rh_cd                       = f8
+      2 rh_disp                     = vc
+      2 expire_dt_tm                = dq8 
+      2 volume                      = i4
+      2 unit_meas_cd                = f8
+      2 unit_meas_disp              = vc
+      2 owner_area_cd               = f8
+      2 owner_area_disp             = vc
+      2 inv_area_cd                 = f8
+      2 inv_area_disp               = vc
+      2 cross_reference             = vc
+      2 contributer_system_cd       = f8
+      2 contributer_system_disp     = vc
+      2 final_disp_type_cd          = f8
+      2 final_disp_type_disp        = vc
+      2 final_disp_tech             = vc
+      2 final_disp_reason_cd        = f8
+      2 final_disp_reason_disp      = vc
+      2 final_disp_dt_tm            = dq8
+      2 final_disp_volume           = i4
+      2 final_disp_qty              = i4
+      2 final_disp_bag_return_ind   = i2
+      2 final_disp_tag_return_ind   = i2
+      2 product_comment             = vc
+      2 product_transfused_ind      = i2
+      2 patient_name                = vc
+      2 birth_dt_tm                 = dq8
+      2 birth_tz                    = i4
+      2 mrn                         = vc
+      2 ssn                         = vc
+      2 sex_cd                      = f8
+      2 sex_disp                    = vc
+      2 antigens[*]
+        3 antigen_cd                = f8
+        3 antigen_disp              = vc
+      2 attributes[*]
+        3 attribute_cd              = f8
+        3 attribute_disp            = vc
+%i cclsource:status_block.inc
+  )
+
+
+  /******************************************************************/
+  /* Get the code values needed and declare/initialize variables    */
+  /******************************************************************/
+  
+  declare g_num_products             = i4 with public, noconstant(0)
+  declare num_antigens               = i4 with public, noconstant(0)
+  declare num_attributes             = i4 with public, noconstant(0)
+  declare h                          = i4 with public, noconstant(0)
+  declare stat                       = i4 with public, noconstant(0)
+  declare mrn_cd                     = f8 with public, noconstant(0.0)
+  declare ssn_cd                     = f8 with public, noconstant(0.0)
+  declare transfused_cd              = f8 with public, noconstant(0.0)
+  declare addr_type_cd               = f8 with public, noconstant(0.0)
+  declare sText                      = vc with public, noconstant(fillstring(254, " "))
+  declare cdf_meaning                = c12 with public, noconstant(fillstring(12, " "))
+
+  declare ANTIGEN_CDF1               = vc with public, constant("+")
+  declare ANTIGEN_CDF2               = vc with public, constant("-")
+  declare ATTRIBUTE_CDF              = vc with public, constant("SPTYP")
+
+  declare MRN_SSN_CODE_SET           = i4 with public, constant(4)
+  declare ADDRESS_TYPE_CODE_SET      = i4 with public, constant(212)
+  declare TRANSFUSED_CODE_SET        = i4 with public, constant(1610)
+
+  declare COMMENT_ENTITY_NAME        = vc with public, constant("BBHIST_PRODUCT")
+  declare ADDRESS_ENTITY_NAME        = vc with public, constant("LOCATION")
+
+  ;initialize variable that keeps handle to i18n data
+  declare i18nHandle                 = i4 with public, noconstant(0)
+
+  set reply->status_data->status = "F"
+
+  ;call uar_i18nlocalizationinit
+  set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+
+  ;get the code_value for mrn_cd and ssn_cd
+  set cdf_meaning = "MRN"
+  call uar_get_meaning_by_codeset(MRN_SSN_CODE_SET, cdf_meaning, 1, mrn_cd)
+  set cdf_meaning = "SSN"
+  call uar_get_meaning_by_codeset(MRN_SSN_CODE_SET, cdf_meaning, 1, ssn_cd)
+  set cdf_meaning = "BUSINESS"
+  call uar_get_meaning_by_codeset(ADDRESS_TYPE_CODE_SET, cdf_meaning, 1, addr_type_cd)
+  set cdf_meaning = "7"
+  call uar_get_meaning_by_codeset(TRANSFUSED_CODE_SET, cdf_meaning, 1, transfused_cd)
+
+  ;check to see if MRN code value retrieved successfully
+  if (mrn_cd = 0.0)    
+     set sText = uar_i18ngetmessage(i18nHandle,"MRNError","Error retrieving MRN code value, code set 4")
+     call log_message(sText, LOG_LEVEL_ERROR)
+     go to exit_script
+  endif
+
+  ;check to see if SSN code value retrieved successfully
+  if (ssn_cd = 0.0)    
+     set sText = uar_i18ngetmessage(i18nHandle,"SSNError","Error retrieving SSN code value, code set 4")
+     call log_message(sText, LOG_LEVEL_ERROR)
+     go to exit_script
+  endif
+
+  ;check to see if address type code value retrieved successfully
+  if (addr_type_cd = 0.0)    
+     set sText = uar_i18ngetmessage(i18nHandle,"addr_type_cdError","Error retrieving BUSINESS code value, code set 212")
+     call log_message(sText, LOG_LEVEL_ERROR)
+     go to exit_script
+  endif
+
+  ;check to see if transfused event code value retrieved successfully
+  if (transfused_cd = 0.0)    
+     set sText = uar_i18ngetmessage(i18nHandle,"transfused_cdError","Error retrieving Transfused (7) code value, code set 1610")
+     call log_message(sText, LOG_LEVEL_ERROR)
+     go to exit_script
+  endif
+
+  ;if the address_location_code passed in is greater than zero, then 
+  ;get the address information to pass back to ReportSelection
+  if (request->address_location_cd > 0.0)
+    select into "nl:"
+      adr.parent_entity_id,
+      adr.address_type_cd
+    from address adr
+    plan adr
+      where adr.parent_entity_id = request->address_location_cd
+        and adr.active_ind = 1
+        and adr.address_type_cd = addr_type_cd
+        and adr.parent_entity_name = ADDRESS_ENTITY_NAME
+    order by adr.parent_entity_id
+    head adr.parent_entity_id
+      ;check to see if the address exists and fill out address information
+      reply->location_cd  = request->address_location_cd
+      reply->location_found_ind = 1
+      reply->street_addr  = adr.street_addr
+      reply->street_addr2 = adr.street_addr2
+      reply->street_addr3 = adr.street_addr3
+      reply->street_addr4 = adr.street_addr4
+      reply->city         = adr.city
+      reply->state        = adr.state
+      reply->zipcode      = adr.zipcode
+      reply->country      = adr.country
+    with nocounter
+  endif    
+  
+
+  ;retrieve the necessary values from the database to fill out reply structure
+  select into "nl:"
+    bbprod.product_id,
+    bbprod.product_cd,
+    bbprod.product_nbr,
+    org.organization_id,
+    bbprodevnt.person_id,
+    bbprodevnt.event_type_cd,
+    psnl.person_id,
+    p.person_id,
+    pa.alias,
+    pa2.alias,
+    lt.parent_entity_id,
+    lt.parent_entity_name,
+    bbspectst.product_id,
+    bbspectst.special_testing_cd,
+    cv.code_value
+  from
+    bbhist_product bbprod,
+    organization org, 
+    bbhist_product_event bbprodevnt,
+    prsnl psnl,
+    person p,
+    person_alias pa,
+    person_alias pa2,
+    long_text lt,
+    bbhist_special_testing bbspectst,
+    code_value cv
+  plan bbprod
+    where bbprod.product_id+0 > 0.0
+      and bbprod.updt_dt_tm between cnvtdatetime(request->start_dt_tm)
+                                and cnvtdatetime(request->end_dt_tm)
+      and ((request->cur_owner_area_cd > 0.0
+           and request->cur_owner_area_cd = bbprod.owner_area_cd)
+          or (request->cur_owner_area_cd = 0.0))
+      and ((request->cur_inv_area_cd > 0.0
+           and request->cur_inv_area_cd = bbprod.inv_area_cd)
+          or (request->cur_inv_area_cd = 0.0))
+  join org
+    where org.organization_id = bbprod.supplier_id
+  join bbprodevnt
+    where bbprodevnt.product_id = bbprod.product_id
+  join psnl
+    where psnl.person_id = bbprodevnt.prsnl_id
+  join p
+    where p.person_id = outerjoin(bbprodevnt.person_id)
+  join pa
+    where pa.person_id = outerjoin(p.person_id)
+      and pa.person_alias_type_cd = outerjoin(mrn_cd)
+  join pa2
+    where pa2.person_id = outerjoin(p.person_id)
+      and pa2.person_alias_type_cd = outerjoin(ssn_cd)
+  join lt
+    where lt.parent_entity_id = outerjoin(bbprod.product_id)
+      and lt.parent_entity_name = outerjoin(COMMENT_ENTITY_NAME)
+  join bbspectst 
+    where bbspectst.product_id = outerjoin(bbprod.product_id)
+  join cv
+    where cv.code_value = outerjoin(bbspectst.special_testing_cd)
+  order by bbprod.product_id, bbspectst.special_testing_cd
+  head bbprod.product_id
+    g_num_products = g_num_products + 1
+    if (mod(g_num_products, 10) = 1)
+      stat = alterlist(reply->products, g_num_products + 10)
+    endif
+    ;fill out the bbhist product information
+    reply->products[g_num_products].supplier_prefix       = bbprod.supplier_prefix
+    reply->products[g_num_products].product_nbr           = bbprod.product_nbr
+    reply->products[g_num_products].product_sub_nbr       = bbprod.product_sub_nbr
+    reply->products[g_num_products].product_cd            = bbprod.product_cd
+    reply->products[g_num_products].abo_cd                = bbprod.abo_cd
+    reply->products[g_num_products].rh_cd                 = bbprod.rh_cd
+    reply->products[g_num_products].expire_dt_tm          = bbprod.expire_dt_tm
+    reply->products[g_num_products].volume                = bbprod.volume
+    reply->products[g_num_products].unit_meas_cd          = bbprod.unit_meas_cd
+    reply->products[g_num_products].owner_area_cd         = bbprod.owner_area_cd
+    reply->products[g_num_products].inv_area_cd           = bbprod.inv_area_cd
+    reply->products[g_num_products].cross_reference       = bbprod.cross_reference
+    reply->products[g_num_products].contributer_system_cd = bbprod.contributor_system_cd
+    reply->products[g_num_products].supplier              = org.org_name
+    ;fill out the final disposition information
+    reply->products[g_num_products].final_disp_type_cd        = bbprodevnt.event_type_cd
+    reply->products[g_num_products].final_disp_reason_cd      = bbprodevnt.reason_cd
+    reply->products[g_num_products].final_disp_tech           = psnl.username
+    reply->products[g_num_products].final_disp_volume         = bbprodevnt.volume
+    reply->products[g_num_products].final_disp_dt_tm          = bbprodevnt.event_dt_tm
+    reply->products[g_num_products].final_disp_qty            = bbprodevnt.qty
+    reply->products[g_num_products].final_disp_bag_return_ind = bbprodevnt.bag_returned_ind
+    reply->products[g_num_products].final_disp_tag_return_ind = bbprodevnt.tag_returned_ind
+    ;check to see if the product comment exists, and fill out product comment information
+    if (lt.long_text_id > 0.0)
+       reply->products[g_num_products].product_comment = lt.long_text
+    endif
+    ;if the product has been transfused, then fill out patient information
+    if (p.person_id > 0.0 and bbprodevnt.event_type_cd = transfused_cd)
+      reply->products[g_num_products].product_transfused_ind = 1
+      reply->products[g_num_products].patient_name = p.name_full_formatted
+      reply->products[g_num_products].birth_dt_tm  = p.birth_dt_tm
+      reply->products[g_num_products].birth_tz     = validate(p.birth_tz,0)
+      reply->products[g_num_products].sex_cd       = p.sex_cd 
+      ;check to see if the MRN was found and fill out information 
+      if (pa.person_alias_id != 0.0)
+        reply->products[g_num_products].mrn = cnvtalias(pa.alias,pa.alias_pool_cd)
+      endif
+      ;check to see if the SSN was found and fill out information 
+      if (pa2.person_alias_id != 0.0)
+        reply->products[g_num_products].ssn = cnvtalias(pa2.alias,pa2.alias_pool_cd)
+      endif
+    endif    
+    num_antigens = 0
+    num_attributes = 0
+  head bbspectst.special_testing_cd
+    ;check to see if any special testing codes were found
+    if (bbspectst.special_testing_cd > 0.0)
+      ;check to see if the code set is the antigen code set
+      if (trim(cv.cdf_meaning) in (ANTIGEN_CDF1, ANTIGEN_CDF2))
+        num_antigens = num_antigens + 1
+        if (mod(num_antigens, 5) = 1)
+          stat = alterlist(reply->products[g_num_products].antigens, num_antigens + 5)
+        endif
+        reply->products[g_num_products].antigens[num_antigens].antigen_cd = bbspectst.special_testing_cd
+      endif
+    
+      ;check to see if the code set is the attribute code set
+      if (trim(cv.cdf_meaning) = ATTRIBUTE_CDF)
+        num_attributes = num_attributes + 1
+        if (mod(num_attributes, 5) = 1)
+          stat = alterlist(reply->products[g_num_products].attributes, num_attributes + 5)
+        endif
+        reply->products[g_num_products].attributes[num_attributes].attribute_cd = bbspectst.special_testing_cd
+      endif
+    endif
+  detail
+    row +0
+  foot bbspectst.special_testing_cd
+    row +0
+  foot bbprod.product_id
+    ;alter the antigens structure to the correct value
+    if (num_antigens > 0)
+      stat = alterlist(reply->products[g_num_products].antigens, num_antigens)
+    endif
+
+    ;alter the attributes structure to the correct value
+    if (num_attributes > 0)
+      stat = alterlist(reply->products[g_num_products].attributes, num_attributes)
+    endif
+  with nocounter,
+       outerjoin = d1,
+       memsort
+            
+  if (ERROR_MESSAGE(1) = 1)
+    go to exit_script
+  endif
+  
+  ;check the products and alter the structure to the correct value
+  if (g_num_products > 0)
+    set stat = alterlist(reply->products, g_num_products)
+    set reply->status_data->status = "S"
+  elseif (g_num_products = 0)
+    set reply->status_data->status = "Z"
+  endif
+
+#exit_script
+end
+go
+
+;Generated by GNU enscript 1.6.4.

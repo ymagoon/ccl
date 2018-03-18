@@ -1,0 +1,1271 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_daily_product_rsl.prg Turn on black mode
+
+/****************************************************************************
+*                                                                           *
+*  Copyright Notice:  (c) 1983 Laboratory Information Systems &             *
+*                              Technology, Inc.                             *
+*       Revision      (c) 1984-2005 Cerner Corporation                      *
+*                                                                           *
+*  Cerner (R) Proprietary Rights Notice:  All rights reserved.              *
+*  This material contains the valuable properties and trade secrets of      *
+*  Cerner Corporation of Kansas City, Missouri, United States of            *
+*  America (Cerner), embodying substantial creative efforts and             *
+*  confidential information, ideas and expressions, no part of which        *
+*  may be reproduced or transmitted in any form or by any means, or         *
+*  retained in any storage or retrieval system without the express          *
+*  written permission of Cerner.                                            *
+*                                                                           *
+*  Cerner is a registered mark of Cerner Corporation.                       *
+*                                                                           *
+****************************************************************************/
+/*****************************************************************************
+ 
+        Source file name:       BBT_RPT_DAILY_PRODUCT_RSL.PRG
+        Object name:            bbt_rpt_daily_product_rsl
+        Request #:              225088
+ 
+        Product:                Blood Bank
+        Product Team:           BBT
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:
+ 
+        Tables read:            result_event
+                                perform_result
+                                result
+                                result_comment
+                                orders
+                                task_assay_cd
+                                discrete_task_assay
+                                prsnl
+                                long_text
+                                data_map
+                                resource_group
+ 
+        Tables updated:         none
+ 
+        Executing from:         Blood Bank Reports
+ 
+        Special Notes:          n/a
+ 
+****************************************************************************************************************/
+;~DB~************************************************************************************************************
+;*                      GENERATED MODIFICATION CONTROL LOG                                                      *
+;****************************************************************************************************************
+;*                                                                                                              *
+;*Mod Date     Engineer             Comment                                                                     *
+;*--- -------- -------------------- ----------------------------------------------------------------------------*
+;*001 11/18/96 Linda DeJong         Initial Release                                                             *
+;*002 02/28/97 Jon Weekes           Modified to correctly process results performed and verified at             *
+;*                                  the same time.  Control break processing had previously been based on       *
+;*                                  pr.perform_result_id; however, with the change to result posting, results   *
+;*                                  performed and verified at the same time will have only 1 perform_result     *
+;*                                  row and 2 result_event rows.  Thus, I (hastely) modified it to control break*
+;*                                  on pr.perform_result_id and re.event_sequence instead of only               *
+;*                                  pr.perform_result_id.  Search for:  JOW, perfresultids, store_perfresultids *
+;*                                  and re.event_sequence.                                                      *
+;*003 06/16/97 Jon Weekes/Doug Saus Added [back] join to product table with initial select to delimit selected  *
+;*                                  products to only those a the specified Owner Area/Inventory area.           *
+;*004 04/07/98 Matt Benson          Modified to retrieve Institution name from preferences                      *
+;*005 01/04/99 John Rieck           Added logic to print location name and address. Added the                   *
+;*                                  address_location_cd to request.  Added bbt_get_location_info.inc and        *
+;*                                  bbt_print_location_info.inc.                                                *
+;*011 05/21/99 Jose Suarez          change cer_temp to cer_print                                                *
+;*012 05/25/99 Matt Benson          Made UAR changes                                                            *
+;*013 09/08/99 Badari Kopparapu     Modified to use bbt_ops_owninvloc.inc for processing owner area, inventory  *
+;*                                  area & location address from batch selection field in Ops Job Templates     *
+;*                                  Modified to use ops_date for computing the report date range.               *
+;*014 09/08/99 Badari Kopparapu     Modified to parse for SVC[ , ,] in the batch_selection field to retrieve    *
+;*                                  service resource codes when run from Operations.                            *
+;*015 11/10/99 Jose Suarez          Enhancement when running from ops added bbt_ops_parm_passed.inc             *
+;*016 01/07/00 Doug Saus            Performance enhancements                                                    *
+;*017 01/24/00 Doug Saus            Added support of date/time assay result type                                *
+;*013 08/09/00 Lawrence Dsouza      internationalized date and time                                             *
+;*018 02/16/01 Chris Noe            Internationalize text                                                       *
+;*019 09/18/01 Christi Ditmars      Corrected Supplier Prefix so that it is displayed.  Added sub number        *
+;*020 07/24/02 Jason Osborn         Unique RPT filename project                                                 *
+;*021 11/21/03 Chris Noe            Defect correction CAPEP00032600.  Removed qualification by                  *
+;*                                  service_resource_cd on the perform_result table since product orders route  *
+;*                                  only to their default service resource defined in deptorcwizard.            *
+;*022 02/27/04 Ronda Zheng          Fixed defect CAPEP00039903, 39901, 74016. Print proper data at the bottom of*
+;*                                  each page. Print out most current result comments and notes. Read data_map  *
+;*                                  and format numeric results                                                  *
+;*023 04/12/04 Jim Jensen           Remove "Select" for own/inv info and use UAR, instead.                      *
+;*024 07/08/04 David Fifer          Rearranged the report to handle a 25 character eurocode product number.     *
+;*025 10/20/04 Jim Jensen           Add clinical validation display for result status' in review.               *
+;*026 01/14/05 Jason Coy            Correct clin val issues.                                                    *
+;*027 10/11/05 Jason Coy            Updated report to display the front end username.                           *
+;~DE~************************************************************************************************************
+;~END~*******************  END OF ALL MODCONTROL BLOCKS  ********************************************************
+ 
+      DROP PROGRAM bbt_rpt_daily_product_rsl:dba GO
+      CREATE PROGRAM bbt_rpt_daily_product_rsl:dba
+ 
+/********************************************************************/
+/*  Request Record           */
+/********************************************************************/
+/*
+      RECORD request
+      (
+        1 dt_tm_begin = dq8
+        1 dt_tm_end = dq8
+        1 printer_name = vc
+        1 ops_date = dq8
+        1 batch_selection = vc
+        1 output_dist = vc
+        1 qual[*]
+          2 service_resource_cd = f8
+        1  cur_owner_area_cd  = f8
+        1  cur_inv_area_cd    = f8
+        1  address_location_cd = f8
+      )
+*/
+ 
+/********************************************************************/
+/*  Reply Record             */
+/********************************************************************/
+ 
+      RECORD reply
+      (
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+      )
+ 
+; lists the results that fall within the specified time frame and
+; which are verified or corrected
+;016 begin
+    record re_rows
+    (
+      1 re_row[*]
+        2 perform_result_id = f8
+        2 result_id = f8
+        2 event_sequence = i4
+     )
+;016 end
+      RECORD perf_results
+      (
+        1 qual[*]
+          2 result_id = f8
+          2 order_id = f8
+          2 catalog_cd = f8
+          2 task_assay_cd = f8
+          2 perform_result_id = f8
+          2 service_resource_cd = f8
+          2 detail_mnemonic = c12
+          2 drawn_time = c12
+          2 bb_result_id = f8
+          2 product_nbr = c20
+          2 bb_processing_cd = f8
+          2 event_sequence = i4
+          2 long_text_id = f8
+          2 result_status_cd = f8
+          2 arg_min_digits          = i4
+          2 arg_max_digits          = i4
+          2 arg_min_dec_places      = i4
+          2 arg_less_great_flag     = i2
+      )
+ 
+; array containing the most recent chartable result comments
+      RECORD r_long_text
+      (
+        1 qual[*]
+          2 result_id = f8
+          2 perform_result_id = f8
+          2 order_id = f8
+          2 task_assay_cd = f8
+          2 result_status_cd = f8
+          2 comment_text = vc
+          2 note_text = vc
+          2 text_result = vc
+          2 event_sequence = i4
+     )
+ 
+      RECORD ops_params
+      (
+        1 qual[*]
+          2 param = c100
+      )
+ 
+%i cclsource:bbt_get_username.inc
+ 
+;Begin 018
+/*****************************************************************************
+* Internationalization                *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+ 
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+record captions
+(
+  1  rpt_date                            = vc
+  1  rpt_time                            = vc
+  1  rpt_by                              = vc
+  1  page_no                             = vc
+  1  test_site                           = vc
+  1  bb_owner                            = vc
+  1  inventory_area                      = vc
+  1  beg_date                            = vc
+  1  end_date                            = vc
+  1  product_number                      = vc
+  1  order_proc                          = vc
+  1  performed                           = vc
+  1  verified                            = vc
+  1  product_type                        = vc
+  1  order_dt_tm                         = vc
+  1  cell_product                        = vc
+  1  procedure                           = vc
+  1  result                              = vc
+  1  tech_id                             = vc
+  1  date                                = vc
+  1  time                                = vc
+  1  rpt_title                           = vc
+  1  all                                 = vc
+  1  report_id                           = vc
+  1  end_of_report                       = vc
+  1  comment                             = vc
+  1  note                                = vc
+  1  text_result                         = vc
+  1  text_result_correct                 = vc
+)
+ 
+set captions->rpt_date = uar_i18ngetmessage(i18nHandle,
+  "rpt_date", "DATE:")
+set captions->rpt_time = uar_i18ngetmessage(i18nHandle,
+  "rpt_time", "TIME:")
+set captions->rpt_by = uar_i18ngetmessage(i18nHandle,
+  "rpt_by", "  BY:")
+set captions->page_no = uar_i18ngetmessage(i18nHandle,
+  "page_no", "PAGE:")
+set captions->test_site = uar_i18ngetmessage(i18nHandle,
+  "test_site", "TEST SITE:")
+set captions->bb_owner = uar_i18ngetmessage(i18nHandle,
+  "bb_owner", "Blood Bank Owner: ")
+set captions->inventory_area = uar_i18ngetmessage(i18nHandle,
+  "inventory_area", "Inventory Area: ")
+set captions->beg_date = uar_i18ngetmessage(i18nHandle,
+  "beg_date", "Beginning Date:")
+set captions->end_date = uar_i18ngetmessage(i18nHandle,
+  "end_date", "Ending Date:")
+set captions->product_number = uar_i18ngetmessage(i18nHandle,
+  "product_number", "PRODUCT NUMBER/")
+set captions->order_proc = uar_i18ngetmessage(i18nHandle,
+  "order_proc", "ORDERED PROC/")
+set captions->performed = uar_i18ngetmessage(i18nHandle,
+  "performed", "PERFORMED")
+set captions->verified = uar_i18ngetmessage(i18nHandle,
+  "verified", "VERIFIED")
+set captions->product_type = uar_i18ngetmessage(i18nHandle,
+  "product_type", "PRODUCT TYPE")
+set captions->order_dt_tm = uar_i18ngetmessage(i18nHandle,
+  "order_dt_tm", "ORDER DATE/TIME")
+set captions->cell_product = uar_i18ngetmessage(i18nHandle,
+  "cell_product", "CELL/PRODUCT")
+set captions->procedure = uar_i18ngetmessage(i18nHandle,
+  "procedure", "PROCEDURE")
+set captions->result = uar_i18ngetmessage(i18nHandle,
+  "result", "RESULT")
+set captions->tech_id = uar_i18ngetmessage(i18nHandle,
+  "tech_id", "TECHID")		;024
+set captions->date = uar_i18ngetmessage(i18nHandle,
+  "date", "DATE")
+set captions->time = uar_i18ngetmessage(i18nHandle,
+  "time", "TIME")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+set captions->rpt_title = uar_i18ngetmessage(i18nHandle,
+  "rpt_title", "BLOOD BANK PRODUCT RESULTS ACTIVITY REPORT")
+set captions->all = uar_i18ngetmessage(i18nHandle,
+  "all", "(All)")
+set captions->report_id = uar_i18ngetmessage(i18nHandle,
+  "report_id", "Report ID: BBT_RPT_DAILY_PRODUCT_RSL")
+;End 018
+set captions->comment = uar_i18ngetmessage(i18nHandle,
+  "comment", "Comment:  ")
+set captions->note = uar_i18ngetmessage(i18nHandle,
+  "note", "Note:  ")
+set captions->text_result = uar_i18ngetmessage(i18nHandle,
+  "text_result", "Text Result:  ")
+set captions->text_result_correct = uar_i18ngetmessage(i18nHandle,
+  "text_result_correct", "Text Result (Corrected): ")
+ 
+#script
+ 
+      SET nbr_prs = 0
+      SET nbr_comments = 0
+      SET no_op = 0
+      SET resultflagstr = fillstring(10, " ")
+      SET result_event_codeset = 1901
+      SET testsite_codeset = 221
+      SET result_flag_codeset = 1902
+      SET priority_codeset = 1905
+      SET commenttype_codeset = 14
+      SET resulttype_codeset = 289
+      SET resourcegroup_codeset = 223
+      SET bb_processing_codeset = 1635
+      SET i = 0         ; used to index reportstuff array
+      SET offset = 0    ; position within a reportstuff row to insert a report item
+      SET hyphen_line =  fillstring(130, "-")
+      SET order_row = 0 ; keep track of next row to put detail on, next row to put comment on
+      SET detail_row = 0
+      SET institution_group_cd = 0.0
+      SET department_group_cd = 0.0
+      SET section_group_cd = 0.0
+      SET subsection_group_cd = 0.0
+      SET crossmatch_cd = 0.0
+      SET patient_abo_cd = 0.0
+      SET product_abo_cd = 0.0
+      SET antigen_cd = 0.0
+      SET antibody_id_cd = 0.0
+      SET antibdy_scrn_cd = 0.0
+      SET institution_name = fillstring(40, " ")
+      SET department_name = fillstring(40, " ")
+      SET section_name = fillstring(40, " ")
+      SET subsection_name = fillstring(40, " ")
+;JOWbeg
+      SET store_perform_result_id = 0.0
+      set store_perfresultids = fillstring(50, " ")
+;JOWend
+      SET procedure_row_hold = 0
+      SET dont_print_proc = 0
+      
+declare reportByUsername = vc with protect, noconstant("")
+set reportByUsername=GET_USERNAME(reqinfo->updt_id)
+
+
+
+IF (trim(request->batch_selection) > " ")
+  set begday = request->ops_date
+  set endday = request->ops_date
+  set temp_string = cnvtupper(trim(request->batch_selection))
+  CALL CHECK_OPT_DATE_PASSED("bbt_rpt_daily_product_rsl")
+  if (reply->status_data->status != "F")
+        set request->dt_tm_begin = begday
+        set request->dt_tm_end = endday
+  endif
+ 
+  SET stat = alterlist(request->qual, 10)
+  call CHECK_SVC_OPT ("bbt_rpt_daily_product_rsl")
+  call CHECK_OWNER_CD ("bbt_rpt_daily_product_rsl")
+  call CHECK_INVENTORY_CD ("bbt_rpt_daily_product_rsl")
+  call CHECK_LOCATION_CD ("bbt_rpt_daily_product_rsl")
+ 
+  SET request->printer_name = request->output_dist
+ENDIF
+ 
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+ 
+%i cclsource:bbt_rpt_subs.inc
+;005 %i cclsource:bbt_get_inst_name.inc
+%i cclsource:bbt_get_location_info.inc
+ 
+set cur_owner_area_disp = fillstring(40," ")
+set cur_inv_area_disp = fillstring(40, " ")
+ 
+/* Retrieve display values for requested Owner Area and Inventory Area */
+if (request->cur_owner_area_cd = 0.0)
+   set cur_owner_area_disp = captions->all
+else
+   set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+endif
+ 
+if (request->cur_inv_area_cd = 0.0)
+   set cur_inv_area_disp = captions->all
+else
+   set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+endif
+ 
+; get resource code values
+ 
+;005 Changed code_value selects to uar_get functions
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(resourcegroup_codeset,"INSTITUTION",code_cnt,institution_group_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(resourcegroup_codeset,"DEPARTMENT",code_cnt,department_group_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(resourcegroup_codeset,"SECTION",code_cnt,section_group_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(resourcegroup_codeset,"SUBSECTION",code_cnt,subsection_group_cd)
+ 
+if ((institution_group_cd = 0.0) or (department_group_cd = 0.0) or
+    (section_group_cd = 0.0) or (subsection_group_cd = 0.0))
+   set reply->status_data->status = "Z"
+   go to exit_script
+endif
+ 
+;get crossmatch code value
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(bb_processing_codeset,"XM",code_cnt,crossmatch_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(bb_processing_codeset,"PATIENT ABO",code_cnt,patient_abo_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(bb_processing_codeset,"PRODUCT ABO",code_cnt,product_abo_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(bb_processing_codeset,"ANTIGEN",code_cnt,antigen_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(bb_processing_codeset,"ANTIBODY ID",code_cnt,antibody_id_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(bb_processing_codeset,"ANTIBDY SCRN",code_cnt,antibdy_scrn_cd)
+ 
+if ((crossmatch_cd = 0.0) or (patient_abo_cd = 0.0) or
+    (product_abo_cd = 0.0) or (antigen_cd = 0.0) or
+    (antibody_id_cd = 0.0) or (antibdy_scrn_cd = 0.0))
+   set reply->status_data->status = "Z"
+   go to exit_script
+endif
+ 
+      SET title_text = captions->rpt_title               ;018
+ 
+      SET performed_cd       = 0.0
+      SET verified_cd        = 0.0
+      SET corrected_cd       = 0.0
+      SET oldperformed_cd    = 0.0
+      SET oldverified_cd     = 0.0
+      SET oldcorrected_cd    = 0.0
+      SET rejected_cd        = 0.0
+      SET changed_cd         = 0.0
+      SET inreview_cd        = 0.0
+      SET oldinreview_cd     = 0.0  
+      SET corrinreview_cd    = 0.0
+      SET oldcorrinreview_cd = 0.0 
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(result_event_codeset,"CORRECTED",code_cnt,corrected_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(result_event_codeset,"VERIFIED",code_cnt,verified_cd)
+
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(result_event_codeset,"PERFORMED",code_cnt,performed_cd)
+
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(result_event_codeset,"OLDCORRECTED",code_cnt,oldcorrected_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(result_event_codeset,"OLDVERIFIED",code_cnt,oldverified_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(result_event_codeset,"OLDPERFORMED",code_cnt,oldperformed_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(result_event_codeset,"REJECT",code_cnt,rejected_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(result_event_codeset,"CHANGE",code_cnt,changed_cd)
+
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(result_event_codeset,"INREVIEW",code_cnt, inreview_cd)
+
+set code_cnt = 1 
+set stat = uar_get_meaning_by_codeset(result_event_codeset,"OLDINREVIEW",code_cnt, oldinreview_cd) 
+
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(result_event_codeset,"CORRINREV",code_cnt, corrinreview_cd)
+
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(result_event_codeset,"OLDCORRINREVIEW",code_cnt, oldcorrinreview_cd) 
+ 
+if ((corrected_cd    = 0.0) or (verified_cd        = 0.0) or
+    (performed_cd    = 0.0) or (oldcorrected_cd    = 0.0) or
+    (oldverified_cd  = 0.0) or (oldperformed_cd    = 0.0) or
+    (rejected_cd     = 0.0) or (changed_cd         = 0.0) or
+    (inreview_cd     = 0.0) or (oldinreview_cd     = 0.0) or 
+    (corrinreview_cd = 0.0) or (oldcorrinreview_cd = 0.0))    
+   set reply->status_data->status = "Z"
+   go to exit_script
+endif
+ 
+; get code value for chartable and nonchartable result comments
+ 
+      SET chartabletype_cd = 0.0          ; chartable
+      SET notetype_cd = 0.0               ; nonchartable
+      SET qcfntype_cd = 0.0
+      SET qcrevwtype_cd = 0
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(commenttype_codeset,"RES COMMENT",code_cnt,chartabletype_cd)
+ 
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(commenttype_codeset,"RES NOTE",code_cnt,notetype_cd)
+ 
+if ((chartabletype_cd = 0.0) or (notetype_cd = 0.0))
+   set reply->status_data->status = "Z"
+   go to exit_script
+endif
+ 
+; get a list of the perform_result rows that the user is interested in
+; (this is done in a separate select so it doesn't clutter up the report-
+; printing select, which is already complicated enough)
+ 
+;016 begin
+      select into "nl:"
+        re.perform_result_id
+        , re.result_id
+        , re.event_sequence
+        , re.event_dt_tm
+ 
+      from
+        result_event re
+ 
+      where re.event_dt_tm >= cnvtdatetime(request->dt_tm_begin)
+        and re.event_dt_tm <= cnvtdatetime(request->dt_tm_end)
+ 
+      head report
+        stat = alterlist(re_rows->re_row,100)
+        row_cnt = 0
+ 
+      detail
+        row_cnt = row_cnt + 1
+        if (mod(row_cnt,100) = 1 and row_cnt != 1)
+            stat = alterlist(re_rows->re_row,row_cnt + 99)
+        endif
+ 
+        re_rows->re_row[row_cnt].perform_result_id = re.perform_result_id
+        re_rows->re_row[row_cnt].result_id = re.result_id
+        re_rows->re_row[row_cnt].event_sequence = re.event_sequence
+ 
+      foot report
+        stat = alterlist(re_rows->re_row,row_cnt)
+ 
+      with nocounter
+;016 end
+;016 removed join to discrete_task_assay (replaced with uar) and result_event (seperated into above select) tables
+;016 reordered queries to start at result_event table
+ 
+      SELECT INTO "nl:"
+         r.result_id
+        , o.product_id
+        , pr.perform_result_id
+        , detail_mnem = trim(substring(1,12, uar_get_code_display(r.task_assay_cd))) ;dta.mnemonic))
+        , drawntime = format(c.drawn_dt_tm, "@DATETIMECONDENSED;;d") ;"ddmmmyy hhmm;;d")
+        , perfresultids = build(pr.result_id, pr.perform_result_id, re_rows->re_row[d_re.seq].event_sequence) ;re.event_sequence)
+        , c_exists = decode(c.seq, "Y", "N")
+        , sd.bb_processing_cd
+        , sd.seq
+ 
+      FROM
+        perform_result pr
+        , result r
+        , orders o
+        , container c
+        , (dummyt d_re with seq = value(size(re_rows->re_row,5)))
+        , (dummyt d1 with seq = 1)
+        , (dummyt d2 with seq = 1)
+        , service_directory sd
+        , product p
+ 
+      plan d_re
+      JOIN pr
+        where   pr.perform_result_id = re_rows->re_row[d_re.seq].perform_result_id
+          and   pr.result_status_cd != oldinreview_cd 
+          and   pr.result_status_cd != oldcorrinreview_cd  
+      JOIN r
+        WHERE r.result_id = pr.result_id
+ 
+      join o
+        ; Only retrieve products for which there are product orders
+        WHERE o.order_id = r.order_id
+                and o.product_id != NULL
+                and o.product_id > 0
+      JOIN p
+        WHERE p.product_id      = o.product_id
+                  and ((request->cur_owner_area_cd > 0.0
+                  and request->cur_owner_area_cd = p.cur_owner_area_cd)
+                  or (request->cur_owner_area_cd = 0.0))
+                  and ((request->cur_inv_area_cd > 0.0
+                  and request->cur_inv_area_cd = p.cur_inv_area_cd)
+                  or (request->cur_inv_area_cd = 0.0))
+      JOIN d1
+        WHERE d1.seq = 1
+          JOIN c
+            WHERE c.container_id = pr.container_id
+          JOIN d2 where d2.seq = 1
+              JOIN sd
+                WHERE r.catalog_cd = sd.catalog_cd
+ 
+      ORDER perfresultids
+ 
+      HEAD perfresultids
+;JOWend
+      nbr_prs = nbr_prs + 1
+      stat = alterlist(perf_results->qual, nbr_prs)
+      perf_results->qual[nbr_prs]->result_id = pr.result_id
+      perf_results->qual[nbr_prs]->perform_result_id = pr.perform_result_id
+      perf_results->qual[nbr_prs]->service_resource_cd = pr.service_resource_cd
+        perf_results->qual[nbr_prs]->long_text_id = pr.long_text_id
+        perf_results->qual[nbr_prs]->result_status_cd = pr.result_status_cd
+      perf_results->qual[nbr_prs]->order_id = r.order_id
+      perf_results->qual[nbr_prs]->catalog_cd = r.catalog_cd
+      perf_results->qual[nbr_prs]->task_assay_cd = r.task_assay_cd
+      perf_results->qual[nbr_prs]->detail_mnemonic = detail_mnem
+      perf_results->qual[nbr_prs]->drawn_time = drawntime
+      perf_results->qual[nbr_prs]->bb_result_id = r.bb_result_id
+      perf_results->qual[nbr_prs]->bb_processing_cd = sd.bb_processing_cd
+      perf_results->qual[nbr_prs]->event_sequence = re_rows->re_row[d_re.seq].event_sequence ;re.event_sequence
+      perf_results->qual[nbr_prs]->arg_less_great_flag = pr.less_great_flag
+ 
+      DETAIL
+        no_op = 0
+ 
+      WITH
+        NOCOUNTER
+        , OUTERJOIN = d1
+        , OUTERJOIN = d2
+        , DONTCARE = c
+ 
+/* get the data map */
+select into "nl:"
+    dm.task_assay_cd
+    , dm.service_resource_cd
+    , data_map_exists = decode(dm.seq, "Y", "N")
+    , rg_exists = decode(rg.seq, "Y", "N")
+ 
+from
+   (dummyt d with seq = value(nbr_prs))
+    , (dummyt d_dm with seq = 1)
+    , data_map dm
+    , (dummyt d_rg with seq = 1)
+    , resource_group rg
+ 
+plan d where d.seq <= nbr_prs
+         and perf_results->qual[d.seq].result_id > 0.0
+join d_dm where   d_dm.seq = 1
+join dm   where dm.task_assay_cd      = perf_results->qual[d.seq]->task_assay_cd
+            and dm.data_map_type_flag = 0
+            and dm.active_ind         = 1
+join d_rg where d_rg.seq = 1
+join rg   where rg.parent_service_resource_cd = dm.service_resource_cd
+            and rg.child_service_resource_cd  = perf_results->qual[d.seq]->service_resource_cd
+            and rg.resource_group_type_cd     = subsection_group_cd
+            and rg.root_service_resource_cd+0 = 0.0
+order by    d.seq, d_dm.seq
+ 
+head d.seq
+        perf_results->qual[d.seq]->arg_min_digits     = 1
+        perf_results->qual[d.seq]->arg_max_digits     = 8
+        perf_results->qual[d.seq]->arg_min_dec_places = 0
+        data_map_level = 0
+ 
+head d_dm.seq
+       if (data_map_exists = "Y")  /* Data_Map found, now we'll check to see if we can use it */
+          if (data_map_level <= 2 and dm.service_resource_cd > 0 and
+              dm.service_resource_cd = perf_results->qual[d.seq]->service_resource_cd)  ;Exact match found
+              data_map_level = 3
+             perf_results->qual[d.seq]->arg_min_digits = dm.min_digits
+             perf_results->qual[d.seq]->arg_max_digits = dm.max_digits
+             perf_results->qual[d.seq]->arg_min_dec_places = dm.min_decimal_places
+          endif
+ 
+          if (data_map_level <= 1 and dm.service_resource_cd > 0.0
+             and rg_exists = "Y" and rg.parent_service_resource_cd = dm.service_resource_cd
+             and rg.child_service_resource_cd = perf_results->qual[d.seq]->service_resource_cd)
+             data_map_level = 2
+             perf_results->qual[d.seq]->arg_min_digits = dm.min_digits
+             perf_results->qual[d.seq]->arg_max_digits = dm.max_digits
+             perf_results->qual[d.seq]->arg_min_dec_places = dm.min_decimal_places
+          endif
+ 
+          if (data_map_level = 0 and dm.service_resource_cd = 0)
+             data_map_level = 1
+             perf_results->qual[d.seq]->arg_min_digits = dm.min_digits
+             perf_results->qual[d.seq]->arg_max_digits = dm.max_digits
+             perf_results->qual[d.seq]->arg_min_dec_places = dm.min_decimal_places
+          endif
+       endif
+ 
+with nocounter
+     , outerjoin(d_dm)
+     , outerjoin(d_rg)
+ 
+; get the latest comment for each result and put it into an array
+; (this assumes the elements of the perf_results array are ordered
+; by result_id)
+ 
+; the selects for chartable and non-chartable comments are done
+; separately because this has to get the most recent chartable
+; comment and the most recent non-chartable comment.
+ 
+      SELECT INTO "nl:"
+          rc.result_id
+        , rc.action_sequence
+        , lt.long_text_id
+        , lt_long_text = substring(1, 32000, lt.long_text)
+      FROM
+         (dummyt d1 with seq = value(nbr_prs))
+       ,  result_comment rc
+       , long_text lt
+      PLAN d1
+      JOIN rc
+        WHERE rc.result_id = perf_results->qual[d1.seq]->result_id
+          and (rc.comment_type_cd = chartabletype_cd
+               or rc.comment_type_cd = notetype_cd)
+      JOIN lt
+        WHERE rc.long_text_id = lt.long_text_id
+          and lt.long_text_id > 0
+ 
+      ORDER rc.result_id, rc.comment_type_cd, rc.action_sequence DESC
+ 
+      head rc.result_id
+        row + 0
+ 
+      head rc.comment_type_cd
+          nbr_comments = nbr_comments + 1
+          stat = alterlist(r_long_text->qual, nbr_comments)
+            r_long_text->qual[nbr_comments]->result_id = rc.result_id
+            r_long_text->qual[nbr_comments]->perform_result_id = perf_results->qual[d1.seq]->perform_result_id
+            r_long_text->qual[nbr_comments]->order_id = perf_results->qual[d1.seq]->order_id
+            r_long_text->qual[nbr_comments]->task_assay_cd = perf_results->qual[d1.seq]->task_assay_cd
+            r_long_text->qual[nbr_comments]->result_status_cd = perf_results->qual[d1.seq]->result_status_cd
+            if (rc.comment_type_cd = chartabletype_cd)
+                r_long_text->qual[nbr_comments]->comment_text = trim(lt_long_text)
+            elseif (rc.comment_type_cd = notetype_cd)
+                r_long_text->qual[nbr_comments]->note_text = trim(lt_long_text)
+            endif
+      WITH
+        NOCOUNTER
+ 
+      SELECT INTO "nl:"
+        result_id = perf_results->qual[d1.seq]->result_id
+        ,perf_result = perf_results->qual[d1.seq]->perform_result_id
+        , lt.seq
+        , lt.long_text_id
+        , lt_long_text = substring(1, 32000, lt.long_text)
+      FROM
+         (dummyt d1 with seq = value(nbr_prs))
+       , long_text lt
+      PLAN d1
+        WHERE perf_results->qual[d1.seq]->long_text_id > 0
+      JOIN lt
+        WHERE perf_results->qual[d1.seq]->long_text_id = lt.long_text_id
+      ORDER result_id, perf_result DESC
+ 
+      HEAD REPORT
+%i cclsource:bbt_remove_rtf.inc
+ 
+      detail
+          nbr_comments = nbr_comments + 1
+          stat = alterlist(r_long_text->qual, nbr_comments)
+            r_long_text->qual[nbr_comments]->result_id = perf_results->qual[d1.seq]->result_id
+            r_long_text->qual[nbr_comments]->perform_result_id = perf_results->qual[d1.seq]->perform_result_id
+            r_long_text->qual[nbr_comments]->order_id = perf_results->qual[d1.seq]->order_id
+            r_long_text->qual[nbr_comments]->task_assay_cd = perf_results->qual[d1.seq]->task_assay_cd
+            r_long_text->qual[nbr_comments]->event_sequence = perf_results->qual[d1.seq]->event_sequence
+            r_long_text->qual[nbr_comments]->result_status_cd = perf_results->qual[d1.seq]->result_status_cd
+            if (lt.seq != NULL and lt.seq > 0)
+                call REMOVE_RTF2(lt_long_text)
+                r_long_text->qual[nbr_comments]->text_result = trim(rtf_out_text)
+            endif
+      WITH
+        NOCOUNTER
+ 
+; get the result information and print the report
+      SET begin_date = format(request->dt_tm_begin, "@DATETIMECONDENSED;;d") ;"ddmmmyy hhmm;;d")
+      SET end_date = format(request->dt_tm_end, "@DATETIMECONDENSED;;d") ;"ddmmmyy hhmm;;d")
+ 
+set select_ok_ind = 0
+set rpt_cnt = 0
+ 
+	  execute cpm_create_file_name_logical "bbtdailyprodrsl", "txt", "x"
+ 
+      select into cpm_cfn_info->file_name_logical
+          pr.result_id
+        , PROD_ORDER.product_id
+        , PROD_ORDER.PRODUCT_NBR
+        , re.event_type_cd
+        , pr.result_status_cd
+        , re.perform_result_id
+        , o.product_id
+        , cv_oc.display
+        , detail_mnem = perf_results->qual[d_pr.seq]->detail_mnemonic
+        , alpha_result = trim(substring(1, 8, pr.result_value_alpha))		;024
+        , result_code_set_disp = trim(substring(1, 9, uar_get_code_display(pr.result_code_set_cd)))	;024
+        , profile_task_yn = decode(ptr.seq, "Y", pr.seq, "N", "Z")
+        , order_cell_yn = decode(oc.seq, "Y", pr.seq, "N", "Z")
+        , cell_yn = decode(cv_oc.seq, "Y", pr.seq, "N", "Z")
+        , product_yn = decode(prod.seq, "Y", pr.seq, "N", "Z")
+        , type_meaning = uar_get_code_meaning(pr.result_type_cd)                                ;012
+        , ptr.sequence
+        , phs_grp.sequence
+        , re.event_sequence
+        , re.event_dt_tm
+        , nowtime = format(curtime, "@TIMENOSECONDS;;M" ) ;"hh:mm;;m")
+        , nowdate = format(curdate, "@DATECONDENSED;;d") ;"mm/dd/yyyy;;d")
+        , drawntime = format(o.orig_order_dt_tm, "@DATETIMECONDENSED;;d") ;"ddmmmyy hhmm;;d")
+        , event_date = format(re.event_dt_tm, "@DATETIMECONDENSED;;d") ;"ddmmmyy hhmm;;d")
+        , ascii_text = trim(substring(1, 13, pr.ascii_text))
+        , text_results = pr.ascii_text
+        , date_result = format(pr.result_value_dt_tm, "ddmmmyy;;d")
+        , date_time_result = format(pr.result_value_dt_tm, "@DATETIMECONDENSED;;d") ;"ddmmmyy hhmm;;d")
+        , norm_display = uar_get_code_display(pr.normal_cd)                                     ;012
+        , crit_display = uar_get_code_display(pr.critical_cd)                                   ;012
+        , notify_disp = decode(pr.seq, uar_get_code_display(pr.notify_cd), " ")
+        , revw_display = uar_get_code_display(pr.review_cd)                                     ;012
+        , delta_display = uar_get_code_display(pr.delta_cd)                                     ;012
+        , prod_display = uar_get_code_display(prod_order.product_cd)                            ;012
+        , tech_name = substring(1, 7, pl.username)
+        , ord_mnem = trim(substring(1, 18, o.order_mnemonic))		;024
+        , bb_processing_cd = perf_results->qual[d_pr.seq]->bb_processing_cd
+        , product_nbr = prod_order.product_nbr         ; perf_results->qual[d_pr.seq]->product_nbr
+        , orderunique = build(o.catalog_cd, o.order_id)
+        , productunique = build(trim(prod_order.product_nbr), prod_order.product_id)
+        , pr.perform_result_id
+        , p_doc_exists = decode(p_doc.seq, "Y", "N")
+        , test_site = uar_get_code_display(pr.service_resource_cd)                              ;012
+        , prod_order.product_nbr
+        , oc.bb_result_id
+        , oc.order_cell_id
+        , prod.product_nbr
+        , oc.cell_cd
+        , pr.long_text_id
+;JOWbeg
+        , perfresultids = build(pr.result_id, pr.perform_result_id, re.event_sequence)
+;JOWend
+        , performDtTm = format(pr.perform_dt_tm,"@DATETIMECONDENSED;;d") 
+        , perfTechName = substring(1, 7, pl2.username) 
+ 
+      FROM
+        (dummyt d_pr with seq = value(nbr_prs))
+        , result_event re
+;        , (dummyt d_presult with seq = 1)
+        , perform_result pr
+        , (dummyt d_result with seq = 1)
+        , orders o
+        , product prod_order
+        , person p_doc
+        , prsnl pl
+        , (dummyt d_ptr with seq = 1)
+        , profile_task_r ptr
+        , bb_order_cell oc
+        , (dummyt d_cv_oc with seq = 1)
+        , code_value cv_oc
+        , product prod
+        , (dummyt d_bp2 with seq = 1)
+        , blood_product bp2
+        , (dummyt d_phs_grp with seq = 1)
+        , bb_order_phase op
+        , phase_group phs_grp
+        , (dummyt d_phase with seq = 1)
+        , prsnl pl2 
+ 
+   PLAN d_pr
+      JOIN pr
+        WHERE (pr.perform_result_id = perf_results->qual[d_pr.seq]->perform_result_id)
+      JOIN pl2     
+        WHERE (pl2.person_id = pr.perform_personnel_id) 
+      JOIN d_result
+        WHERE d_result.seq = 1
+      JOIN re
+        WHERE (re.result_id = perf_results->qual[d_pr.seq]->result_id)
+        AND (re.perform_result_id = perf_results->qual[d_pr.seq]->perform_result_id)
+        AND (re.event_sequence = perf_results->qual[d_pr.seq]->event_sequence)
+      JOIN o
+        WHERE o.order_id = perf_results->qual[d_pr.seq]->order_id
+      JOIN prod_order
+        WHERE (o.product_id > 0
+          AND  o.product_id != NULL
+          AND  o.product_id = prod_order.product_id)
+ 
+      JOIN p_doc
+        WHERE (p_doc.person_id = o.last_update_provider_id)
+      JOIN pl
+        WHERE pl.person_id = re.event_personnel_id
+  JOIN (d_ptr
+        WHERE d_ptr.seq = 1
+      JOIN (ptr
+        WHERE (ptr.catalog_cd = perf_results->qual[d_pr.seq]->catalog_cd
+        AND ptr.task_assay_cd = perf_results->qual[d_pr.seq]->task_assay_cd
+        AND (perf_results->qual[d_pr.seq]->bb_processing_cd != antigen_cd
+              OR perf_results->qual[d_pr.seq]->bb_processing_cd = crossmatch_cd
+              OR perf_results->qual[d_pr.seq]->bb_processing_cd = patient_abo_cd
+              OR perf_results->qual[d_pr.seq]->bb_processing_cd = product_abo_cd
+              OR perf_results->qual[d_pr.seq]->bb_result_id = 0)))
+      ORJOIN (oc
+             WHERE oc.order_id = perf_results->qual[d_pr.seq]->order_id
+               AND oc.bb_result_id = perf_results->qual[d_pr.seq]->bb_result_id
+             JOIN d_phs_grp where d_phs_grp.seq = 1
+             JOIN (op
+               WHERE op.order_id = perf_results->qual[d_pr.seq]->order_id
+               JOIN d_phase where d_phase.seq = 1
+               JOIN phs_grp
+                 WHERE op.phase_grp_cd = phs_grp.phase_group_cd
+                   AND op.phase_grp_cd > 0
+                   AND phs_grp.task_assay_cd = perf_results->qual[d_pr.seq]->task_assay_cd)
+           JOIN (d_cv_oc
+             WHERE d_cv_oc.seq = 1
+                JOIN (cv_oc
+                WHERE cv_oc.code_value = oc.cell_cd
+                            and oc.cell_cd > 0)
+                ORJOIN (prod
+                WHERE prod.product_id = oc.product_id
+                        and oc.product_id > 0))))
+ 
+        JOIN d_bp2 WHERE d_bp2.seq = 1                          ;BNK - 11/01/97
+        JOIN bp2 WHERE bp2.product_id = prod_order.product_id         ;BNK - 11/01/97
+      ORDER test_site, productunique, orderunique, test_site,
+        oc.bb_result_id, product_nbr, ptr.sequence, phs_grp.sequence, perfresultids ; pr.perform_result_id
+        , re.event_sequence
+ 	  
+      HEAD REPORT
+%i cclsource:bbt_rpt_macros.inc
+        CALL clear_reportstuff(' ')
+        first_page    = "Y"
+        select_ok_ind = 0
+        status_disp   = fillstring(21, " ")
+      HEAD PAGE
+; print top-of-page stuff that tells what this report is and where it comes from
+%i cclsource:bbt_print_location_info.inc
+        row 0
+        col 114, captions->rpt_date                                  ;018
+        col + 1, nowdate
+        row + 1
+        col 114, captions->rpt_time   ;114                            ;018
+        col + 1, nowtime
+        row + 1
+        col 114, captions->rpt_by   ;114                                ;018
+        col 120, reportByUsername "##########;L"
+        row + 1
+        col 114, captions->page_no     ;114                                ;018
+        col + 1, curpage "###"
+        save_row = row
+        row 0
+        CALL CENTER(title_text, 1, 132)
+        row + 1
+        row save_row
+        row + 2
+        col 1, captions->test_site         ;018
+        col + 1, test_site
+        row + 2
+        col 1, captions->bb_owner,            ;018
+        col 19, cur_owner_area_disp,
+        row + 1
+        col 1, captions->inventory_area,                                      ;018
+        col 17, cur_inv_area_disp
+        row + 2
+        col  32, captions->beg_date   ;018
+        col  48, begin_date  ;"@DATECONDENSED;;d"     ;"ddmmmyy;;d"
+        col  69, captions->end_date        ;018
+        col  82,  end_date  ;"@DATECONDENSED;;d"     ;"ddmmmyy;;d"
+        row + 2
+; print column headers
+        row + 1
+        col 4, captions->product_number           ;018
+        col 29, captions->order_proc       ;018			;024
+        col 96, captions->performed         ;018		;024
+        col 117, captions->verified           ;018		;024
+        row + 1
+        col 6, captions->product_type         ;018
+        col 27, captions->order_dt_tm         ;018		;024
+        col 50, captions->cell_product;018				;024
+        col 70, captions->procedure      ;018			;024
+        col 82, captions->result       ;018				;024
+        col 90, captions->tech_id      ;018				;024
+        col 98, captions->date               ;018		;024
+        col 105, captions->time      ;018				;024
+        col 110, captions->tech_id                      ;024          ;018
+        col 119, captions->date  ;018					;024
+        col 126, captions->time                  ;018
+        row + 1
+        col 0, hyphen_line
+        col 25, " "			;024
+        col 43, " "			;024
+        col 69, " "			;024
+        col 80, " "			;024
+        col 89, " "			;024
+        col 96, " "			;024
+        col 104, " "		;024
+        col 109, " "		;024
+        col 117, " "		;024
+        col 125, " "		;024
+        row + 1
+ 
+      HEAD test_site
+        if (first_page = "N")
+            break
+        else
+           first_page = "N"
+        endif
+      HEAD productunique
+          prod_nbr_display = concat(trim(bp2.supplier_prefix), trim(prod_order.product_nbr), " ",	;024
+              trim(prod_order.product_sub_nbr))
+          CALL store_item(0, 1, prod_nbr_display)
+          CALL store_item(0, 2, prod_display)          ; product type
+          order_row = 0
+          detail_row = 0
+ 
+      HEAD orderunique
+; start new order on line following last detail of previous order
+        IF (detail_row > order_row)
+          order_row = detail_row
+; start 1st detail of each order on 1st line of order
+        ELSE
+          detail_row = order_row
+        ENDIF
+        order_row = order_row + 1
+        detail_row = detail_row + 1
+; remember 1st detail line of current order
+        save1stline = order_row
+            CALL store_item(26, order_row, ord_mnem)                ; order mnemonic	;024
+            order_row = order_row + 1
+            IF (size(trim(drawntime), 3) > 0)
+               CALL store_item(26, order_row, drawntime)             ; collection date	;024
+               order_row = order_row + 1
+            ENDIF
+ 
+      HEAD oc.bb_result_id
+        if (cell_yn = "Y" and product_yn = "N")
+              CALL store_item(44, detail_row, cv_oc.display)          ; cell	;024
+        elseif (cell_yn = "N" and product_yn = "Y")
+          prod_nbr_display = concat(trim(bp2.supplier_prefix), trim(prod_order.product_nbr), " ",
+          								  trim(prod_order.product_sub_nbr))   ;BNK - 11/01/97 	;024
+               CALL store_item(44, detail_row, prod_nbr_display)      ; BNK - 11/01/97			;024
+        endif
+ 
+      HEAD ptr.sequence
+          no_op = 0
+ 
+      HEAD phs_grp.sequence
+            no_op = 0
+ 
+;JOWbeg
+ HEAD perfresultids
+;JOWend
+      ;DDH (Prevents "duplicate" information)
+      IF (store_perform_result_id = pr.perform_result_id)
+        dont_print_proc = 1
+      ELSE
+        dont_print_proc = 0
+      ENDIF
+ 
+      IF ((pr.result_id > 0) and (dont_print_proc = 0))
+        store_perform_result_id = pr.perform_result_id
+        procedure_row_hold = detail_row
+ 
+        CALL store_item(70, detail_row, substring(1, 10, detail_mnem))            ; detail mnemonic		;024
+        IF (type_meaning IN ("1", "7"))
+          IF (pr.long_text_id = 0)
+              CALL store_item(81, detail_row, text_results)               ; text result		;024
+              offset = size(trim(text_results), 3) + 81										;024
+          ELSE
+               no_op = 0
+               offset = 83
+          ENDIF
+        ELSEIF (type_meaning = "2"
+           OR (type_meaning = "4"
+           AND bb_processing_cd != patient_abo_cd
+           AND bb_processing_cd != product_abo_cd))
+          CALL store_item(81, detail_row, alpha_result)         ; alpha result		;024
+          offset = size(trim(alpha_result), 3) + 81									;024
+        ELSEIF (type_meaning IN ("3", "8"))
+           arg_min_digits       = perf_results->qual[d_pr.seq]->arg_min_digits
+           arg_max_digits       = perf_results->qual[d_pr.seq]->arg_max_digits
+           arg_min_dec_places   = perf_results->qual[d_pr.seq]->arg_min_dec_places
+           arg_less_great_flag  = perf_results->qual[d_pr.seq]->arg_less_great_flag
+           arg_raw_value        = pr.result_value_numeric
+           numeric_result       = fillstring(8, " ")		;024
+           numeric_result       = substring(1, 8, uar_fmt_result(arg_min_digits, arg_max_digits,
+                                    arg_min_dec_places, arg_less_great_flag, arg_raw_value))
+          CALL store_item(81, detail_row, numeric_result)       ; numeric result	;024
+          offset = size(trim(numeric_result), 3) + 81								;024
+        ELSEIF (type_meaning = "6")
+          CALL store_item(81, detail_row, date_result)          ; date result		;024
+         offset = size(trim(date_result), 3) + 81									;024
+;017 begin
+        ELSEIF (type_meaning = "11")
+          CALL store_item(81, detail_row, date_time_result)          ; date and time result		;024
+         offset = size(trim(date_time_result), 3) + 81											;024
+;017 end
+        ELSE   ;IF (type_meaning = "9")
+          CALL store_item(81, detail_row, result_code_set_disp)          ; code set result 		;024
+          offset = size(trim(result_code_set_disp), 3) + 81										;024
+        ENDIF
+; build a string of result flags
+        resultflagstr = fillstring(10, " ")
+        IF (pr.result_status_cd IN (corrected_cd, oldcorrected_cd))
+                correction_flag = "Y"
+        ELSE
+                correction_flag = "N"
+        ENDIF
+; display field may be empty, so add a blank so subroutine will have something to pass
+; (blank must go first because catting something onto an empty string returns an empty string)
+        cv_normflag = concat(" ", norm_display)                                 ;012
+        cv_critflag = concat(" ", crit_display)                                 ;012
+        cv_revwflag = concat(" ", revw_display)                                 ;012
+        cv_deltaflag = concat(" ", delta_display)                               ;012
+        comment_exists = "N"
+        note_exists = "N"
+            resultflagstr = bldresultflagstr(cv_normflag, cv_critflag, cv_revwflag, cv_deltaflag,
+          comment_exists, note_exists, correction_flag, notify_disp)
+ 
+        IF (size(trim(resultflagstr), 3) > 0)
+;        IF (type_meaning IN ("1", "7")
+;             AND pr.long_text_id = 0)
+                  CALL store_item(offset, detail_row, resultflagstr)    ; string of result flags
+;          ELSE
+                  no_op = 0
+ 
+;          ENDIF
+        ENDIF
+       ENDIF
+ 
+      DETAIL
+;JOWbeg
+  IF (store_perfresultids != perfresultids)
+        store_perfresultids = perfresultids
+;JOWend
+      IF (pr.result_id > 0)
+        IF (re.event_type_cd IN (verified_cd, corrected_cd))
+          offset = 110		;024
+          call clear_item(109, procedure_row_hold, fillstring(21," ")) 
+          CALL store_item(offset, procedure_row_hold, tech_name)        ; technician userid
+          offset = offset + 8
+          CALL store_item(offset, procedure_row_hold, event_date)       ; verify date
+          IF (dont_print_proc = 0)
+            detail_row = detail_row + 1
+          ENDIF
+        ELSEIF (re.event_type_cd IN (performed_cd))
+          offset = 90		;024
+          CALL clear_item(109, procedure_row_hold, fillstring(21," ")) 
+          CALL store_item(offset, procedure_row_hold, tech_name)        ; technician userid
+          offset = offset + 7
+          CALL store_item(offset, procedure_row_hold, event_date)       ; perform date
+          IF (dont_print_proc = 0)      
+            detail_row = detail_row + 1
+          ENDIF         
+        ELSEIF (re.event_type_cd = inreview_cd)
+          offset = 90    
+          CALL clear_item(offset, procedure_row_hold, fillstring(20, " ")) 
+          CALL store_item(offset, procedure_row_hold, perfTechName)        
+          offset = offset + 7    
+          CALL store_item(offset, procedure_row_hold, performDtTm) 
+          status_disp = concat("<<< ", trim(uar_get_code_display(re.event_type_cd)), " >>>")
+          offset = 111
+          CALL store_item(offset, procedure_row_hold, status_disp) 
+          IF (dont_print_proc = 0)       
+            detail_row = detail_row + 1
+          ENDIF
+        ELSEIF (re.event_type_cd = corrinreview_cd)
+          status_disp = concat("<<< ", trim(uar_get_code_display(re.event_type_cd)), " >>>")
+          offset = 109
+          CALL store_item(offset, procedure_row_hold, status_disp) 
+          IF (dont_print_proc = 0)      
+            detail_row = detail_row + 1
+          ENDIF
+        ENDIF
+      endif
+ ENDIF
+ 
+      FOOT pr.perform_result_id
+      IF (dont_print_proc = 0)
+        FOR (i = 1 to nbr_comments)
+           IF (r_long_text->qual[i]->perform_result_id = pr.perform_result_id
+              and r_long_text->qual[i]->event_sequence = re.event_sequence
+              and r_long_text->qual[i]->text_result > " ")
+                IF (r_long_text->qual[i]->result_status_cd IN (corrected_cd, oldcorrected_cd))
+                     CALL store_item(58, detail_row, captions->text_result_correct)
+                     vcstring = r_long_text->qual[i]->text_result
+                     detail_row =  store_varchar_item2(detail_row, 83, 47, 1)
+                ELSE
+                     CALL store_item(58, detail_row, captions->text_result)
+                     vcstring = r_long_text->qual[i]->text_result
+                     detail_row =  store_varchar_item2(detail_row, 70, 59, 1)		;024
+                ENDIF
+           ENDIF
+        ENDFOR
+ 
+        FOR (i = 1 to nbr_comments)
+           IF (r_long_text->qual[i]->perform_result_id = pr.perform_result_id)
+               IF (r_long_text->qual[i]->comment_text > " ")
+                    detail_row = detail_row +1
+                    CALL store_item(58, detail_row, captions->comment)
+                    vcstring = r_long_text->qual[i]->comment_text
+                    detail_row =  store_varchar_item2(detail_row, 68, 63, 1)
+               ENDIF
+               IF (r_long_text->qual[i]->note_text > " ")
+                    detail_row = detail_row +1
+                    CALL store_item(58, detail_row, captions->note)
+                    vcstring = r_long_text->qual[i]->note_text
+                    detail_row =  store_varchar_item2(detail_row, 68, 63, 1)
+               ENDIF
+           ENDIF
+        ENDFOR
+ 
+      ENDIF
+      FOOT orderunique
+; for the first line in this order, give the number of total lines
+        reportstuff->qual[save1stline]->detailcount = detail_row - save1stline + 1
+ 
+      FOOT productunique
+; print out previous patient info and erase it from reportstuff array
+        print_stuff
+ 
+      FOOT PAGE
+      row 59
+      col   1, hyphen_line,
+      row + 1
+      col   1, captions->report_id,
+      col  58, captions->page_no,
+      col  64, curpage "###",
+      col 110, curdate "@DATECONDENSED;;d"
+      col 120, curtime "@TIMENOSECONDS;;M"
+ 
+      FOOT REPORT
+; print out last patient info and erase it from reportstuff array
+        print_stuff
+        row + 2
+        CALL CENTER(captions->end_of_report, 1, 132)                                     ;018
+        select_ok_ind = 1
+ 
+      WITH
+        NOCOUNTER
+        , DONTCARE = cv_result
+;        , DONTCARE = prod_order
+        , DONTCARE = p_doc
+        , OUTERJOIN = d_ptr
+        , OUTERJOIN = ptr
+        , OUTERJOIN = oc
+        , OUTERJOIN = d_phs_grp
+        , DONTCARE = op
+        , DONTCARE = phs_grp
+        , OUTERJOIN = d_cv_oc
+        , DONTCARE = cv_oc
+        , DONTCARE = prod
+        , NULLREPORT
+        , compress, nolandscape ;BNK - 10/31/97
+        , maxrow = 63
+ 
+      IF (nbr_prs = 0)
+        SET reply->status_data->status = "Z"
+      ELSE
+        SET reply->status_data->status = "S"
+      ENDIF
+ 
+        set rpt_cnt = rpt_cnt +1
+        set stat = alterlist(reply->rpt_list, rpt_cnt)
+        set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+ 
+        if (trim(request->batch_selection) > "")
+           set spool = value(reply->rpt_list[rpt_cnt].rpt_filename) VALUE(request->printer_name)
+        endif
+ 
+        if (select_ok_ind = 1)
+          set reply->status_data->status = "S"
+        endif
+ 
+#exit_script
+ 
+      END GO
+
+;Generated by GNU enscript 1.6.4.

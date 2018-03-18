@@ -1,0 +1,248 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_xfer_details/glb_get_xfer_details.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_XFER_DETAILS.PRG
+        Object name:            GLB_GET_XFER_DETAILS
+        Request #:              250105
+
+        Product:                General Lab           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Get list of detail procedures for each
+                                order, give current testsite for each
+                                detail
+
+        Tables read:            profile_task_r
+                                discrete_task_assay
+                                assay_processing_r
+                                order_procedure_exception
+                                order_serv_res_container
+
+        Tables updated:         n/a
+
+        Executing from:         General Lab transfer test application
+
+        Special Notes:          This expects that once a detail is transferred,
+                                all the details for that order will get an
+                                entry in the order_procedure_exception table.
+                                Details that have not been transferred have
+                                the testsite listed in the order_serv_res_container
+                                table.
+                                Put dontcare on assay_processing_r so that 
+                                details will show up regardless of whether they're
+                                valid for the current testsite.
+                                The accession and order_mnemonic fields are there
+                                to make it easier to use the output from this
+                                script to fill the From spreadsheet in the transfers
+                                program.
+
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 08/01/96 Newton Hughes        Initial Release                     *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+  
+      DROP PROGRAM glb_get_xfer_details:dba GO
+      CREATE PROGRAM glb_get_xfer_details:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      RECORD request
+      (
+        1 service_resource_cd = f8
+        1 qual[x]
+          2 order_id = f8
+          2 catalog_cd = f8
+          2 order_mnemonic = vc
+          2 accession = vc
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      RECORD reply
+      (
+        1 nbr_orders = i4
+        1 qual[10]
+          2 order_id = f8
+          2 catalog_cd = f8
+          2 task_assay_cd = f8
+          2 service_resource_cd = f8
+          2 display_seq = i4
+          2 detail_mnemonic = vc
+          2 accession = vc
+          2 order_mnemonic = vc
+%i cclsource:status_block.inc
+      )
+
+#script
+      SET reply->status_data->status = "F"
+      SET req_ords = size(request->qual, 5)     ; number of entries in request array
+      SET nords = 0                             ; indexes reply array
+      SET unknown_testsites = 0                 ; counts reply array entries without opx records
+
+; Get the mnemonic, display_sequence, and testsite for each detail in request array
+; (look for testsite on order_processing_exception, set it to 0 if opx record is not there)
+
+      SELECT INTO "nl:"
+        d1.seq
+        , ptr.catalog_cd
+        , ptr.task_assay_cd
+        , opx.order_id
+        , dta.mnemonic      
+        , apr.display_sequence
+        , opx_exists = decode(opx.seq, "Y", "N")
+        , apr_exists = decode(apr.seq, "Y", "N")
+
+      FROM
+        (dummyt d1 with seq = value(req_ords))
+        , profile_task_r ptr
+        , discrete_task_assay dta
+        , assay_processing_r apr
+        , (dummyt d2 with seq = 1)
+        , (dummyt d3 with seq = 1)
+        , order_procedure_exception opx
+
+      PLAN d1
+      JOIN ptr
+        WHERE ptr.catalog_cd = request->qual[d1.seq]->catalog_cd
+      JOIN dta
+        WHERE dta.task_assay_cd = ptr.task_assay_cd
+      JOIN d3
+        WHERE d3.seq = 1
+      JOIN apr
+        WHERE apr.service_resource_cd = request->service_resource_cd
+        AND apr.task_assay_cd = ptr.task_assay_cd
+      JOIN d2
+        WHERE d2.seq = 1
+      JOIN opx
+        WHERE opx.order_id = request->qual[d1.seq]->order_id
+        AND opx.task_assay_cd = ptr.task_assay_cd
+
+      ORDER
+        opx.order_id,
+        apr.display_sequence
+
+      DETAIL  
+        nords = nords + 1
+        IF (mod(nords, 10) = 1 and nords > 10)
+          stat = alter(reply->qual, nords + 10)
+        ENDIF
+        reply->qual[nords]->order_id = request->qual[d1.seq]->order_id
+        reply->qual[nords]->catalog_cd = request->qual[d1.seq]->catalog_cd
+        reply->qual[nords]->order_mnemonic = request->qual[d1.seq]->order_mnemonic
+        reply->qual[nords]->accession = request->qual[d1.seq]->accession
+        reply->qual[nords]->task_assay_cd = ptr.task_assay_cd
+        reply->qual[nords]->detail_mnemonic = dta.mnemonic                             
+        reply->nbr_orders = nords
+
+; Find current test site for this detail on order_procedure_exception
+        IF (opx_exists = "Y")
+          reply->qual[nords]->service_resource_cd = opx.service_resource_cd
+        ELSE
+          reply->qual[nords]->service_resource_cd = 0
+          unknown_testsites = unknown_testsites + 1     ; indicate that osrc has to be queried for testsite
+        ENDIF
+
+; Get display sequence for this detail from assay_processing_r
+        IF (apr_exists = "Y")
+          reply->qual[nords]->display_seq = apr.display_sequence
+        ELSE
+          reply->qual[nords]->display_seq = 0
+        ENDIF
+
+      WITH
+        OUTERJOIN = d2          ; d2 precedes opx in plan
+        , OUTERJOIN = d3        ; d3 precedes apr in plan
+        , DONTCARE = apr
+
+      IF (curqual = 0)
+        SET reply->status_data->status = "Z"
+        GO TO exit_script
+      ENDIF
+
+; If any assays do not have an order_procedure_exception record yet, read the
+; order_serv_res_container table to find their service resource.  Since the
+; assays that don't have exception records have the same testsite
+; the order_serv_res_container records will differ by container ID, but not by
+; service resource.
+
+      IF (unknown_testsites != 0)
+        SELECT INTO "nl:"
+        FROM
+          (dummyt d1 with seq = value(nords))
+          , order_serv_res_container osrc
+
+        PLAN d1
+        JOIN osrc
+          WHERE reply->qual[d1.seq]->service_resource_cd = 0
+          AND osrc.order_id = reply->qual[d1.seq]->order_id
+        
+        DETAIL
+          reply->qual[d1.seq]->service_resource_cd = osrc.service_resource_cd
+
+        WITH
+          NOCOUNTER
+
+        IF (curqual = 0)
+          SET reply->status_data->status = "Z"
+          GO TO exit_script
+        ENDIF
+      ENDIF
+/*
+      SET x = 0
+      FOR (x = 1 TO nords)
+        CALL ECHO(reply->qual[x]->order_id, 0)
+        CALL ECHO(" ,", 0)
+        CALL ECHO(reply->qual[x]->catalog_cd, 0)
+        CALL ECHO(" ,", 0)
+        CALL ECHO(reply->qual[x]->task_assay_cd, 0)
+        CALL ECHO(" ,", 0)
+        CALL ECHO(reply->qual[x]->display_seq, 0)
+        CALL ECHO(" ,", 0)
+        CALL ECHO(reply->qual[x]->service_resource_cd, 0)
+        CALL ECHO(" ,", 0)
+        CALL ECHO(reply->qual[x]->order_mnemonic, 0)
+        CALL ECHO(" ,", 0)
+        CALL ECHO(reply->qual[x]->detail_mnemonic, 0)
+        CALL ECHO(" ", 1)  
+      ENDFOR
+      CALL ECHO(" ", 1)
+*/
+      SET reply->status_data->status = "S"
+      
+#exit_script
+      END GO
+
+;Generated by GNU enscript 1.6.4.

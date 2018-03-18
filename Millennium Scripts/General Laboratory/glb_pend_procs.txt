@@ -1,0 +1,1127 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_pend_procs/glb_pend_procs.inc Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2000 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       GLB_GET_Pend_PROCS.PRG
+                                GLB_RPT_Pend_PROCS.PRG
+        Object name:            GLB_GET_Pend_PROCS
+                                GLB_RPT_Pend_PROCS
+        Request #:              250060
+ 
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Return all pending procedures for a specified
+                                service resource and, optionally, a specified
+                                ordered procedure.  List may also be filtered
+                                to include only "In-Lab" orders.
+ 
+        Tables read:            order_serv_res_container
+;002                                pending_collection
+;002                                container
+                                container_accession
+                                orders
+                                order_laboratory
+                                person
+;jdf                                turnaround_time
+;jdf                                code_value
+                                order_comment
+;002                                encntr_info
+                                encounter
+                                worklist_order_r
+                                worklist
+ 
+        Tables updated:         n/a
+ 
+        Executing from:         General Lab pending inquiry application
+ 
+        Special Notes:          n/a
+ 
+******************************************************************************/
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODifICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 02/20/96 Jeff Fry             Initial Release                     *
+;     001 01/29/98 Jeff Fry             Add container_location_disp and     *
+;                                       received_dt_tm to reply.            *
+;     002 02/25/98 Kurt Gugler          Improve efficiency of main select(s)*
+;     003 09/18/98 Jeff Fry             Find "best" container for Reply     *
+;     004 04/24/00 Gary Runde           Return activity_type info and       *
+;                                       person id                           *
+;     005 07/17/00 Hal Patchen          Improve performance                 *
+;     006 09/23/02 Mark Brooks          Added service resource security.    *
+;     007 03/10/03 Joel Norton          Moved info from report foot to head *
+;     008 11/10/03 Nirmal Sanganee      Retrieving MRN, FinNbr and Patient  *
+;                                       Location for display                *
+;     009 12/30/03 Scott Sundahl        Returning pending tests for service *
+;                                       resource at section level           *
+;     010 11/17/05 Matt Schile					Improve performance         *
+;     011 02/13/07 David Fifer          Added status_flag logic along with  *
+;                                       logic to not qualify AP orders with *
+;                                       a dept_status_cd of "INPATHOLOGY".  *
+;     012 07/20/09 Oliver Barbara       Added logic to allow retrieval of   *
+;                                       scheduled orders.                   *
+;~DE~************************************************************************
+;~end~ ******************  end OF ALL MODCONTROL BLOCKS  ********************
+ 
+ 
+%i cclsource:pcs_resource_security.inc                                  ;006
+ 
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+        1  service_resource_cd    = f8
+        1  catalog_cd             = f8
+        1  in_lab_only_ind        = i2
+        1  batch_selection        = vc
+        1  output_dist            = vc
+        1  resource_sec_ind       = i2                                  ;006
+        1  status_flag            = i2  ; 0-"All Pending", 1-"Received Only", 2-"InLab Only"
+      )
+*/
+ 
+/********************************************************************/
+/*  ServiceResource Record                                          */
+/********************************************************************/
+ 
+      record sr
+      (
+        1  nbr_sr                     = i4
+        1  sr_list[*]
+           2  service_resource_cd     = f8
+           2  display                 = vc
+      )
+ 
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+ 
+      record reply
+      (
+        1  pend_list[*]
+           2  service_resource_cd    = f8
+           2  service_resource_disp  = vc
+           2  service_resource_mean  = vc
+           2  report_priority_cd     = f8
+           2  report_priority_disp   = vc
+           2  report_priority_mean   = c10
+           2  accession              = vc
+           2  order_id               = f8
+           2  activity_type_cd       = f8                               ;004
+           2  activity_type_disp     = vc                               ;004
+           2  activity_type_mean     = vc                               ;004
+           2  person_id              = f8                               ;004
+           2  drawn_dt_tm            = dq8
+           2  collected_ind          = i2
+           2  osc_location_cd        = f8
+           2  container_location_cd  = f8
+           2  container_location_disp= vc                               ;001
+           2  received_dt_tm         = dq8                              ;001
+           2  container_id           = f8
+           2  catalog_cd             = f8
+           2  order_mnemonic         = vc
+           2  status_flag            = i2
+           2  name_full_formatted    = vc
+           2  encntr_comment_ind     = i2
+           2  order_comment_ind      = i2
+           2  worklist_id            = f8
+           2  worklist_alias         = vc
+           2  encntr_id              = f8
+           2  mrn_alias              = vc
+           2  fin_alias              = vc
+           2  loc_facility_cd        = f8
+           2  loc_facility_disp      = c40
+           2  loc_building_cd        = f8
+           2  loc_building_disp      = c40
+           2  loc_nurse_unit_cd      = f8
+           2  loc_nurse_unit_disp    = c40
+           2  loc_room_cd            = f8
+           2  loc_room_disp          = c40
+           2  loc_bed_cd             = f8
+           2  loc_bed_disp           = c40
+           2  order_status_cd        = f8
+           2  dept_status_cd         = f8
+		   2  orders_updt_cnt        = i4
+		   2  catalog_type_cd        = f8
+		   2  oe_format_id           = f8
+%i cclsource:status_block.inc                                           ;006
+      )
+/*******************************************************************/
+/* Declare new variables                                           */
+/*******************************************************************/
+declare dMrnCd = f8 with protect, noconstant(0.0)
+declare dFinCd = f8 with protect, noconstant(0.0)
+declare ORDER_COMMENT_CD = f8 with protect, constant(uar_get_code_by("MEANING", 14, "ORD COMMENT"))
+declare ORDER_NOTE_CD = f8 with protect, constant(uar_get_code_by("MEANING", 14, "ORD NOTE"))
+declare dTempCd = f8 with protect, noconstant(0.0)
+
+declare nIdx = i4 with protect, noconstant(0)
+declare nTotal = i4 with protect, noconstant(0)
+declare nTotal2 = i4  with protect, noconstant(0)
+declare nSize = i4 with protect, constant(50)
+declare nSize2 = i4 with protect, constant(10)
+declare nStart = i4 with protect, noconstant(0)
+
+/******************/
+     #Script
+/******************/
+      set pend_cnt = 0
+      set sr_cnt = 1
+      set sr_chg = 0
+      set acc_chg = 0
+      set reply->status_data->status = "F"
+      set SERVICE_RESOURCE_TYPE_CODESET = 223
+ 
+      declare dServiceResourceCd = f8 with protect, noconstant(0.0)
+      declare sTmpStringSrc = c50 with protect, noconstant(fillstring(50, " "))
+      declare serv_res_section_cd = f8
+      declare serv_res_subsection_cd = f8
+      declare SERV_RES_SECTION_CDF = c12 with protect, constant("SECTION")
+      declare SERV_RES_SUBSECTION_CDF = c12 with protect, constant("SUBSECTION")
+      declare rpt_order = vc with protect, noconstant("")
+      declare dInProcessTypeCd = f8 with protect, noconstant(0.0)
+      declare dScheduledTypeCd = f8 with protect, noconstant(0.0)
+ 
+      set stat = UAR_GET_MEANING_BY_CODESET(14281,"INPATHOLOGY", 1, dInProcessTypeCd)
+      set stat = UAR_GET_MEANING_BY_CODESET(14281,"LABSCHEDULED", 1, dScheduledTypeCd)
+ 
+      call InitResourceSecurity(request->resource_sec_ind)
+ 
+      set stat = uar_Get_meaning_by_codeset(SERVICE_RESOURCE_TYPE_CODESET, SERV_RES_SECTION_CDF,1,serv_res_section_cd)
+      set stat = uar_Get_meaning_by_codeset(SERVICE_RESOURCE_TYPE_CODESET, SERV_RES_SUBSECTION_CDF,1,serv_res_subsection_cd)
+ 
+      if (request->status_flag = 0)
+        ; If the in_lab_only_ind is equal to 1 set status_flag to 1.  This is
+        ; to maintain passivity since we are now using the status_flag variable.
+        if (request->in_lab_only_ind = 1)
+          set request->status_flag = request->in_lab_only_ind
+        endif
+      endif
+ 
+      if (trim(request->batch_selection) > " ")
+        set request->service_resource_cd = 0.0
+        set request->catalog_cd = 0.0
+        set request->status_flag = 0
+        set report_ind = 1
+        set supress_page_head = 0
+        set row_cnt = 0
+        set tmp_string_dest = fillstring(50, " ")
+        set str_pos = 0
+        set stat = 0
+        set param_cnt = 0
+				set dTempCd = cnvtreal(trim(request->batch_selection))
+				
+        select into "nl:"
+          cv.code_set,
+          cv.description
+        from code_value cv
+        where trim(cv.display_key) = trim(cnvtupper(cnvtalphanum(request->batch_selection)))
+          and cv.code_set = 1950.0
+          and cv.cdf_meaning = "PTR"
+        head cv.code_set
+          sTmpStringSrc = trim(cv.definition)
+        with nocounter
+        
+        if (curqual = 0)
+        	select into "nl:"
+          	cv.code_set,
+            cv.description
+          from code_value cv
+          where cv.code_value = dTempCd
+          	and cv.code_set = 1950.0
+            and cv.cdf_meaning = "PTR"
+          head cv.code_set
+            sTmpStringSrc = trim(cv.definition)
+          with nocounter
+          
+          if (curqual = 0)
+            go to EXIT_SCRIPT
+            set reply->status_data->status = "Z"
+          endif
+        endif
+
+;********************extract parameters from string
+        for (param_cnt = 1 to 3)
+        	if (param_cnt in (1, 2))
+          	set str_pos = findstring(",", sTmpStringSrc, 1)
+            set stat = movestring(sTmpStringSrc, 1, tmp_string_dest, 1, str_pos - 1)
+          endif
+          if (param_cnt = 1)
+          	set request->service_resource_cd = cnvtreal(trim(tmp_string_dest))
+          elseif (param_cnt = 2)
+            set request->catalog_cd = cnvtreal(trim(tmp_string_dest))
+          else
+            set request->status_flag = cnvtint(trim(sTmpStringSrc))
+          endif
+          if (param_cnt in (1, 2))
+            set stat = movestring(sTmpStringSrc, str_pos + 1, tmp_string_dest, 1,
+                                  size(sTmpStringSrc, 1) - (str_pos + 1))
+            set sTmpStringSrc = tmp_string_dest
+            set tmp_string_dest = fillstring(50, " ")
+          endif
+        endfor
+;*******************************************
+ 
+        if (request->catalog_cd > 0.0)
+        	set rpt_order = uar_get_code_display(request->catalog_cd)
+        else
+          set rpt_order = "All"
+        endif
+      else
+        set report_ind = 0
+      endif
+ 
+ 	    set stat = alterlist(sr->sr_list, 2)
+      set sr->sr_list[1]->service_resource_cd = request->service_resource_cd
+ 
+      set serv_res_type_cdf = fillstring(12, " ")
+      set serv_res_type_cdf = uar_get_code_meaning(request->service_resource_cd)
+
+      if (request->service_resource_cd > 0.0)
+ 
+         if (serv_res_type_cdf = "SUBSECTION")
+ 
+            select into "nl:"                                          ;005
+               r.child_service_resource_cd                             ;005
+              ,s.service_resource_cd                                   ;005
+            from                                                       ;005
+               resource_group r                                        ;005
+              ,service_resource s                                      ;005
+            plan r                                                     ;005
+              where r.parent_service_resource_cd =                     ;005
+                        request->service_resource_cd                   ;005
+                and r.root_service_resource_cd +0 = 0.0                ;005
+                and r.active_ind = 1
+            join s                                                     ;005
+              where s.service_resource_cd =                            ;005
+                        r.child_service_resource_cd                    ;005
+                AND s.activity_type_cd IN                              ;005
+                        (select cv.code_value                          ;005
+                         from code_value cv                            ;005
+                         where cv.code_set = 106                       ;005
+                           and cv.cdf_meaning in ("GLB", "BB", "HLA")) ;005
+                and s.active_ind = 1
+            order BY                                                   ;005
+               r.parent_service_resource_cd                            ;005
+            detail                                                     ;005
+               dServiceResourceCd = r.child_service_resource_cd        ;006
+               if (IsResourceViewable(dServiceResourceCd))             ;006
+                  sr_cnt = sr_cnt + 1                                  ;005
+                  if (mod(sr_cnt,2) = 1 and sr_cnt != 1)               ;005
+                     stat = alterlist(sr->sr_list,sr_cnt + 2)              ;005
+                  endif                                                ;005
+                  sr->sr_list[sr_cnt]->service_resource_cd =           ;005
+                        r.child_service_resource_cd                    ;005
+                  sr->nbr_sr = sr_cnt                                  ;005
+               endif                                                   ;006
+            with                                                       ;005
+               nocounter
+         elseif  (serv_res_type_cdf = "SECTION")
+           select into "nl:"
+              sect.parent_service_resource_cd,
+              subsect.parent_service_resource_cd,
+              subsect.child_service_resource_cd
+           from
+              resource_group sect,
+              resource_group subsect
+           plan sect  where sect.resource_group_type_cd =
+                          serv_res_section_cd
+                  and sect.parent_service_resource_cd =
+                          request->service_resource_cd
+                  and sect.root_service_resource_cd+0 = 0.0
+                  and sect.active_ind = 1
+           join subsect where subsect.parent_service_resource_cd =
+                          sect.child_service_resource_cd
+                  and subsect.resource_group_type_cd =
+                      serv_res_subsection_cd
+                  and subsect.root_service_resource_cd+0 = 0.0
+                  and subsect.active_ind = 1
+           order by
+              subsect.parent_service_resource_cd,
+              subsect.child_service_resource_cd
+           head subsect.parent_service_resource_cd
+              dServiceResourceCd = subsect.parent_service_resource_cd
+              if (IsResourceViewable(dServiceResourcecd) = True)
+                  sr_cnt = sr_cnt + 1
+                  stat = alterlist(sr->sr_list, sr_cnt)
+                  sr->sr_list[sr_cnt].service_resource_cd =
+                      subsect.parent_service_resource_cd
+                  sr->nbr_sr = sr_cnt
+              endif
+           head subsect.child_service_resource_cd
+              dServiceResourceCd = subsect.parent_service_resource_cd
+              if (IsResourceViewable(dServiceResourcecd) = True)
+                  sr_cnt = sr_cnt + 1
+                  stat = alterlist(sr->sr_list, sr_cnt)
+                  sr->sr_list[sr_cnt].service_resource_cd =
+                      subsect.child_service_resource_cd
+                  sr->nbr_sr = sr_cnt
+              endif
+           with
+              nocounter
+         endif
+      else
+         ;* Load all service resources                                 ;005
+         select into "nl:"                                             ;005
+            r.child_service_resource_cd                                ;005
+           ,s.service_resource_cd                                      ;005
+         from                                                          ;005
+            resource_group r                                           ;005
+           ,service_resource s                                         ;005
+         plan r                                                        ;005
+           where r.root_service_resource_cd = 0.0                      ;005
+             and r.active_ind = 1
+         join s                                                        ;005
+           where s.service_resource_cd =                               ;005
+                     r.child_service_resource_cd                       ;005
+             AND s.activity_type_cd IN                                 ;005
+                     (select cv.code_value                             ;005
+                      from code_value cv                               ;005
+                      where cv.code_set = 106                          ;005
+                        and cv.cdf_meaning in ("GLB", "BB", "HLA"))    ;005
+             and s.active_ind = 1
+         order by                                                      ;005
+            r.parent_service_resource_cd                               ;005
+         detail                                                        ;005
+            dServiceResourceCd = r.child_service_resource_cd           ;006
+            if (IsResourceViewable(dServiceResourceCd))                ;006
+               sr_cnt = sr_cnt + 1                                     ;005
+               if (mod(sr_cnt,2) = 1 and sr_cnt != 1)                  ;005
+                  stat = alterlist(sr->sr_list,sr_cnt + 2)             ;005
+               endif                                                   ;005
+               sr->sr_list[sr_cnt]->service_resource_cd =              ;005
+                     r.child_service_resource_cd                       ;005
+               sr->nbr_sr = sr_cnt                                     ;005
+            endif                                                      ;006
+         with                                                          ;005
+            nocounter                                                  ;005
+      endif                                                            ;005
+ 
+      if (sr->nbr_sr = 0)
+         set sr->nbr_sr = 1
+      endif
+      set stat = alterlist(sr->sr_list,sr->nbr_sr)
+      set nbr_sr = size(sr->sr_list,5)
+
+/********************************************************************/
+/* If printing report, get service resource display values          */
+/********************************************************************/
+      if (report_ind = 1)
+        for(nIdx = 1 to value(nbr_sr))
+          set sr->sr_list[nIdx].display = uar_get_code_display(sr->sr_list[nIdx]->service_resource_cd)
+        endfor
+      endif
+ 
+;002 if not report, fill reply record
+ 
+    set save_flag = 0                                                  ;003
+    if (report_ind = 0)                                                ;002
+ 
+      set nTotal2 = size(sr->sr_list,5)
+      set nTotal = ceil( cnvtreal(nTotal2) /nSize2) * nSize2
+      set stat = alterlist(sr->sr_list,nTotal)
+      set nStart = 1
+ 
+      for (nIdx=nTotal2+1 to nTotal)
+           set sr->sr_list[nIdx].service_resource_cd = sr->sr_list[nTotal2].service_resource_cd
+      endfor
+ 
+      select                                                           ;005
+      if (request->status_flag = 3 and request->catalog_cd = 0.0)
+          into "nl:"
+            osc.order_id
+          , osc.service_resource_cd
+          , ACCESSION = ""
+          , o.order_id
+          , o.catalog_cd
+          , ol.report_priority_cd
+          , p.person_id
+     
+          from
+            (dummyt d1 with seq = value(1+((nTotal-1)/nSize2)))
+          , order_serv_res_container osc
+          , orders o
+          , order_laboratory ol
+          , encounter e
+          , person p    
+      
+         plan d1 where initarray(nStart,evaluate(d1.seq,1,1,nStart+nSize2))
+         join osc
+           where expand(nIdx, nStart, nStart+(nSize2-1), osc.service_resource_cd, sr->sr_list[nIdx]->service_resource_cd)
+             and osc.status_flag = 0
+         join o
+           where o.order_id = osc.order_id
+             and o.dept_status_cd = dScheduledTypeCd
+         join ol
+           where ol.order_id = o.order_id
+         join e
+           where e.encntr_id = o.encntr_id
+         join p
+           where p.person_id = o.person_id
+           
+      elseif (request->status_flag = 3)
+          into "nl:"
+            osc.order_id
+          , osc.service_resource_cd
+          , ACCESSION = ""
+          , o.order_id
+          , o.catalog_cd
+          , ol.report_priority_cd
+          , p.person_id
+     
+          from
+            (dummyt d1 with seq = value(1+((nTotal-1)/nSize2)))
+          , order_serv_res_container osc
+          , orders o
+          , order_laboratory ol
+          , encounter e
+          , person p     
+      
+         plan d1 where initarray(nStart,evaluate(d1.seq,1,1,nStart+nSize2))
+         join osc
+           where expand(nIdx, nStart, nStart+(nSize2-1), osc.service_resource_cd, sr->sr_list[nIdx]->service_resource_cd)
+             and osc.status_flag = 0
+         join o
+           where o.order_id = osc.order_id
+             and o.catalog_cd +0 = request->catalog_cd
+             and o.dept_status_cd = dScheduledTypeCd
+         join ol
+           where ol.order_id = o.order_id
+         join e
+           where e.encntr_id = o.encntr_id
+         join p
+           where p.person_id = o.person_id
+           
+      elseif (request->catalog_cd = 0.0)
+          into "nl:"                                                       ;005
+            osc.order_id                                                    ;002
+          , osc.service_resource_cd                                         ;002
+          , ACCESSION = ca.accession
+          , o.order_id                                                      ;002
+          , o.catalog_cd                                                    ;002
+          , ol.report_priority_cd                                           ;002
+          , p.person_id                                                     ;002
+     
+          from                                                              ;002
+            (dummyt d1 with seq = value(1+((nTotal-1)/nSize2)))             ;002
+          , order_serv_res_container osc                                    ;002
+          , container_accession ca                                          ;002
+          , orders o                                                        ;002
+          , order_laboratory ol                                             ;002
+          , encounter e
+          , person p                                                        ;002      
+      
+         plan d1 where initarray(nStart,evaluate(d1.seq,1,1,nStart+nSize2))
+         join osc                                                      ;005
+           where expand(nIdx, nStart, nStart+(nSize2-1), osc.service_resource_cd, sr->sr_list[nIdx]->service_resource_cd)
+             and osc.status_flag in (0, 1)                             ;005
+             and (osc.location_cd +0 = osc.current_location_cd +0
+               or (request->status_flag = 0)
+               or (request->status_flag = 2 and osc.status_flag = 1 and osc.current_location_cd > 0.0))
+         join o                                                        ;005
+           where o.order_id = osc.order_id                             ;005
+             and o.dept_status_cd != dInProcessTypeCd
+         join ol                                                       ;005
+           where ol.order_id = o.order_id                              ;005
+         join e
+           where e.encntr_id = o.encntr_id
+         join p                                                        ;005
+           where p.person_id = o.person_id                             ;005
+         join ca                                                       ;005
+           where ca.container_id = osc.container_id                    ;005
+             and ca.container_id != 0.0                                ;005
+             
+      else                                                             ;005
+          into "nl:"                                                       ;005
+            osc.order_id                                                    ;002
+          , osc.service_resource_cd                                         ;002
+          , ACCESSION = ca.accession
+          , o.order_id                                                      ;002
+          , o.catalog_cd                                                    ;002
+          , ol.report_priority_cd                                           ;002
+          , p.person_id                                                     ;002
+     
+          from                                                              ;002
+            (dummyt d1 with seq = value(1+((nTotal-1)/nSize2)))             ;002
+          , order_serv_res_container osc                                    ;002
+          , container_accession ca                                          ;002
+          , orders o                                                        ;002
+          , order_laboratory ol                                             ;002
+          , encounter e
+          , person p                                                        ;002      
+      
+         plan d1 where initarray(nStart,evaluate(d1.seq,1,1,nStart+nSize2))
+         join osc                                                      ;005
+           where expand(nIdx, nStart, nStart+(nSize2-1), osc.service_resource_cd, sr->sr_list[nIdx]->service_resource_cd)
+             and osc.status_flag in (0, 1)                             ;005
+             and (osc.location_cd +0 = osc.current_location_cd +0
+               or (request->status_flag = 0)
+               or (request->status_flag = 2 and osc.status_flag = 1 and osc.current_location_cd > 0.0))
+         join o                                                        ;005
+           where o.order_id = osc.order_id                             ;005
+             and o.catalog_cd +0 = request->catalog_cd                 ;005
+             and o.dept_status_cd != dInProcessTypeCd
+         join ol                                                       ;005
+           where ol.order_id = o.order_id                              ;005
+         join e
+           where e.encntr_id = o.encntr_id
+         join p                                                        ;005
+           where p.person_id = o.person_id                             ;005
+         join ca                                                       ;005
+           where ca.container_id = osc.container_id                    ;005
+             and ca.container_id != 0.0                                ;005
+
+      endif                                                            ;005
+ 
+      order                                                             ;002
+        osc.order_id                                                    ;002
+        , osc.location_cd                                              ;003
+        , osc.status_flag                                              ;003
+      detail                                                            ;002
+ 
+        save_flag = 0                                                   ;003
+        ; This if check fixes an expression overflow warning since
+        ; pend_cnt is 0 the first time the detail section is hit.
+        if (pend_cnt = 0)
+           save_flag = 1
+        else
+           if (reply->pend_list[pend_cnt]->order_id != osc.order_id)       ;003
+              save_flag = 1
+           elseif (reply->pend_list[pend_cnt]->service_resource_cd  != osc.service_resource_cd)
+              save_flag = 1
+           else                                                            ;003
+              if (osc.status_flag = 1)
+                 if (reply->pend_list[pend_cnt]->osc_location_cd !=        ;003
+                     reply->pend_list[pend_cnt]->container_location_cd)    ;003
+                     save_flag = 2                                         ;003
+                 else                                                      ;003
+                    if (reply->pend_list[pend_cnt]->status_flag <          ;003
+                        osc.status_flag)                                   ;003
+                        save_flag = 2                                      ;003
+                    endif                                                  ;003
+                 endif                                                     ;003
+              else                                                         ;003
+                 if (reply->pend_list[pend_cnt]->status_flag <             ;003
+                     osc.status_flag)                                      ;003
+                     save_flag = 2                                         ;003
+                 endif                                                     ;003
+              endif                                                        ;003
+           endif                                                           ;003
+        endif
+ 
+        if (save_flag > 0)                                              ;003
+            if (save_flag = 1)                                           ;003
+               pend_cnt = pend_cnt + 1                                  ;002
+               if (mod(pend_cnt,10) = 1)                                ;002
+                   stat = alterlist(reply->pend_list,pend_cnt + 10)     ;002
+               endif                                                    ;002
+            endif                                                       ;003
+            reply->pend_list[pend_cnt]->service_resource_cd =           ;002
+              osc.service_resource_cd                                   ;002
+
+
+
+            if (trim(ACCESSION) > "")
+                   reply->pend_list[pend_cnt]->accession = ACCESSION
+            else
+                   reply->pend_list[pend_cnt]->accession = "(None)"
+            endif
+
+            if(request->status_flag = 3)
+                reply->pend_list[pend_cnt]->drawn_dt_tm = cnvtdatetime(o.current_start_dt_tm)
+                reply->pend_list[pend_cnt]->collected_ind = 0
+            else
+                reply->pend_list[pend_cnt]->container_id = osc.container_id 
+                reply->pend_list[pend_cnt]->container_location_cd =  osc.current_location_cd
+                    
+                if (osc.location_cd > 0)
+                  if (osc.status_flag = 1)
+                    if (cnvtdatetime(o.current_start_dt_tm) > 0.0)
+                      reply->pend_list[pend_cnt]->drawn_dt_tm = cnvtdatetime(o.current_start_dt_tm)
+                      reply->pend_list[pend_cnt]->collected_ind = 1
+                    else
+                      reply->pend_list[pend_cnt]->collected_ind = 0
+                    endif
+                    reply->pend_list[pend_cnt]->received_dt_tm = osc.in_lab_dt_tm
+                  endif
+                endif
+            endif
+            
+            
+            reply->pend_list[pend_cnt]->osc_location_cd =               ;002
+              osc.location_cd                                           ;002
+            reply->pend_list[pend_cnt]->order_id =                      ;002
+              o.order_id                                                ;002
+            reply->pend_list[pend_cnt]->activity_type_cd =              ;004
+              o.activity_type_cd                                        ;004
+            reply->pend_list[pend_cnt]->person_id =                     ;004
+              p.person_id                                               ;004
+            reply->pend_list[pend_cnt]->catalog_cd =                    ;002
+              o.catalog_cd                                              ;002
+            reply->pend_list[pend_cnt]->order_mnemonic =                ;002
+              o.order_mnemonic                                          ;002
+            reply->pend_list[pend_cnt]->status_flag =                   ;002
+              osc.status_flag                                           ;002
+            reply->pend_list[pend_cnt]->container_id =                  ;003
+              osc.container_id                                          ;003
+            reply->pend_list[pend_cnt]->name_full_formatted =           ;002
+              p.name_full_formatted                                     ;002
+            reply->pend_list[pend_cnt]->report_priority_cd =            ;002
+              ol.report_priority_cd                                     ;002
+            reply->pend_list[pend_cnt]->order_comment_ind = 0           ;005
+            reply->pend_list[pend_cnt]->worklist_id = 0.0               ;005
+            reply->pend_list[pend_cnt]->worklist_alias = ""             ;005
+            reply->pend_list[pend_cnt]->encntr_id =
+              e.encntr_id
+            reply->pend_list[pend_cnt]->loc_facility_cd =
+              e.loc_facility_cd
+            reply->pend_list[pend_cnt]->loc_building_cd =
+              e.loc_building_cd
+            reply->pend_list[pend_cnt]->loc_nurse_unit_cd =
+              e.loc_nurse_unit_cd
+            reply->pend_list[pend_cnt]->loc_room_cd =
+              e.loc_room_cd
+            reply->pend_list[pend_cnt]->loc_bed_cd =
+              e.loc_bed_cd
+            reply->pend_list[pend_cnt] -> order_status_cd =
+              o.order_status_cd
+            reply->pend_list[pend_cnt] -> dept_status_cd =
+              o.dept_status_cd
+            reply->pend_list[pend_cnt] -> orders_updt_cnt =
+              o.updt_cnt
+            reply->pend_list[pend_cnt] -> catalog_type_cd =
+              o.catalog_type_cd
+            reply->pend_list[pend_cnt] -> oe_format_id =
+              o.oe_format_id
+            if (request->status_flag = 0)
+              reply->pend_list[pend_cnt]->drawn_dt_tm =                 ;002
+                cnvtdatetime(o.current_start_dt_tm)                     ;002
+            endif                                                       ;002
+        endif
+ 
+      with                                                              ;002
+        nullreport                                                      ;002
+       , nocounter                                                      ;002
+       , check                                                          ;002
+ 
+      set stat = alterlist(sr->sr_list, nTotal2)
+      set stat = alterlist(reply->pend_list, pend_cnt)
+    endif                                                               ;002
+ 
+/********************************************************************/  ;005
+/* Select order comments                                            */  ;005
+/********************************************************************/  ;005
+    if (report_ind = 0 and pend_cnt > 0)
+ 
+      set nTotal2 = size(reply->pend_list,5)
+      set nTotal = ceil( cnvtreal(nTotal2) /nSize) * nSize
+      set stat = alterlist(reply->pend_list,nTotal)
+      set nStart = 1
+ 			
+      for (nIdx=nTotal2+1 to nTotal)
+           set reply->pend_list[nIdx].order_id = reply->pend_list[nTotal2].order_id
+           set reply->pend_list[nIdx].encntr_id = reply->pend_list[nTotal2].encntr_id
+      endfor
+ 
+      select into "nl:"                                                 ;005
+        oc.seq                                                         ;005
+      from                                                              ;005
+         (dummyt d1 with seq = value(1+((nTotal-1)/nSize)))             ;005
+        ,order_comment oc                                               ;005
+      plan d1 where initarray(nStart,evaluate(d1.seq,1,1,nStart+nSize)) ;005
+      join oc                                                           ;005
+        where expand(nIdx, nStart, nStart+(nSize-1), oc.order_id, reply->pend_list[nIdx].order_id)
+          and oc.comment_type_cd in (ORDER_COMMENT_CD, ORDER_NOTE_CD)   ;005
+      detail
+         index = locateval(nIdx, 1, nTotal2, oc.order_id, reply->pend_list[nIdx].order_id)
+         reply->pend_list[index].order_comment_ind = 1                  ;005
+      with nocounter                                                    ;005
+ 
+/********************************************************************/  ;005
+/* Select worklist info                                             */  ;005
+/********************************************************************/  ;005
+      select into "nl:"                                                 ;005
+         index = locateval(nIdx, 1, nTotal2, wo.order_id, reply->pend_list[nIdx].order_id)
+        ,wo.seq                                                         ;005
+        ,w.seq                                                          ;005
+      from                                                              ;005
+         (dummyt d1 with seq = value(1+((nTotal-1)/nSize)))             ;005
+        ,worklist_order_r wo                                            ;005
+        ,worklist w                                                     ;005
+      plan d1 where initarray(nStart,evaluate(d1.seq,1,1,nStart+nSize)) ;005
+      join wo                                                           ;005
+        where expand(nIdx, nStart, nStart+(nSize-1), wo.order_id, reply->pend_list[nIdx].order_id)
+      join w                                                            ;005
+        where w.worklist_id = wo.worklist_id                            ;005
+      order by
+        index, wo.order_id, w.worklist_id
+ 
+      head wo.order_id
+        row + 0
+      head w.worklist_id
+        if(request->status_flag != 3)
+          if (size(trim(reply->pend_list[index].worklist_alias)) = 0)
+            reply->pend_list[index].worklist_alias = w.worklist_alias     ;005
+          else
+            reply->pend_list[index].worklist_alias =
+            concat(reply->pend_list[index].worklist_alias, ",", w.worklist_alias)
+          endif
+        endif
+      with nocounter                                                    ;005
+ 
+/********************************************************************/
+/* Select encounter alias info                                      */
+/********************************************************************/
+      set nStart = 1
+      set stat = uar_get_meaning_by_codeset (319, "MRN", 1, dMrnCd)
+      set stat = uar_get_meaning_by_codeset (319, "FIN NBR", 1, dFinCd)
+ 
+      select into "nl:"
+         frmt_alias = cnvtalias(ea.alias, ea.alias_pool_cd)
+      from
+         (dummyt d1 with seq = value(1+((nTotal-1)/nSize)))
+         ,encntr_alias ea
+      plan d1 where initarray(nStart,evaluate(d1.seq,1,1,nStart+nSize))
+      join ea
+        where expand(nIdx, nStart, nStart+(nSize-1), ea.encntr_id, reply->pend_list[nIdx].encntr_id)
+          and ea.encntr_alias_type_cd in (dMrnCd, dFinCd)
+          and ea.active_ind = 1
+          and ea.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+          and ea.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3)
+      detail
+        index = locateval(nIdx, 1, nTotal2, ea.encntr_id, reply->pend_list[nIdx].encntr_id)
+        while(index !=0)
+        	if (ea.encntr_alias_type_cd = dMrnCd)
+          	reply->pend_list[index].mrn_alias = frmt_alias
+        	else
+          	reply->pend_list[index].fin_alias = frmt_alias
+        	endif
+          index = locateval(nIdx, index + 1, nTotal2, ea.encntr_id, reply->pend_list[nIdx].encntr_id)
+        endwhile
+      with nocounter
+ 
+      set stat = alterlist(reply->pend_list, nTotal2)
+
+    endif
+ 
+ 
+/********************************************************************/
+/* Select qualified pending rows                                    */
+/********************************************************************/
+ 
+    if (report_ind = 1)                                                 ;002
+      set nTotal2 = size(sr->sr_list,5)
+      set nTotal = ceil( cnvtreal(nTotal2) /nSize) * nSize
+      set stat = alterlist(sr->sr_list,nTotal)
+      set nStart = 1
+
+      for (nIdx=nTotal2+1 to nTotal)
+           set sr->sr_list[nIdx].service_resource_cd = sr->sr_list[nTotal2].service_resource_cd
+      endfor
+  
+      select 
+      if (request->status_flag = 3)
+          into request->output_dist
+            osc.order_id
+          , osc.service_resource_cd
+          , osc.in_lab_dt_tm
+          , ACCESSION = ""
+          , o.order_id
+          , o.catalog_cd
+          , o.current_start_dt_tm
+          , ol.report_priority_cd
+          , cvp.display
+          , p.person_id
+     
+          from
+            (dummyt d1 with seq = value(1+((nTotal-1)/nSize)))
+           , order_serv_res_container osc
+           , orders o
+           , order_laboratory ol
+           , code_value cvp
+           , person p
+     
+          plan
+            d1 where initarray(nStart,evaluate(d1.seq,1,1,nStart+nSize))                                                      ;002
+          join
+            osc
+            where 
+              expand(nIdx, nStart, nStart+(nSize-1), osc.service_resource_cd, sr->sr_list[nIdx]->service_resource_cd)
+            and osc.status_flag = 0
+            and (request->catalog_cd = 0.0
+                          or EXISTS (select
+                                       o.order_id
+                                     from
+                                       orders o
+                                     where
+                                       o.catalog_cd = request->catalog_cd
+                                     and
+                                       osc.order_id = o.order_id))
+          join
+            o
+            where
+              o.order_id = osc.order_id
+            and
+              o.dept_status_cd = dScheduledTypeCd
+          join
+            ol
+            where
+              ol.order_id = o.order_id
+          join
+            cvp
+            where
+              cvp.code_value = ol.report_priority_cd
+          join
+            p
+            where
+              p.person_id = o.person_id
+              
+        else
+          into request->output_dist
+            osc.order_id                                                    ;002
+          , osc.service_resource_cd                                         ;002
+          , osc.in_lab_dt_tm                                                ;002
+          , ACCESSION = ca.accession
+          , o.order_id                                                      ;002
+          , o.catalog_cd                                                    ;002
+          , o.current_start_dt_tm                                           ;002
+          , ol.report_priority_cd                                           ;002
+          , cvp.display                                                     ;002
+          , p.person_id                                                     ;002
+     
+          from                                                              ;002
+            (dummyt d1 with seq = value(1+((nTotal-1)/nSize)))              ;002
+           , order_serv_res_container osc                                   ;002
+           , container_accession ca                                         ;002
+           , orders o                                                       ;002
+           , order_laboratory ol                                            ;002
+           , code_value cvp                                                 ;002
+           , person p                                                       ;002
+     
+          plan
+            d1 where initarray(nStart,evaluate(d1.seq,1,1,nStart+nSize))                                                      ;002
+          join                                                              ;002
+            osc                                                             ;002
+            where                                                           ;002
+              expand(nIdx, nStart, nStart+(nSize-1), osc.service_resource_cd, sr->sr_list[nIdx]->service_resource_cd)
+            and osc.status_flag in (0, 1)                                   ;005
+            and (request->catalog_cd = 0.0                                  ;002
+                          or EXISTS (select                                 ;002
+                                       o.order_id                           ;002
+                                     from                                   ;002
+                                       orders o                             ;002
+                                     where                                  ;002
+                                       o.catalog_cd = request->catalog_cd   ;002
+                                     and                                    ;002
+                                       osc.order_id = o.order_id))          ;002
+           and (osc.location_cd +0 = osc.current_location_cd +0
+            or (request->status_flag = 0)
+            or (request->status_flag = 2 and osc.status_flag = 1 and osc.current_location_cd > 0.0))
+          join                                                              ;002
+            ca                                                              ;002
+            where                                                           ;002
+              ca.container_id != 0                                          ;002
+            and                                                             ;002
+              ca.container_id = osc.container_id                            ;002
+          join                                                              ;002
+            o                                                               ;002
+            where                                                           ;002
+              o.order_id = osc.order_id                                     ;002
+            and
+              o.dept_status_cd != dInProcessTypeCd
+          join                                                              ;002
+            ol                                                              ;002
+            where                                                           ;002
+              ol.order_id = o.order_id                                      ;002
+          join                                                              ;002
+            cvp                                                             ;002
+            where                                                           ;002
+              cvp.code_value = ol.report_priority_cd                        ;002
+          join                                                              ;002
+            p                                                               ;002
+            where                                                           ;002
+              p.person_id = o.person_id                                     ;002
+        endif
+        
+          order by
+            osc.service_resource_cd,
+            cvp.cdf_meaning,
+            ACCESSION,
+            o.order_id,
+            if (osc.location_cd > 0)                                    ;002
+              if (osc.status_flag = 1)
+                cnvtdatetime(osc.in_lab_dt_tm)                          ;002
+              else                                                      ;002
+                cnvtdatetime(o.current_start_dt_tm)                     ;002
+              endif                                                     ;002
+            else                                                        ;002
+              cnvtdatetime(o.current_start_dt_tm)                       ;002
+            endif                                                       ;002
+          head report
+            sr_cnt = 0
+            order_cnt = 0
+            first_time_ind = 1
+ 
+          head page
+          	index = locateval(nIdx, 1, nTotal2, osc.service_resource_cd, sr->sr_list[nIdx]->service_resource_cd)
+            col 1, "DATE:", col + 2, curdate "ddmmmyyyy;;d"
+            col 45, "P E N D I N G    T E S T    R E P O R T"
+            col 110, "PAGE NO:", col + 2, curpage "######;;i"
+            row + 1
+            col 1, "TIME:", col + 2, curtime
+            if (supress_page_head = 0)
+              row + 2
+              col 1, "TEST SITE:", col + 2,
+                     sr->sr_list[index]->display "####################;;c"
+              row + 1
+              col 1, "PROCEDURE:", col + 2, rpt_order
+              row + 1
+              col 1, "BATCH SELECTION:", col + 2, request->batch_selection
+              row + 1
+              col 1, "OUTPUT DISTRIBUTION:", col + 2, request->output_dist
+              row + 2
+              col 1, "ACCESSION"
+              col 25, "PROCEDURE"
+              col 44, "PRIORITY"
+              col 57, "COLLECT"
+              col 75, "NAME"
+              col 114, "STATUS"
+              row + 1
+              col 1, "---------------------"
+              col 25, "----------------"
+              col 44, "----------"
+              col 57, "---------------"
+              col 75, "-----------------------------------"
+              col 114, "----------"
+              row + 1
+              row_cnt = 6
+            else
+              row + 1
+              row_cnt = 3
+            endif
+ 
+          head osc.service_resource_cd
+            if (first_time_ind = 1)
+               first_time_ind = 0
+            else
+               break
+            endif
+            order_cnt = 0
+ 
+          head ACCESSION
+               pend_cnt = pend_cnt + 1
+               if (trim(ACCESSION) > "")
+                 col 1, ACCESSION "#####-####-###-######;;c"
+               endif
+               if (trim(ACCESSION) <= "")
+                 col 1, "(none)               "
+               endif
+          head o.order_id
+               order_cnt = 1
+               col 25, o.order_mnemonic "################;;c"
+               col 44, cvp.display "##########;;c"
+               if (osc.location_cd > 0.0)                               ;002
+                 if (osc.status_flag = 1)
+                   col 57, osc.in_lab_dt_tm "ddmmmyyyy hh:mm;;d"        ;002
+                 else
+                   col 56, "*", col + 1,                                ;002
+                   o.current_start_dt_tm "ddmmmyyyy hh:mm;;d"           ;002
+                 endif                                                  ;002
+               else                                                     ;002
+                 col 56, "*", col + 1,                                  ;002
+                 o.current_start_dt_tm "ddmmmyyyy hh:mm;;d"             ;002
+               endif                                                    ;002
+               col 75,
+                 p.name_full_formatted "###################################;;c"
+               if (osc.location_cd > 0.0)                               ;002
+                 if (osc.status_flag = 1)
+                   col 114, "In-Lab"
+                 else
+                   col 114, "Pending"
+                 endif
+               else
+                 col 114, "Pending"
+               endif
+               row + 1
+               row_cnt = row_cnt + 1
+          foot o.order_id
+            row + 0
+ 
+          foot ACCESSION
+            row + 0
+ 
+          foot osc.service_resource_cd
+            if (order_cnt = 0)
+              col 1, "No pending procedures at this test site."
+            endif
+ 
+          foot report
+            if (row_cnt > 53)
+              break
+            endif
+            if (pend_cnt = 0)
+              col 1, "No pending procedures qualified for report."
+            endif
+            row + 2
+            col 44, "* * * E N D    O F    R E P O R T * * *"
+ 
+ 
+      with
+        nullreport,
+        nocounter,
+        check,
+        DONTCARE = ca
+ 
+      set stat = alterlist(sr->sr_list, nTotal2)                      ;002
+    endif                                                               ;002
+      set stat = alterlist(reply->pend_list, pend_cnt)
+ 
+      if (pend_cnt = 0)
+         set reply->status_data->status = "Z"
+      else
+         set reply->status_data->status = "S"
+      endif
+ 
+#EXIT_SCRIPT
+ 
+    if ((reply->status_data->status != "F") and
+            (GetResourceSecurityStatus(0) != "S"))                       ;006
+        call PopulateResSecStatusBlock(0)                                ;006
+        set reply->status_data->status = GetResourceSecurityStatus(0)    ;006
+    endif
+ 
+    free record sr                                                       ;006
+end
+ 
+go
+ 
+
+;Generated by GNU enscript 1.6.4.

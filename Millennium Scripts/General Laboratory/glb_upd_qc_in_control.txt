@@ -1,0 +1,182 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_upd_qc_in_control/glb_upd_qc_in_control.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_UPD_QC_IN_CONTROL.PRG
+        Object name:            GLB_UPD_QC_IN_CONTROL
+        Request #:              257588
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        When QCCorrection performs the rules and
+                                all rules pass, this script will update the
+                                result_control_cd to be in_control for the
+                                qc result id's passed in
+
+        Tables read:            n/a
+
+        Tables updated:         qc_result
+
+        Executing from:         QCCorrection.dll
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 09/01/00 Gary Runde           Initial Release                     *
+;     001 09/28/00 Gary Runde           Pass in resource,assay, control to  *
+;                                       eval qc schedule                    *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_UPD_QC_IN_CONTROL:dba go
+      create program GLB_UPD_QC_IN_CONTROL:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 results[*]
+           2 qc_result_id                 = f8
+           2 service_resource_cd          = f8
+           2 task_assay_cd                = f8
+           2 control_id                   = f8
+           2 qc_group_assay_id            = f8
+      )
+
+record reqinfo
+( 1 commit_ind  = i2
+  1 updt_id     = f8
+  1 position_cd = f8
+  1 updt_app    = i4
+  1 updt_task   = i4
+  1 updt_req    = i4
+  1 updt_applctx= i4
+)
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+%i cclsource:status_block.inc
+      )
+
+     #Script
+
+%i cclsource:glb_eval_qc_scheduler.inc                                               ;001
+
+      set failed = "F"
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+      set num_results = value(size(request->results, 5))
+
+      set in_control_cd = 0.0
+      call uar_get_meaning_by_codeset(1902, "IN_CONTROL", 1, in_control_cd)
+
+/********************************************************************/
+/* Update assay_resource_lot					    */
+/********************************************************************/
+       for (res_cnt = 1 to num_results)
+
+          UPDATE
+             into qc_result q
+          SET
+             q.result_control_cd = in_control_cd,
+             q.qc_group_assay_id = request->results[res_cnt].qc_group_assay_id,
+             q.updt_dt_tm        = cnvtdatetime(curdate,curtime),
+             q.updt_id           = reqinfo->updt_id,
+             q.updt_applctx      = reqinfo->updt_applctx,
+             q.updt_cnt          = q.updt_cnt + 1
+          plan q where q.qc_result_id = request->results[res_cnt].qc_result_id
+          with nocounter
+
+          set error_check = ERROR(sErrorMsg,0)   ;get error message
+          if (error_check != 0)
+            set failed = "T"
+            set reply->status_data->status = "F"
+            set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+            go to exit_script
+          endif
+
+          if (curqual = 0)
+             go to none_found
+          endif
+
+         ;just call check for the first result since all results have same control ID              ;001
+         if (res_cnt = 1)                                                                          ;001
+            ;call sub to see if this control is on the QC schedule or not                          ;001
+            set found_on_schedule = 0                                                              ;001
+            set found_on_schedule = OnQCSchedule (request->results[res_cnt].service_resource_cd,   ;001
+                                                  request->results[res_cnt].control_id)            ;001
+         endif                                                                                     ;001
+
+         ;check to see whether we need to call the evaluate QC Schedule subs                       ;001
+         ;if this control was found on the schedule then call sub to check schedule                ;001
+         if (found_on_schedule = 1)                                                                ;001
+            call CheckQCSchedule (request->results[res_cnt].service_resource_cd,                   ;001
+                                  request->results[res_cnt].task_assay_cd)                         ;001
+         endif                                                                                     ;001
+
+       endfor
+
+       go to exit_script
+
+/********************************************************************/
+/* Executed if no rows where found on the assay_resource_lot table. */
+/********************************************************************/
+     #none
+      set reply->status_data->subeventstatus[1]->operationname =
+         "update"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "Z"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "assay_resource_lot table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+      if (failed = "F")
+         set reply->status_data->status = "S"
+         commit
+      else
+         rollback
+      endif
+END
+GO
+
+;Generated by GNU enscript 1.6.4.

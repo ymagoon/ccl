@@ -1,0 +1,782 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBCompXMElig/BBT_GET_CURRENT_ORDER_RESULT.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-2006 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+ 
+        Source file name:       bbt_get_current_order_result.prg
+        Object name:            bbt_get_current_order_result
+        Request #:              225570
+ 
+        Product:                Pathnet
+        Product Team:           Blood Bank Transfusion
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Get current results of orders for a patient
+ 
+        Tables read:            orders, service_directory, result,
+                                discrete_task_assay, perform_result,
+                                result_event, person_name_hist
+ 
+        Tables updated:         None
+ 
+        Executing from:         VB
+ 
+        Special Notes:          ??
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 08/04/98 Doug Saus            Initial Release                     *
+;    *001 03/29/99 Doug Saus            Removed selects from code_value table
+;    *                                  and added debug_ind                 *
+;    *002 02/22/00 Doug Saus            Fixed dontcare/decode problem       *
+;    *003 10/18/02 Christi Ditmars      Correct CAPEP00062222 multiple OCRC *
+;    *                                  rows cause error in BBRE            *
+;    *004 01/14/05 Jason Osborn         Updated to only bring back containers
+;                                       that have actually been logged in.  *
+;    *005 11/01/05 Paul Lessin          Return historical name              *
+;    *006 04/03/06 Tom Brecht           Return interface flag               *
+;    *007 08/17/06 Jason Coy            Add flexible specimen logic.        *
+;    *008 08/28/07 Jason Coy            Update to return unformatted accn   *
+;    *                                  and accession id in the reply.      *
+;     009 03/17/09 Kiran Vankadaru      Populate historic names after person*
+;                                       combine                             *
+;     010 10/10/13 Satish Joshi         Filtered the specimens based on the *
+;                                       facility when the filter_by_facility*
+;                                       is set to yes for the pc_location
+;                                       facility.
+;	  011 03/31/14 Gayatri Samala       fix for CR 1-7701258819 (Multiple 
+;										Blood bank scripts perform poorly when
+;										patients have a lot of historical data.)
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program bbt_get_current_order_result:dba go
+create program bbt_get_current_order_result:dba
+ 
+/*
+record request
+(
+ 1  debug_ind                           = i2 ;001
+ 1  person_id                           = f8
+ 1  current_only_ind                    = i2
+ 1  resultmeanlist[*]
+    2  bb_processing_mean               = c12
+    2  bb_processing_cd                 = f8     ;set at run time
+    2  bb_result_processing_mean        = c12
+    2  bb_result_processing_cd          = f8     ;set at run time
+ 1  facility_cd                         = f8
+)
+*/
+ 
+record reply
+(
+ 1  historical_demog_ind                  = i2
+ 1  qual[*]
+   2  encntr_id                           = f8
+   2  order_id                            = f8
+   2  order_mnemonic                      = vc
+   2  bb_processing_cd                    = f8
+   2  bb_processing_disp                  = vc
+   2  bb_processing_mean                  = c12
+   2  result_id                           = f8
+   2  task_assay_cd                       = f8
+   2  mnemonic                            = vc
+   2  bb_result_processing_cd             = f8
+   2  bb_result_processing_disp           = vc
+   2  bb_result_processing_mean           = c12
+   2  result_status_cd                    = f8
+   2  result_status_disp                  = vc
+   2  result_status_mean                  = c12
+   2  container_id                        = f8
+   2  specimen_id                         = f8
+   2  drawn_dt_tm                         = dq8
+   2  perform_result_id                   = f8
+   2  pr_nomenclature_id                  = f8
+   2  result_value_alpha                  = vc
+   2  nomenclature_id                     = f8
+   2  concept_identifier                  = c18
+   2  concept_source_cd                   = f8
+   2  concept_source_disp                 = vc
+   2  concept_source_mean                 = c12
+   2  result_code_set_cd                  = f8
+   2  result_code_set_disp                = vc
+   2  result_code_set_mean                = c12
+   2  result_value_numeric                = f8
+   2  event_sequence                      = i4
+   2  event_dt_tm                         = dq8
+   2  event_personnel_id                  = f8
+   2  username                            = c25
+   2  accession                           = c30
+   2  historical_name                     = c40
+   2  interface_flag                      = i2
+   2  expiration_dt_tm                    = dq8
+   2  encntr_facility_cd                  = f8
+   2  spec_flex_ind                       = i2
+   2  unformatted_accession               = c20
+   2  accession_id                        = f8
+   2  testing_facility_cd                 = f8
+%i cclsource:status_block.inc
+)
+ 
+free set temp
+ 
+record temp
+(
+   1 Facilities[*]
+     2 enc_facility_cd                    = f8
+     2 test_facility_cd                   = f8
+)
+; Include the following file for flexible specimen implementation.
+%i cclsource:BBT_GetBBPreference.inc
+%i cclsource:bbt_calc_flex_expiration.inc
+%i cclsource:bbt_scripts_common.inc
+ 
+/************************/
+/* Initialize variables */
+/************************/
+declare PopulateReply(NULL) = NULL
+declare verified_status_cd          = f8
+declare corrected_status_cd         = f8
+declare order_type_cd               = f8
+ 
+declare gsub_code_value             = f8
+ 
+declare dCurrentNameTypeCd          = f8 with protect, noconstant(0.0)
+declare lCount                      = i4 with protect, noconstant(0)
+declare lIdx                        = i4 with protect, noconstant(0)
+ 
+declare dCurrentPersonId            = f8 with protect, noconstant(0.0)
+declare dCombineAddCd               = f8 with protect, noconstant(0.0)
+declare dActiveStatusCd             = f8 with protect, noconstant(0.0)
+ 
+;Slightly < one minute, expressed as a fraction of a day, used for rounding up
+declare dMINUTE            = f8  with protect, constant(1/1440.0)
+declare filter_by_facility = i2 with protect, noconstant(0)
+declare testing_facility_cd = f8 with protect, noconstant(0.0)
+ 
+declare pc_facility_cd = f8 with protect, noconstant(0.0)
+declare test_facility_cd = f8 with protect, noconstant(0.0)
+declare FacilityIdxHold  = i4 with protect, noconstant(0)
+declare facility_count   = i4 with protect, noconstant(0)
+declare x_idx            = i4 with protect, noconstant(0)
+set result_stat_code_set            = 1901
+ 
+set verified_status_cdf_meaning     = fillstring(12," ") ;001
+set corrected_status_cdf_meaning    = fillstring(12," ") ;001
+ 
+set verified_status_cdf_meaning     = "VERIFIED"
+set corrected_status_cdf_meaning    = "CORRECTED"
+ 
+set verified_status_cd              = 0.0
+set corrected_status_cd             = 0.0
+ 
+set order_code_set                  = 1635
+ 
+set result_code_set                 = 1636
+ 
+set count1                          = 0
+set mean_cnt                        = size(request->resultmeanlist, 5)
+ 
+set select_ok_ind                   = 0
+ 
+;001 Begin
+set stat = 1
+set code_cnt = 1
+ 
+ 
+/*****************************/
+/* Select verified_status_cd */
+/*****************************/
+ 
+  
+set stat = uar_get_meaning_by_codeset(result_stat_code_set, verified_status_cdf_meaning, code_cnt, gsub_code_value)
+ 
+if (request->debug_ind = 1)
+    call echo(stat)
+    call echo(result_stat_code_set)
+    call echo(verified_status_cdf_meaning)
+    call echo(gsub_code_value)
+    call echo(" ")
+endif
+ 
+if (stat = 1)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get verified status code_value"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get verified status code_value"
+    go to EXIT_SCRIPT
+else
+    set verified_status_cd = gsub_code_value
+endif
+ 
+/******************************/
+/* Select corrected_status_cd */
+/******************************/
+set code_cnt = 1
+set stat = uar_get_meaning_by_codeset(result_stat_code_set, corrected_status_cdf_meaning, code_cnt, gsub_code_value)
+ 
+if (request->debug_ind = 1)
+    call echo(stat)
+    call echo(result_stat_code_set)
+    call echo(corrected_status_cdf_meaning)
+    call echo(gsub_code_value)
+    call echo(" ")
+endif
+ 
+if (stat = 1)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get corrected status code_value"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get corrected status code_value"
+    go to EXIT_SCRIPT
+else
+    set corrected_status_cd = gsub_code_value
+endif
+ 
+/**********************************/
+/* Select codes for historical name */
+/**********************************/
+ 
+set stat = uar_get_meaning_by_codeset(213, "CURRENT", 1, dCurrentNameTypeCd)
+if (stat = 1)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get Current name type code_value"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get Current name type code_value"
+    go to EXIT_SCRIPT
+endif
+ 
+set stat = uar_get_meaning_by_codeset(48, "ACTIVE", 1, dActiveStatusCd)
+if (stat = 1)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get active status code_value"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get Active Status code_value"
+    go to EXIT_SCRIPT
+endif
+ 
+set stat = uar_get_meaning_by_codeset(327, "ADD", 1, dCombineAddCd)
+if (stat = 1)
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alterlist(reply->status_data->subeventstatus, count1)
+    endif
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "get combine action Add code_value"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get combine action Add code_value"
+    go to EXIT_SCRIPT
+endif
+ 
+/***************************/
+/* Select bb_processing_cd */
+/***************************/
+set order_cdf_meaning = fillstring(12," ")
+ 
+for (cnt = 1 to mean_cnt)
+    set code_cnt = 1
+    set order_cdf_meaning = request->resultmeanlist[cnt].bb_processing_mean
+ 
+    set stat = uar_get_meaning_by_codeset(order_code_set, order_cdf_meaning, code_cnt, gsub_code_value)
+    ;call GET_CODE_VALUE(order_code_set, order_cdf_meaning)
+ 
+    if (request->debug_ind = 1)
+        call echo(stat)
+        call echo(order_code_set)
+        call echo(order_cdf_meaning)
+        call echo(gsub_code_value)
+        call echo(" ")
+    endif
+ 
+    if (stat = 1)
+        set count1 = count1 + 1
+        if (count1 > 1)
+            set stat = alterlist(reply->status_data->subeventstatus, count1)
+        endif
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[count1]->OperationName = "get order_type code_value"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get order_type code_value"
+        go to EXIT_SCRIPT
+    else
+        set request->resultmeanlist[cnt].bb_processing_cd = gsub_code_value
+    endif
+endfor
+ 
+/**********************************/
+/* Select bb_result_processing_cd */
+/**********************************/
+set result_cdf_meaning = fillstring(12," ")
+ 
+for (cnt = 1 to mean_cnt)
+    set code_cnt = 1
+    set result_cdf_meaning = request->resultmeanlist[cnt].bb_result_processing_mean
+ 
+    set stat = uar_get_meaning_by_codeset(result_code_set, result_cdf_meaning, code_cnt, gsub_code_value)
+;    call GET_CODE_VALUE(result_code_set, result_cdf_meaning)
+ 
+    if (request->debug_ind = 1)
+        call echo(stat)
+        call echo(result_code_set)
+        call echo(result_cdf_meaning)
+        call echo(gsub_code_value)
+        call echo(" ")
+    endif
+ 
+    if (stat = 1)
+        set count1 = count1 + 1
+        if (count1 > 1)
+            set stat = alterlist(reply->status_data->subeventstatus, count1)
+        endif
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[count1]->OperationName = "get result_type code_value"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get result_type code_value"
+        go to EXIT_SCRIPT
+    else
+        set request->resultmeanlist[cnt].bb_result_processing_cd = gsub_code_value
+    endif
+endfor
+;001 End
+ 
+/****************************************************************************
+*       Determine whether client stores historical records                  *
+*****************************************************************************/
+    set reply->historical_demog_ind = BbtGetHistoricInfoPreference(request->facility_cd)
+/*Read the filter_by_facility preference value for the PC location facility*/
+set pc_facility_cd = request->facility_cd
+set test_facility_cd = BbtGetFlexSpecTestingFacility(request->facility_cd)
+
+if (test_facility_cd = -1)
+        set count1 = count1 + 1
+        if (count1 > 1)
+            set stat = alterlist(reply->status_data->subeventstatus, count1)
+        endif
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[count1]->OperationName = "get result_type code_value"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not get test fac code"
+        go to EXIT_SCRIPT
+endif
+
+
+if (test_facility_cd > 0)
+set pc_facility_cd = test_facility_cd
+endif
+set filter_by_facility = BbtGetFlexFilterByFacility(pc_facility_cd)
+/************************/
+/* Select current order */
+/************************/
+;002 removed join to concept table
+ 
+select into "nl:"
+    o.order_id
+    , o.order_mnemonic
+    , r.task_assay_cd
+    , r.result_status_cd
+    , d.seq
+    , dta.mnemonic
+    , pr.perform_result_id
+    , pr.nomenclature_id
+    , pr.result_value_alpha
+    , pr.result_code_set_cd
+    , pr.result_value_numeric
+    , re.event_dt_tm
+    , re.event_personnel_id
+    , pnl.username
+    , co.specimen_id
+    , co.drawn_dt_tm
+    , accession_number = decode(aor.seq,uar_fmt_accession(aor.accession,size(aor.accession,1))," ")
+    , nomenclature_id_field = decode(n.seq,n.nomenclature_id,0.0) ;002
+    , concept_source_cd_field = decode(n.seq,n.concept_source_cd,0.0) ;002
+    , concept_identifier_field = decode(n.seq,n.concept_identifier,"") ;002
+ 
+from
+    (dummyt d with        seq = value(mean_cnt))
+    , service_directory       sd
+    , orders                o
+    , encounter             e
+    , accession_order_r     aor
+    , result                r
+    , discrete_task_assay   dta
+    , perform_result        pr
+    , result_event          re
+    , prsnl                 pnl
+    , (dummyt d_n with      seq = 1)
+    , nomenclature          n
+    , container             co
+    , (dummyt d_seo with     seq = 1)
+    , bb_spec_expire_ovrd   seo
+ 
+plan    d
+ 
+join    sd      where sd.bb_processing_cd       = request->resultmeanlist[d.seq].bb_processing_cd
+ 
+join    o       where o.catalog_cd              = sd.catalog_cd
+                  and o.person_id               = request->person_id
+                  and o.order_id               != NULL
+                  and o.order_id                > 0
+ 
+join    e       where e.encntr_id               = o.encntr_id
+ 
+join    aor     where aor.order_id              = o.order_id
+                  and aor.primary_flag          = 0
+                  and o.order_id                > 0
+                  and o.order_id               != NULL
+ 
+join    r       where r.order_id                = o.order_id
+                  and r.result_id              != NULL
+                  and r.result_id               > 0
+                  and r.task_assay_cd          != NULL
+                  and r.task_assay_cd           > 0
+ 
+join    dta     where dta.task_assay_cd         = r.task_assay_cd
+                  and dta.bb_result_processing_cd
+                                = request->resultmeanlist[d.seq].bb_result_processing_cd
+ 
+join    pr      where pr.result_id              = r.result_id
+                  and (pr.result_status_cd      = verified_status_cd
+                       or pr.result_status_cd   = corrected_status_cd)
+                  and pr.perform_result_id     != NULL
+                  and pr.perform_result_id      > 0
+ 
+join    re      where re.result_id              = r.result_id
+                  and re.perform_result_id      = pr.perform_result_id
+                  and re.event_type_cd          = pr.result_status_cd
+ 
+join    co      where co.container_id           = pr.container_id
+                  and co.specimen_id            > 0
+                  and co.specimen_id           != NULL
+ 
+join    pnl     where pnl.person_id             = re.event_personnel_id
+                  and re.event_personnel_id    != NULL
+                  and re.event_personnel_id     > 0
+ 
+join    d_n     where d_n.seq                   = 1
+ 
+join    n       where n.nomenclature_id         = pr.nomenclature_id
+                  and pr.nomenclature_id        > 0.0
+                  and pr.nomenclature_id       != NULL
+ 
+join    d_seo
+ 
+join    seo     where seo.specimen_id           = co.specimen_id
+                  and seo.active_ind            = 1
+ 
+order by cnvtdatetime(re.event_dt_tm)
+ 
+head report
+    select_ok_ind = 0
+    lCount = 0
+ 	facility_count = 0
+ 	FacilityIdxHold = 0
+ 
+detail
+	FacilityIdxHold = locateval(x_idx, 1, size(temp->Facilities, 5), e.loc_facility_cd, temp->Facilities[x_idx].enc_facility_cd)
+  	if (FacilityIdxHold <= 0)
+  		; transfusion service facility is not yet retrieved for this encounter facility.
+    	facility_count = facility_count + 1
+    	if (facility_count > size(temp->Facilities,5))
+   			stat = alterlist(temp->Facilities, facility_count + 9)
+    	endif
+ 
+ 		temp->Facilities[facility_count].enc_facility_cd = e.loc_facility_cd
+ 		temp->Facilities[facility_count].test_facility_cd = BbtGetFlexSpecTestingFacility (e.loc_facility_cd)
+ 
+    	FacilityIdxHold = facility_count
+    endif
+    testing_facility_cd = temp->Facilities[FacilityIdxHold].test_facility_cd
+ 
+	if (filter_by_facility = 1)
+		spec_in_facility = BBtCheckSpecimenInFacility(e.loc_facility_cd,testing_facility_cd,
+		pc_facility_cd,filter_by_facility)
+		if (spec_in_facility = 1)
+			call PopulateReply(NULL)
+		endif
+	else
+		call PopulateReply(NULL)
+	endif
+ 
+foot report
+    select_ok_ind = 1
+    if (facility_count > 0)
+        stat = alterlist(temp->Facilities, facility_count)
+	endif
+with  nocounter, dontcare(n), outerjoin(d_seo), nullreport
+ 
+/****************************************************************************
+*  Determine flexible specimen expiration where needed.                     *
+****************************************************************************/
+set facility_count = 0
+set FacilityIdxHold = 0
+for (lIdx = 1 to lCount)
+	; Load flexible specimen preferences one time for each transfusion service facility
+	set FacilityIdxHold = locateval(x_idx, 1, size(FacilityInfo->Facilities, 5), reply->qual[lIdx].testing_facility_cd,
+  								FacilityInfo->Facilities[x_idx].testing_facility_cd)
+  	if (FacilityIdxHold <= 0)
+  		; transfusion service facility has never been added to the structure.
+    	set facility_count = facility_count + 1
+    	if (facility_count > size(FacilityInfo->Facilities,5))
+   			set stat = alterlist(FacilityInfo->Facilities, facility_count + 9)
+    	endif
+ 
+ 		set FacilityInfo->Facilities[facility_count].testing_facility_cd = reply->qual[lIdx].testing_facility_cd
+ 		; read flexible specimen parameters set at transfusion service facility using LoadFlexParams()
+ 		call GetFlexSpecimenParams (facility_count, reply->qual[lIdx].encntr_facility_cd, 1, fillstring(10, " "))
+    	set FacilityIdxHold = facility_count
+    else
+    	call GetFlexSpecimenParams (FacilityIdxHold, reply->qual[lIdx].encntr_facility_cd, 0, fillstring(10, " "))
+   	endif
+ 
+   	if (FacilityInfo->Facilities[FacilityIdxHold].load_flex_params = -1)
+  		; Problem loading flexible specimen parameters, log and exit.
+        set count1 = count1 + 1
+ 
+        if (count1 > 1)
+            set stat = alterlist(reply->status_data->subeventstatus, count1)
+        endif
+ 
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[count1]->OperationName = "load flex spec params"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+        set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not load flex spec params"
+        go to EXIT_SCRIPT
+    endif
+ 
+    set reply->qual[lIdx].spec_flex_ind = flex_param_out->flex_on_ind
+ 
+    ; Determine if flexible specimen is turned on for this testing facility.
+    if (flex_param_out->flex_on_ind = 1)
+        ; Determine if specimen expiration override was found in the previous select.
+        if (reply->qual[lIdx].expiration_dt_tm = 0.0)
+        	; Get flexible specimen expiration.
+            set reply->qual[lIdx].expiration_dt_tm
+                = GetFlexExpirationForPerson( request->person_id,
+            	                              0.0,
+                                              reply->qual[lIdx].drawn_dt_tm,
+                                              reply->qual[lIdx].encntr_facility_cd,
+                                              0)
+ 
+            if (reply->qual[lIdx].expiration_dt_tm = -1)
+            	set count1 = count1 + 1
+         		if (count1 > 1)
+            		set stat = alterlist(reply->status_data->subeventstatus, count1)
+        		endif
+ 
+        		set reply->status_data->status = "F"
+        		set reply->status_data->subeventstatus[count1]->OperationName = "get flex expiration for person"
+       			set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+        		set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+        		set reply->status_data->subeventstatus[count1]->TargetObjectValue = "could not set expiration date time"
+        		go to EXIT_SCRIPT
+            endif
+        endif
+    endif
+endfor
+ 
+if (facility_count > 0)
+        set stat = alterlist(FacilityInfo->Facilities, facility_count)
+endif
+ 
+;Get historical names if history is stored
+if (reply->historical_demog_ind= 1)
+    for(lIdx = 1 to lCount)
+	    set dCurrentPersonId = request->person_id
+ 
+        select into "nl:"
+             pc.from_person_id
+        from person_combine_det pcd,
+             person_combine pc
+        plan pcd where pcd.entity_id = reply->qual[lIdx]->order_id
+                     and pcd.entity_name = "ORDERS"
+        join pc where pc.person_combine_id = pcd.person_combine_id
+                     and pc.active_status_cd = dActiveStatusCd
+                     and pc.active_status_dt_tm >= cnvtdatetime(reply->qual[lIdx]->drawn_dt_tm)
+                     and pc.active_ind = 1
+ 
+        order by pc.active_status_dt_tm
+ 
+        Head Report
+             dCurrentPersonId = pc.from_person_id
+        with nocounter
+ 
+        select into "nl:"
+              pnh.name_full
+        from person_name_hist pnh
+        plan pnh where pnh.person_id = dCurrentPersonId
+                  and pnh.name_type_cd = dCurrentNameTypeCd
+                  and pnh.transaction_dt_tm <= cnvtdatetime(datetimeadd(reply->qual[lIdx]->drawn_dt_tm, dMINUTE))
+                  and not exists (select
+                                      pcd.entity_id
+                                  from person_combine_det pcd
+                                  where pcd.entity_id = pnh.person_name_hist_id
+                                        and pcd.entity_name = "PERSON_NAME_HIST"
+                                        and pcd.combine_action_cd = dCombineAddCd)
+ 
+        order by pnh.transaction_dt_tm desc
+ 
+        Head Report
+    	     reply->qual[lIdx]->historical_name = pnh.name_full
+        with nocounter
+    endfor
+endif
+ 
+if (select_ok_ind != 1)
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[count1]->OperationName = "select"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_current_order_result"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "select for orders/results failed"
+endif
+ 
+ 
+#EXIT_SCRIPT
+if (reply->status_data->status != "F")
+    set reply->status_data->status = "S"
+endif
+ 
+;001 begin
+if (request->debug_ind = 1)
+    set item_cnt = cnvtint(size(reply->qual, 5))
+    call echo(build("STATUS: ",
+    reply->status_data->status  , " / ",
+    item_cnt,
+    reply->status_data->subeventstatus[1]->TargetObjectValue ))
+ 
+    for (item = 1 to item_cnt)
+        call echo(build("REPLY INFO ", item, ": ",
+        reply->qual[item].encntr_id            , " / ",
+        reply->qual[item].order_id             , " / ",
+        reply->qual[item].order_mnemonic       , " / ",
+        reply->qual[item].bb_processing_cd     , " / ",
+        reply->qual[item].result_id            , " / ",
+        reply->qual[item].task_assay_cd        , " / ",
+        reply->qual[item].mnemonic             , " / ",
+        reply->qual[item].bb_result_processing_cd , " / ",
+        reply->qual[item].result_status_cd     , " / ",
+        reply->qual[item].container_id         , " / ",
+        reply->qual[item].specimen_id          , " / ",
+        reply->qual[item].drawn_dt_tm          , " / ",
+        reply->qual[item].perform_result_id    , " / ",
+        reply->qual[item].pr_nomenclature_id   , " / ",
+        reply->qual[item].result_value_alpha   , " / ",
+        reply->qual[item].nomenclature_id      , " / ",
+        reply->qual[item].concept_identifier   , " / ",
+        reply->qual[item].concept_source_cd    , " / ",
+        reply->qual[item].result_code_set_cd   , " / ",
+        reply->qual[item].result_value_numeric , " / ",
+        reply->qual[item].event_dt_tm          , " / ",
+        reply->qual[item].event_personnel_id   , " / ",
+        reply->qual[item].username             , " / ",
+        reply->qual[item].accession            , " / ",
+        reply->qual[item].unformatted_accession , " / ",
+        reply->qual[item].accession_id         , " / ",
+        reply->qual[item].historical_name      , " / ",
+        reply->qual[item].interface_flag
+      ))
+    endfor
+endif
+;001
+ 
+subroutine PopulateReply(NULL)
+ 
+    if (request->current_only_ind = 1)
+        if (lCount = 0)
+            set lCount = 1
+            set stat = alterlist(reply->qual, lCount)
+        endif
+    else
+        set lCount = lCount + 1
+        set stat = alterlist(reply->qual, lCount)
+    endif
+ 
+    set reply->qual[lCount].encntr_id            = o.encntr_id
+    set reply->qual[lCount].order_id             = o.order_id
+    set reply->qual[lCount].order_mnemonic       = o.order_mnemonic
+    set reply->qual[lCount].bb_processing_cd     = sd.bb_processing_cd
+    set reply->qual[lCount].result_id            = r.result_id
+    set reply->qual[lCount].task_assay_cd        = r.task_assay_cd
+    set reply->qual[lCount].mnemonic             = dta.mnemonic
+    set reply->qual[lCount].bb_result_processing_cd = dta.bb_result_processing_cd
+    set reply->qual[lCount].result_status_cd     = r.result_status_cd
+    set reply->qual[lCount].container_id         = co.container_id
+    set reply->qual[lCount].specimen_id          = co.specimen_id
+    set reply->qual[lCount].drawn_dt_tm          = cnvtdatetime(co.drawn_dt_tm)
+    set reply->qual[lCount].perform_result_id    = pr.perform_result_id
+    set reply->qual[lCount].pr_nomenclature_id   = pr.nomenclature_id
+    set reply->qual[lCount].result_value_alpha   = pr.result_value_alpha
+    set reply->qual[lCount].nomenclature_id      = nomenclature_id_field
+    set reply->qual[lCount].concept_identifier   = concept_identifier_field
+    set reply->qual[lCount].concept_source_cd    = concept_source_cd_field
+    set reply->qual[lCount].result_code_set_cd   = pr.result_code_set_cd
+    set reply->qual[lCount].result_value_numeric = pr.result_value_numeric
+    set reply->qual[lCount].event_dt_tm          = cnvtdatetime(re.event_dt_tm)
+    set reply->qual[lCount].event_personnel_id   = re.event_personnel_id
+    set reply->qual[lCount].username             = pnl.username
+    set reply->qual[lCount].interface_flag       = pr.interface_flag
+    set reply->qual[lCount].accession            = accession_number
+    set reply->qual[lCount].unformatted_accession= aor.accession
+    set reply->qual[lCount].accession_id         = aor.accession_id
+    set reply->qual[lCount].encntr_facility_cd   = e.loc_facility_cd
+    set reply->qual[lCount].testing_facility_cd  = testing_facility_cd
+ 
+    if ((seo.specimen_id > 0.0) and (seo.active_ind = 1))
+        ; Found a specimen expiration override, set expiration_dt_tm accordingly.
+        set reply->qual[lCount].expiration_dt_tm = seo.new_spec_expire_dt_tm
+    endif
+ 
+end
+ 
+end
+ 
+go
+ 
+
+;Generated by GNU enscript 1.6.4.

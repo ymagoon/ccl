@@ -1,0 +1,379 @@
+ ;;Solution_Test/script/PathNet -- Common Services/pcs_add_res_cd_args/pcs_add_res_cd_args.prg Turn on black mode
+
+drop program pcs_add_res_cd_args:dba go
+create program pcs_add_res_cd_args:dba 
+
+/*
+record request 
+(
+  1 event_list[*]
+    2 contributor_system_cd = f8
+    2 reference_nbr = c100
+    2 ref_cd_list[*]
+      3 nomenclature_id = f8
+    2 microbiology_list[*]
+      3 micro_seq_nbr = i4
+      3 ref_cd_list[*]
+        4 nomenclature_id = f8
+      3 susceptibility_list[*]
+        4 suscep_seq_nbr = i4
+        4 ref_cd_list[*]
+          5 nomenclature_id = f8
+)
+*/
+
+record reply
+(
+  1 arg_list[*]
+    2 res_cd_arg_queue_id       = f8
+    2 contributor_system_cd     = f8
+    2 reference_nbr             = c100
+    2 arg_group_seq             = i2
+    2 arg_seq                   = i2
+    2 arg_name                  = vc
+    2 arg_value                 = f8
+    2 assignment_method_cd      = f8
+%i cclsource:status_block.inc
+)
+
+;Used to keep track of the next ARG_GROUP_SEQ for each CONTRIBUTOR_SYSTEM_CD/REFERENCE_NBR combo.
+record group_seq_rec 
+(
+  1 event_list[*]
+    2 contributor_system_cd   = f8
+    2 reference_nbr           = c100
+    2 group_seq               = i2
+)
+
+/***************************************************************************************************
+Constants, code values and other setup
+***************************************************************************************************/
+declare sSUSCEP_SEQ_NBR = vc with protect, constant("SUSCEP_SEQ_NBR")
+declare sMICRO_SEQ_NBR = vc with protect, constant("MICRO_SEQ_NBR")
+declare sNOMENCLATURE_ID = vc with protect, constant("NOMENCLATURE_ID")
+
+declare ASSIGN_METHOD_CD_SET = i4 with protect, constant(4002244)
+
+declare SUSC_ASSIGN_BY_ARG = f8 with protect, constant(uar_get_code_by("MEANING", ASSIGN_METHOD_CD_SET, "ARG_SUSCEP"))
+declare ORG_ASSIGN_BY_ARG = f8 with protect, constant(uar_get_code_by("MEANING", ASSIGN_METHOD_CD_SET, "ARG_ORG"))
+declare EVENT_ASSIGN_BY_ARG = f8 with protect, constant(uar_get_code_by("MEANING", ASSIGN_METHOD_CD_SET, "ARG_EVENT"))
+
+declare lIdx = i4 with protect, noconstant(0)
+
+/***************************************************************************************************
+Determine the arguments for the event
+NOMENCLATURE_ID     The NOMENCLATURE_ID(s) for the REF_CD being assigned
+***************************************************************************************************/
+select into "nl:" 
+  contributor_system_cd = request->event_list[d1.seq].contributor_system_cd,
+  reference_nbr = request->event_list[d1.seq].reference_nbr,
+  nomenclature_id = request->event_list[d1.seq].ref_cd_list[d2.seq].nomenclature_id
+from 
+  (dummyt d1 with seq = size(request->event_list, 5)),
+  dummyt d2
+plan d1
+  where maxrec(d2, size(request->event_list[d1.seq].ref_cd_list, 5))
+join d2
+
+order by contributor_system_cd, reference_nbr, d1.seq
+  
+head report
+  c = 0  
+  el_idx = 0
+  group_seq = 0
+  
+head contributor_system_cd
+  row +0
+  
+head reference_nbr
+  el_idx = locateval(lIdx, 1, size(group_seq_rec->event_list, 5), 
+            contributor_system_cd, group_seq_rec->event_list[lIdx].contributor_system_cd, 
+            reference_nbr, group_seq_rec->event_list[lIdx].reference_nbr)
+  
+  if (el_idx = 0)
+    el_idx = size(group_seq_rec->event_list, 5) + 1
+    stat = alterlist(group_seq_rec->event_list, el_idx)
+    group_seq_rec->event_list[el_idx].contributor_system_cd = contributor_system_cd
+    group_seq_rec->event_list[el_idx].reference_nbr = reference_nbr
+    group_seq_rec->event_list[el_idx].group_seq = 0
+  else
+    group_seq_rec->event_list[el_idx].group_seq = group_seq_rec->event_list[el_idx].group_seq + 1
+  endif
+  
+  arg_seq = 0
+  group_seq = group_seq_rec->event_list[el_idx].group_seq
+  
+head d1.seq
+  stat = alterlist(reply->arg_list, c + size(request->event_list[d1.seq].ref_cd_list, 5))
+
+detail
+  c = c + 1
+  
+  reply->arg_list[c].contributor_system_cd = contributor_system_cd
+  reply->arg_list[c].reference_nbr = reference_nbr
+  reply->arg_list[c].arg_group_seq = group_seq
+  reply->arg_list[c].arg_seq = arg_seq
+  reply->arg_list[c].arg_name = sNOMENCLATURE_ID
+  reply->arg_list[c].arg_value = nomenclature_id
+  reply->arg_list[c].assignment_method_cd = EVENT_ASSIGN_BY_ARG
+
+  arg_seq = arg_seq + 1
+  
+with nocounter
+
+/***************************************************************************************************
+Determine the arguments for the MICROBIOLOGY_LIST
+MICRO_SEQ_NBR       The MICRO_SEQ_NBR associated to the organism
+NOMENCLATURE_ID     The NOMENCLATURE_ID(s) for the REF_CD being assigned
+***************************************************************************************************/
+select into "nl:" 
+  contributor_system_cd = request->event_list[d1.seq].contributor_system_cd,
+  reference_nbr = request->event_list[d1.seq].reference_nbr,
+  micro_seq_nbr = request->event_list[d1.seq].microbiology_list[d2.seq].micro_seq_nbr,
+  nomenclature_id = request->event_list[d1.seq].microbiology_list[d2.seq].ref_cd_list[d3.seq].nomenclature_id
+from 
+  (dummyt d1 with seq = size(request->event_list, 5)),
+  dummyt d2, 
+  dummyt d3
+plan d1
+  where maxrec(d2, size(request->event_list[d1.seq].microbiology_list, 5))
+join d2
+  where maxrec(d3, size(request->event_list[d1.seq].microbiology_list[d2.seq].ref_cd_list, 5))
+join d3
+
+order by contributor_system_cd, reference_nbr, micro_seq_nbr, d1.seq, d2.seq
+
+head report
+  c = size(reply->arg_list, 5)
+  el_idx = 0
+  group_seq = 0
+  
+head contributor_system_cd
+  row +0
+  
+head reference_nbr
+  row +0
+  
+head micro_seq_nbr
+  el_idx = locateval(lIdx, 1, size(group_seq_rec->event_list, 5), 
+            contributor_system_cd, group_seq_rec->event_list[lIdx].contributor_system_cd, 
+            reference_nbr, group_seq_rec->event_list[lIdx].reference_nbr)
+  
+  if (el_idx = 0)
+    el_idx = size(group_seq_rec->event_list, 5) + 1
+    stat = alterlist(group_seq_rec->event_list, el_idx)
+    group_seq_rec->event_list[el_idx].contributor_system_cd = contributor_system_cd
+    group_seq_rec->event_list[el_idx].reference_nbr = reference_nbr
+    group_seq_rec->event_list[el_idx].group_seq = 0
+  else
+    group_seq_rec->event_list[el_idx].group_seq = group_seq_rec->event_list[el_idx].group_seq + 1
+  endif
+  
+  group_seq = group_seq_rec->event_list[el_idx].group_seq
+
+  c = c + 1
+  stat = alterlist(reply->arg_list, c)
+  
+  reply->arg_list[c].contributor_system_cd = contributor_system_cd
+  reply->arg_list[c].reference_nbr = reference_nbr
+  reply->arg_list[c].arg_group_seq = group_seq
+  reply->arg_list[c].arg_seq = 0
+  reply->arg_list[c].arg_name = sMICRO_SEQ_NBR
+  reply->arg_list[c].arg_value = micro_seq_nbr
+  reply->arg_list[c].assignment_method_cd = ORG_ASSIGN_BY_ARG  
+  
+  arg_seq = 1
+  
+head d1.seq
+  row +0
+  
+head d2.seq
+  stat = alterlist(reply->arg_list, c + size(request->event_list[d1.seq].microbiology_list[d2.seq].ref_cd_list, 5))
+
+detail
+  c = c + 1
+  
+  reply->arg_list[c].contributor_system_cd = contributor_system_cd
+  reply->arg_list[c].reference_nbr = reference_nbr
+  reply->arg_list[c].arg_group_seq = group_seq
+  reply->arg_list[c].arg_seq = arg_seq
+  reply->arg_list[c].arg_name = sNOMENCLATURE_ID
+  reply->arg_list[c].arg_value = nomenclature_id
+  reply->arg_list[c].assignment_method_cd = ORG_ASSIGN_BY_ARG
+  
+  arg_seq = arg_seq + 1
+
+with nocounter
+
+/***************************************************************************************************
+Determine the arguments for the SUSCEPTIBILITY_LIST
+MICRO_SEQ_NBR       The MICRO_SEQ_NBR associated to the organism the susceptibility is for
+SUSCEP_SEQ_NBR      The SUSCEP_SEQ_NBR associated to the susceptibility 
+NOMENCLATURE_ID     The NOMENCLATURE_ID(s) for the REF_CD being assigned
+***************************************************************************************************/
+select into "nl:" 
+  contributor_system_cd = request->event_list[d1.seq].contributor_system_cd,
+  reference_nbr = request->event_list[d1.seq].reference_nbr,
+  micro_seq_nbr = request->event_list[d1.seq].microbiology_list[d2.seq].micro_seq_nbr,
+  suscep_seq_nbr = request->event_list[d1.seq].microbiology_list[d2.seq].susceptibility_list[d3.seq].suscep_seq_nbr,
+  nomenclature_id = request->event_list[d1.seq].microbiology_list[d2.seq].susceptibility_list[d3.seq]
+                          .ref_cd_list[d4.seq].nomenclature_id
+from 
+  (dummyt d1 with seq = size(request->event_list, 5)),
+  dummyt d2, 
+  dummyt d3, 
+  dummyt d4
+plan d1
+  where maxrec(d2, size(request->event_list[d1.seq].microbiology_list, 5))
+join d2
+  where maxrec(d3, size(request->event_list[d1.seq].microbiology_list[d2.seq].susceptibility_list, 5))
+join d3
+  where maxrec(d4, size(request->event_list[d1.seq].microbiology_list[d2.seq].susceptibility_list[d3.seq].ref_cd_list, 5))
+join d4
+
+order by contributor_system_cd, reference_nbr, micro_seq_nbr, d1.seq, d2.seq, d3.seq
+
+head report
+  c = size(reply->arg_list, 5)
+  el_idx = 0
+  group_seq = 0
+  
+head contributor_system_cd
+  row +0
+  
+head reference_nbr
+  row +0
+  
+head micro_seq_nbr
+  row +0
+  
+head suscep_seq_nbr
+  el_idx = locateval(lIdx, 1, size(group_seq_rec->event_list, 5), 
+            contributor_system_cd, group_seq_rec->event_list[lIdx].contributor_system_cd, 
+            reference_nbr, group_seq_rec->event_list[lIdx].reference_nbr)
+  
+  if (el_idx = 0)
+    el_idx = size(group_seq_rec->event_list, 5) + 1
+    stat = alterlist(group_seq_rec->event_list, el_idx)
+    group_seq_rec->event_list[el_idx].contributor_system_cd = contributor_system_cd
+    group_seq_rec->event_list[el_idx].reference_nbr = reference_nbr
+    group_seq_rec->event_list[el_idx].group_seq = 0
+  else
+    group_seq_rec->event_list[el_idx].group_seq = group_seq_rec->event_list[el_idx].group_seq + 1
+  endif
+  
+  arg_seq = 0
+  group_seq = group_seq_rec->event_list[el_idx].group_seq
+
+  c = c + 1
+  stat = alterlist(reply->arg_list, c + 1)
+  
+  reply->arg_list[c].contributor_system_cd = contributor_system_cd
+  reply->arg_list[c].reference_nbr = reference_nbr
+  reply->arg_list[c].arg_group_seq = group_seq
+  reply->arg_list[c].arg_seq = 0
+  reply->arg_list[c].arg_name = sMICRO_SEQ_NBR
+  reply->arg_list[c].arg_value = micro_seq_nbr
+  reply->arg_list[c].assignment_method_cd = SUSC_ASSIGN_BY_ARG  
+  
+  arg_seq = arg_seq + 1
+  
+  c = c + 1
+  reply->arg_list[c].contributor_system_cd = contributor_system_cd
+  reply->arg_list[c].reference_nbr = reference_nbr
+  reply->arg_list[c].arg_group_seq = group_seq
+  reply->arg_list[c].arg_seq = 1
+  reply->arg_list[c].arg_name = sSUSCEP_SEQ_NBR
+  reply->arg_list[c].arg_value = suscep_seq_nbr
+  reply->arg_list[c].assignment_method_cd = SUSC_ASSIGN_BY_ARG  
+  
+  arg_seq = 2
+  
+head d1.seq
+  row +0
+  
+head d2.seq
+  row +0
+  
+head d3.seq
+  stat = alterlist(reply->arg_list, c + size(request->event_list[d1.seq].microbiology_list[d2.seq]
+                           .susceptibility_list[d3.seq].ref_cd_list, 5))
+ 
+detail
+  c = c + 1
+  
+  reply->arg_list[c].contributor_system_cd = contributor_system_cd
+  reply->arg_list[c].reference_nbr = reference_nbr
+  reply->arg_list[c].arg_group_seq = group_seq
+  reply->arg_list[c].arg_seq = arg_seq
+  reply->arg_list[c].arg_name = sNOMENCLATURE_ID
+  reply->arg_list[c].arg_value = nomenclature_id
+  reply->arg_list[c].assignment_method_cd = SUSC_ASSIGN_BY_ARG
+  
+  arg_seq = arg_seq + 1
+with nocounter
+
+/***************************************************************************************************
+Check for Z status
+***************************************************************************************************/
+if (size(reply->arg_list, 5) = 0) 
+  set reply->status_data.status = "Z"
+  go to exit_script
+endif
+
+/***************************************************************************************************
+Get ID values from sequence
+***************************************************************************************************/
+for (i = 1 to size(reply->arg_list, 5))
+  select into "nl:" 
+    y = seq(pathnet_seq, nextval)
+  from 
+    dual d
+  detail
+    reply->arg_list[i].res_cd_arg_queue_id = y
+  with nocounter
+endfor
+
+/***************************************************************************************************
+DELETE from RES_CD_ARG_QUEUE old/stale rows
+***************************************************************************************************/
+if (not validate(req1040001))
+  execute pcs_del_res_cd_args with replace("REPLY", "REP1040002") 
+else
+  execute pcs_del_res_cd_args with replace("REQUEST", "REQ1040001"), replace("REPLY", "REP1040002") 
+endif
+    
+/***************************************************************************************************
+INSERT into RES_CD_ARG_QUEUE
+***************************************************************************************************/
+insert into 
+  res_cd_arg_queue r,
+  (dummyt d with seq = size(reply->arg_list, 5))
+set
+  r.res_cd_arg_queue_id = reply->arg_list[d.seq].res_cd_arg_queue_id,
+  r.contributor_system_cd = reply->arg_list[d.seq].contributor_system_cd,
+  r.reference_nbr_txt = reply->arg_list[d.seq].reference_nbr,
+  r.arg_group_seq = reply->arg_list[d.seq].arg_group_seq,
+  r.arg_seq = reply->arg_list[d.seq].arg_seq,
+  r.arg_name = reply->arg_list[d.seq].arg_name,
+  r.arg_value = reply->arg_list[d.seq].arg_value,
+  r.assignment_method_cd = reply->arg_list[d.seq].assignment_method_cd,
+  r.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+  r.updt_id = reqinfo->updt_id,
+  r.updt_task = reqinfo->updt_task,
+  r.updt_cnt = 0,
+  r.updt_applctx = reqinfo->updt_applctx
+plan d
+join r
+with nocounter
+
+set reply->status_data.status = "S"
+set reqinfo->commit_ind = 1
+
+#exit_script
+
+free set group_seq_rec
+
+end go
+
+;Generated by GNU enscript 1.6.4.

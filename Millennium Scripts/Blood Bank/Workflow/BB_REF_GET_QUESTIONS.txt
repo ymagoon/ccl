@@ -1,0 +1,219 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/R_BBRefQuestion/BB_REF_GET_QUESTIONS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Request #:              225814
+
+        Product:                PathNet
+        Product Team:           Blood Bank
+
+        Program purpose:        Retrieve all answers to questions
+
+        Executing from:         include\BBRefQuestions.cls
+        Special Notes:          NONE
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 06/12/00 Lawrence Dsouza      Initial Release                     *
+;     002 07/20/01 Gary Runde           Look for response flag of five      *
+;     003 01/09/02 Sasi Gandham         Add Order by for the Head           *
+;     004 03/21/03 John Rieck           Returning answer code value info if *
+;                                       necessary.                          *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+DROP PROGRAM   bb_ref_get_questions:dba GO
+CREATE PROGRAM bb_ref_get_questions:dba
+
+/*
+RECORD request
+(
+
+  1  qual[*]
+     2 cdf_meaning = c12
+)
+*/
+
+RECORD reply
+(
+  1  question[*]
+     2 module_cd               = f8
+     2 module_display          = vc
+     2 module_meaning          = vc
+     2 process_cd              = f8
+     2 process_display         = vc
+     2 process_meaning         = vc
+     2 question_cd             = f8
+     2 question_meaning        = vc
+     2 question                = vc
+     2 response_length         = i4
+     2 response_type           = i2
+     2 code_set                = i4
+     2 default_answer_cd       = f8
+     2 default_answer_meaning  = vc
+     2 default_answer_alpha    = vc
+     2 default_answer_numeric  = i4
+     2 default_answer_boolean  = i2
+     2 answer[*]
+       3 answer_cd               = f8
+       3 answer_disp             = c40
+       3 answer_desc             = c60
+       3 answer_mean             = c12
+       3 answer_meaning          = vc
+       3 answer_alpha            = vc
+       3 answer_numeric          = i4
+       3 answer_boolean          = i2
+
+
+%i cclsource:status_block.inc
+)
+
+/***********************************************************************
+*   Script                                                             *
+***********************************************************************/
+DECLARE nRequestSize = i2
+DECLARE nIdx = i2
+DECLARE nAnswerCnt = i2
+
+SET CODESET  = 0
+SET RESPONSECODE = 1
+SET NUMERIC = 2
+SET ALPHANUMERIC  = 3
+SET BOOLEAN = 4
+
+SET sErrorMsg = FILLSTRING(255," ")
+SET sError_Check = ERROR(sErrorMsg,1)
+
+SET nRequestSize = SIZE(request->qual,5)
+SET stat = ALTERLIST(reply->question,nRequestSize)
+
+FOR (nIdx = 1 TO nRequestSize)
+   SET reply->question[nIdx]->question_meaning = request->qual[nIdx]->cdf_meaning
+   SET stat = uar_get_meaning_by_codeset(1661, request->qual[nIdx]->cdf_meaning, 1, reply->question[nIdx]->question_cd)
+   IF (reply->question[nIdx]->question_cd = 0)
+      SET reply->status_data->status = "F"
+      SET reply->status_data->subeventstatus[1]->TargetObjectValue =
+              BUILD("Code lookup for question ", request->qual[nIdx]->cdf_meaning, "failed")
+      GO TO EXIT_SCRIPT
+   ENDIF
+ENDFOR
+
+SELECT  INTO "nl:"
+    *
+FROM
+   question q
+   ,answer a
+   ,(dummyt d1 WITH seq = VALUE(nRequestSize))
+PLAN d1
+JOIN q
+   WHERE q.question_cd = reply->question[d1.seq]->question_cd
+     AND q.active_ind = 1
+JOIN a
+   WHERE q.question_cd = a.question_cd
+     AND a.active_ind = 1
+
+ORDER BY q.question_cd
+
+HEAD q.question_cd
+   reply->question[d1.seq]->module_cd       = q.module_cd
+   reply->question[d1.seq]->module_display  = uar_get_code_display(q.module_cd)
+   reply->question[d1.seq]->module_meaning  = uar_get_code_meaning(q.module_cd)
+   reply->question[d1.seq]->process_cd      = q.process_cd
+   reply->question[d1.seq]->process_display  = uar_get_code_display(q.process_cd)
+   reply->question[d1.seq]->process_meaning  = uar_get_code_meaning(q.process_cd)
+   reply->question[d1.seq]->question        = q.question
+   reply->question[d1.seq]->response_length = q.response_length
+   reply->question[d1.seq]->response_type   = q.response_flag
+   reply->question[d1.seq]->code_set        = q.code_set
+   nAnswerCnt = 0
+DETAIL
+   nAnswerCnt = nAnswerCnt + 1
+   stat = ALTERLIST(reply->question[d1.seq]->answer,nAnswerCnt)
+
+   IF (q.response_flag = RESPONSECODE or q.response_flag = CODESET)
+      IF (TRIM(q.def_answer) = "")
+         reply->question[d1.seq]->default_answer_cd  = 0
+         reply->question[d1.seq]->default_answer_meaning  = ""
+      ELSE
+         reply->question[d1.seq]->default_answer_cd  = CNVTREAL(q.def_answer)
+         IF (reply->question[d1.seq]->default_answer_cd = 0)
+            reply->question[d1.seq]->default_answer_meaning = ""
+         ELSE
+            reply->question[d1.seq]->default_answer_meaning = uar_get_code_meaning(CNVTREAL(q.def_answer))
+         ENDIF
+      ENDIF
+      IF (TRIM(a.answer) = "")
+         reply->question[d1.seq]->answer[nAnswerCnt]->answer_cd  = 0
+      ELSE
+         reply->question[d1.seq]->answer[nAnswerCnt]->answer_cd  = CNVTREAL(a.answer)
+         IF (reply->question[d1.seq]->answer[nAnswerCnt]->answer_cd = 0)
+            reply->question[d1.seq]->answer[nAnswerCnt]->answer_meaning  = ""
+         ELSE
+            reply->question[d1.seq]->answer[nAnswerCnt]->answer_meaning  = uar_get_code_meaning(CNVTREAL(a.answer))
+         ENDIF
+      ENDIF
+   ELSEIF(q.response_flag in (ALPHANUMERIC, 5))
+      reply->question[d1.seq]->default_answer_alpha = q.def_answer
+      reply->question[d1.seq]->answer[nAnswerCnt]->answer_alpha = a.answer
+   ELSEIF(q.response_flag = NUMERIC)
+      IF (TRIM(q.def_answer) = "")
+         reply->question[d1.seq]->default_answer_numeric  = 0
+      ELSE
+         reply->question[d1.seq]->default_answer_numeric = CNVTINT(q.def_answer)
+      ENDIF
+      IF (TRIM(a.answer) = "")
+         reply->question[d1.seq]->answer[nAnswerCnt]->answer_numeric = 0
+      ELSE
+         reply->question[d1.seq]->answer[nAnswerCnt]->answer_numeric = CNVTINT(a.answer)
+      ENDIF
+   ELSEIF(q.response_flag = BOOLEAN)
+      IF (TRIM(q.def_answer) = "1")
+         reply->question[d1.seq]->default_answer_boolean = 1
+      ELSE
+         reply->question[d1.seq]->default_answer_boolean = 0
+      ENDIF
+      IF (TRIM(a.answer) = "1")
+         reply->question[d1.seq]->answer[nAnswerCnt]->answer_boolean = 1
+      ELSE
+         reply->question[d1.seq]->answer[nAnswerCnt]->answer_boolean = 0
+      ENDIF
+   ENDIF
+WITH NOCOUNTER
+
+SET sError_Check = ERROR(sErrorMsg,0)
+IF (sError_Check = 0)
+   IF (CURQUAL > 0)
+      SET reply->status_data->status = "S"
+   ELSE
+      SET reply->status_data->status = "Z"
+   ENDIF
+ELSE
+   SET reply->status_data->status = "F"
+   SET reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+ENDIF
+
+#EXIT_SCRIPT
+END GO
+
+;Generated by GNU enscript 1.6.4.

@@ -1,0 +1,1084 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_upd_rr_results/GLB_UPD_RR_RESULTS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_UPD_RR_RESULTS.PRG
+        Object name:            GLB_UPD_RR_RESULTS
+        Request #:              257577
+
+        Product:                General Lab - Round Robin
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Update RR Results
+                                into the database
+
+        Tables read:            rr_result
+                                rr_perform_Result
+				rr_result_event
+
+        Tables updated:         rr_result
+                                rr_perform_result
+                                rr_result_event
+
+        Executing from:         General Lab RR Result Entry
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 12/23/98 Gary Runde           Initial Release                     *
+;    *001 06/22/00 Gary Runde           Write perform_personnel_id of user  *
+;                                       assigned to instrument              *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_UPD_RR_RESULTS:dba go
+      create program GLB_UPD_RR_RESULTS:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 use_Req_dt_tm_ind            = i2
+         1 event_dt_tm                  = dq8
+         1 event_personnel_id           = f8
+         1 event_type_cd                = f8
+         1 accession_id                 = f8
+         1 round_robin_ref_id           = f8
+         1 rr_results[x]
+           2 rr_result_id               = f8
+           2 rr_perform_result_id       = f8
+           2 perform_personnel_id       = f8
+           2 service_resource_cd        = f8
+           2 task_assay_cd              = f8
+           2 result_status_cd           = f8
+           2 perform_dt_tm              = dq8
+           2 result_value_numeric       = f8
+           2 result_updt_cnt            = i4
+           2 perform_result_updt_cnt	= i4
+           2 repeat_nbr			        = i4
+           2 repeat_ind                 = i2   ;1 = repeating a test
+           2 perform_ind                = i2   ;1 = performed/repreformed
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+         1  event_dt_tm                  = dq8
+         1  rr_results[*]
+	       2  service_resource_cd 	    = f8
+               2  task_assay_cd             = f8
+               2  rr_result_id              = f8
+               2  rr_perform_result_id      = f8
+               2  perform_dt_tm             = dq8
+               2  updt_id                   = f8
+               2  result_updt_cnt           = i4
+               2  perform_result_updt_cnt   = i4
+               2  result_status_cd          = f8
+%i cclsource:status_block.inc
+)
+
+      record dateformat
+      (
+	  1 current_perform_dt_tm    = dq8
+	  1 system_dt_tm	     = dq8
+      )
+
+
+      set dateformat->system_dt_tm = cnvtdatetime(curdate, curtime3)
+      set reply->status_data->status = "F"
+
+      /***********************************************************************
+      * Get RoundRobinID subroutine                                             *
+      ***********************************************************************/
+      declare Get_RR_ID( accession_id ) = i4
+      subroutine Get_RR_ID( accession_id )
+
+set sText = build("Upd_rr_results GetRRID accnID: ", accession_id)
+call uar_SysEvent(hSys, 3, "GetRRID", NULLTERM(sText))
+
+	select into "nl:"
+		ra.accession_id,
+		ra.round_robin_ref_id
+	from rr_accession_r ra
+	where ra.accession_id = accession_id
+	detail
+		gRound_robin_ref_id = ra.round_robin_ref_id
+	with maxqual(ra, 1), nocounter
+
+              if (curqual = 0)
+               set reply->status_data.subeventstatus[1].OperationName =
+                  "GETRRID"
+               set reply->status_data.subeventstatus[1].OperationStatus =
+                  "F"
+               set reply->status_data.subeventstatus[1].TargetObjectName =
+                  "RR ACCESSION R"
+               set reply->status_data.subeventstatus[1].TargetObjectValue =
+                  build("Cound not find accession_id"
+                         , accession_id)
+              endif
+
+	      return(curqual)
+	end
+
+      /***********************************************************************
+      * Insert result subroutine                                             *
+      ***********************************************************************/
+      declare insert_result( none ) = i4
+      subroutine insert_result( none )
+
+set sText = "Insert Result"
+call uar_SysEvent(hSys, 3, "UPD_RR_RESULTS Insert Result", NULLTERM(sText))
+
+      select into "nl:"
+      	next_seq_nbr = seq(pathnet_seq,nextval) "######################;rp0"
+      from dual
+      detail
+      	ginsert_rr_result_id = next_seq_nbr
+      with nocounter, format
+
+      /* Insert result record */
+      insert into
+      		rr_result rr1
+      set
+	    	rr1.rr_result_id 	= ginsert_rr_result_id,
+	    	rr1.round_robin_ref_id	= gRound_Robin_ref_id,
+	    	rr1.accession_id 	= request->accession_id,
+	    	rr1.service_Resource_cd = request->rr_results[ridx].service_resource_cd,
+	    	rr1.task_assay_cd	= request->rr_results[ridx].task_assay_cd,
+	    	rr1.result_status_cd    = request->rr_results[ridx].result_status_cd,
+           	rr1.updt_dt_tm          = cnvtdatetime(curdate,curtime3),
+           	rr1.updt_cnt            = 0,
+           	rr1.updt_task           = reqinfo->updt_task,
+           	rr1.updt_id             = reqinfo->updt_id,
+    		rr1.updt_applctx        = reqinfo->updt_applctx
+
+      plan rr1
+
+      with
+      	nocounter
+
+              if (curqual = 0)
+               set reply->status_data.subeventstatus[1].OperationName =
+                  "INSERT"
+               set reply->status_data.subeventstatus[1].OperationStatus =
+                  "F"
+               set reply->status_data.subeventstatus[1].TargetObjectName =
+                  "RR RESULT"
+               set reply->status_data.subeventstatus[1].TargetObjectValue =
+                        "Unable to insert result"
+              endif
+
+      return(curqual)
+      end
+
+/*********002 start new code ************************/
+      /********************************************************************************
+      * Get person_id of user assigned to instrument to write perform_personnel_id    *
+      ********************************************************************************/
+         subroutine get_perform_personnel_id( nonePerfID )
+
+             ;if the interface flag is greater than zero then this came from the instrument
+             if (request->rr_results[ridx].perform_personnel_id = 0.0)
+                   ;if from instrument read the INSTRUMENT_ASSIGNMENT table to see
+                   ;if anyone is logged into this instrument currently
+                   select into "nl:"
+                      ia.service_resource_cd,
+                      ia.prsnl_id
+                   from
+                      instrument_assignment ia
+                   plan ia where ia.service_resource_cd =
+                                      request->rr_results[ridx].service_resource_cd
+                             and ia.active_ind = 1
+                             and cnvtdatetime(curdate,curtime3) between
+                                      ia.beg_effective_dt_tm and ia.end_effective_dt_tm
+                   detail
+                       ;if a person is found, then use it as the perform_personnel_id on the
+                       ;perform_result table
+                       request->rr_results[ridx].perform_personnel_id =
+                                      ia.prsnl_id
+                   with nocounter
+             endif
+         end
+/*********002 end new code ************************/
+
+      /***********************************************************************
+      * Update result subroutine                                             *
+      * Sets the result status code of the result_id arg to the req status cd*
+      ***********************************************************************/
+      	declare curr_updt_cnt = i4
+	declare update_result ( arg_rr_result_id ) = i4
+	subroutine update_result( arg_rr_result_id )
+
+set sText = BUILD("UPDATE RESULT ID: ", ARG_RR_RESULT_ID)
+call uar_SysEvent(hSys, 3, "UPD_RR_RESULTS UPDATE Result", NULLTERM(sText))
+
+	      /****************************
+	      * Lock rows for update      *
+      	      ****************************/
+              set curr_updt_cnt = -1
+	      select into "nl:"
+		rr.updt_cnt
+	      from rr_result rr
+	      where rr.rr_result_id = value(arg_rr_result_id)
+	      detail
+			curr_updt_cnt = rr.updt_cnt
+	      with nocounter, forupdate(rr)
+            /***************************************************/
+            /* Check to make sure rows haven't been update yet */
+            /***************************************************/
+            if (curr_updt_cnt !=
+                request->rr_results[ridx].result_updt_cnt)
+               set reply->status_data.subeventstatus[1].OperationName =
+                  "SELECT"
+               set reply->status_data.subeventstatus[1].OperationStatus =
+                  "F"
+               set reply->status_data.subeventstatus[1].TargetObjectName =
+                  "RR RESULT TABLE"
+               set reply->status_data.subeventstatus[1].TargetObjectValue =
+                  build("Result update count has already been updated",
+                        " for result_id =", arg_rr_result_id)
+               return(0)
+            endif
+	      /****************************
+	      * Update rr_result rows     *
+      	      ****************************/
+	      update into
+		rr_result rr
+	      set
+		rr.result_status_cd 	= request->rr_results[ridx].result_status_cd,
+            	rr.updt_dt_tm          	= cnvtdatetime(curdate,curtime3),
+            	rr.updt_cnt            	= rr.updt_cnt + 1,
+            	rr.updt_task           	= reqinfo->updt_task,
+            	rr.updt_id             	= reqinfo->updt_id,
+            	rr.updt_applctx        	= reqinfo->updt_applctx
+              where rr.rr_result_id = value(arg_rr_result_id)
+	      with nocounter
+              if (curqual = 0)
+               set reply->status_data.subeventstatus[1].OperationName =
+                  "UPDATE"
+               set reply->status_data.subeventstatus[1].OperationStatus =
+                  "F"
+               set reply->status_data.subeventstatus[1].TargetObjectName =
+                  "RR RESULT TABLE"
+               set reply->status_data.subeventstatus[1].TargetObjectValue =
+                  build("Unable to update record",
+                        " for result_id =", arg_rr_result_id)
+              endif
+
+	      return(curqual)
+
+	end
+
+      /********************************************************************/
+      /* determine if previous result exists                              */
+      /********************************************************************/
+
+	declare read_result ( arg_round_rbn_ref_id,
+				arg_task_assay_cd,
+				arg_service_resource_cd,
+				arg_accession_id ) = i4
+	subroutine read_result ( arg_round_rbn_ref_id,
+				arg_task_assay_cd,
+				arg_service_resource_cd,
+				arg_accession_id )
+
+call echo(build("res: ", arg_service_resource_cd))
+call echo(build("assay: ", arg_task_assay_cd))
+set sText = BUILD("READ RESULT RRID: ", ARG_ROUND_RBN_ref_ID)
+call uar_SysEvent(hSys, 3, "UPD_RR_RESULTS READ RESULT1", NULLTERM(sText))
+
+	select into "nl:"
+		rr.task_assay_cd,
+		rr.round_robin_ref_id,
+		rr.service_resource_cd,
+		rr.accession_id
+	from rr_result rr
+	where rr.round_robin_ref_id = value(arg_round_rbn_ref_id)
+		and rr.task_assay_cd = value(arg_task_assay_cd)
+		and rr.service_resource_cd = value(arg_service_resource_cd)
+		and rr.accession_id = value(arg_accession_id)
+	with nocounter
+
+    if (curqual > 0)
+      set reply->status_data.subeventstatus[1].OperationName =
+           "READRESULT"
+      set reply->status_data.subeventstatus[1].OperationStatus =
+            "F"
+      set reply->status_data.subeventstatus[1].TargetObjectName =
+            "RR RESULT"
+      set reply->status_data.subeventstatus[1].TargetObjectValue =
+            "Previous Result already exists"
+    endif
+	return(curqual)
+    end
+
+
+      /********************************************************************/
+      /* Insert Peform Result Row                                         */
+      /********************************************************************/
+      declare insert_perform_result( arg_rr_result_id ) = i4
+      subroutine insert_perform_result( arg_rr_result_id )
+
+set sText = BUILD("INSERT PERFORM RESULT RRRESULTid: ", ARG_RR_RESULT_ID)
+call uar_SysEvent(hSys, 3, "UPD_RR_RESULTS INSERT PERFORM RESULT", NULLTERM(sText))
+
+      ; Generate sequence for result insert
+      select into "nl:"
+      	   next_seq_nbr = seq(pathnet_seq,nextval) "######################;rp0"
+      from dual
+      detail
+           current_rr_perform_result_id = next_seq_nbr
+      with nocounter, format
+
+      if (request->use_req_dt_tm_ind = 0)
+           set request->rr_results[ridx].perform_dt_tm = dateformat->system_dt_tm
+      endif
+
+      /************************************/                     ;002
+      /* Get Perform personnel id         */                     ;002
+      /************************************/                     ;002
+      call get_perform_personnel_id(0)                           ;002
+
+
+      /* Insert result record */
+      insert into
+      	rr_perform_result rp
+      set
+            rp.rr_perform_result_id = current_rr_perform_result_id,
+            rp.rr_result_id        	= value(arg_rr_result_id),
+            rp.perform_personnel_id = request->rr_results[ridx].perform_personnel_id,
+            rp.numeric_result_value = request->rr_results[ridx].result_value_numeric,
+            rp.perform_dt_tm 	= cnvtdatetime( request->rr_results[ridx].perform_dt_tm ),
+            rp.result_status_cd    	= request->rr_results[ridx].result_status_cd,
+            rp.repeat_nbr		= request->rr_results[ridx].repeat_nbr,
+            rp.updt_dt_tm          	= cnvtdatetime(curdate,curtime3),
+            rp.updt_cnt            	= 0,
+            rp.updt_task           	= reqinfo->updt_task,
+            rp.updt_id             	= reqinfo->updt_id,
+            rp.updt_applctx        	= reqinfo->updt_applctx
+      with nocounter
+
+      if (curqual = 0)
+               set reply->status_data.subeventstatus[1].OperationName =
+                  "INSERT"
+               set reply->status_data.subeventstatus[1].OperationStatus =
+                  "F"
+               set reply->status_data.subeventstatus[1].TargetObjectName =
+                  "RR PERFORM RESULT"
+               set reply->status_data.subeventstatus[1].TargetObjectValue =
+                  build("Could not insert perform result id ",
+				current_rr_perform_result_id)
+      endif
+
+      return(curqual)
+      end
+
+      /********************************************************************/
+      /* Update Peform Result Row                                         */
+      /********************************************************************/
+      declare update_perform_result ( arg_rr_perform_result_id,
+					arg_rr_result_id,
+					arg_result_status_cd ) = i4
+
+      subroutine update_perform_result ( arg_rr_perform_result_id,
+					arg_rr_result_id,
+					arg_result_status_cd )
+
+set sText = BUILD("UPDATE PERFORM RESULT RRRESULTid: ", ARG_RR_RESULT_ID)
+call uar_SysEvent(hSys, 3, "UPD_RR_RESULTS UPDATE PERFORM RESULT", NULLTERM(sText))
+
+	update into
+		rr_perform_result rpr
+	set
+		rpr.result_status_cd 		= value(arg_result_status_cd),
+            	rpr.updt_dt_tm          	= cnvtdatetime(curdate,curtime3),
+            	rpr.updt_cnt            	= rpr.updt_cnt + 1,
+            	rpr.updt_task           	= reqinfo->updt_task,
+            	rpr.updt_id             	= reqinfo->updt_id,
+            	rpr.updt_applctx        	= reqinfo->updt_applctx
+	plan rpr
+		where rpr.rr_perform_result_id = value(arg_rr_perform_result_id)
+		and rpr.rr_result_id = value(arg_rr_result_id)
+	with nocounter
+
+        if (curqual = 0)
+               set reply->status_data.subeventstatus[1].OperationName =
+                  "UPDATE"
+               set reply->status_data.subeventstatus[1].OperationStatus =
+                  "F"
+               set reply->status_data.subeventstatus[1].TargetObjectName =
+                  "RR PERFORM RESULT"
+               set reply->status_data.subeventstatus[1].TargetObjectValue =
+                  build("Could not update perform result id ",
+				arg_rr_perform_result_id    )
+	 endif
+	 return(curqual)
+      end
+
+      /********************************************************************/
+      /* Update repeated perform_result sub                               */
+      /* Update the result_status_cd to old performed                     */
+      /********************************************************************/
+      declare update_repeated_perform_result ( arg_rr_result_id ) = i4
+      subroutine update_repeated_perform_result ( arg_rr_result_id )
+
+set sText = BUILD("UPDATE REPEAT PERFORM RESULT RRRESULTid: ", ARG_RR_RESULT_ID)
+call uar_SysEvent(hSys, 3, "UPD_RR_RESULTS UPDATE REPEAT PERFORM RESULT", NULLTERM(sText))
+
+	 update into
+		rr_perform_Result rpr
+	 set
+		rpr.result_status_cd 	= result_status_old_perf_cd,
+            	rpr.updt_dt_tm          = cnvtdatetime(curdate,curtime3),
+            	rpr.updt_cnt            = rpr.updt_cnt + 1,
+            	rpr.updt_task           = reqinfo->updt_task,
+            	rpr.updt_id             = reqinfo->updt_id,
+            	rpr.updt_applctx        = reqinfo->updt_applctx
+	 plan rpr
+		where rpr.rr_result_id = value(arg_rr_result_id)
+		and rpr.result_status_cd = value(result_status_performed_cd)
+	 with nocounter
+
+	 return(1)
+      end
+
+
+      /********************************************************************/
+      /* Read Perform Result.  Get current result status                  */
+      /********************************************************************/
+      declare read_perform_result ( arg_rr_result_id,
+				    arg_rr_perform_result_id ) = i4
+      subroutine read_perform_result ( arg_rr_result_id,
+				    arg_rr_perform_result_id )
+
+set sText = BUILD("UPDATE READ PERFORM RESULT RRRESULTid: ", ARG_RR_RESULT_ID)
+call uar_SysEvent(hSys, 3, "UPD_RR_RESULTS READ PERFORM RESULT", NULLTERM(sText))
+
+	 select into "nl:"
+	 	rpr.result_status_cd,
+		rpr.rr_result_id
+	 from rr_perform_result rpr
+	 plan rpr
+		where rpr.rr_perform_result_id = value(arg_rr_perform_result_id)
+		and rpr.rr_result_id = value(arg_rr_result_id)
+	 detail
+		dateformat->current_perform_dt_tm = rpr.perform_dt_tm
+		current_result_status_cd = rpr.result_status_cd
+	 with nocounter
+
+         if (curqual = 0)
+               set reply->status_data.subeventstatus[1].OperationName =
+                  "SELECT"
+               set reply->status_data.subeventstatus[1].OperationStatus =
+                  "F"
+               set reply->status_data.subeventstatus[1].TargetObjectName =
+                  "RR PERFORM RESULT"
+               set reply->status_data.subeventstatus[1].TargetObjectValue =
+                  build("Unable to read record for perf_res_id "
+				,arg_rr_perform_result_id, " and result_id: ",
+				arg_rr_Result_id    )
+	 endif
+	 return(curqual)
+      end
+
+
+      /********************************************************************/
+      /* Read Perform Result.  Get current result status                  */
+      /********************************************************************/
+      declare insert_result_event ( arg_rr_result_id,
+				    arg_rr_perform_result_id,
+				    arg_event_type_cd,
+				    arg_event_prsnl_id ) = i4
+       subroutine insert_result_event ( arg_rr_result_id,
+				    arg_rr_perform_result_id,
+				    arg_event_type_cd,
+				    arg_event_prsnl_id )
+
+set sText = BUILD("INSERT RESULT EVENT RRRESULTid: ", ARG_RR_RESULT_ID)
+call uar_SysEvent(hSys, 3, "UPD_RR_RESULTS INSERT RESULT EVENT", NULLTERM(sText))
+
+	 /****************************/
+	 /* Find last event sequence */
+	 /***************************/
+	set last_event_seq = 0
+	select into "nl:"
+		rre.rr_result_id,
+		rre.event_sequence
+	from
+		rr_Result_event rre
+	plan rre where rre.rr_result_id = value(arg_rr_result_id)
+		 and rre.rr_perform_Result_id = value(arg_rr_perform_result_id)
+	order rre.event_sequence desc
+	head rre.rr_result_id
+		last_event_seq = rre.event_sequence
+	with nocounter
+
+	 /****************************/
+	 /* Insert new result event  */
+	 /***************************/
+	 insert into
+		rr_result_event rre
+	 set
+		rre.rr_result_id = value(arg_rr_result_id),
+		rre.rr_perform_result_id = value(arg_rr_perform_result_id),
+		rre.event_sequence = last_event_seq + 1,
+		rre.event_dt_tm = cnvtdatetime(request->event_dt_tm),
+		rre.event_personnel_id = value(arg_event_prsnl_id),
+		rre.event_type_cd = value(arg_event_type_cd),
+            	rre.updt_dt_tm          = cnvtdatetime(curdate,curtime3),
+            	rre.updt_cnt            = 0,
+            	rre.updt_task           = reqinfo->updt_task,
+            	rre.updt_id             = reqinfo->updt_id,
+            	rre.updt_applctx        = reqinfo->updt_applctx
+	 plan rre
+	 with nocounter
+
+         if (curqual = 0)
+               set reply->status_data.subeventstatus[1].OperationName =
+                  "INSERT"
+               set reply->status_data.subeventstatus[1].OperationStatus =
+                  "F"
+               set reply->status_data.subeventstatus[1].TargetObjectName =
+                  "RR RESULT EVENT"
+               set reply->status_data.subeventstatus[1].TargetObjectValue =
+                  build("Unable to insert record for perform_res: "
+				,arg_rr_perform_result_id, " and result_id: ",
+				arg_rr_Result_id    )
+	 endif
+	 return(curqual)
+      end
+
+
+      /********************************************************************/
+      /* Process a new result.                                            */
+      /********************************************************************/
+      declare process_new_rr_result ( none3 ) = i2
+      subroutine process_new_rr_result ( none3 )
+
+
+      		/****************************************/
+      		/* Verify no record exists before       */
+		/* inserting new result                 */
+      		/****************************************/
+		set curr_accession_id = request->accession_id
+		set curr_task_assay_cd =
+			request->rr_Results[ridx].task_assay_cd
+		set curr_serv_Res_cd =
+			request->rr_results[ridx].service_resource_cd
+call echo(build("ridx: ", ridx))
+call echo(request->rr_Results[ridx].task_assay_cd)
+		if (read_result ( gRound_Robin_ref_ID,
+				  curr_task_assay_cd,
+				  curr_serv_res_cd,
+				  curr_accession_id ) > 0 )
+			return(0)
+		endif
+
+                if ( insert_result( 0 ) = 0 )
+                	return ( 0 )
+		endif
+
+		set reply->rr_results[ridx].rr_result_id = ginsert_rr_result_id
+		set reply->rr_results[ridx].result_updt_cnt = 0
+
+		if ( insert_perform_result ( ginsert_rr_result_id ) = 0 )
+			return (0)
+		endif
+
+		set reply->rr_results[ridx].rr_perform_Result_id =
+    	                        current_rr_perform_result_id
+		set reply->rr_results[ridx].perform_result_updt_cnt = 0
+
+                /***********************************************/
+		/*  Insert result event records                */
+		/*  Insert perform and verfied if only verfied */
+		/***********************************************/
+
+		if (request->rr_results[ridx].result_status_cd in
+			(result_status_verified_cd,
+			 result_status_autoverified_cd) )
+			set event_type_cd = result_status_performed_cd
+			set event_prsnl_id =
+				request->rr_results[ridx].perform_personnel_id
+			if ( insert_result_event ( ginsert_rr_result_id,
+						   current_rr_perform_result_id,
+                                                   event_type_cd,
+						   event_prsnl_id ) = 0 )
+				return (0)
+			endif
+		endif
+
+		set event_type_cd = request->rr_results[ridx].result_status_cd
+		set event_prsnl_id = request->event_personnel_id
+		if ( insert_result_event ( ginsert_rr_result_id,
+					   current_rr_perform_result_id,
+                                           event_type_cd,
+					   event_prsnl_id ) = 0 )
+			return (0)
+		endif
+
+
+	return (1)
+      end
+
+      /********************************************************************/
+      /* Process a updated result.                                            */
+      /********************************************************************/
+      declare process_updated_rr_result ( none4 ) = i2
+      subroutine process_updated_rr_result ( none4 )
+
+        set current_rr_result_id = request->rr_results[ridx].rr_result_id
+        if (update_result ( current_rr_result_id ) = 0 )
+		return (0)
+	endif
+      	set reply->rr_results[ridx].rr_result_id = current_rr_result_id
+	set reply->rr_results[ridx].result_updt_cnt =
+		request->rr_results[ridx].result_updt_cnt + 1
+
+	;Check to see if perform_result_id exists
+	if (request->rr_results[ridx].rr_perform_result_id = 0)
+
+        	;****************************************************
+		;no perform result record exists so insert one
+		;****************************************************
+		if ( insert_perform_result ( current_rr_result_id ) = 0)
+			return ( 0 )
+		endif
+
+		set reply->rr_results[ridx].rr_perform_Result_id =
+				current_rr_perform_result_id
+		set reply->rr_results[ridx].perform_result_updt_cnt = 0
+	endif
+
+	/***************************************************/
+	/* perform result id exists so result is either      */
+	/* repeated, repreformed, verified, or corrected     */
+	/***************************************************/
+
+	if (request->rr_results[ridx].rr_perform_result_id > 0)
+
+	        set current_rr_perform_result_id
+			= request->rr_results[ridx].rr_perform_result_id
+
+		;***************************************************
+		;sets dateformat->current_perform_dt_tm
+		;and current_result_status_cd
+		;***************************************************
+		if ( read_perform_result ( current_rr_result_id,
+		       			 current_rr_perform_result_id ) = 0 )
+	        	return (0)
+		endif
+
+		;*********************************************************
+		;if not being repreformed use date off of perform_result
+		;*********************************************************
+		if (request->rr_results[ridx].perform_ind = 0)
+			set request->rr_results[ridx].perform_dt_tm =
+				dateformat->current_perform_dt_tm
+			set reply->rr_results[ridx].perform_dt_tm =
+				dateformat->current_perform_dt_tm
+                endif
+
+		if ( request->rr_results[ridx].result_status_cd in
+				(result_status_performed_cd,
+				 result_status_verified_cd,
+				 result_status_autoverified_cd,
+				 result_status_corrected_cd ))
+
+			;*******************************************
+			; existing is performed and new is performed,
+			; verf, or autoverf and not being repeated then
+			; set old to old perf and write new perf row
+			;*******************************************
+			if (current_result_status_cd = result_status_performed_cd
+		            and request->rr_results[ridx].result_status_cd in
+					( result_status_performed_cd,
+					  result_status_verified_cd,
+					  result_status_autoverified_cd )
+			    and request->rr_results[ridx].perform_ind > 0 )
+
+			    if (request->rr_results[ridx].repeat_ind = 0)
+			       ;****************************************
+			       ; Update perform_res row to old_perf if not
+			       ; being repeated
+			       ;****************************************
+
+				if ( update_perform_result (    current_rr_perform_result_id,
+								current_rr_result_id,
+			  					result_status_old_perf_cd ) = 0 )
+				        	   return (0)
+			       endif
+			    endif
+
+			    ;****************************************
+			    ; Insert new perform_Result row
+			    ;****************************************
+
+			    if ( insert_perform_result ( current_rr_result_id )
+						= 0 )
+				return (0)
+			    endif
+
+			    ;****************************************
+			    ; In case the task assay has been previously
+			    ; repeated, set all perform_result rows to old perf
+			    ;****************************************
+			    if ( request->rr_results[ridx].result_status_cd
+					in ( result_status_verified_cd,
+					     result_status_autoverified_cd ))
+				if (update_repeated_perform_result ( current_rr_result_id )  = 0 )
+					return(0)
+				endif
+			    endif
+
+		     	    set reply->rr_results[ridx].rr_perform_Result_id =
+			 		current_rr_perform_result_id
+			    set reply->rr_results[ridx].perform_result_updt_cnt
+ 								 = 0
+			endif
+
+			;*******************************************
+			; if new result is verified without being repreformed
+			; then update the perform result row to verified
+			;*******************************************
+	     		if (current_result_status_cd = result_status_performed_cd
+	      	            and request->rr_results[ridx].result_status_cd in
+	       				  ( result_status_verified_cd,
+	        			    result_status_autoverified_cd )
+		 	    and request->rr_results[ridx].perform_ind = 0 )
+
+			    ;*********************************************
+			    ;* update perf_res row to verified
+			    ;*********************************************
+
+			    if (request->rr_results[ridx].result_status_cd =
+					result_status_verified_cd)
+	   			if ( update_perform_result ( current_rr_perform_result_id,
+						             current_rr_result_id,
+			  				     result_status_verified_cd ) = 0 )
+				          	return (0)
+				endif
+
+
+			    ;*********************************************
+			    ;* update perf_res row to autoverified
+			    ;*********************************************
+
+			    elseif (request->rr_results[ridx].result_status_cd =
+					result_status_autoverified_cd)
+	   			if ( update_perform_result ( current_rr_perform_result_id,
+						             current_rr_result_id,
+			  				     result_status_autoverified_cd ) = 0 )
+				          	return (0)
+				endif
+                            endif
+
+	                    /********************************************/
+        	            /* In case the task assay was previously    */
+                	    /* repeated, set all extra perform_result   */
+                            /* records to "old perform" status.         */
+	                    /********************************************/
+        	            if (update_repeated_perform_result( current_rr_result_id ) = 0)
+                	           return(0)
+			    endif
+
+		     	    set reply->rr_results[ridx].rr_perform_Result_id =
+			 		current_rr_perform_result_id
+			    set reply->rr_results[ridx].perform_result_updt_cnt
+				= reply->rr_results[ridx].perform_result_updt_cnt + 1
+
+		   	endif
+
+
+			;*******************************************
+			; if a verified result is being corrected then set
+			; verified to old verified and add new row wiht corr
+			;*******************************************
+	     		if (current_result_status_cd = result_status_verified_cd
+	      	            and request->rr_results[ridx].result_status_cd =
+	        			    result_status_corrected_cd )
+
+			    	;*********************************************
+				;* update perf_res row to "old verified"
+			    	;*********************************************
+	   			if ( update_perform_result ( current_rr_perform_result_id,
+						             current_rr_result_id,
+			  				     result_status_old_verf_cd ) = 0 )
+				          	return (0)
+				endif
+
+			    	;*********************************************
+				;* insert "corrected" perform result row
+			    	;*********************************************
+                                if (insert_perform_result ( current_rr_result_id ) = 0 )
+					return (0)
+				endif
+  		     	        set reply->rr_results[ridx].rr_perform_Result_id =
+			 		current_rr_perform_result_id
+			        set reply->rr_results[ridx].perform_result_updt_cnt
+ 								 = 0
+                        endif
+
+
+			;*******************************************
+			; if a autoverified result is being corrected then set
+			; autoverified to "old autoverified" and
+			;  add new row with corrected status
+			;*******************************************
+	     		if (current_result_status_cd = result_status_autoverified_cd
+	      	            and request->rr_results[ridx].result_status_cd =
+	        			    result_status_corrected_cd )
+
+			    	;*********************************************
+				;* update perf_res row to "old autoverified"
+			    	;*********************************************
+	   			if ( update_perform_result ( current_rr_perform_result_id,
+						             current_rr_result_id,
+			  				     result_status_old_autoverf_cd ) = 0 )
+				          	return (0)
+				endif
+
+			    	;*********************************************
+				;* insert "corrected" perform result row
+			    	;*********************************************
+                                if (insert_perform_result ( current_rr_result_id ) = 0 )
+					return (0)
+				endif
+  		     	        set reply->rr_results[ridx].rr_perform_Result_id =
+			 		current_rr_perform_result_id
+			        set reply->rr_results[ridx].perform_result_updt_cnt
+ 								 = 0
+                        endif
+
+
+			;*******************************************
+			; if a corrected result is being corrected then set
+			; corrected to "old corrected" and
+			;  add new row with corrected status
+			;*******************************************
+	     		if (current_result_status_cd = result_status_corrected_cd
+	      	            and request->rr_results[ridx].result_status_cd =
+	        			    result_status_corrected_cd )
+
+			    	;*********************************************
+				;* update perf_res row to "old autoverified"
+			    	;*********************************************
+	   			if ( update_perform_result ( current_rr_perform_result_id,
+						             current_rr_result_id,
+			  				     result_status_old_corr_cd ) = 0 )
+				          	return (0)
+				endif
+
+			    	;*********************************************
+				;* insert "corrected" perform result row
+			    	;*********************************************
+                                if (insert_perform_result ( current_rr_result_id ) = 0 )
+					return (0)
+				endif
+  		     	        set reply->rr_results[ridx].rr_perform_Result_id =
+			 		current_rr_perform_result_id
+			        set reply->rr_results[ridx].perform_result_updt_cnt
+ 								 = 0
+                        endif
+
+                endif    ;resultstatuscd in ...
+	endif      ;perfresid > 0
+
+
+	/***************************************************/
+	/* Insert result event record                      */
+	/***************************************************/
+	set event_type_cd = request->rr_results[ridx].result_status_cd
+	set event_prsnl_id = request->event_personnel_id
+	if ( insert_result_event ( current_rr_result_id,
+				   current_rr_perform_result_id,
+                                   event_type_cd,
+				   event_prsnl_id ) = 0 )
+		return (0)
+	endif
+
+
+
+
+	return(1)
+      end
+      /********************************************************************/
+      /* Script                                                           */
+      /********************************************************************/
+
+
+      declare ginsert_rr_result_id = f8
+      declare gRound_Robin_ref_ID = f8
+      declare Failed = c2
+      declare ginsert_rr_perform_result_id = f8
+      declare event_type_cd	       = f8
+      declare event_prsnl_id	       = f8
+      declare current_result_status_cd = f8   ;set by read_perform_result
+      declare current_rr_result_id     = f8
+      declare current_rr_perform_result_id     = f8
+      declare result_status_old_perf_cd = f8
+      declare result_status_performed_cd = f8
+      declare result_status_verified_cd = f8
+      declare curr_task_assay_cd = f8
+      declare curr_serv_res_cd = f8
+      declare curr_accession_id = f8
+      declare result_status_old_verf_cd = f8
+      declare result_status_autoverified_cd = f8
+      declare result_status_old_autoverf_cd = f8
+      declare result_status_corrected_cd   = f8
+      declare result_status_old_corr_cd  = f8
+
+      set hSys = 0
+      set SysStat = 0
+      call uar_SysCreateHandle(hSys,SysStat)
+      set sText = fillstring(254, " ")
+
+      set RESULT_STATUS_CODESET       = 1901
+      set RESULT_STATUS_PERFORMED_CDF = "PERFORMED"
+      set RESULT_STATUS_OLD_PERF_CDF  = "OLDPERFORMED"
+      set RESULT_STATUS_VERIFIED_CDF  = "VERIFIED"
+      set RESULT_STATUS_OLD_VERF_CDF  = "OLDVERIFIED"
+      set RESULT_STATUS_AUTOVERIFIED_CDF = "AUTOVERIFIED"
+      set RESULT_STATUS_OLD_AUTOVERF_CDF = "OLDAUTOVERF"
+      set RESULT_STATUS_CORRECTED_CDF = "CORRECTED"
+      set RESULT_STATUS_OLD_CORR_CDF    = "OLDCORRECTED"
+      /***********************************************************************
+      * Load result type and result status code sets                         *
+      ***********************************************************************/
+         select into "nl:"
+            cv.code_set,
+            cv.code_value
+         from
+            code_value cv
+         where cv.code_set in ( RESULT_STATUS_CODESET )
+         detail
+            if (cv.code_set = RESULT_STATUS_CODESET)
+               case (cv.cdf_meaning)
+                 of RESULT_STATUS_PERFORMED_CDF:
+                    result_status_performed_cd = cv.code_value
+                 of RESULT_STATUS_OLD_PERF_CDF:
+                    result_status_old_perf_cd = cv.code_value
+                 of RESULT_STATUS_VERIFIED_CDF:
+                    result_status_verified_cd = cv.code_value
+                    result_status_verified_disp = cv.display
+		 of RESULT_STATUS_OLD_VERF_CDF:
+		    result_status_old_verf_cd = cv.code_value
+                 of RESULT_STATUS_AUTOVERIFIED_CDF:
+                    result_status_autoverified_cd = cv.code_value
+                 of RESULT_STATUS_OLD_AUTOVERF_CDF:
+                    result_status_old_autoverf_cd = cv.code_value
+                 of RESULT_STATUS_CORRECTED_CDF:
+                    result_status_corrected_cd = cv.code_value
+                 of RESULT_STATUS_OLD_CORR_CDF:
+                    result_status_old_corr_cd = cv.code_value
+               endcase
+            endif
+         with nocounter
+
+	set Failed = "F"
+
+      /***********************************************/
+      /*Get the Round Robin ID if it does not exist  */
+      /***********************************************/
+
+	if (request->round_robin_ref_id > 0)
+		set gRound_robin_ref_id = request->round_robin_ref_id
+	elseif ( get_rr_id ( request->accession_id ) = 0 )
+		set Failed = "T"
+		go to EXIT_SCRIPT
+ 	endif
+
+      /***********************************************/
+      /* Insert new result records                   */
+      /***********************************************/
+      	set nbr_of_results = size(request->rr_results, 5)
+set sText = build("Upd_rr_results NumOfResultsIN:  ", nbr_of_results)
+call uar_SysEvent(hSys, 3, "NumResults", NULLTERM(sText))
+	set stat = alterlist(reply->rr_results, nbr_of_results)
+	set reply->event_dt_tm = request->event_dt_tm
+
+        for ( ridx = 1 to nbr_of_Results )
+
+		if (request->rr_results[ridx].rr_result_id = 0.00 )
+set sText = "Upd_rr_results Call Process new rr result"
+call uar_SysEvent(hSys, 3, "ProcessNewResult", NULLTERM(sText))
+			if ( process_new_rr_result ( 0 ) = 0 )
+			     set failed = "T"
+			     go to exit_script
+			endif
+		elseif (request->rr_results[ridx].rr_result_id > 0.00 )
+set sText = "Upd_rr_results Call Process upd rr result"
+call uar_SysEvent(hSys, 3, "ProcessUPDResult", NULLTERM(sText))
+		    	if ( process_updated_rr_result ( 0 ) = 0 )
+			     set failed = "T"
+			     go to exit_script
+			endif
+		endif
+		set reply->rr_results[ridx].service_resource_cd =
+				request->rr_results[ridx].service_resource_cd
+		set reply->rr_results[ridx].task_assay_cd =
+				request->rr_results[ridx].task_assay_cd
+		if (request->use_req_dt_tm_ind = 1)
+			set reply->rr_results[ridx].perform_dt_tm =
+	 			request->rr_results[ridx].perform_dt_tm
+		else
+			set reply->rr_results[ridx].perform_dt_tm =
+	 			dateformat->system_dt_tm
+		endif
+		set reply->rr_results[ridx].updt_id =
+				request->event_personnel_id
+		set reply->rr_results[ridx].result_status_cd =
+				request->rr_results[ridx].result_status_cd
+	endfor
+
+
+call echo(build("Failed (T/F):  ", Failed))
+set sText = build("Upd_rr_results Failed (T/F):  ", Failed)
+call uar_SysEvent(hSys, 3, "Upd_rr_resultsFailed", NULLTERM(sText))
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+#EXIT_SCRIPT
+call uar_SysDestroyHandle(hSys)
+      if (failed = "F")
+         set reply->status_data->status = "S"
+         commit
+      else
+         rollback
+      endif
+
+END
+GO
+
+;Generated by GNU enscript 1.6.4.

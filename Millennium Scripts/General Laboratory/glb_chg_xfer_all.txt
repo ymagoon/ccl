@@ -1,0 +1,371 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_chg_xfer_all/glb_chg_xfer_all.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_CHG_XFER_ALL.PRG
+        Object name:            GLB_CHG_XFER_ALL
+        Request #:              250106
+
+        Product:                General Lab           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Change the testsite for all details of each procedure
+                                in request
+
+        Tables read:            
+
+        Tables updated:         order_serv_res_container
+                                order_procedure_exception
+                                order_laboratory
+
+        Executing from:         General Lab transfer test application, ucm_ens_case_steps.prg
+
+        Special Notes:          Doesn't validate anything so far.  Yeee-ha!
+
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 07/31/96 Newton Hughes        Initial Release                     *
+;     P01 08/13/00 Kasie D Sly          Performance enhancement             *
+;     002 02/04/02 Jay Ferstl           Update to mic_ang_automated         *
+;     003 09/13/06 Scott Haven          Allow script to be executed.        *
+;     004 07/20/09 Oliver Barbara       Added logic to update default micro *
+;                                       media.                              *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+  
+      DROP PROGRAM glb_chg_xfer_all:dba GO
+      CREATE PROGRAM glb_chg_xfer_all:dba
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      RECORD request
+      (
+        1 service_resource_To = f8
+        1 service_resource_From = f8 
+        1 qual[x]
+          2 order_id = f8
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+if (not validate(reply, 0))
+      RECORD reply
+      (
+%i cclsource:status_block.inc
+      )
+endif
+
+      RECORD osrc_temp
+      (
+        1 qual[10]
+          2 order_id = f8
+          2 container_id = f8
+          2 location_cd = f8
+          2 status_flag = i2
+          2 ignoreme = i2
+          2 in_lab_dt_tm = dq8
+          2 current_location_cd = f8
+      )
+
+      RECORD micro_temp
+      (
+        1 qual[*]
+          2 order_id = f8
+          2 catalog_cd = f8
+          2 service_resource_To = f8
+      )
+	  
+	  
+#script
+
+      declare cs_login_loc_cd = f8 with protect, noconstant(0.0)
+
+      declare code_cnt        = i4 with protect,noconstant(1)
+      declare idx             = i4 with protect,noconstant(0)
+      declare code_set        = i4 with protect,noconstant(0)
+      declare cdf_meaning     = vc with protect,noconstant("")
+      declare code_value      = f8 with protect,noconstant(0.0)
+      declare dMicroActCd     = f8 with protect,noconstant(0.0)
+
+      set code_set = 106
+      set cdf_meaning = NULLTERM("MICROBIOLOGY")
+      set stat = uar_get_meaning_by_codeset(code_set, cdf_meaning, code_cnt, code_value)
+      set dMicroActCd = code_value
+
+      SET reply->status_data->status = "F"
+      SET req_ords = size(request->qual, 5)                        
+      SET nbr_osrcs = 0                         
+
+
+      IF (request->service_resource_From = request->service_resource_To)
+        SET reply->status_data->status = "Z"
+        GO TO exit_script
+      ENDIF
+
+; Get the location of the instrument to which orders are being transferred.
+
+      SELECT INTO "nl:"
+        sr.cs_login_loc_cd
+      FROM
+        service_resource sr
+      WHERE
+        sr.service_resource_cd = request->service_resource_to
+      DETAIL
+        cs_login_loc_cd = sr.cs_login_loc_cd
+      WITH
+        NOCOUNTER
+
+      IF (curqual = 0)
+        GO TO exit_script
+      ENDIF
+
+; Get a list of osrc rows for the From testsite.
+
+      SELECT INTO "nl:"
+        osrc.container_id
+        , osrc.service_resource_cd
+        , osrc.status_flag
+      FROM
+        order_serv_res_container osrc
+        , (dummyt d1 with seq = value(req_ords))
+
+      PLAN d1
+      JOIN osrc
+        WHERE osrc.order_id = request->qual[d1.seq]->order_id
+        AND osrc.service_resource_cd = request->service_resource_From
+
+      DETAIL
+        nbr_osrcs = nbr_osrcs + 1
+        IF (mod(nbr_osrcs, 10) = 1 AND nbr_osrcs > 10)
+          stat = alter(osrc_temp->qual, nbr_osrcs + 10)
+        ENDIF
+        osrc_temp->qual[nbr_osrcs]->order_id = osrc.order_id
+        osrc_temp->qual[nbr_osrcs]->container_id = osrc.container_id
+        osrc_temp->qual[nbr_osrcs]->status_flag = osrc.status_flag
+        osrc_temp->qual[nbr_osrcs]->ignoreme = 0
+        osrc_temp->qual[nbr_osrcs]->current_location_cd = osrc.current_location_cd
+        osrc_temp->qual[nbr_osrcs]->in_lab_dt_tm = osrc.in_lab_dt_tm
+  
+      WITH
+        COUNTER
+
+      IF (curqual = 0)
+        GO TO exit_script
+      ENDIF      
+
+; Set status_flag of each saved osrc to 1 if any osrc for that order
+; has a status of 1 or 2
+
+      SELECT INTO "nl:"
+        osrc.status_flag
+        , osrc.order_id
+      FROM
+        order_serv_res_container osrc
+        , (dummyt d1 with seq = value(nbr_osrcs))
+
+      PLAN d1
+      JOIN osrc
+        WHERE (osrc.order_id = osrc_temp->qual[d1.seq]->order_id)
+;P01        AND ((osrc.status_flag = 1) OR (osrc.status_flag = 2))
+        AND osrc.status_flag +0 in (1,2) 				;P01
+
+      DETAIL
+        osrc_temp->qual[d1.seq]->status_flag = 1
+
+      WITH
+        NOCOUNTER
+
+; Delete all osrc records for each order being transferred
+
+      DELETE FROM
+        order_serv_res_container osrc
+        , (dummyt d1 with seq = value(nbr_osrcs))
+      SET osrc.seq = 1
+
+      PLAN d1
+      JOIN osrc
+        WHERE osrc.order_id = osrc_temp->qual[d1.seq]->order_id
+
+      WITH
+        NOCOUNTER
+
+      IF (curqual = 0)
+        go to EXIT_SCRIPT
+      ENDIF
+
+; Create new osrc records (1 for each container)
+
+      INSERT INTO
+        order_serv_res_container osrc
+        , (dummyt d1 with seq = value(nbr_osrcs))
+      SET
+        osrc.service_resource_cd = request->service_resource_To
+        , osrc.location_cd = cs_login_loc_cd
+        , osrc.container_id = osrc_temp->qual[d1.seq]->container_id
+        , osrc.order_id = osrc_temp->qual[d1.seq]->order_id
+        , osrc.status_flag = osrc_temp->qual[d1.seq]->status_flag
+        , osrc.updt_dt_tm = cnvtdatetime(curdate, curtime)
+        , osrc.updt_id = reqinfo->updt_id
+        , osrc.updt_task = reqinfo->updt_task
+        , osrc.updt_cnt = 0
+        , osrc.updt_applctx = reqinfo->updt_applctx
+        , osrc.in_lab_dt_tm = cnvtdatetime(osrc_temp->qual[d1.seq]->in_lab_dt_tm)
+        , osrc.current_location_cd = osrc_temp->qual[d1.seq]->current_location_cd
+
+      PLAN d1
+      JOIN osrc
+
+      WITH
+        NOCOUNTER
+
+      IF (curqual = 0)
+        GO TO exit_script
+      ENDIF
+
+; Update the service_resource on all exception records for each order
+
+      UPDATE INTO
+        order_procedure_exception opx
+        , (dummyt d1 with seq = value(req_ords))
+      SET
+        opx.service_resource_cd = request->service_resource_To
+        , opx.exception_type_flag = 1           ; mark this row as transferred
+        , opx.updt_dt_tm = cnvtdatetime(curdate, curtime)
+        , opx.updt_id = reqinfo->updt_id
+        , opx.updt_task = reqinfo->updt_task
+        , opx.updt_cnt = opx.updt_cnt + 1
+        , opx.updt_applctx = reqinfo->updt_applctx
+
+      PLAN d1
+      JOIN opx
+        WHERE opx.order_id = request->qual[d1.seq]->order_id
+
+      WITH
+        NOCOUNTER 
+
+; Update the resource_route_level_flag to 2 on order_laboratory for each order
+/*
+      UPDATE INTO
+        (dummyt d1 with seq = value(req_ords))
+        , order_laboratory ol
+      SET
+        ol.resource_route_level_flag = 2
+        , ol.updt_dt_tm = cnvtdatetime(curdate, curtime)
+        , ol.updt_id = reqinfo->updt_id
+        , ol.updt_task = reqinfo->updt_task
+        , ol.updt_cnt = ol.updt_cnt + 1
+        , ol.updt_applctx = reqinfo->updt_applctx
+
+      PLAN d1
+      JOIN ol
+        WHERE ol.order_id = request->qual[d1.seq]->order_id
+
+      WITH
+        NOCOUNTER                                                    
+        , OUTERJOIN = d1
+*/
+
+      SET reply->status_data->status = "S"
+      
+      ;Need to update mic_ang_automated when the service resource is changed (transfered)
+      ;and micro is installed 
+      SELECT into "nl:"
+      FROM dprotect 
+      WHERE object_name = "MIC_CHG_ANG_SERVICE_RESOURCE" 
+            and object = "P" 
+      WITH nocounter
+      
+      IF (curqual > 0)      
+        if (validate(glb_chg_xfer_all_req, 0))
+          ;* When called from the back end, the request must be named glb_chg_xfer_all_req.
+          execute mic_chg_ang_service_resource with replace("REQUEST", "GLB_CHG_XFER_ALL_REQ")
+        else
+          EXECUTE mic_chg_ang_service_resource 
+        endif
+      ENDIF
+
+      if(request->status_flag = 3)
+          execute mic_reeval_order_routing
+    
+          select into "nl:" o.order_id, o.catalog_cd
+    
+          from orders o
+          
+          where expand(idx, 1, size(request->qual,5), o.order_id, request->qual[idx].order_id)
+                     and o.activity_type_cd = dMicroActCd
+                     
+          order by o.order_id      
+          
+          head report
+             rec_cnt = 0
+    
+          head o.order_id
+              rec_cnt = rec_cnt + 1
+              if (rec_cnt > size(micro_temp->qual, 5))
+                  stat = alterlist(micro_temp->qual, rec_cnt + 9)
+              endif
+    
+              micro_temp->qual[rec_cnt].order_id = o.order_id
+              micro_temp->qual[rec_cnt].catalog_cd = o.catalog_cd
+              micro_temp->qual[rec_cnt].service_resource_To = request->service_resource_To
+    
+          foot o.order_id
+             row+0
+          
+          foot report
+             stat = alterlist(micro_temp->qual, rec_cnt)
+    
+          with nocounter
+   
+    
+          for(idx = 1 to size(micro_temp->qual, 5))
+             set stat = DoMicroResourceReeval(micro_temp->qual[idx].order_id, micro_temp->qual[idx].catalog_cd, 
+                                              micro_temp->qual[idx].service_resource_To)
+          endfor
+      endif
+      
+      free set micro_temp
+      
+      
+      IF (reply->status_data->status = "S")
+        COMMIT
+      ELSE
+        ROLLBACK
+      ENDIF   
+#exit_script
+      END GO
+
+
+
+
+
+;Generated by GNU enscript 1.6.4.

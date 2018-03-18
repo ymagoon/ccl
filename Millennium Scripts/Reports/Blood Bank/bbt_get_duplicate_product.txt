@@ -1,0 +1,361 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Receiveproducts/BBT_GET_DUPLICATE_PRODUCT.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_duplicate_product.prg
+        Object name:            bbt_get_duplicate_product
+        Request #:              225007
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Blood Bank Transfusion
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Gets any product with the same product number,
+                                product type, and supplier ID
+                                                               
+        Tables read:            product
+        Tables updated:         none
+        Executing from:         Receive Products
+
+        Special Notes:          
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 03/27/96 Lisa Grayson         Initial Release                     *
+;     002 07/03/97 Doug Saus            Added join of derivative table      *
+;     003 07/17/97 Doug Saus            Adding check for duplicate sub_nbr  *
+;     004 07/24/97 Doug Saus            Added product_id of duplicate found *
+;                                       to the reply (mainly for Receive)   *
+;     005 08/14/97 Doug Saus            Total rewrite of script             *
+;     006 01/02/98 Mike Goings          Look for active products only       *
+;     007 01/08/98 David Hall           Look for manufacturer id for deriv. *
+;     008 04/29/98 David Hall           History Upload Table Scans          *
+;     009 05/04/98 David Hall           Added supplier_prefix check         *
+;     010 10/28/98 David Hall           Added ability to be called from     *
+;                                       another script.                     *
+;     011 09/10/99 Badari Kopparapu     Modified to check for supplier when *
+;                                       doing conflicting ABO/Rh check.     *
+;     012 09/13/99 Badari Kopparapu     Look for derivatives based on Owner *
+;                                       Area and Inventory Area, but not on *
+;                                       Supplier.                           *   
+;     013 12/12/05 Ronda Zheng          Retrieve donor product_id.          *
+;~DE~************************************************************************
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_get_duplicate_product:dba go
+create program bbt_get_duplicate_product:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+/*
+record request
+( 1 called_from_script_ind = i2
+  1 donor_product_ind = i2
+  1 debug_ind
+  1 productlist[x]
+    2 product_nbr = c20
+    2 product_sub_nbr = c5
+    2 product_cd = f8
+    2 cur_supplier_id = f8
+    2 supplier_prefix = f8
+    2 abo_cd = f8
+    2 rh_cd = f8
+    2 manufacturer_id = f8
+    2 cur_owner_area_cd = f8
+    2 cur_inv_area_cd = f8
+    2 ref_product_id = f8 ;reference_product_id to correlate to a sister derivative product in transfer
+)
+*/
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+/* Determine if script called from another ccl script.  If so do not redefine reply structure */
+if (request->called_from_script_ind = 0) 
+    record reply
+    (1 qual[*]
+       2 product_id = f8
+       2 duplicate_found = c1
+       2 conflicting_aborh_found = c1
+       2 abo_cd = f8
+       2 abo_disp = c40
+       2 rh_cd = f8
+       2 rh_disp = c40
+       2 history_upload_ind = i2
+       2 ref_product_id = f8
+%i cclsource:status_block.inc
+    )
+endif
+
+set select_ok_ind = "N"
+set select2_ok_ind = "N"
+set reply->status_data->status = "F"
+set product_cnt = size(request->productlist, 5)
+set stat = alterlist(reply->qual, product_cnt)
+
+if (request->donor_product_ind = 1) 
+
+   select into "nl:"
+       d.seq,
+       p.product_id
+
+   from
+        (dummyt d with seq = value(product_cnt)), 
+        product p
+
+   plan d
+   join p where p.product_nbr 	= cnvtupper(request->productlist[d.seq].product_nbr) and          
+                p.active_ind    = 1
+
+   detail p.product_id
+      if (p.product_id > 0.0)
+      	 reply->qual[d.seq].duplicate_found ="Y"
+      	 reply->qual[d.seq].product_id      = p.product_id 
+      endif
+
+   with nocounter
+
+   set select_ok_ind = "Y"
+   set select2_ok_ind = "Y"
+
+else
+
+   select into "nl:"
+        d.seq
+        , p.product_id
+        , p.product_nbr
+        , p.product_sub_nbr
+        , p.product_cd
+        , p.product_cat_cd
+        , p.cur_supplier_id
+        , pc.rh_required_ind
+        , bp_drv_ind = decode(drv.seq, "drv", bp.seq, "bp ", "xxx")
+        , bp.cur_abo_cd
+        , bp.cur_rh_cd
+        , drv.product_id
+        , abo_cd = decode(bp.seq,bp.cur_abo_cd,0.0)
+        , rh_cd = decode(bp.seq,bp.cur_rh_cd,0.0)
+        , drv.manufacturer_id
+
+   from
+        (dummyt d with seq = value(product_cnt)) 
+        , product p
+        , product_category pc
+        , (dummyt d_bp_drv with seq = 1)
+        , blood_product bp
+        , derivative drv
+
+   plan    d
+   join    p               where   p.product_nbr                   = cnvtupper(request->productlist[d.seq].product_nbr)            
+   /*006*/                         and p.active_ind                = 1
+   join    pc              where   pc.product_cat_cd               = p.product_cat_cd
+   join    (d_bp_drv       where   d_bp_drv.seq                    = 1
+           join    bp      where   bp.product_id                   = p.product_id
+           orjoin  drv     where   drv.product_id                  = p.product_id)
+   
+   order by d.seq
+
+;/*
+
+   head d.seq
+       dup_ind = "N"
+       con_ind = "N"
+
+   detail
+   	   reply->qual[d.seq].ref_product_id = request->productlist[d.seq].ref_product_id
+       if (dup_ind = "N"
+          and p.product_cd = request->productlist[d.seq].product_cd 
+          and trim(p.product_sub_nbr) = trim(request->productlist[d.seq].product_sub_nbr))
+          if (trim(bp_drv_ind) = "drv") ; derivative product
+   ;012 beg
+            if (((p.cur_owner_area_cd > 0.0 and p.cur_owner_area_cd = request->productlist[d.seq].cur_owner_area_cd) 
+                or request->productlist[d.seq].cur_owner_area_cd = 0.0 
+                or request->productlist[d.seq].cur_owner_area_cd = NULL) 
+               and ((p.cur_inv_area_cd > 0.0 and p.cur_inv_area_cd = request->productlist[d.seq].cur_inv_area_cd) 
+                or request->productlist[d.seq].cur_inv_area_cd = 0.0 
+                or request->productlist[d.seq].cur_inv_area_cd = NULL))
+                        ;012 end       and p.cur_supplier_id = request->productlist[d.seq].cur_supplier_id)
+                if (validate(request->productlist[d.seq].manufacturer_id, 0.0) > 0.0)
+                   if (drv.manufacturer_id = request->productlist[d.seq].manufacturer_id)
+                       dup_ind = "Y"
+                       reply->qual[d.seq].product_id = p.product_id
+                       reply->qual[d.seq].duplicate_found ="Y"
+                   endif
+                   /* manufacturer_id is defined as cur_supplier_id for derivatives in the bbt_add_hist_product CSA*/
+                elseif  (validate(request->productlist[d.seq].manufacturer_id, 0.0) = 0.0)
+                   if (drv.manufacturer_id = request->productlist[d.seq].cur_supplier_id)
+                       dup_ind = "Y"
+                       reply->qual[d.seq].product_id = p.product_id
+                       reply->qual[d.seq].duplicate_found ="Y"
+                   endif
+                endif
+            endif
+         elseif ((trim(request->productlist[d.seq].supplier_prefix) > ""
+                 and cnvtupper(bp.supplier_prefix) = cnvtupper(request->productlist[d.seq].supplier_prefix))
+                  or (trim(request->productlist[d.seq].supplier_prefix) = ""
+                 and p.cur_supplier_id = request->productlist[d.seq].cur_supplier_id)) ;blood product
+                     dup_ind = "Y"
+                     reply->qual[d.seq].product_id = p.product_id
+                     reply->qual[d.seq].duplicate_found ="Y"
+         endif
+       elseif (con_ind = "N"
+          and p.cur_supplier_id = request->productlist[d.seq].cur_supplier_id /*only if it is from the same supplier*/
+          and p.product_cd != request->productlist[d.seq].product_cd
+          and trim(bp_drv_ind) = "bp"
+          and (abo_cd != request->productlist[d.seq].abo_cd
+           or (pc.rh_required_ind = 1
+          and rh_cd != request->productlist[d.seq].rh_cd))) 
+              con_ind = "Y"
+              reply->qual[d.seq].product_id = p.product_id
+              reply->qual[d.seq].conflicting_aborh_found = "Y"
+              reply->qual[d.seq].abo_cd = abo_cd
+              reply->qual[d.seq].rh_cd = rh_cd
+       endif
+
+   foot report
+       select_ok_ind = "Y"
+         
+;*/
+
+   with    nocounter, nullreport
+
+   /***********************************
+    ***  History Upload Table Scan  ***
+    ***          MOD 008            ***
+    ***********************************/
+
+   select into "nl:"
+        d.seq
+        , hp.product_id
+        , hp.product_nbr
+        , hp.product_sub_nbr
+        , hp.product_cd
+        , hp.supplier_id
+        , pc.rh_required_ind
+        , product_class_meaning = uar_get_code_meaning(hp.product_class_cd)
+        , hp.abo_cd
+        , hp.rh_cd
+                
+   from
+        (dummyt d with seq = value(product_cnt)) 
+        , bbhist_product hp
+        , product_index pi
+        , product_category pc
+
+   plan    d
+   join    hp              where   hp.product_nbr                  = cnvtupper(request->productlist[d.seq].product_nbr)
+                                   and hp.active_ind               = 1
+   join    pi              where   pi.product_cd                   = hp.product_cd
+   join    pc              where   pc.product_cat_cd               = pi.product_cat_cd
+
+   order by d.seq
+
+;/*
+                                
+
+   head d.seq
+       dup_ind = "N"
+       con_ind = "N"
+
+   detail
+       if (dup_ind = "N"
+          and hp.product_cd = request->productlist[d.seq].product_cd 
+          and trim(hp.product_sub_nbr) = trim(request->productlist[d.seq].product_sub_nbr))
+          reply ->qual[d.seq].history_upload_ind = 1
+          if (product_class_meaning = "DERIVATIVE")
+               ;012 beg 'from history upload; owner, inventory areas might not be filled out
+               if (((hp.owner_area_cd > 0.0 and hp.owner_area_cd = request->productlist[d.seq].cur_owner_area_cd) 
+                  or hp.owner_area_cd = 0.0 or hp.owner_area_cd = NULL) 
+                 and ((hp.inv_area_cd > 0.0 and hp.inv_area_cd = request->productlist[d.seq].cur_inv_area_cd) 
+                  or hp.inv_area_cd = 0.0 or hp.inv_area_cd = NULL))
+                  ;manufacturer_id is set in request only from ReceiveProducts or CorrectInventory application. 
+                  if (validate(request->productlist[d.seq].manufacturer_id, 0.0) > 0.0)
+                     if (hp.supplier_id = request->productlist[d.seq].manufacturer_id)
+                         dup_ind = "Y"
+                         reply->qual[d.seq].product_id = hp.product_id
+                         reply->qual[d.seq].duplicate_found ="Y"
+                     endif
+                  /* manufacturer_id is defined as cur_supplier_id for derivatives in the bbt_add_hist_product CSA */
+                  elseif (validate(request->productlist[d.seq].manufacturer_id, 0.0) = 0.0)
+                      if (hp.supplier_id = request->productlist[d.seq].cur_supplier_id)
+                          dup_ind = "Y"
+                          reply->qual[d.seq].product_id = hp.product_id
+                          reply->qual[d.seq].duplicate_found ="Y"
+                      endif
+                  endif
+               endif  ;012 end
+           elseif (hp.supplier_id = request->productlist[d.seq].cur_supplier_id) ;blood product
+                 dup_ind = "Y"
+                 reply->qual[d.seq].product_id = hp.product_id
+                 reply->qual[d.seq].duplicate_found ="Y"
+           endif
+       elseif (con_ind = "N"
+         and hp.supplier_id = request->productlist[d.seq].cur_supplier_id  
+         and hp.product_cd != request->productlist[d.seq].product_cd
+         and (product_class_meaning = "BLOOD")
+         and (hp.abo_cd != request->productlist[d.seq].abo_cd
+          or (pc.rh_required_ind = 1
+         and hp.rh_cd != request->productlist[d.seq].rh_cd))) 
+             con_ind = "Y"
+             reply->qual[d.seq].product_id = hp.product_id
+             reply->qual[d.seq].conflicting_aborh_found = "Y"
+             reply->qual[d.seq].abo_cd = hp.abo_cd
+             reply->qual[d.seq].rh_cd = hp.rh_cd
+       endif 
+
+   foot report
+       select2_ok_ind = "Y"
+
+;*/
+
+   with    nocounter, nullreport
+endif
+            
+if (select2_ok_ind = "N") 
+    set select_ok_ind = "N"
+endif
+        
+set reply->status_data->subeventstatus[1]->OperationName = "select product table"
+set reply->status_data->subeventstatus[1]->targetObjectName = "bbt_get_duplicate_product"
+if (select_ok_ind = "Y")
+    set reply->status_data->status = "S"
+    set reply->status_data->subeventstatus[1]->operationstatus = "S"
+    set reply->status_data->subeventstatus[1]->targetobjectvalue = "SUCCESS"
+else
+    set reply->status_data->status = "F"
+    set reply->status_data->subeventstatus[1]->operationstatus = "F"
+    set reply->status_data->subeventstatus[1]->targetobjectvalue = "product/bbhist_product table select failed"
+endif
+
+end go  
+
+;Generated by GNU enscript 1.6.4.

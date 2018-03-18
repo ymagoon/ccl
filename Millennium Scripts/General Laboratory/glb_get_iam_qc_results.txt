@@ -1,0 +1,609 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_iam_qc_results/GLB_GET_IAM_QC_RESULTS.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_GET_IAM_QC_RESULTS.PRG
+        Object name:            GLB_GET_IAM_QC_RESULTS
+        Request #:              250171
+
+        Product:                General Lab
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve all accessions pertaining to a
+				specific service_resource_cd with result_status
+				of autoverified and a performed_dt_tm between a
+				specified time period
+
+        Tables read:            qc_result
+				accession
+				qc_result_grp
+
+        Tables updated:         n/a
+        Executing from:         General Lab Instrument Activity Monitor App.
+
+        Special Notes:          n/a
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 08/20/98 Gary Runde           Initial Release                     *
+;     001 07/26/00 Soham Dhakal		Changes to Autoverify Error Code    *
+; 					and rework   		 	    *
+;     002 02/01/08 Ryan Manuel          Removed curqual and replaced it with*
+;                                       size of reply
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+	drop program glb_get_iam_qc_results:dba go
+	create program glb_get_iam_qc_results:dba
+
+/*
+	record request
+	(
+	   1  service_resource_cd	= F8
+	   1  start_dt_tm		= DQ8
+	   1  end_dt_tm			= dq8				;001
+	   1  accession 		= c20				;001
+	)
+*/
+
+	record reply
+	(
+	   1  qual[*]
+	      2  accession		= VC
+	      2  control		= VC
+	      2  tasks[*]
+		 3  task_assay_cd	= F8
+		 3  task_assay_disp	= VC
+		 3  result_id		= f8				;001
+		 3  prev_result_id      = f8				;001
+		 3  result_type_cd	= F8
+		 3  result_type_disp    = vc				;001
+		 3  result_type_mean	= vc				;001
+		 3  result_value_alpha	= VC
+		 3  result_value_numeric= F8
+		 3  perform_dt_tm	= DQ8
+            	 3  result_control_cd	= F8
+		 3  result_process_cd	= F8
+		 3  result_status_cd    = f8                            ;001
+		 3  result_status_disp  = vc				;001
+		 3  result_status_mean  = vc				;001
+		 3  personnel_name      = vc				;001
+		 3  service_resource_cd = f8				;001
+		 3  service_resource_disp = vc				;001
+		 3  interface_flag = i2					;001
+		 3  av_errors [*]					;001
+	  	   4  av_error_cd         = F8                         	;001
+		   4  av_error_disp       = VC                         	;001
+		   4  av_error_mean       = vc				;001
+%i cclsource:status_block.inc
+	)
+
+	;001 temp structure to get all of the performed results		;001
+	record temp_result						;001
+	(								;001
+	  1 r_count = i4						;001
+	  1 results[*]							;001
+	    2 result_id = f8						;001
+	    2 traverse_up_ind = i2					;001
+	    2 traverse_down_ind = i2					;001
+	)								;001
+	
+	declare lReplySize = i4 with protect, noconstant(0)
+
+	subroutine validate_results (arg_result_id, arg_prev_result_id)	;001
+	;this sub takes in result_id and prev_result_id as parameter 	;001
+	;and checks the temp_struct to see if the id's have already 	;001
+	;been added or not, and then based on it, sets the traverse_up	;001
+	;or down indicators						;001
+	  set add_result = 1						;001
+	  set add_prev_result = 1					;001
+	  set x = 1							;001
+	  set y = 1							;001
+	  set o_pos = 0							;001
+	  ;check to see if result is already on the list		;001
+    	  if (temp_result->r_count > 0)					;001
+      	    if (arg_result_id > 0)					;001
+	      while (x <= temp_result->r_count)				;001
+	        if (temp_result->results[x]->result_id = arg_result_id)	;001
+	          ;already in the list so set add_result to false	;001
+	          set add_result  = 0					;001
+	          set x = temp_result->r_count + 1			;001
+	        endif							;001
+	        set x = x + 1						;001
+	      endwhile							;001
+	    else							;001
+              set add_result = 0					;001
+            endif							;001
+          ;check the previous results					;001
+	    if (arg_prev_result_id > 0.0)				;001
+	      while (y <= temp_result->r_count)				;001
+	        if (temp_result->results[y]->result_id = 		;001
+	            arg_prev_result_id)					;001
+		  ;already on the list so don't add it			;001
+	          set add_prev_result  = 0				;001
+	          ;since this is the previous result and it has already been
+	          ;added to the list, we don't need to travers for this
+	          set temp_result->results[y]->traverse_up_ind = 0	;001
+	          set temp_result->results[y]->traverse_down_ind = 0	;001
+	          set y = temp_result->r_count + 1			;001
+	        endif							;001
+	        set y = y + 1						;001
+	      endwhile							;001
+	    else							;001
+	      ;call echo("do not add to list")				;001
+	      set add_prev_result = 0					;001
+	    endif							;001
+	  endif								;001
+									;001
+	  ;only add if its not already on the list			;001
+	  if (add_result = 1)						;001
+	    set temp_result->r_count = temp_result->r_count + 1		;001
+	    if (mod(temp_result->r_count,10) = 1)			;001
+	      set stat = alterlist (temp_result->results,  		;001
+	      		temp_result->r_count + 10)			;001
+	    endif							;001
+	    ;call echo(build("Adding....result:", arg_result_id))	;001
+	    set temp_result->results[temp_result->r_count]		;001
+	    	.result_id = arg_result_id				;001
+	    ;new result so only need to find its children		;001
+	    set temp_result->results[temp_result->r_count]		;001
+	    	.traverse_up_ind = 0					;001
+	    set temp_result->results[temp_result->r_count].		;001
+	    	traverse_down_ind = 1					;001
+	  endif								;001
+	  if (add_prev_result = 1 and arg_prev_result_id > 0)		;001
+	    set temp_result->r_count = temp_result->r_count + 1		;001
+	    if (mod(temp_result->r_count,10) = 1)			;001
+	      set stat = alterlist (temp_result->results,  		;001
+	      	temp_result->r_count + 10)				;001
+	    endif							;001
+	    set temp_result->results[temp_result->r_count]		;001
+	    .result_id = arg_prev_result_id				;001
+	    ;previous result so need to find its parent			;001
+	    set temp_result->results[temp_result->r_count]		;001
+	    .traverse_up_ind = 1					;001
+	    set temp_result->results[temp_result->r_count]		;001
+	    .traverse_down_ind = 0					;001
+	  endif								;001
+	end  ;end of subroutine						;001
+
+	/* Variable initialization */
+	set reply->status_data.status = "F"
+;001	set AUTOVERIFY = 0.0
+	set a_cnt = 0
+	set t_cnt = 0
+	set av_cnt = 0							;001
+	set sErrorMsg = FILLSTRING(255," ")    				;001
+	;reset error queue to empty
+	set error_check = ERROR(sErrorMsg,1)		         	;001
+
+	set performed_cd = 0.0						;001
+	set autoverify_cd = 0.0						;001
+	set verified_cd = 0.0						;001
+	set RESULT_CODESET = 1901					;001
+	set AUTOVERIFY_CDF = fillstring(12," ")				;001
+	set PERFORMED_CDF = fillstring(12," ")				;001
+	set VERIFIED_CDF = fillstring(12," ")				;001
+	set AUTOVERIFY_CDF = "AUTOVERIFIED"				;001
+	set PERFORMED_CDF = "PERFORMED"					;001
+	set VERIFIED_CDF = "VERIFIED"					;001
+	set stat = 0							;001
+
+	;001 use the UAR's to get the code Values
+	set stat = uar_Get_meaning_by_codeset(RESULT_CODESET,		;001
+	                AUTOVERIFY_CDF,1, autoverify_cd)		;001						
+	set stat = uar_Get_meaning_by_codeset(RESULT_CODESET, 		;001
+	                PERFORMED_CDF,1, performed_cd)			;001
+	set stat = uar_Get_meaning_by_codeset(RESULT_CODESET, 		;001
+	                VERIFIED_CDF,1, verified_cd)			;001
+
+	if (request->service_resource_cd > 0)				;001
+	  select into "nl:"						;001
+	    qr.prev_result_id,						;001
+	    qre.qc_result_id,						;001
+	    e_verf.event_type_cd,					;001
+	    d1.seq							;001
+	  from qc_result qr,						;001
+	    qc_result_event qre,					;001
+	    dummyt d1,							;001
+	    qc_result_event e_verf					;001
+	  plan qre							;001
+	    where (qre.event_dt_tm >= cnvtdatetime(request->start_dt_tm)	;001
+	    and qre.event_dt_tm <= cnvtdatetime(request->end_dt_tm))	;001
+	    and qre.event_type_cd in (performed_cd)			;001
+	  join qr							;001
+	    where qr.qc_result_id = qre.qc_result_id			;001
+	      and qr.service_resource_cd = request->service_resource_cd	;001
+	  join d1							;001
+	  join e_verf							;001
+	    where e_verf.qc_result_id = qr.qc_result_id			;001
+	      and e_verf.event_type_cd in (verified_cd, autoverify_cd)	;001
+	  order by qr.qc_result_id					;001
+
+	  head report							;001
+	    temp_result->r_count = 0					;001
+	  head qr.qc_result_id						;001
+
+	    call validate_results( qr.qc_result_id, qr.prev_result_id)	;001
+
+	  foot qr.qc_result_id						;001
+	    row + 0							;001
+	  foot report							;001
+	    stat = alterlist(temp_result->results, temp_result->r_count);001
+	  with outerjoin = d1, nocounter				;001
+	else  ;accession was passed					;001
+	  select into "nl:"						;001
+	    qrg.qc_group_id,						;001
+	    qr.prev_result_id,						;001
+	    qre.qc_result_id,						;001
+	    e_verf.event_type_cd,					;001
+	    d1.seq							;001
+	  from accession a,						;001
+	    qc_result_grp qrg,						;001
+	    qc_result qr,						;001
+	    qc_result_event qre,					;001
+	    dummyt d1,							;001
+	    qc_result_event e_verf					;001
+	  plan qre							;001
+	    where (qre.event_dt_tm >= cnvtdatetime(request->start_dt_tm)	;001
+	    and qre.event_dt_tm <= cnvtdatetime(request->end_dt_tm))	;001
+	      and qre.event_type_cd in (performed_cd)			;001
+	  join qr							;001
+	    where qr.qc_result_id = qre.qc_result_id			;001
+	  join qrg							;001
+	    where qrg.qc_group_id = qr.qc_group_id			;001
+	  join a							;001
+	    where qrg.accession_id = a.accession_id			;001
+	    and a.accession = request->accession			;001
+	  join d1							;001
+	  join e_verf							;001
+	    where e_verf.qc_result_id = qr.qc_result_id			;001
+	      and e_verf.event_type_cd in (verified_cd, autoverify_cd)	;001
+	  order by qr.qc_result_id					;001
+
+	  head report							;001
+	    temp_result->r_count = 0					;001
+	  head qr.qc_result_id						;001
+
+	    call validate_results( qr.qc_result_id, qr.prev_result_id)	;001
+									;001
+	  foot qr.qc_result_id						;001
+	    row + 0							;001
+	  foot report							;001
+	    stat = alterlist(temp_result->results, temp_result->r_count);001
+	  with outerjoin = d1, nocounter				;001
+	endif								;001
+	set error_check = ERROR(sErrorMsg,0)   ;get error message	;001
+	if (error_check != 0)						;001
+	  set reply->status_data->status = "F"				;001
+	  set reply->status_data->subeventstatus[1]			;001
+	  	->TargetObjectValue = sErrorMsg				;001
+	  go to exit_script						;001
+	endif								;001
+
+	;***************DEBUG*************				;001
+	;call echo("------ Before traversing---")			;001
+	;set i = 0							;001
+	;set j = temp_result->r_count					;001
+	;for (i=1 to j )						;001
+	;  call echo(temp_result->results[i].result_id)			;001
+	;  call echo(build("result_id = ", temp_result->results[i].result_id));001
+	;  call echo(build("traverse_up = ", temp_result->results[i].traverse_up_ind));001
+	;  call echo(build("traverse_down = ", temp_result->results[i].traverse_down_ind));001
+	;endfor								;001
+
+
+	set i = 0							;001
+	set j = temp_result->r_count					;001
+	; get the parent and/or the child for all the id's		;001
+	for (i=1 to j )							;001
+	  set bfoundUp = 0						;001
+	  set bfoundDown = 0						;001
+	  ;check to see if we need to traverse up			;001
+	  if (temp_result->results[i].traverse_up_ind = 1)		;001
+	    set temp_result_id = temp_result->results[i].result_id	;001
+	    while( bfoundup = 0)					;001
+	      ;keep looping and adding to the struct until we find the parent
+	      select into "nl:"						;001
+	  	qr.qc_result_id						;001
+	      from							;001
+		qc_result qr						;001
+	      plan qr							;001
+		where qr.qc_result_id = temp_result_id			;001
+	      head report						;001
+		bfoundUp = 1						;001
+		row +0							;001
+	      detail							;001
+		if (qr.prev_result_id > 0)				;001
+		  call echo(build("moving up:", qr.prev_result_id))	;001
+		  temp_result_id = qr.prev_result_id			;001
+		  temp_result->r_count = temp_result->r_count + 1	;001
+		  stat = alterlist(temp_result->results, temp_result->r_count);001
+		  temp_result->results[temp_result->r_count]		;001
+		  .result_id = qr.prev_result_id			;001
+		  ;call validate_results(0, qr.prev_result_id)		;001
+		  ;call echo(build("next id:", temp_result_id))		;001
+		  bfoundup = 0						;001
+		endif							;001
+	      foot report						;001
+		row + 0							;001
+	      with nocounter						;001
+	    endwhile							;001
+	  endif								;001
+	  ;traverse down						;001
+	  if (temp_result->results[i].traverse_down_ind = 1)		;001
+	      set temp_result_id = temp_result->results[i].result_id	;001
+	    while( bfounddown = 0)					;001
+	      select into "nl:"						;001
+	  	qr.qc_result_id						;001
+	      from							;001
+		qc_result qr						;001
+	      plan qr							;001
+		where qr.prev_result_id = temp_result_id		;001
+	      head report						;001
+		bfounddown = 1						;001
+	      detail							;001
+		;call echo(build("moving down:", qr.qc_result_id))	;001
+		temp_result_id = qr.qc_result_id			;001
+		;Found a child so add it to the rec struct		;001
+		temp_result->r_count = temp_result->r_count + 1		;001
+		stat = alterlist(temp_result->results, 			;001
+				temp_result->r_count)			;001
+		temp_result->results[temp_result->r_count]		;001
+			.result_id = qr.qc_result_id 			;001
+		bfounddown = 0						;001
+	      with nocounter						;001
+	      if (curqual = 0)						;001
+		set bFoundDown= 1					;001
+	      endif							;001
+	    endwhile							;001
+	  endif								;001
+	endfor								;001
+
+	;call echo("------ After traversing---")			;001
+	set i = 0							;001
+	set j = temp_result->r_count					;001
+
+
+	;001 Debug
+	;for (i=1 to j )						;001
+	;  call echo(temp_result->results[i].result_id)			;001
+	;  call echo(build("result_id = ", temp_result->results[i].result_id))
+	;  call echo(build("traverse_up = ", temp_result->results[i].traverse_up_ind))
+	;  call echo(build("traverse_down = ", temp_result->results[i].traverse_down_ind))
+	;endfor
+	;001 End Debug
+
+	; get the rest of the information and fill the reply structure
+
+	select into "nl:"						;001
+  	  r.accession_id,						;001
+	  qc.perform_dt_tm,						;001
+	  qc.task_assay_cd,						;001
+	  a.accession,							;001
+	  qre.event_personnel_id,					;001
+	  p.person_id,							;001
+	  d_tr.seq							;001
+	from								;001
+	  qc_result_grp r,						;001
+	  qc_result qc,							;001
+	  control_material cm,						;001
+	  accession a,							;001
+	  qc_result_event qre,						;001
+	  prsnl p,							;001
+	  (dummyt d_tr with seq = value(size(temp_result->results,5)))	;001
+	plan d_tr							;001
+	join qc								;001
+	  where qc.qc_result_id = 					;001
+	  		temp_result->results[d_tr.seq].result_id	;001
+	join qre							;001
+	  where qre.qc_result_id = qc.qc_result_id			;001
+	join p								;001
+	  where qre.event_personnel_id = p.person_id			;001
+	join cm								;001
+	  where qc.control_id = cm.control_id				;001
+	join r								;001
+	  where qc.qc_group_id = r.qc_group_id				;001
+	join a								;001
+	  where r.accession_id = a.accession_id				;001
+	order r.accession_id, qc.qc_result_id				;001
+	head report							;001
+	  a_cnt = 0							;001
+	head r.accession_id						;001
+	  a_cnt = a_cnt + 1						;001
+	  if (mod(a_cnt,10) = 1)					;001
+	    stat = alterlist(reply->qual, (a_cnt + 10))			;001
+	  endif								;001
+	  reply->qual[a_cnt].accession = a.accession			;001
+	  t_cnt = 0							;001
+
+	head qc.qc_result_id						;001
+	  t_cnt = t_cnt + 1						;001
+	  if (mod(t_cnt,10) = 1)					;001
+	    stat = alterlist(reply->qual[a_cnt].tasks, (t_cnt + 10))	;001
+	  endif								;001
+	  reply->qual[a_cnt].tasks[t_cnt].				;001
+	  		task_assay_cd = qc.task_assay_cd		;001
+	  reply->qual[a_cnt].tasks[t_cnt] 				;001
+	  		.result_id = qc.qc_result_id			;001
+	  reply->qual[a_cnt].tasks[t_cnt] 				;001
+	  		.prev_result_id = qc.prev_result_id		;001
+	  reply->qual[a_cnt].tasks[t_cnt]				;001
+			.result_value_numeric =qc.result_value_numeric	;001
+	  reply->qual[a_cnt].tasks[t_cnt]				;001
+			.result_value_alpha = qc.result_value_alpha	;001
+	  reply->qual[a_cnt].tasks[t_cnt]				;001
+			.perform_dt_tm = qc.perform_dt_tm		;001
+	  reply->qual[a_cnt].tasks[t_cnt]				;001
+			.result_control_cd = qc.result_control_cd	;001
+	  reply->qual[a_cnt].tasks[t_cnt]				;001
+			.result_process_cd = qc.result_process_cd	;001
+	  reply->qual[a_cnt].tasks[t_cnt]				;001
+	  		.result_type_cd = qc.result_type_cd		;001
+	  reply->qual[a_cnt].tasks[t_cnt].				;001
+	  		result_status_cd = qc.result_status_cd		;001
+	  reply->qual[a_cnt].tasks[t_cnt]				;001
+	  		.personnel_name = p.name_full_formatted		;001
+	  reply->qual[a_cnt].tasks[t_cnt]				;001
+	  		.service_resource_cd = qc.service_resource_cd	;001
+	  reply->qual[a_cnt].tasks[t_cnt]				;001
+	  		.interface_flag = qc.interface_flag		;001
+	  av_cnt = 0							;001
+									;001
+	detail								;001
+	  row + 0							;001
+	foot qc.qc_result_id						;001
+	  row + 0							;001
+	foot r.accession_id						;001
+	  stat = alterlist(reply->qual[a_cnt].tasks, t_cnt)		;001
+	foot report							;001
+	  stat = alterlist(reply->qual, a_cnt)				;001
+	with nocounter					;001
+									;001
+	;001 get all the auto verify_codes if they exist		;001
+	set i = 0							;001
+	set j = 0							;001
+	
+	set lReplySize = size(reply->qual,5) 
+	
+	for (i=1 to lReplySize)				;001
+	  for (j =1 to value(size(reply->qual[i].tasks,5)))		;001
+      	    select into "nl:"						;001
+	      av.auto_verify_cd,					;001
+	      error_exists = decode(avc.auto_verify_cd,"Y", "N")	;001
+            from auto_verify_code avc					;001
+            where avc.parent_entity_id =				;001
+      	      reply->qual[i].tasks[j].result_id				;001
+            head report							;001
+      	      av_cnt = 0						;001
+            detail							;001
+              if (error_exists = "Y")					;001
+    	        av_cnt = av_cnt + 1					;001
+                if (mod(av_cnt,10) = 1)					;001
+                  stat = alterlist(reply->qual[i].tasks[j].av_errors	;001
+               		, (av_cnt + 10))				;001
+                endif							;001
+                reply->qual[i].tasks[j].av_errors[av_cnt]		;001
+      				.av_error_cd = avc.auto_verify_cd	;001
+              endif							;001
+	    foot report							;001
+	      stat = alterlist(reply->qual[i].tasks[j].av_errors, av_cnt);001
+	  endfor							;001
+	endfor								;001
+
+/*get the code value for the auto verfiy*/
+;001	select into "nl:"
+;001		code_value
+;001	from code_value cv
+;001	where cv.code_set = 1901 and cv.cdf_meaning = "AUTOVERIFIED"
+;001	detail
+;001		AUTOVERIFY = cv.code_value
+;001	with nocounter
+;001	call echo(autoverify)
+;001
+;001	select into "nl:"
+;001		r.accession_id,
+;001		qc.perform_dt_tm,
+;001		qc.task_assay_cd,
+;001		a.accession
+;001	from
+;001		qc_result_grp r,
+;001		qc_result qc,
+;001		control_material cm,
+;001		accession a
+;001	plan qc	where qc.service_resource_cd = request->service_resource_cd
+;001			and qc.qc_result_type_flag = 0
+;001			and qc.result_status_cd = AUTOVERIFY
+;001		    	and qc.perform_dt_tm >= cnvtdatetime(request->start_dt_tm)
+;001		  	and qc.perform_dt_tm <= cnvtdatetime(curdate, curtime3)
+;001	join cm where qc.control_id = cm.control_id
+;001	join r	where qc.qc_group_id = r.qc_group_id
+;001	join a  where r.accession_id = a.accession_id
+;001	order	 qc.perform_dt_tm desc, qc.task_assay_cd
+;001	head report
+;001		a_cnt = 0
+;001	head qc.perform_dt_tm
+;001		a_cnt = a_cnt + 1
+;001	        if (mod(a_cnt,10) = 1)
+;001	        	stat = alterlist(reply->qual, (a_cnt + 10))
+;001	        endif
+;001		reply->qual[a_cnt].accession = a.accession
+;001		reply->qual[a_cnt].control = cm.description
+;001		t_cnt = 0
+;001	detail
+;001		t_cnt = t_cnt + 1
+;001	        if (mod(t_cnt,10) = 1)
+;001	        	stat = alterlist(reply->qual[a_cnt].tasks, (t_cnt + 10))
+;001	        endif
+;001		reply->qual[a_cnt].tasks[t_cnt].task_assay_cd = qc.task_assay_cd
+;001		reply->qual[a_cnt].tasks[t_cnt].result_type_cd = qc.result_type_cd
+;001		reply->qual[a_cnt].tasks[t_cnt].result_value_numeric =
+;001							qc.result_value_numeric
+;001		reply->qual[a_cnt].tasks[t_cnt].result_value_alpha =
+;001							qc.result_value_alpha
+;001		reply->qual[a_cnt].tasks[t_cnt].perform_dt_tm =
+;001							qc.perform_dt_tm
+;001		reply->qual[a_cnt].tasks[t_cnt].result_control_cd =
+;001							qc.result_control_cd
+;001		reply->qual[a_cnt].tasks[t_cnt].result_process_cd =
+;001							qc.result_process_cd
+;001	foot qc.perform_dt_tm
+;001	       	stat = alterlist(reply->qual[a_cnt].tasks, t_cnt)
+;001	with nocounter
+;001
+;001	      set stat = alterlist(reply->qual, a_cnt)
+;001
+;001	/* If no record matching, exit with return
+;001	   status of "F". */
+	set error_check = ERROR(sErrorMsg,0)   ;get error message	;001
+	if (error_check != 0)						;001
+          set reply->status_data->status = "F"				;001
+          set reply->status_data->subeventstatus[1]			;001
+          	->TargetObjectValue = sErrorMsg				;001
+          go to exit_script						;001
+        endif								;001
+
+        if (lReplySize = 0)
+          set reply->status_data->status = "Z"
+;001          go to EXIT_PROGRAM
+;001    endif
+        else								;001
+          set reply->status_data->status = "S"
+        endif								;001
+
+;001	#EXIT_PROGRAM
+;001	      end go
+#exit_script								;001
+end go									;001
+
+;Generated by GNU enscript 1.6.4.

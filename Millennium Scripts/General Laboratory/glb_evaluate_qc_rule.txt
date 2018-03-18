@@ -1,0 +1,870 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_evaluate_qc_rule/glb_evaluate_qc_rule.inc Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       GLB_EVALUATE_QC_RULE.INC
+        Object name:            GLB_EVALUATE_QC_RULE
+        Request #:
+
+        Product:                General Lab Quality Control
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load a number of Quality Control results
+                                based on the number of results within
+                                control (request->max_within_control) and
+                                optionally the number of results across
+                                controls (request->max_across_control).
+                                Perform QC Rule evalation on results.
+                                Results are selected back from a starting
+                                perform date and time.
+
+        Tables read:            code_value
+                                control_x_check
+                                qc_result
+                                qc_result_grp_id
+
+        Tables updated:         None
+        Executing from:
+
+        Special Notes:
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 01/04/99 Chad Moats           Initial Release                     *
+;    *001 07/05/00 Gary Runde           Sort results by qc_result_id desc to*
+;    *                                  get latest qc_result_id for rules   *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+/*      record rule_request
+      (
+         1  control_id                   = f8
+         1  service_resource_cd          = f8
+         1  task_assay_cd                = f8
+         1  start_perform_dt_tm          = dq8
+         1  qc_result_type_flag          = i2   ;0 = qc results         ;003
+                                                ;1 = patient results    ;003
+         1  rule_id                      = f8
+      )
+*/
+      record all_results
+      (
+         1  results[*]
+            2  qc_result_id              = f8
+            2  lot_id                    = f8
+            2  control_id                = f8
+            2  service_resource_cd       = f8
+            2  task_assay_cd             = f8
+            2  task_assay_disp           = vc
+            2  preactive_ind             = i2
+            2  result_status_cd          = f8
+            2  perform_personnel_id      = f8
+            2  perform_dt_tm             = dq8
+            2  result_type_cd            = f8
+            2  result_value_numeric      = f8
+            2  numeric_raw_value         = f8
+            2  result_value_alpha        = c25
+            2  nomenclature_id           = f8
+            2  resource_error_codes      = vc
+            2  multiplex_resource_cd     = f8
+            2  rule_id                   = f8
+            2  prev_result_id            = f8
+            2  mean                      = f8
+            2  clinical_std_dev          = f8
+            2  statistical_std_dev       = f8
+            2  abs_low                   = f8
+            2  abs_high                  = f8
+            2  arl_id                    = f8
+            2  result_control_cd         = f8
+            2  updt_cnt                  = i4
+            2  qc_group_id               = f8
+            2  result_process_cd         = f8
+      )
+
+      record rule
+      (
+         1  rule_id                      = f8
+         1  across_control_ind           = i2
+         1  max_across_results           = i4
+         1  max_within_results           = i4
+         1  trigger_rule                 = i4
+         1  rules[*]
+            2  sequence                  = i4
+            2  rule_form_flag            = i2
+            2  error_flag                = i2
+            2  rule_definition           = vc
+            2  across_control_ind        = i2
+            2  across_run_ind            = i2
+            2  trig_ind                  = i2
+            2  max_req_results           = i4
+            2  rule_status               = i2
+      )
+
+      record internal
+      (
+         1  qual[*]
+            2  control_id                = f8
+      )
+
+
+     declare performRule(arg_cntrl_id, arg_sr_cd, arg_ta_cd, arg_start_dt_tm, arg_result_type_flag, arg_rule_id ) = i4
+     subroutine performRule(arg_cntrl_id, arg_sr_cd, arg_ta_cd, arg_start_dt_tm, arg_result_type_flag, arg_rule_id )
+       declare qual_nbr = i4
+       declare arg_A = i4
+       declare arg_B = f8
+       declare arg_C = i4
+       declare arg_D = f8
+       declare arg_E = f8
+       set arg_A = 0
+       set arg_B = 0.0
+       set arg_C = 0
+       set arg_D = 0.0
+       set arg_E = 0.0
+       declare arg_XCntrlFlag = i2
+       declare arg_ErrFlag = i2
+       set rule_failed = 0
+       set cnt = 0
+       set rule_cnt = 0
+       set result_cnt = 0
+       set rule_status = 0
+       declare std_dev = f8
+       declare zscore = f8
+       declare fail_cnt = i4
+       declare pos_cnt = i4
+       declare neg_cnt = i4
+
+       if (getQCRule( 0 ) = 0)
+         return(0)
+       endif
+       if (getQCResults( 0 ) = 0)
+         return(0)
+       endif
+
+       if (rule->trigger_rule > 0)    ;trigger rule found
+         set t_cnt = rule->trigger_rule
+         case(rule->rules[t_cnt].rule_form_flag)
+           of 1:      ; a-bs rule
+             set dash_loc = findstring("-", rule->rules[t_cnt].rule_definition)
+             set arg_A = cnvtint(substring(1, dash_loc - 1, rule->rules[t_cnt].rule_definition))
+             set s_loc = findstring("s", rule->rules[t_cnt].rule_definition)
+             set arg_B = cnvtreal(substring((dash_loc + 1), s_loc - (dash_loc + 1), rule->rules[t_cnt].rule_definition))
+             set arg_XCntrlFlag = rule->rules[t_cnt].across_control_ind
+             set arg_ErrFlag = rule->rules[t_cnt].error_flag
+             set rule_status = absRule( 0 )
+	     if (rule_status = 0)
+	       set rule_failed = 1
+	     endif
+           of 2:      ; aofcbs
+             set of_loc = findstring("of", rule->rules[t_cnt].rule_definition)
+             set arg_A = cnvtint(substring(2, of_loc - 2, rule->rules[t_cnt].rule_definition))
+             set end_para_loc = findstring(")", rule->rules[t_cnt].rule_definition)
+             set arg_C = cnvtint(substring((of_loc + 2), end_para_loc - (of_loc + 2), rule->rules[t_cnt].rule_definition))
+             set s_loc = findstring("s", rule->rules[t_cnt].rule_definition)
+             set arg_B = cnvtreal(substring((end_para_loc + 1), s_loc - (end_para_loc + 1), rule->rules[t_cnt].rule_definition))
+             set arg_XCntrlFlag = rule->rules[t_cnt].across_control_ind
+             set arg_ErrFlag = rule->rules[t_cnt].error_flag
+             set rule_status = aofcRule( 0 )
+	     if (rule_status = 0)
+	       set rule_failed = 1
+	     endif
+           of 3:     ;R-bs
+             set dash_loc = findstring("-", rule->rules[t_cnt].rule_definition)
+             set s_loc = findstring("s", rule->rules[t_cnt].rule_definition)
+             set arg_B = cnvtreal(substring((dash_loc + 1), s_loc - (dash_loc + 1), rule->rules[t_cnt].rule_definition))
+             set arg_XCntrlFlag = rule->rules[t_cnt].across_control_ind
+             set arg_ErrFlag = rule->rules[t_cnt].error_flag
+             set rule_status = RbsRule( 0 )
+	     if (rule_status = 0)
+	       set rule_failed = 1
+	     endif
+           of 4:
+             set x_loc = findstring("x", rule->rules[t_cnt].rule_definition)
+             set arg_A = cnvtint(substring(1, x_loc - 1, rule->rules[t_cnt].rule_definition))
+             set arg_XCntrlFlag = rule->rules[t_cnt].across_control_ind
+             set arg_ErrFlag = rule->rules[t_cnt].error_flag
+             set rule_status = axRule( 0 )
+	     if (rule_status = 0)
+	       set rule_failed = 1
+	     endif
+           of 5:
+             set end_para_loc = findstring(")", rule->rules[t_cnt].rule_definition)
+             set arg_A = cnvtint(substring(4, end_para_loc - 4, rule->rules[t_cnt].rule_definition))
+             set comma_loc = findstring(",", rule->rules[t_cnt].rule_definition)
+             set arg_D = cnvtreal(substring((end_para_loc + 1),
+                        comma_loc - (end_para_loc + 1), rule->rules[t_cnt].rule_definition))
+             set string_size = (size(rule->rules[t_cnt].rule_definition))
+             set string_length = string_size - comma_loc
+             set arg_E = cnvtreal(substring(comma_loc + 1, string_length, rule->rules[t_cnt].rule_definition))
+             set arg_XCntrlFlag = rule->rules[t_cnt].across_control_ind
+             set arg_ErrFlag = rule->rules[t_cnt].error_flag
+             set rule_status = CSadeRule( 0 )
+	     if (rule_status = 0)
+	       set rule_failed = 1
+	     endif
+         endcase
+         ;set rule status for trigger rule (0=failed;1=passed,2=invalid;3=not tested)
+         set rule->rules[t_cnt].rule_status = rule_status
+       endif
+
+       ;if trigger passed, set rest of rule statuses to not tested
+       if (rule_status = 1 and rule->trigger_rule > 0)
+         for (cnt = 1 to rule_cnt)
+           if (cnt != rule->trigger_rule)
+             set rule->rules[cnt].rule_status = 3 ;not tested
+           endif
+         endfor
+       else
+         for (cnt = 1 to rule_cnt)
+           case(rule->rules[cnt].rule_form_flag)
+             of 1:      ; a-bs rule
+               set dash_loc = findstring("-", rule->rules[cnt].rule_definition)
+               set arg_A = cnvtint(substring(1, dash_loc - 1, rule->rules[cnt].rule_definition))
+               set s_loc = findstring("s", rule->rules[cnt].rule_definition)
+               set arg_B = cnvtreal(substring((dash_loc + 1), s_loc - (dash_loc + 1), rule->rules[cnt].rule_definition))
+               set arg_XCntrlFlag = rule->rules[cnt].across_control_ind
+               set arg_ErrFlag = rule->rules[cnt].error_flag
+               set rule_status = absRule( 0 )
+	       if (rule_status = 0)
+	         set rule_failed = 1
+	       endif
+             of 2:      ; aofcbs
+               set of_loc = findstring("of", rule->rules[cnt].rule_definition)
+               set arg_A = cnvtint(substring(2, of_loc - 2, rule->rules[cnt].rule_definition))
+               set end_para_loc = findstring(")", rule->rules[cnt].rule_definition)
+               set arg_C = cnvtint(substring((of_loc + 2), end_para_loc - (of_loc + 2), rule->rules[cnt].rule_definition))
+               set s_loc = findstring("s", rule->rules[cnt].rule_definition)
+               set arg_B = cnvtreal(substring((end_para_loc + 1), s_loc - (end_para_loc + 1), rule->rules[cnt].rule_definition))
+               set arg_XCntrlFlag = rule->rules[cnt].across_control_ind
+               set arg_ErrFlag = rule->rules[cnt].error_flag
+               set rule_status = aofcRule( 0 )
+	       if (rule_status = 0)
+	         set rule_failed = 1
+	       endif
+             of 3:     ;R-bs
+               set dash_loc = findstring("-", rule->rules[cnt].rule_definition)
+               set s_loc = findstring("s", rule->rules[cnt].rule_definition)
+               set arg_B = cnvtreal(substring((dash_loc + 1), s_loc - (dash_loc + 1), rule->rules[cnt].rule_definition))
+               set arg_XCntrlFlag = rule->rules[cnt].across_control_ind
+               set arg_ErrFlag = rule->rules[cnt].error_flag
+               set rule_status = RbsRule( 0 )
+	       if (rule_status = 0)
+	         set rule_failed = 1
+	       endif
+             of 4:
+               set x_loc = findstring("x", rule->rules[cnt].rule_definition)
+               set arg_A = cnvtint(substring(1, x_loc - 1, rule->rules[cnt].rule_definition))
+               set arg_XCntrlFlag = rule->rules[cnt].across_control_ind
+               set arg_ErrFlag = rule->rules[cnt].error_flag
+               set rule_status = axRule( 0 )
+	       if (rule_status = 0)
+	         set rule_failed = 1
+	       endif
+             of 5:
+               set end_para_loc = findstring(")", rule->rules[cnt].rule_definition)
+               set arg_A = cnvtint(substring(4, end_para_loc - 4, rule->rules[cnt].rule_definition))
+               set comma_loc = findstring(",", rule->rules[cnt].rule_definition)
+               set arg_D = cnvtreal(substring((end_para_loc + 1),
+                                comma_loc - (end_para_loc + 1), rule->rules[cnt].rule_definition))
+               set string_size = (size(rule->rules[cnt].rule_definition))
+               set string_length = string_size - comma_loc
+               set arg_E = cnvtreal(substring(comma_loc + 1, string_length, rule->rules[cnt].rule_definition))
+               set arg_XCntrlFlag = rule->rules[cnt].across_control_ind
+               set arg_ErrFlag = rule->rules[cnt].error_flag
+               set rule_status = CSadeRule( 0 )
+	       if (rule_status = 0)
+	         set rule_failed = 1
+	       endif
+           endcase
+           set rule->rules[cnt].rule_status = rule_status
+         endfor
+       endif
+
+       if (rule_failed = 1)
+         set stat = updFailedRules( 0 )
+       endif
+       set stat = updQCResultStatus( 0 )
+
+     end
+
+/* INTERNAL SUBROUTINES */
+
+     declare absRule( none1 ) = i4
+     subroutine absRule( none1 )
+        set qual_nbr = 0
+        set r_status = 0
+        set neg_cnt = 0
+        set pos_cnt = 0
+        set fail_cnt = 0
+
+        for (r_cnt = 1 to result_cnt)
+          if (qual_nbr < arg_A)
+            if ((arg_XCntrlFlag = 0 and all_results->results[r_cnt].control_id = arg_cntrl_id) or
+                arg_XCntrlFlag = 1 or arg_result_type_flag != 0)
+              set qual_nbr = qual_nbr + 1
+              set mean = all_results->results[r_cnt].mean
+              set std_dev = all_results->results[r_cnt].statistical_std_dev
+              set result = all_results->results[r_cnt].result_value_numeric
+              set zscore = (result - mean) / std_dev
+              if (arg_ErrFlag = 2)
+                if (zscore < 0 and abs(zscore) > arg_B)
+                  set neg_cnt = neg_cnt + 1
+                elseif (zscore > 0 and abs(zscore) > arg_B)
+                  set pos_cnt = pos_cnt + 1
+                endif
+              endif
+              set zscore = abs(zscore)
+              if (zscore > arg_B)
+                set fail_cnt = fail_cnt + 1
+              endif
+            endif
+          endif
+        endfor
+        if (qual_nbr = arg_A)
+          if (arg_ErrFlag = 2)
+            if (fail_cnt < arg_A and neg_cnt < arg_A and pos_cnt < arg_A)
+              set r_status = 1
+            endif
+          else
+            if (fail_cnt < arg_A)
+              set r_status = 1
+            endif
+          endif
+        else
+          set r_status = 2
+        endif
+
+        return(r_status)
+
+      end
+
+     declare aofcRule( none2 ) = i4
+     subroutine aofcRule( none2 )
+        set qual_nbr = 0
+        set r_status = 0
+        set neg_cnt = 0
+        set pos_cnt = 0
+        set fail_cnt = 0
+
+        for (r_cnt = 1 to result_cnt)
+          if (qual_nbr < arg_C)
+            if ((arg_XCntrlFlag = 0 and all_results->results[r_cnt].control_id = arg_cntrl_id) or
+                arg_XCntrlFlag = 1 or arg_result_type_flag != 0)
+              set qual_nbr = qual_nbr + 1
+              set mean = all_results->results[r_cnt].mean
+              set std_dev = all_results->results[r_cnt].statistical_std_dev
+              set result = all_results->results[r_cnt].result_value_numeric
+              set zscore = (result - mean) / std_dev
+              if (arg_ErrFlag = 2)
+                if (zscore < 0 and abs(zscore) > arg_B)
+                  set neg_cnt = neg_cnt + 1
+                elseif (zscore > 0 and abs(zscore) > arg_B)
+                  set pos_cnt = pos_cnt + 1
+                endif
+              endif
+              set zscore = abs(zscore)
+              if (zscore > arg_B)
+                set fail_cnt = fail_cnt + 1
+              endif
+            endif
+          endif
+        endfor
+        if (qual_nbr = arg_C)
+          if (arg_ErrFlag = 2)
+            if (fail_cnt < arg_A and pos_cnt < arg_C and neg_cnt < arg_C)
+              set r_status = 1
+            endif
+          else
+            if (fail_cnt < arg_A)
+              set r_status = 1
+            endif
+          endif
+        else
+          set r_status = 1
+        endif
+
+        return(r_status)
+
+      end
+
+     declare axRule( none3 ) = i4
+     subroutine axRule( none3 )
+        set qual_nbr = 0
+        set r_status = 0
+        set neg_cnt = 0
+        set pos_cnt = 0
+        set fail_cnt = 0
+
+        for (r_cnt = 1 to result_cnt)
+          if (qual_nbr < arg_A)
+            if ((arg_XCntrlFlag = 0 and all_results->results[r_cnt].control_id = arg_cntrl_id) or
+                arg_XCntrlFlag = 1 or arg_result_type_flag != 0)
+              set qual_nbr = qual_nbr + 1
+              set mean = all_results->results[r_cnt].mean
+              set std_dev = all_results->results[r_cnt].statistical_std_dev
+              set result = all_results->results[r_cnt].result_value_numeric
+              set zscore = (result - mean) / std_dev
+              if (zscore < 0)
+                set neg_cnt = neg_cnt + 1
+              elseif (zscore > 0)
+                set pos_cnt = pos_cnt + 1
+              endif
+            endif
+          endif
+        endfor
+        if (qual_nbr = arg_A)
+          if (neg_cnt < arg_A and pos_cnt < arg_A)
+            set r_status = 1
+          else
+            set r_status = 0
+          endif
+        else
+          set r_status = 2
+        endif
+
+        return(r_status)
+      end
+
+     declare CSadeRule( none4 ) = i4
+     subroutine CSadeRule( none4 )
+        set qual_nbr = 0
+        set r_status = 0
+        set neg_cnt = 0
+        set pos_cnt = 0
+        set fail_cnt = 0
+
+        for (r_cnt = 1 to all_cnt)
+          if (qual_nbr < arg_A)
+            if ((arg_XCntrlFlag = 0 and all_results->results[r_cnt].control_id = arg_cntrl_id) or
+                arg_XCntrlFlag = 1 or arg_result_type_flag != 0)
+              set qual_nbr = qual_nbr + 1
+              set mean = all_results->results[r_cnt].mean
+              set std_dev = all_results->results[r_cnt].statistical_std_dev
+              set result = all_results->results[r_cnt].result_value_numeric
+              set zscore = (result - mean) / std_dev
+              if (qual_nbr = 1)
+                if (abs(zscore) <= arg_D)
+                  set r_status = 1
+                  return(r_status)
+                endif
+              endif
+              if (zscore < 0)
+                set neg_cnt = neg_cnt + 1
+              elseif (zscore > 0)
+                set pos_cnt = pos_cnt + 1
+              endif
+              if (neg_cnt > 1 and pos_cnt > 1)
+                set r_status = 1
+                return(r_status)
+              endif
+              set cumsum = cumsum + zscore
+              if (abs(cumsum) > arg_E)
+                set r_status = 0
+                return(r_status)
+              endif
+            endif
+          endif
+        endfor
+        if (qual_nbr = arg_A)
+          set r_status = 1
+        else
+          set r_status = 0
+        endif
+
+        return(r_status)
+
+      end
+
+     declare RbsRule( none5 ) = i4
+     subroutine RbsRule( none5 )
+        set qual_nbr = 0
+        set r_status = 0
+        set neg_cnt = 0
+        set pos_cnt = 0
+        set fail_cnt = 0
+
+        for (r_cnt = 1 to result_cnt)
+          if (qual_nbr < 2)
+            if ((arg_XCntrlFlag = 0 and all_results->results[r_cnt].control_id = arg_cntrl_id) or
+                arg_XCntrlFlag = 1 or arg_result_type_flag != 0)
+              set qual_nbr = qual_nbr + 1
+              set mean = all_results->results[r_cnt].mean
+              set std_dev = all_results->results[r_cnt].statistical_std_dev
+              set result = all_results->results[r_cnt].result_value_numeric
+              if (qual_nbr = 1)
+                set zscore1 = (result - mean) / std_dev
+              elseif (qual_nbr = 2)
+                set zscore2 = (result - mean) / std_dev
+              endif
+            endif
+          endif
+        endfor
+        set z_range = 0.0
+        if (qual_nbr = 2)
+          if (zscore1 < zscore2)
+            set z_range = value(zscore1 - zscore2)
+          else
+            set z_range = value(zscore2 - zscore1)
+          endif
+          set z_range = abs(z_range)
+          if (z_range <= arg_B)
+            set r_status = 1
+          endif
+        else
+          set r_status = 2
+        endif
+
+        return(r_status)
+      end
+
+     declare getQCResults( none6 ) = i4
+     subroutine getQCResults( none6 )
+
+         set CV_REQUIRED_RECS            = 4
+         declare cv_cnt                  = i4
+         set RESULT_STATUS_CODESET       = 1901
+         set RESULT_STATUS_ACCEPT_CDF    = "ACCEPT"
+         set RESULT_STATUS_VERIFIED_CDF  = "VERIFIED"
+         set RESULT_STATUS_AUTO_VERF_CDF = "AUTOVERIFIED"
+         set RESULT_STATUS_CHANGED_CDF = "CHANGE"
+         declare result_status_accept_cd = f8
+         declare result_status_verified_cd  = f8
+         declare result_status_auto_verf_cd  = f8
+         declare result_status_changed_cd = f8
+         declare stat                    = i4
+         declare cnt                     = i4
+         declare q_cnt                   = i4
+         declare found_result_ind        = i4
+         declare tot_within              = i4
+         declare tot_across              = i4
+
+     /***********************************************************************
+      * Load result status code set                                          *
+      ***********************************************************************/
+         set cv_cnt = 0
+
+         select into "nl:"
+            cv.code_set,
+            cv.code_value
+
+         from code_value cv
+
+         where cv.code_set = RESULT_STATUS_CODESET
+           and cv.cdf_meaning in ( RESULT_STATUS_ACCEPT_CDF,
+                                   RESULT_STATUS_VERIFIED_CDF,
+                                   RESULT_STATUS_AUTO_VERF_CDF,  ;001
+                                   RESULT_STATUS_CHANGED_CDF )
+           and cv.active_ind = 1
+           and (cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+             and  cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+
+         detail
+            case ( cv.cdf_meaning )
+              of RESULT_STATUS_ACCEPT_CDF:
+                 result_status_accept_cd = cv.code_value
+                 cv_cnt = cv_cnt + 1
+              of RESULT_STATUS_VERIFIED_CDF:
+                 result_status_verified_cd = cv.code_value
+                 cv_cnt = cv_cnt + 1
+              of RESULT_STATUS_AUTO_VERF_CDF:  ;001
+                 result_status_auto_verf_cd = cv.code_value  ;001
+                 cv_cnt = cv_cnt + 1  ;001
+              of RESULT_STATUS_CHANGED_CDF:
+                 result_status_changed_cd = cv.code_value
+                 cv_cnt = cv_cnt + 1
+            endcase
+
+         with nocounter
+
+         ;* Verify that all required code value records were read.
+         if (cv_cnt != CV_REQUIRED_RECS)
+            return(0)
+         endif
+
+      /***********************************************************************
+      * Load control's to search across for results.                         *
+      ***********************************************************************/
+      set cnt = 1
+      set stat = alterlist(internal->qual, cnt)
+      set internal->qual[cnt].control_id = arg_cntrl_id
+      if (arg_result_type_flag = 0)
+         if (rule->across_control_ind = 1)
+            select into "nl:"
+               cxc.control_id,
+               cxc.control_x_id
+            from
+               control_x_check cxc
+            plan cxc where cxc.control_id = arg_cntrl_id
+            detail
+               cnt = cnt + 1,
+               stat = alterlist(internal->qual, cnt),
+               internal->qual[cnt].control_id = cxc.control_x_id
+            with nocounter
+         endif
+      endif
+
+      /***********************************************************************
+      * Select qc results                                                    *
+      ***********************************************************************/
+         select into "nl:"
+            d.seq,
+            qr.seq
+         from
+            (dummyt d with seq = value(cnt)),
+            qc_result qr
+
+         plan    d
+         join    qr  where qr.control_id = internal->qual[d.seq].control_id
+                       and qr.service_resource_cd = arg_sr_cd
+                       and qr.task_assay_cd = arg_ta_cd
+                       and qr.result_status_cd in ( result_status_accept_cd,
+                                                    result_status_verified_cd,
+                                                    result_status_auto_verf_cd,
+                                                    result_status_changed_cd)
+                       and qr.qc_result_type_flag = arg_result_type_flag
+                       and qr.preactive_ind = 0
+                       and qr.perform_dt_tm <=
+                                     cnvtdatetime(arg_start_dt_tm)
+
+         order by
+             qr.qc_result_id desc
+;            cnvtdatetime(qr.perform_dt_tm) desc
+
+         head report
+            q_cnt = 0,
+            found_result_ind = 0,
+            tot_within = 0,
+            tot_across = 0
+
+         detail
+            found_result_ind = 0
+
+            ;****************************************************
+            ;* Check for a qualifying result within the control *
+            ;****************************************************
+            if (qr.control_id = arg_cntrl_id
+            and tot_within < rule->max_within_results)
+               tot_within = tot_within + 1
+               found_result_ind = 1
+            endif
+
+            ;*************************************************
+            ;* Check for a qualifying result across controls *
+            ;*************************************************
+            if (qr.control_id != arg_cntrl_id
+            and tot_across < rule->max_across_results)
+               tot_across = tot_across + 1
+               found_result_ind = 1
+            endif
+
+            ;******************************************
+            ;* If qc result was found, fill out reply *
+            ;******************************************
+            if (found_result_ind = 1)
+               result_cnt = result_cnt + 1
+               if (mod(result_cnt,10) = 1)
+                  stat = alterlist(all_results->results, result_cnt + 10)
+               endif
+               all_results->results[result_cnt].qc_result_id = qr.qc_result_id
+               all_results->results[result_cnt].lot_id = qr.lot_id
+               all_results->results[result_cnt].control_id = qr.control_id
+               all_results->results[result_cnt].service_resource_cd = qr.service_resource_cd
+               all_results->results[result_cnt].task_assay_cd = qr.task_assay_cd
+               all_results->results[result_cnt].preactive_ind = qr.preactive_ind
+               all_results->results[result_cnt].result_status_cd = qr.result_status_cd
+               all_results->results[result_cnt].perform_personnel_id = qr.perform_personnel_id
+               all_results->results[result_cnt].perform_dt_tm = qr.perform_dt_tm
+               all_results->results[result_cnt].result_type_cd = qr.result_type_cd
+               all_results->results[result_cnt].result_value_numeric = qr.result_value_numeric
+               all_results->results[result_cnt].numeric_raw_value = qr.numeric_raw_value
+               all_results->results[result_cnt].result_value_alpha = qr.result_value_alpha
+               all_results->results[result_cnt].nomenclature_id = qr.nomenclature_id
+               all_results->results[result_cnt].resource_error_codes = qr.resource_error_codes
+               all_results->results[result_cnt].multiplex_resource_cd = qr.multiplex_resource_cd
+               all_results->results[result_cnt].rule_id = qr.rule_id
+               all_results->results[result_cnt].prev_result_id = qr.prev_result_id
+               all_results->results[result_cnt].mean = qr.mean
+               all_results->results[result_cnt].clinical_std_dev = qr.clinical_std_dev
+               all_results->results[result_cnt].statistical_std_dev = qr.statistical_std_dev
+               all_results->results[result_cnt].abs_low = qr.abs_low
+               all_results->results[result_cnt].abs_high = qr.abs_high
+               all_results->results[result_cnt].arl_id = qr.arl_id
+               all_results->results[result_cnt].result_control_cd = qr.result_control_cd
+               all_results->results[result_cnt].result_process_cd = qr.result_process_cd
+               all_results->results[result_cnt].updt_cnt = qr.updt_cnt
+               all_results->results[result_cnt].qc_group_id = qr.qc_group_id
+            endif
+
+         foot report
+            stat = alterlist(all_results->results, result_cnt)
+
+         with
+            nocounter
+
+         return(result_cnt)
+
+     end
+
+     declare getQCRule( none7 ) = i4
+     subroutine getQCRule( none7 )
+
+       select into "nl:"
+         qct.rule_id,
+         qr.rule_id,
+         qr.sequence
+       from
+         qc_rule_type qct,
+         qc_rule qr
+       plan qct
+         where qct.rule_id = arg_rule_id
+       join qr
+         where qr.rule_id = qct.rule_id
+       order by qr.sequence
+       head qr.sequence
+         rule_cnt = rule_cnt + 1
+         if (mod(rule_cnt,10) = 1)
+           stat = alterlist(rule->rules, rule_cnt + 10)
+         endif
+         rule->rule_id = qr.rule_id
+         rule->rules[rule_cnt].sequence = qr.sequence
+         rule->rules[rule_cnt].rule_form_flag = qr.rule_form_flag
+         rule->rules[rule_cnt].error_flag = qr.error_flag
+         rule->rules[rule_cnt].rule_definition = qr.rule_definition
+         rule->rules[rule_cnt].across_control_ind = qr.across_control_ind
+         if (qr.across_control_ind = 1)
+           rule->across_control_ind = 1
+           if (qr.max_req_results > rule->max_across_results)
+             rule->max_across_results = qr.max_req_results
+           endif
+         else
+           if (qr.max_req_results > rule->max_within_results)
+             rule->max_within_results = qr.max_req_results
+           endif
+         endif
+         rule->rules[rule_cnt].across_run_ind = qr.across_run_ind
+         rule->rules[rule_cnt].trig_ind = qr.trig_ind
+         if (qr.trig_ind = 1)
+           rule->trigger_rule = rule_cnt
+         endif
+         rule->rules[rule_cnt].max_req_results = qr.max_req_results
+       detail
+         row + 0
+       with nocounter
+
+       set stat = alterlist(rule->rules, rule_cnt)
+       return(rule_cnt)
+
+     end
+
+     declare updFailedRules( none8 ) = i4
+     subroutine updFailedRules( none8 )
+      set f_cnt = 0
+      for (f_cnt = 1 to rule_cnt)
+        if (rule->rules[f_cnt].rule_status = 0)
+call LOG_MESSAGE (build("rule->rule_id =", rule->rule_id), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("qc_result_id =", all_results->results[1].qc_result_id), LOG_LEVEL_DEBUG)
+call LOG_MESSAGE (build("sequence =", rule->rules[f_cnt].sequence), LOG_LEVEL_DEBUG)
+          INSERT
+            into qc_result_rule_r qrr
+          SET
+            qrr.rule_id             = rule->rule_id,
+            qrr.qc_result_id        = all_results->results[1].qc_result_id,
+            qrr.sequence            = rule->rules[f_cnt].sequence,
+            qrr.status_flag         = rule->rules[f_cnt].rule_status,
+            qrr.updt_dt_tm          = cnvtdatetime(curdate,curtime),
+            qrr.updt_cnt            = 0,
+            qrr.updt_task           = reqinfo->updt_task,
+            qrr.updt_id             = reqinfo->updt_id,
+            qrr.updt_applctx        = reqinfo->updt_applctx
+          PLAN qrr
+          WITH
+            nocounter
+        endif
+      endfor
+
+     end
+
+     declare updQCResultStatus( none8 ) = i4
+     subroutine updQCResultStatus( none8 )
+
+       ;still need to update run to out of control
+
+       set RESULT_PROCESS_CODESET       = 1902
+       set RESULT_OUT_CONTROL_CDF    = "OUT_CONTROL"
+       set RESULT_IN_CONTROL_CDF  = "IN_CONTROL"
+       declare result_out_control_cd = f8
+       declare result_in_control_cd  = f8
+       set cv_cnt = 0
+
+       select into "nl:"
+         cv.code_set,
+         cv.code_value
+       from code_value cv
+         where cv.code_set = RESULT_PROCESS_CODESET
+           and cv.cdf_meaning in ( RESULT_OUT_CONTROL_CDF,
+                                   RESULT_IN_CONTROL_CDF)
+           and cv.active_ind = 1
+           and (cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+             and  cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+       detail
+         case ( cv.cdf_meaning )
+              of RESULT_OUT_CONTROL_CDF:
+                 result_out_control_cd = cv.code_value
+                 cv_cnt = cv_cnt + 1
+              of RESULT_IN_CONTROL_CDF:
+                 result_in_control_cd = cv.code_value
+                 cv_cnt = cv_cnt + 1
+         endcase
+       with nocounter
+
+       if (rule_failed = 1)
+         set control_cd = result_out_control_cd
+       else
+         set control_cd = result_in_control_cd
+       endif
+
+       UPDATE
+         into qc_result qr
+       SET
+         qr.result_control_cd   = control_cd,
+         qr.updt_dt_tm          = cnvtdatetime(curdate,curtime),
+         qr.updt_cnt            = 1,
+         qr.updt_task           = reqinfo->updt_task,
+         qr.updt_id             = reqinfo->updt_id,
+         qr.updt_applctx        = reqinfo->updt_applctx
+       PLAN qr
+         where qr.qc_result_id = all_results->results[1].qc_result_id
+       WITH nocounter
+
+     end
+
+
+;Generated by GNU enscript 1.6.4.

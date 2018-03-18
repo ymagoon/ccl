@@ -1,0 +1,1380 @@
+ ;;Solution_Test/script/PathNet -- Common Services/pcs_get_pat_display_data/pcs_get_pat_display_data2.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Author:                 Heatheryn Parker
+        Date Written:           03/06/06
+        Source file name:       PCS_GET_PAT_DISPLAY_DATA2.PRG
+        Object name:            PCS_GET_PAT_DISPLAY_DATA2
+        Request #:              n/a
+
+        Product:                Pathnet Common Services
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        This script recalls patient data for a
+                                requested set of fields
+        Tables read:
+
+        Tables updated:         None
+        Executing from:         Patient Demographics control
+        Special Notes:
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 03/06/06 Heatheryn Parker     Initial Release                     *
+;     002 06/06/06 Paul Lessin          Recall AP accession number,order doc*
+;                                       Get case_spec desc, path_case col dt*
+;     003 07/28/06 Paul Lessin          Don't fail if no Mobile Phone code  *
+;     004 08/18/06 Matt Schile          Added linked_person_ind to reply    *
+;     005 12/12/06 Paul Lessin          Return last order comment           *
+;     006 01/15/07 Kevin Power          Updates to return UCM fields        *
+;     007 05/15/07 Revathy Sreenath     Corrected cve.Field_name to "Option"*                          
+;     008 03/20/08 Shruthi Ramesh       Fix for 1-1139492561 and 1-1687089581*
+;     009 11/05/08 YW017302             Fix for 1-1846930821 & 1-1262079131 *
+;     010 06/11/09 Antony Greetan       Fix for CR# 1-1230850591            *
+;                                       Fetching Active Allergies to display*
+;     011 06/24/11 Jiansheng Chen       CR 1-4690364471 code_value_r change
+;     010 09/18/13 T.Gray		Added CBI-CerbatchIndex to pcs_apps.*
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program pcs_get_pat_display_data2:dba go
+create program pcs_get_pat_display_data2:dba
+
+set modify predeclare
+
+/*****************************************************
+* Structures and Includes
+*****************************************************/
+/*
+record request(
+	1  person_id         = f8
+	1  encntr_id         = f8
+	1  order_id          = f8
+	1  historical_dt_tm  = dq8
+	1  pat_fields[*]
+	   2  field_cd       = f8
+	1  app_key           = vc
+	1  container_id      = f8
+	1  ap_case_id        = f8
+)
+*/
+
+record reply (
+	1  pat_fields[*]
+	   2  field_cd       = f8
+	   2  value_type     = i2
+	   2  current_ind    = i2
+	   2  value_text     = vc
+	   2  value_date     = dq8
+	   2  value_numeric  = f8
+   	   2  value_cd       = f8
+   	   2  value_disp     = c40
+   	   2  value_mean     = c12
+  1  linked_person_ind = i2  
+%i cclsource:status_block.inc
+  1  birth_tz=i4
+)
+
+
+Record requested_fields(
+  1 qual[*]
+    2 field_cd     = f8
+    2 field_mean   = c12
+    2 current_mean = c12
+    2 reply_idx    = i4
+)
+/* start 008*/
+ 
+record hla_type_request (
+%i cclsource:hla_get_person_hla_type_req.inc
+)
+ 
+record hla_type_reply (
+%i cclsource:hla_get_person_hla_type_rep.inc
+)
+ 
+/* end 008*/
+
+record used_requestids
+(
+ 1 qual[10]
+  2 ord_rqstn_id = f8
+)
+
+
+%i cclsource:i18n_uar.inc
+declare nStat                     = i2  with protect, noconstant(0)
+declare lI18NHandle               = i4 with protect, noconstant(0)
+set nStat = uar_i18nlocalizationinit(lI18NHandle, curprog, "", curcclrev)
+
+%i cclsource:pcs_subevent.inc
+%i cclsource:pcs_format_age.inc
+%i cclsource:pcs_get_pat_display_data.inc
+
+%i cclsource:aps_uar_rtf.inc
+
+/* begin 011 */
+%i cclsource:pm_passive_check.inc  
+declare check_active_ind_person_cvr = i4 with noconstant(column_exists("PERSON_CODE_VALUE_R","ACTIVE_IND"))
+/* end 011 */
+/*****************************************************
+* Variables and Constants
+*****************************************************/
+
+declare dOrderCommentCd    = f8  with protect, noconstant(0.0) ;Code value of Order Comment(14)
+declare dOrderNoteCd       = f8  with protect, noconstant(0.0) ;Code value of Order Note(14)
+declare dHomePhoneCd       = f8  with protect, noconstant(0.0) ;Code value of Home Phone(43)
+declare dBusPhoneCd        = f8  with protect, noconstant(0.0) ;Code value of Business Phone(43)
+declare dMobilePhoneCd     = f8  with protect, noconstant(0.0) ;Code value of Mobine Phone(43)
+declare dRefDocCd          = f8  with protect, noconstant(0.0) ;Code valueMAINTCASE of Referring Doc(333)
+declare dPrimaryDocCd      = f8  with protect, noconstant(0.0) ;Code value of Primary Care Doc(331)
+declare dActiveCd          = f8  with protect, noconstant(0.0) ;Code value of Active Allergy Reaction Status
+declare dProposedCd        = f8  with protect, noconstant(0.0) ;Code value of Proposed Allergy Reaction Status
+declare dOptMulti          = f8  with protect, noconstant(0.0)
+declare sList              = vc  with protect, noconstant("") ;|| delimited list of aliases
+declare sList2             = vc  with protect, noconstant("") ;|| delimited list of aliases
+declare sOrganList         = vc  with protect, noconstant("") ;|| delimited list of aliases
+declare lActionSequence    = i4  with protect, noconstant(0)
+
+declare nHistLoadInd       = i2  with protect, noconstant(0)   ;Historical data will be recalled
+declare nHistRequestInd    = i2  with protect, noconstant(0)   ;Historical fields were requested
+
+declare lReqCnt            = i4  with protect, noconstant(0)  ;Number of fields in request
+declare lFieldCnt          = i4  with protect, noconstant(0)  ;Number of fields in temporary field structure
+
+declare lIdx               = i4  with protect, noconstant(0)  ;Indexes for EXPAND
+declare h                  = i4  with protect, noconstant(0)
+
+declare lFIELDCODESET      = i4  with protect, constant(4000821)
+declare lBATCHSIZE         = i4  with protect, constant(100)  ;Batch size for Expand
+declare sDELIM             = c3  with protect, constant(" / ")
+declare sMultiselect       = c5  with protect, noconstant("false")
+
+;Slightly < one minute, expressed as a fraction of a day, used for rounding up
+declare dMINUTE            = f8  with protect, constant(1/1450.0)
+
+declare mic_apps           = vc  with protect, constant("MICINQ|MICLOGIN|MICRE")
+declare hla_apps           = vc  with protect, constant("HAPLOCHART|HLAHIST|DEFORGDON|DEFORGREC|DEFPERSREL")
+declare ap_apps            = vc  with protect,
+    constant("CASEFIND|CASESTATUS|CYTORE|HISTINQ|MAINTCASE|ONLRVW|ONLRVWWRD|PTOE|TRANS|TRANSWRD")
+declare pcs_apps           = vc  with protect, constant("ORV|DOE|RQ|CBI")
+declare glb_apps           = vc  with protect, constant("ARE|POCRE")
+declare scs_apps           = vc  with protect, noconstant("SPECLOGIN|COLLINQ|CONTINQ|MODCOLL")
+declare osm_apps           = vc  with protect, noconstant("ROE")
+
+; string formatting declarations
+declare sInBuffer                   = vc with protect, noconstant(" ")
+declare lInBufLen                   = i4 with protect, noconstant(0)
+declare sOutBuffer                  = c1000 with protect, noconstant("")
+declare lOutBufLen                  = i4 with protect, noconstant(1000)
+declare lRetBufLen                  = i4 with protect, noconstant(0)
+declare bFlag                       = i4 with protect, noconstant(0)
+declare i                           = i4 with protect, noconstant(0)
+declare LoadHelixData()             = NULL with protect
+declare sBlobBuffer                 = c100000 with protect, noconstant(nullterm(""))
+
+/*********************************************************************
+/* Preliminaries
+***********************************************************************/
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+
+set lReqCnt = size(request->pat_fields, 5)
+if (lReqCnt = 0)
+	set reply->status_data->status = "Z"
+	call subevent_add("GET","Z","Request", "Failure -- No fields in  request")
+	go to Exit_Script
+endif
+
+set reply->status_data->status = "F"
+if (request->person_id = 0)
+	call subevent_add("GET","F","Request", "Failure -- No person_id in request")
+	go to Exit_Script
+endif
+
+set nStat = uar_get_meaning_by_codeset(14, "ORD COMMENT", 1, dOrderCommentCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (14 - ORD COMMENT)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(14, "ORD NOTE", 1, dOrderNoteCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (14 - ORD NOTE)")
+  go to Exit_Script
+endif
+
+set nStat = uar_get_meaning_by_codeset(43, "HOME", 1, dHomePhoneCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (43 - HOME)")
+  go to Exit_Script
+endif
+set nStat = uar_get_meaning_by_codeset(43, "BUSINESS", 1, dBusPhoneCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (43 - BUSINESS)")
+  go to Exit_Script
+endif
+
+/* This code may not be exported */
+set nStat = uar_get_meaning_by_codeset(43, "MOBILE", 1, dMobilePhoneCd)
+
+set nStat = uar_get_meaning_by_codeset(331, "PCP", 1, dPrimaryDocCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (331 - PCP)")
+  go to Exit_Script
+endif
+
+set nStat = uar_get_meaning_by_codeset(12025, "ACTIVE", 1, dActiveCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (12025 - ACTIVE)")
+  go to Exit_Script
+endif
+ 
+set nStat = uar_get_meaning_by_codeset(12025, "PROPOSED", 1, dProposedCd)
+if (nStat = 1)
+  call subevent_add("UAR","F","UAR", "CODE_VALUE (12025 - PROPOSED)")
+  go to Exit_Script
+endif
+
+if (findstring(request->app_key, hla_apps) and (request->encntr_id = 0.0))
+    SELECT into "nl:"
+    FROM encounter e
+    WHERE e.person_id = request->person_id
+    ORDER BY e.beg_effective_dt_tm desc
+    DETAIL
+          request->encntr_id = e.encntr_id
+    WITH maxrec = 1
+endif
+
+if (request->ap_case_id > 0.0)
+   SELECT into "nl:"
+   FROM pathology_case pc
+   WHERE request->ap_case_id = pc.case_id
+   DETAIL
+         if (request->encntr_id = 0.0)
+            request->encntr_id = pc.encntr_id
+         endif
+         if (nullind(pc.main_report_cmplete_dt_tm) = 0)
+           request->historical_dt_tm = cnvtdatetime(pc.main_report_cmplete_dt_tm)
+         else
+           request->historical_dt_tm = cnvtdatetime(pc.case_collect_dt_tm)
+         endif
+   WITH nocounter
+endif
+
+
+/*********************************************************************
+/*  Record relationships between historial and current fields.
+**********************************************************************/
+SELECT into "nl:"
+	pdf.current_field_cd
+FROM pcs_demographic_field pdf
+PLAN pdf WHERE expand(lIdx, 1, lReqCnt, pdf.field_cd, request->pat_fields[lIdx].field_cd, lBATCHSIZE)
+DETAIL
+	lFieldCnt = lFieldCnt + 1
+	if (mod(lFieldCnt, 5) = 1)
+		nStat = alterlist(requested_fields->qual, lFieldCnt + 4)
+    endif
+    requested_fields->qual[lFieldCnt].field_cd = pdf.field_cd
+	requested_fields->qual[lFieldCnt].field_mean = uar_get_code_meaning(pdf.field_cd)
+
+	if (pdf.historical_ind = 1)
+		requested_fields->qual[lFieldCnt].current_mean = uar_get_code_meaning(pdf.current_field_cd)
+		nHistRequestInd = 1
+    endif
+FOOT report
+	nStat = alterlist(requested_fields->qual, lFieldCnt)
+WITH nocounter
+
+
+if (request->person_id > 0.0)
+    /*********************************************************************
+    /* Get allergy information
+    ***********************************************************************/
+    SELECT into "nl:"
+	    FROM allergy a, nomenclature n
+	    PLAN a WHERE a.person_id = request->person_id
+	           AND a.active_ind = 1
+	           AND a.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+	           AND a.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3)
+	           AND a.reaction_status_cd IN(dActiveCd,dProposedCd)
+	    JOIN n WHERE n.nomenclature_id = outerjoin(a.substance_nom_id)
+	    ORDER BY a.updt_dt_tm desc
+	    HEAD REPORT
+	         sList = ""
+	    DETAIL
+            if (sList != "")
+                sList = build2(trim(sList), "||")
+            endif
+            if (trim(n.source_string) > "")
+               sList = concat(trim(sList), trim(n.source_string))
+            else
+               sList = concat(trim(sList), trim(a.substance_ftdesc))
+            endif
+        FOOT REPORT
+		    call ReplyTextField("ALLERGIES", sList, 0)
+	    WITH nocounter
+
+    /*********************************************************************
+    /* Get phone numbers
+    ***********************************************************************/
+    SELECT into "nl:"
+        FROM phone p
+        PLAN p WHERE p.parent_entity_id = request->person_id AND p.parent_entity_name = "PERSON"
+        ORDER BY p.phone_type_cd, p.updt_dt_tm desc
+        HEAD p.phone_type_cd
+            sList = ""
+        DETAIL
+            if (sList != "")
+                sList = build2(trim(sList), "||")
+            endif
+            sList = concat(trim(sList), trim(p.phone_num))
+        FOOT p.phone_type_cd
+	        case (p.phone_type_cd)
+			    of dHomePhoneCd:
+	    	       call ReplyTextField("PHONEHOME", sList, 0)
+	    	    of dBusPhoneCd:
+	    	       call ReplyTextField("PHONEBUS", sList, 0)
+	    	    of dMobilePhoneCd:
+	    	       call ReplyTextField("PHONEMOBILE", sList, 0)
+	        endcase
+	    WITH nocounter
+
+    /*********************************************************************
+    /* Get disease alerts
+    ***********************************************************************/
+    set dOptMulti = uar_get_code_by("MEANING", 20790, "MULTISELECT")
+    SELECT into "nl:"
+        FROM code_value_extension cve
+        WHERE cve.code_value = dOptMulti
+        AND cve.field_name = "OPTION"
+        DETAIL
+        if (cnvtint(trim(cve.field_value, 3)) = true)
+            sMultiselect = "true"
+        endif
+        WITH nocounter
+
+        If (sMultiselect = "true")
+            /* begin 011 */
+            ; SELECT into "nl:"
+            ; FROM person_code_value_r pcvr
+            ; WHERE pcvr.person_id = request->person_id
+            ; AND pcvr.code_set = 19349
+           
+            SELECT IF(check_active_ind_person_cvr)
+               WHERE pcvr.person_id = request->person_id
+               AND pcvr.code_set = 19349
+               AND pcvr.active_ind = 1    
+	           AND pcvr.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)          
+	           AND pcvr.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3)        
+            ELSE
+               WHERE pcvr.person_id = request->person_id
+               AND pcvr.code_set = 19349
+            ENDIF            
+            INTO "nl:"          
+            FROM person_code_value_r pcvr
+            /* end 011 */
+            ORDER BY pcvr.updt_dt_tm desc
+            HEAD REPORT
+                sList = ""
+            DETAIL
+                if (sList != "")
+                    sList = build2(trim(sList), "||")
+                endif
+                sList = concat(trim(sList), uar_get_code_display(pcvr.code_value))
+            FOOT REPORT
+                call ReplyTextField("DISEASEALERT", sList, 0)
+            WITH nocounter
+         else
+             SELECT into "nl:"
+             FROM person_patient pp
+             WHERE pp.person_id = request->person_id
+             ORDER BY pp.updt_dt_tm desc
+             DETAIL
+                call ReplyCodeField("DISEASEALERT", pp.disease_alert_cd, 0)
+             WITH nocounter
+         endif
+endif
+
+
+if (request->order_id > 0.0)
+    /*********************************************************************
+    /* Get order comments and notes
+    ***********************************************************************/
+	SELECT into "nl:"
+		FROM order_comment oc, long_text lt
+		PLAN oc WHERE oc.order_id = request->order_id
+	    JOIN lt WHERE lt.long_text_id = oc.long_text_id
+	    ORDER BY oc.action_sequence asc
+	    HEAD REPORT
+	        oc.comment_type_cd
+	    DETAIL
+			case (oc.comment_type_cd)
+				of dOrderCommentCd:
+	    	       call ReplyTextField("ORDCOMMENT", lt.long_text, 0)
+	    	    of dOrderNoteCd:
+	    	       call ReplyTextField("ORDNOTE", lt.long_text, 0)
+	    	endcase
+		WITH nocounter
+
+    /*********************************************************************
+    /* Get testing site
+    ***********************************************************************/
+    SELECT into "nl:"
+        FROM order_serv_res_container osrc
+        WHERE osrc.order_id = request->order_id
+              AND (osrc.container_id = request->container_id OR osrc.container_id = 0)
+        ORDER BY osrc.updt_dt_tm desc
+        HEAD REPORT
+             sList = ""
+        DETAIL
+            if (osrc.container_id = 0)
+                if (sList != "")
+                    sList = build2(trim(sList), "||")
+                endif
+                sList = concat(trim(sList), uar_get_code_display(osrc.service_resource_cd))
+                call ReplyTextField("TESTSITE", sList, 0)
+            else
+                call ReplyCodeField("TESTSITE", osrc.service_resource_cd, 0)
+            endif
+        WITH nocounter
+
+    /*********************************************************************
+    /* Get collection and report priorities
+    ***********************************************************************/
+    SELECT into "nl:"
+        FROM order_laboratory ol
+        WHERE ol.order_id = request->order_id
+        DETAIL
+            call ReplyCodeField("COLLPRIO", ol.collection_priority_cd, 0)
+            call ReplyCodeField("REPPRIORITY", ol.report_priority_cd,0)
+        WITH nocounter
+
+    /*********************************************************************
+    /* Get group identifer and group identifier name
+    ***********************************************************************/
+    SELECT into "nl:"
+        accn = uar_fmt_accession(a.accession, size(a.accession,1))
+        FROM pcs_order_group_r ogr,
+             pcs_order_group og,
+             accession a
+        PLAN ogr WHERE ogr.order_id = request->order_id
+                   AND ogr.active_ind = 1
+        JOIN og  WHERE og.pcs_order_group_id = ogr.pcs_order_group_id
+                   and og.active_ind = 1
+        JOIN a   WHERE a.accession_id = og.group_accession_id
+        HEAD REPORT
+             sList = "",
+             sList2 = ""
+        DETAIL
+           if (sList != "")
+               sList = build2(trim(sList), "||")
+           endif
+           sList = concat(trim(sList), trim(accn))
+           if (sList2 != "")
+               sList2 = build2(trim(sList2), "||")
+           endif
+           sList2 = concat(trim(sList2), trim(og.group_name))
+        FOOT REPORT
+           call ReplyTextField("GROUPID", sList, 0)
+           call ReplyTextField("GROUPIDNAME", sList2, 0)
+        WITH nocounter
+
+    /**********************************************************************
+    * Get Request ID                                                      *
+    ***********************************************************************/
+    if (request->app_key = "ORV")
+      SELECT into "nl:"
+        sFormattedRequestID = concat(r.client_alias_name, "-", format(r.seq_nbr, "##########;P0"))
+        FROM
+          report_task rt,
+          case_report cr,
+          processing_task pt,
+          ord_rqstn_ord_r oror,
+          ord_rqstn r,
+          case_specimen cs,
+          ap_tag ap
+        PLAN rt   WHERE rt.order_id = request->order_id
+        JOIN cr   WHERE cr.report_id = rt.report_id
+        JOIN cs   WHERE cs.case_id = cr.case_id
+        JOIN ap   WHERE ap.tag_id = cs.specimen_tag_id
+        JOIN pt   WHERE pt.case_specimen_id = cs.case_specimen_id
+                    AND pt.create_inventory_flag = 4
+                    AND pt.order_id > 0.0
+        JOIN oror WHERE oror.order_id = pt.order_id
+        JOIN r    WHERE r.ord_rqstn_id = oror.ord_rqstn_id
+
+        ORDER BY ap.tag_sequence, r.ord_rqstn_id
+
+        HEAD REPORT
+             sList = ""
+             cnt = 0
+
+        HEAD r.ord_rqstn_id
+           if (locateval(lIdx, 1, cnt, r.ord_rqstn_id, used_requestids->qual[lIdx].ord_rqstn_id) = 0)
+              cnt = cnt + 1
+              if (cnt <= 10)
+                 used_requestids->qual[cnt].ord_rqstn_id = r.ord_rqstn_id
+                 if (sList != "")
+                     sList = build2(trim(sList), "||")
+                 endif
+                 sList = concat(trim(sList), trim(sFormattedRequestID))
+              endif
+           endif
+
+        FOOT REPORT
+           if (cnt > 10)
+              sList = concat(trim(sList), "||...")
+           endif
+
+           call ReplyTextField("REQUESTID", sList, 0)
+      with nocounter
+    endif
+
+    if (request->app_key != "ORV"  or curqual = 0)
+      SELECT into "nl:"
+        sFormattedRequestID = concat(r.client_alias_name, "-", format(r.seq_nbr, "##########;P0"))
+        FROM ord_rqstn_ord_r oror, ord_rqstn r
+        PLAN oror WHERE oror.order_id = request->order_id
+        JOIN r    WHERE r.ord_rqstn_id = oror.ord_rqstn_id
+
+        DETAIL
+          call ReplyTextField("REQUESTID", sFormattedRequestID, 0)
+      with nocounter
+    endif
+endif
+
+
+/*********************************************************************
+/* Get primary care physicians
+***********************************************************************/
+if (request->person_id > 0.0)
+    SELECT into "nl:"
+        FROM person_prsnl_reltn ppr,
+             prsnl p
+        PLAN ppr WHERE ppr.person_id = request->person_id
+                 AND ppr.active_ind = 1
+                 AND ppr.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+                 AND ppr.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3)
+                 AND ppr.person_prsnl_r_cd = dPrimaryDocCd
+        JOIN p WHERE p.person_id = ppr.prsnl_person_id
+        DETAIL
+            case (ppr.person_prsnl_r_cd)
+                of dPrimaryDocCd:
+                    call ReplyRefField("PRIMARYDOC", ppr.prsnl_person_id, p.name_full_formatted, 0)
+            endcase
+        WITH nocounter
+endif
+
+
+/*********************************************************************
+/* Get collected date/time
+***********************************************************************/
+if (request->container_id > 0.0)
+    SELECT into "nl:"
+        FROM container c, prsnl p, v500_specimen v
+        PLAN c WHERE (c.container_id = request->container_id)
+        JOIN p WHERE (p.person_id = c.drawn_id)
+        join v where v.specimen_id = c.specimen_id
+        DETAIL
+            call ReplyTextField("COLLECTEDBY", p.name_full_formatted, 0)
+            call ReplyDateTimeField("COLLECTED", c.drawn_dt_tm, 0)
+            call ReplyCodeField("SPEC_TYPE", v.specimen_type_cd,0)
+        WITH nocounter
+
+elseif (request->container_id = 0.0 and request->order_id > 0.0)
+    SELECT into "nl:"
+        FROM order_container_r ocr, container c, v500_specimen v
+        PLAN ocr WHERE ocr.order_id = request->order_id
+        join c where c.container_id = ocr.container_id
+        join v where v.specimen_id = c.specimen_id
+        DETAIL
+            call ReplyCodeField("SPEC_TYPE", v.specimen_type_cd,0)
+        WITH nocounter, maxqual(ocr, 1)
+endif
+
+if ((findstring(request->app_key, hla_apps) or (request->app_key = "ARE") or (request->app_key = "ORV")
+                                           or (request->app_key = "RQ") or (request->app_key = "UCM")) 
+                                           AND (request->person_id > 0.0))
+    /*********************************************************************
+    /* Get CREGs and HLA type
+    ***********************************************************************/
+
+ 
+ /* start 008 */
+
+  set nStat = alterlist(hla_type_request->qual,1)
+  set hla_type_request->qual[1]->person_id = request->person_id
+ 
+  set hla_type_request->retrieve_preliminary = 0
+  set sList = ""
+  set sList2 = ""
+ 
+ 
+  set modify nopredeclare
+  execute hla_get_person_hla_type with replace("REQUEST", "HLA_TYPE_REQUEST")
+         , replace ("REPLY","HLA_TYPE_REPLY")
+  set modify predeclare
+ 
+  for (i = 1 to size(hla_type_reply ->qual,5))
+      if (hla_type_reply ->qual[i].loci_mean = "CREG")
+ 
+                   if (sList != "")
+                      set sList = build2(trim(sList), "||")
+                   endif
+                   set sList = concat(trim(sList), trim(hla_type_reply ->qual[i].hla_type))
+ 
+       elseif (hla_type_reply ->qual[i].loci_mean = "LOCI")
+       
+ 
+                   if (sList2 != "")
+                       set sList2 = build2(trim(sList2), "||")
+                   endif
+                   set sList2 = concat(trim(sList2), trim(hla_type_reply ->qual[i].hla_type))
+ 
+       endif
+  endfor
+ 
+  if (sList != "")
+  	 call ReplyTextField("CREGRES", sList, 0)
+  endif
+  if (sList2 != "")
+  	 call ReplyTextField("HLATYPE", sList2, 0)
+  endif
+ 
+ /* end 008 */
+ 
+    /*********************************************************************
+    /* Get HLA Antibodies
+    ***********************************************************************/
+
+    SELECT into "nl:"
+        FROM person_hla_ab_screen phasc, person_hla_ab_spec phasp, nomenclature n
+        PLAN phasc WHERE (phasc.person_id = request->person_id)
+        JOIN phasp WHERE (phasp.hla_ab_screen_id = phasc.hla_ab_screen_id)
+        JOIN n WHERE (n.nomenclature_id = phasp.hla_type_nom_id)
+        ORDER BY n.source_string, n.updt_dt_tm desc
+        HEAD REPORT
+            sList = ""
+        DETAIL 
+            if (findstring(trim(n.source_string), sList) = false)
+                if (sList != "")
+                    sList = build2(trim(sList), "||")
+                endif
+                sList = concat(trim(sList), trim(n.source_string))
+            endif
+        FOOT REPORT
+            call ReplyTextField("ANTIBODIES", sList, 0)
+        WITH nocounter
+
+    /*********************************************************************
+    /* Get HLA organ types
+    ***********************************************************************/
+
+    SELECT into "nl:"
+        FROM person_organ_donor pod
+        WHERE pod.person_id = request->person_id
+        ORDER BY pod.updt_dt_tm desc
+        HEAD REPORT
+            sOrganList = ""
+        DETAIL
+            if (sOrganList != "")
+                sOrganList = build2(trim(sOrganList), "||")
+            endif
+            sOrganList = concat(trim(sOrganList), trim(uar_get_code_display(pod.organ_type_cd)),
+                              "(", trim(uar_get_code_display(pod.donor_type_cd)), ")")
+        WITH nocounter
+
+    SELECT into "nl:"
+        FROM person_transplant_candidate ptc
+        WHERE ptc.person_id = request->person_id
+        ORDER BY ptc.updt_dt_tm desc
+        HEAD REPORT
+            sOrganList = sOrganList
+        DETAIL
+            if (sOrganList != "")
+                sOrganList = build2(trim(sOrganList), "||")
+            endif
+            sOrganList = concat(trim(sOrganList), trim(uar_get_code_display(ptc.organ_type_cd)),
+                              "(", trim(uar_get_code_display(ptc.priority_cd)), ")")
+        WITH nocounter
+        call ReplyTextField("ORGANTYPE", sOrganList, 0)
+
+    /*********************************************************************
+    /* Get Transfusion Indicator
+    ***********************************************************************/
+    SELECT into "nl:"
+        FROM transfusion t
+        WHERE t.person_id = request->person_id
+        WITH maxrec = 1
+
+        if (curqual > 0)
+            call ReplyTextField("TRANSFUSEIND", uar_i18ngetmessage(lI18nHandle, "Yes", "Yes"), 0)
+        else
+            call ReplyTextField("TRANSFUSEIND", uar_i18ngetmessage(lI18nHandle, "Unknown", "Unknown"), 0)
+        endif
+endif
+
+if ((findstring(request->app_key, mic_apps) or (request->app_key = "RQ")) AND (request->order_id > 0.0))
+    /*********************************************************************
+    /* Get micro culture status, date/time, and pathogens
+    ***********************************************************************/
+    SELECT into "nl:"
+        pathogen_found = evaluate(nullind(mp.seq), 0, 1, 0)
+        FROM mic_order_lab mol, mic_pathogen mp
+        PLAN mol WHERE mol.order_id = request->order_id
+        JOIN mp WHERE mp.order_id = outerjoin(mol.order_id)
+        ORDER BY mp.updt_dt_tm
+        HEAD REPORT
+            call ReplyCodeField("CULTSTATUS", mol.status_cd, 0)
+            call ReplyDateTimeField("CULTUREDTTM", mol.culture_start_dt_tm, 0)
+            sList = ""
+        DETAIL
+            if (pathogen_found = 1)
+                if (sList != "")
+                    sList = build2(trim(sList), "||")
+                endif
+                sList = concat(trim(sList), trim(uar_get_code_display(mp.pathogen_cd)))
+                call ReplyTextField("PATHOGENS", sList, 0)
+            endif
+        FOOT REPORT
+            if (pathogen_found = 1)
+                call ReplyTextField("PATHOGENS", sList, 0)
+            endif
+        WITH nocounter
+
+    /*********************************************************************
+    /* Get micro antibiotics
+    ***********************************************************************/
+    SELECT into "nl:"
+        FROM mic_meds_activity mma
+        WHERE mma.order_id = request->order_id
+        ORDER BY mma.updt_dt_tm desc
+        HEAD REPORT
+             sList = ""
+        DETAIL
+           if (sList != "")
+               sList = build2(trim(sList), "||")
+           endif
+           sList = concat(trim(sList), trim(uar_get_code_display(mma.medication_cd)))
+        FOOT REPORT
+           call ReplyTextField("ANTIBIOTICS", sList, 0)
+        WITH nocounter
+
+    /*********************************************************************
+    /* Get micro source, received date/time and specimen location
+    ***********************************************************************/
+    if (request->container_id > 0.0)
+        SELECT into "nl:"
+            FROM container c, v500_specimen vs, long_text lt
+            PLAN c WHERE c.container_id = request->container_id
+            JOIN vs WHERE vs.specimen_id = c.specimen_id
+            JOIN lt WHERE lt.long_text_id = vs.long_text_id
+            DETAIL
+                call ReplyCodeField("BODYSITE", vs.body_site_cd, 0)
+                call ReplyTextField("CULTSOURCEFT", lt.long_text, 0)
+                call ReplyDateTimeField("RECDTTM", c.received_dt_tm, 0)
+                call ReplyCodeField("SPECLOC", c.current_location_cd, 0)
+            WITH nocounter
+    endif
+endif
+
+/*********************************************************************
+/* Get ap collection date/time, accession number, ordering doctor, and Outside Case Number
+***********************************************************************/
+if (request->ap_case_id > 0.0)
+    SELECT into "nl:"
+         extrnl_accn_ind = nullind(aes.accession_external_smry_id)
+        FROM pathology_case pc, prsnl p, accession_external_smry aes
+        PLAN pc WHERE pc.case_id = request->ap_case_id
+        JOIN p WHERE p.person_id = pc.requesting_physician_id
+        JOIN aes WHERE aes.accession_id = outerjoin(pc.case_id)
+        ORDER BY aes.external_accession_key
+        HEAD REPORT
+             sList = ""
+             call ReplyDateTimeField("CASECOLLDTTM", pc.case_collect_dt_tm, 0)
+             call ReplyTextField("ACCESSION", uar_fmt_accession(pc.accession_nbr, size(pc.accession_nbr)), 0)
+             call ReplyRefField("ORDERDOC", pc.requesting_physician_id, p.name_full_formatted, 0)
+        DETAIL
+          if(extrnl_accn_ind = 0)
+            if (sList != "")
+                sList = build2(trim(sList), "||")
+            endif
+            sList = concat(trim(sList), trim(aes.external_accession))
+          endif
+        FOOT REPORT
+            call ReplyTextField("OUTCASENUM", sList, 0)
+     WITH nocounter
+/*************************************************************************************
+ Get AP specimen list 
+**************************************************************************************/
+     SELECT into "nl:"
+     	From pathology_case pc,case_specimen cs,ap_tag tg
+     	PLAN pc WHERE pc.case_id = request->ap_case_id
+        JOIN cs WHERE cs.case_id = pc.case_id AND cs.cancel_cd = 0.0
+        JOIN tg WHERE tg.tag_id = cs.specimen_tag_id
+        ORDER BY tg.tag_sequence
+        HEAD REPORT
+             sList = ""
+        DETAIL
+             if(sList != "")
+                sList = build2(trim(sList), "||")
+             endif
+             sList = concat(trim(sList), trim(cs.specimen_description))
+        FOOT REPORT
+             call ReplyTextField("CASESPECLIST", sList, 0)
+        WITH nocounter      
+            
+             	     
+     	
+    /**********************************************************************
+    * Get Request ID                                                      *
+    ***********************************************************************/
+
+    SELECT into "nl:"
+       FROM
+          ord_rqstn_ord_r oror,
+          ord_rqstn r,
+          processing_task pt,
+          case_specimen cs,
+          ap_tag ap
+       plan cs
+          where cs.case_id = request->ap_case_id
+       join ap
+          where cs.specimen_tag_id = ap.tag_id
+       join pt
+          where cs.case_specimen_id = pt.case_specimen_id
+            and pt.create_inventory_flag = 4
+       join oror
+          where oror.order_id = pt.order_id
+       join r
+          where r.ord_rqstn_id = oror.ord_rqstn_id
+
+       ORDER BY ap.tag_sequence, r.ord_rqstn_id
+
+       HEAD REPORT
+          sList = ""
+          cnt = 0
+
+       HEAD r.ord_rqstn_id
+         if (locateval(lIdx, 1, cnt, r.ord_rqstn_id, used_requestids->qual[lIdx].ord_rqstn_id) = 0)
+            cnt = cnt + 1
+            used_requestids->qual[cnt].ord_rqstn_id = r.ord_rqstn_id
+            if (cnt <= 10)
+               if (sList != "")
+                  sList = build2(trim(sList), "||")
+               endif
+               sList = concat(trim(sList), trim(concat(r.client_alias_name, "-", format(r.seq_nbr, "##########;P0"))))
+            endif
+         endif
+       FOOT REPORT
+         call echo(build("cnt->", cnt, "::sList->", sList))
+          if (cnt > 10)
+             sList = concat(trim(sList), "||...")
+          endif
+
+          call ReplyTextField("REQUESTID", sList, 0)
+    with nocounter
+endif
+
+
+/**********************************************************************
+* Get Request IDs for encounter if case or order is not sent in.      *
+* -- If we're in maintain case, we could not have a case id but not   *
+*    want to see an encounter's Request ID's                          *
+***********************************************************************/
+if (request->encntr_id > 0.0 and request->ap_case_id = 0.0 and request->order_id = 0.0 and request->app_key != "MAINTCASE")
+  SELECT into "nl:"
+    sFormattedRequestID = concat(r.client_alias_name, "-", format(r.seq_nbr, "##########;P0"))
+    FROM
+      ord_rqstn r
+    PLAN r
+      WHERE r.encntr_id = request->encntr_id
+
+    ORDER BY r.ord_rqstn_id
+
+    HEAD REPORT
+         sList = ""
+         cnt = 0
+
+    HEAD r.ord_rqstn_id
+       cnt = cnt + 1
+       ;Limit to 10 request Id's because having too many can cause RTE's in the app.
+       if (cnt <= 10)
+          if (sList != "")
+              sList = build2(trim(sList), "||")
+          endif
+          sList = concat(trim(sList), trim(sFormattedRequestID))
+       endif
+    FOOT REPORT
+         call echo(build("cnt->", cnt, "::sList->", sList))
+       if (cnt > 10)
+          sList = concat(trim(sList), "||...")
+       endif
+
+       call ReplyTextField("REQUESTID", sList, 0)
+  ;Restrict to 11 records so we can have the "..." at the end if there are more than 10
+  with nocounter, maxrec = 11
+endif
+
+/*********************************************************************
+/* Get queue name
+***********************************************************************/
+if (request->app_key = "RQ")
+    call ReplyTextField("QUEUENAME", "", 0)
+
+    if (request->order_id > 0.0)
+        SELECT into "nl:"
+            FROM pcs_queue_assignment pqa
+            WHERE pqa.order_id = request->order_id
+            DETAIL
+                call ReplyCodeField("REVIEWSTATUS", pqa.review_status_cd, 0)
+            WITH nocounter
+    endif
+endif
+
+
+/*********************************************************************
+/* Get report service resource
+***********************************************************************/
+if (findstring(request->app_key, ap_apps) AND (request->order_id > 0.0))
+    SELECT into "nl:"
+        FROM report_task rt
+        WHERE rt.order_id = request->order_id
+        DETAIL
+            call ReplyCodeField("REPSERVRES", rt.service_resource_cd, 0)
+        WITH nocounter
+endif
+
+/*********************************************************************
+/* Get requistion number and client alias pool
+***********************************************************************/
+if (request->app_key = "ROE")
+    call ReplyTextField("REQNUM", "", 0)
+    call ReplyTextField("CLIENT", "", 0)
+endif
+
+call LoadHelixData(NULL)
+
+/*****************************************************************
+/* Clean up
+***********************************************************************/
+free record requested_fields
+set nStat = alterlist(reply->pat_fields, lReplyCnt)
+
+if (size(reply->pat_fields, 5) = 0)
+  set reply->status_data->status = "Z"
+else
+  set reply->status_data->status = "S"
+endif
+
+#Exit_Script
+
+  /*********************************************************************
+  /* Get the UCM specific fields
+  ***********************************************************************/
+subroutine LoadHelixData(NULL)
+
+  declare dCaseId                     = f8 with protect, noconstant(0.0)
+  declare dCaseOrderId                = f8 with protect, noconstant(0.0)
+  declare dSpecimenOrderId            = f8 with protect, noconstant(0.0)
+  declare dCaseStepId                 = f8 with protect, noconstant(0.0)
+  declare dCaseStepOrderId            = f8 with protect, noconstant(0.0)
+
+  if (substring(1,3,request->app_key) = "UCM"  AND (request->order_id > 0.0))
+
+    ;* lets see what type of order we have
+
+    ;* first check for a case step
+    select into "nl:"
+    from
+      ucm_case_step ucs,
+      ucm_case uc
+    plan ucs
+      where ucs.order_id = request->order_id
+    join uc
+      where uc.ucm_case_id = ucs.ucm_case_id
+    order by
+      ucs.order_id
+    head ucs.order_id
+      dCaseId = uc.ucm_case_id
+      dCaseOrderId = uc.order_id
+      dSpecimenOrderId = ucs.specimen_order_id
+      dCaseStepId = ucs.ucm_case_step_id
+      dCaseStepOrderId = ucs.order_id
+    with nocounter
+
+    if (dCaseId <= 0.0)
+      ;* didn't find a step, lets look for a spec request
+      select into "nl:"
+      from
+        ucm_case_step ucs,
+        ucm_case uc
+      plan ucs
+        where ucs.specimen_order_id = request->order_id
+      join uc
+        where uc.ucm_case_id = ucs.ucm_case_id
+      order by
+        ucs.specimen_order_id
+      head ucs.specimen_order_id
+        dCaseId = uc.ucm_case_id
+        dCaseOrderId = uc.order_id
+        dSpecimenOrderId = ucs.specimen_order_id
+      with nocounter
+    endif
+
+    if (dCaseId <= 0.0)
+      ;* didn't find a step or a workup, lets look for a case
+      select into "nl:"
+      from
+        ucm_case uc
+      plan uc
+        where uc.order_id = request->order_id
+      detail
+        dCaseId = uc.ucm_case_id
+        dCaseOrderId = uc.order_id
+        dSpecimenOrderId = 0.0
+      with nocounter
+    endif
+
+    ;* if we get here and we haven't found a case, time to give up
+    if (dCaseId <= 0.0)
+      return
+    endif
+
+    ;* get case data.
+    select into "nl:"
+    from
+      orders o_case,
+      accession_order_r aor_case
+    plan o_case
+      where o_case.order_id = dCaseOrderId
+    join aor_case
+      where aor_case.order_id = o_case.order_id
+        and aor_case.primary_flag+0 = 0
+    order by o_case.order_id
+    head o_case.order_id
+      call ReplyTextField("HLXCASETYPE", o_case.hna_order_mnemonic, 0)
+      call ReplyCodeField("HLXCASESTAT", o_case.order_status_cd, 0)
+      call ReplyTextField("HLXCASENUM", cnvtacc(aor_case.accession), 0)
+      call ReplyDateTimeField("HLXCASEORDDT", o_case.orig_order_dt_tm ,0)
+    with nocounter
+
+    ;* and case groups
+    select into "nl:"
+    from
+      ucm_case_group_prequal cgp_case,
+      ucm_case_group cg_case
+    plan cgp_case
+      where cgp_case.ucm_case_id = dCaseId
+    join cg_case
+      where cg_case.ucm_case_group_id = cgp_case.ucm_case_group_id
+    order by cg_case.ucm_case_group_id
+    head report
+      sList = ""
+    head cg_case.ucm_case_group_id
+      if (cg_case.ucm_case_group_id > 0.0)
+        if (sList != "")
+          sList = build2(trim(sList), "||")
+        endif
+        sList = concat(trim(sList), cg_case.case_group_description)
+      endif
+    foot report
+      Call ReplyTextField("CASEGRPS", sList, 0)
+    with nocounter
+
+    ;* specimen comments
+    set sInBuffer = ""
+    set sBlobBuffer = ""
+    select into "nl:"
+    from
+      ucm_case u,
+      ucm_case_step ucs,
+      accession_order_r aor,
+      ucm_specimen_comment usc,
+      long_blob lb
+    plan u
+      where u.ucm_case_id = dCaseId
+        and u.ucm_case_id > 0.0
+    join ucs
+      where ucs.ucm_case_id = u.ucm_case_id
+        and ucs.specimen_order_id+0 > 0.0   ;* only get steps with a "real" specimen
+    join aor
+      where aor.order_id = ucs.specimen_order_id
+        and aor.primary_flag = 0
+    ;* since a case can have multiple workups and therefore multiple accessions, this needs to handle multiple spec comm's
+    join usc
+      where usc.accession_id = aor.accession_id
+        and usc.ucm_specimen_comment_id > 0.0
+        and usc.ucm_specimen_comment_id = usc.prev_ucm_specimen_comment_id
+        and usc.active_ind = 1
+    join lb
+      where lb.long_blob_id = usc.long_blob_id
+    order by 
+      lb.long_blob_id
+    head report
+      sInBuffer = ""
+    head lb.long_blob_id
+      nBlobRetlen = 1
+      nBlobOffset = 0
+      while (nBlobRetlen > 0)
+        nBlobRetlen = blobget(sBlobBuffer, nBlobOffset, lb.long_blob)
+        sInBuffer = notrim(concat(sInBuffer, sBlobBuffer))
+        nBlobOffset = nBlobOffset + 100000
+      endwhile
+    detail
+      giStat = 0
+    foot lb.long_blob_id
+      ;* add a line feed between each comment
+      sInBuffer = concat(sInBuffer, char(10))
+    foot report
+      sInBuffer = trim(sInBuffer,3)  ;* trim trailing and leading spaces
+    with nocounter
+
+    if (sInBuffer != "")
+      ;* if we found a comment, call this routine to break it into lines of 80 chars each.
+      ;have to turn off predeclare here since this include file doesn't honor it
+      set modify nopredeclare
+      call RTF_TO_TEXT(sInBuffer, 1, 80)
+      set modify predeclare
+      if (size(tmptext->qual, 5) > 0)
+        ;* now that we have the text in the 'tmptext' structure, we can now use the same variable to 
+        ;*  store the broken down comment
+        set sInBuffer = trim(tmptext->qual[1].text,3)
+        for (i = 2 to size(tmptext->qual, 5))
+          ;* so, between each line, lets put a 'seperator' (the ||) that the control will use for other lists of things
+          set sInBuffer = concat(sInBuffer, "||", trim(tmptext->qual[i].text,3))
+        endfor
+        call ReplyTextField("SPECCOMM", sInBuffer, 0)
+      endif
+    endif
+    
+    ;* now, get workup data
+    if (dSpecimenOrderId > 0.0)
+      ;* just a single workup.
+      select into "nl:"
+      from
+        orders o_wu,
+        order_container_r ocr_wu,
+        container c_wu
+      plan o_wu
+        where o_wu.order_id = dSpecimenOrderId
+      join ocr_wu
+        where ocr_wu.order_id = o_wu.order_id
+      join c_wu
+        where c_wu.container_id = ocr_wu.container_id
+      order by
+        o_wu.order_id
+      head o_wu.order_id
+        sList = ""
+        sList = concat(trim(uar_get_code_display(c_wu.specimen_type_cd)),
+                       " @ ",
+                       trim(format( o_wu.current_start_dt_tm, "@SHORTDATE4YR;;d")),
+                       " ",
+                       cnvtupper(trim(format(o_wu.current_start_dt_tm, "@TIMENOSECONDS;;S"))))
+        call ReplyTextField("HLXWORKUP", sList, 0)
+      with nocounter
+
+      /* determine the reason for genetic referral - Check for the workup order */
+      select into "nl:"
+      from
+        order_detail od
+      plan od
+        where od.order_id = dSpecimenOrderId
+          and od.oe_field_meaning = "REASNGENEREF"
+      order by
+        od.order_id,
+        od.action_sequence desc ;* if an order has been modified, we only want the most recent value.
+      head report
+        sList = ""
+      head od.order_id
+        lActionSequence = od.action_sequence 
+      detail
+        iAdd = 1
+        if (sList != "")
+          sList = build2(trim(sList), "||")
+          ;* dup check the display value, append the "||" to ensure that
+          if (findstring(concat(trim(uar_get_code_display(od.oe_field_value)), "||"),
+                         sList) > 0 or od.action_sequence < lActionSequence)
+            ;* item already in list, do not add and remove the "||"
+            sList = substring(1, size(sList)-2, sList)
+            iAdd = 0
+          endif
+        endif
+        if (iAdd = 1)
+          sList = concat(trim(sList),
+                         trim(uar_get_code_display(od.oe_field_value)))
+        endif
+      foot report
+        call ReplyTextField("REASNGENEREF", sList, 0)
+      with nocounter
+
+	  /*determine the workup accession number - Check for the workup order */
+	  select into "nl:"
+      from
+        orders o_wu,
+        accession_order_r aor_wu
+      plan o_wu
+        where o_wu.order_id = dSpecimenOrderId
+      join aor_wu
+        where aor_wu.order_id = o_wu.order_id and
+              aor_wu.primary_flag+0 = 0
+      order by
+        o_wu.order_id
+      head o_wu.order_id
+		call ReplyTextField("HLXWRKUPNUM", cnvtacc(aor_wu.accession), 0)
+      with nocounter
+
+    else ;* by not doing another check here, if we have selected a CI order, which would not have a dSpecimenOrderId > 0.0,
+         ;*   we will basically load the fields below for a CI order in the same way we would if they selected a case.
+      call echo("SINGLE")
+      ;* get for all workups in the case.
+      select into "nl:"
+      from
+        ucm_case_step ucs,
+        orders o_wu,
+        order_container_r ocr_wu,
+        container c_wu
+      plan ucs
+        where ucs.ucm_case_id = dCaseId
+      join o_wu
+        where o_wu.order_id = ucs.specimen_order_id
+      join ocr_wu
+        where ocr_wu.order_id = o_wu.order_id
+      join c_wu
+        where c_wu.container_id = ocr_wu.container_id
+          and c_wu.container_id > 0.0
+      order by
+        o_wu.order_id
+      head report
+        sList = ""
+      head o_wu.order_id
+        if (sList != "")
+          sList = build2(trim(sList), "||")
+        endif
+        sList = concat(trim(sList),
+                       trim(uar_get_code_display(c_wu.specimen_type_cd)),
+                       " @ ",
+                       trim(format(o_wu.current_start_dt_tm, "@SHORTDATE4YR;;d")),
+                       " ",
+                       cnvtupper(trim(format(o_wu.current_start_dt_tm, "@TIMENOSECONDS;;S"))))
+      foot report
+        call ReplyTextField("HLXWORKUP", sList, 0)
+      with nocounter
+
+      /* determine the reason for genetic referral - Check for ALL workup orders */
+      select into "nl:"
+      from
+        ucm_case_step ucs,
+        order_detail od_wu
+      plan ucs
+        where ucs.ucm_case_id = dCaseId
+      join od_wu
+        where od_wu.order_id = ucs.specimen_order_id
+          and od_wu.oe_field_meaning = "REASNGENEREF"
+      order by
+        od_wu.order_id,
+        od_wu.action_sequence desc ;* if an order has been modified, we only want the most recent value.
+      head report
+        sList = ""
+      head od_wu.order_id
+        stat = 0
+        iAdd = 0
+        lActionSequence = od_wu.action_sequence
+      detail
+        iAdd = 1
+        if (sList != "")
+          sList = build2(trim(sList), "||")
+          ;* dup check the display value, append the "||" to ensure that
+          if (findstring(concat(trim(uar_get_code_display(od_wu.oe_field_value)), "||"),
+                         sList) > 0 or od_wu.action_sequence < lActionSequence)
+            ;* item already in list, do not add and remove the "||"
+            sList = substring(1, size(sList)-2, sList)
+            iAdd = 0
+          endif
+        endif
+        if (iAdd = 1)
+          sList = concat(trim(sList),
+                         trim(uar_get_code_display(od_wu.oe_field_value)))
+        endif
+      foot report
+        call ReplyTextField("REASNGENEREF", sList, 0)
+      with nocounter
+      
+      /*determine the workup accession number - Check for ALL workup orders */
+	  select into "nl:"
+      from
+        ucm_case_step ucs,
+        accession_order_r aor_wu
+      plan ucs
+        where ucs.ucm_case_id = dCaseId
+      join aor_wu
+        where aor_wu.order_id = ucs.specimen_order_id and
+              aor_wu.order_id > 0 and
+              aor_wu.primary_flag+0 = 0
+      order by
+        aor_wu.order_id
+      head report
+        sList = ""
+        iAdd = 0
+      head aor_wu.order_id
+        iAdd = 1
+        if (sList != "")
+          sList = build2(trim(sList), "||")
+          ;* dup check the display value, append the "||" to ensure that
+          if (findstring(concat(trim(cnvtacc(aor_wu.accession)), "||"),
+                         sList) > 0)
+            ;* item already in list, do not add and remove the "||"
+            sList = substring(1, size(sList)-2, sList)
+            iAdd = 0
+          endif
+        endif
+        if (iAdd = 1)
+          sList = concat(trim(sList),
+                       trim(cnvtacc(aor_wu.accession)))
+        endif
+      foot report  
+ 		call ReplyTextField("HLXWRKUPNUM", sList, 0)
+      with nocounter
+
+    endif
+
+  endif
+
+end ;sub LoadHelixData
+
+set modify nopredeclare
+end
+
+go
+
+;Generated by GNU enscript 1.6.4.

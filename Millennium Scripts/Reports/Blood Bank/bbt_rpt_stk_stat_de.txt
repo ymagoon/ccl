@@ -1,0 +1,762 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_stk_stat_de.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-2005 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_rpt_stk_stat_de.prg
+        Object name:            bbt_rpt_stk_stat_de
+        Request #:              225189
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Report the quantity of derivatives by product
+                                category and state
+
+        Tables read:            code_value, product_index, product, product_event,
+                                derivative, assign, patient_dispense, quarantine
+
+        Tables updated:         none
+
+        Executing from:         VB
+
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 09/30/96 Brian Franke         Initial Release                     *
+;     002 03/24/98 Matt Benson          Modified to retrieve Institution    *
+;                                       name from preferences               *
+;     003 12/31/98 John Rieck           Added logic to print location name  *
+;                                       and address. Added the address_     *
+;                                       location_cd to request.  Added bbt_ *
+;                                       get_location_info.inc and bbt_print_*
+;                                       location_info.inc.                  *
+;     004 05/21/99 Jose Suarez          change cer_temp to cer_print        *
+;     005 08/19/99 Doug Saus            UAR changes                         *
+;     006 09/08/99 Badari Kopparapu     Modified to print from Operations   *
+;     007 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       removed bbt_ops_owninvloc.inc and   *
+;                                       added bbt_ops_parm_passed.inc       * 
+;     008 08/28/00 Lawrence Dsouza      internationalized date and time     *
+;     009 02/27/01 Rob Peterson         Internationalize script             *
+;     010 07/26/02 Jason Osborn			Unique RPT filename project			*
+;     011 04/12/04 Jim Jensen           Remove "Select" for own/inv info and*
+;                                       use UAR, instead.                   *
+;     012 12/09/04 Cedric Daniels		Added dummy table "d6" to display   *
+;										product class and catagory when no  *
+;										derivative products qualify for     *
+;										stock status summary report.		*
+;     013 10/11/05 Jason Coy            Updated report to display the       *
+;                                       front end username.                 *
+;     014 02/12/12 Sachin Yadav         fixed derivative inactive product   *
+;										display issue
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_rpt_stk_stat_de:dba go
+create program bbt_rpt_stk_stat_de:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+        /*
+        record request
+        (
+          1  batch_selection            = c200  
+          1  ops_date                   = dq8   
+          1  output_dist                = c200 
+          1  dsss_product_cat_cd        = f8
+          1  cur_owner_area_cd          = f8
+          1  cur_inv_area_cd            = f8
+          1  address_location_cd        = f8    
+        )
+        */
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+        record reply
+        (
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+        )
+        
+%i cclsource:bbt_get_username.inc       
+
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc                                              
+                                                                       
+set i18nHandle = 0                                                     
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)   
+                                                                       
+record captions                                                        
+(                                                                      
+  1  rpt_title                  = vc                                   
+  1  rpt_time                   = vc                                   
+  1  rpt_as_of_date             = vc                                   
+  1  product_category           = vc                                   
+  1  all                        = vc                                   
+  1  derivatives                = vc                                   
+  1  blood_bank_owner           = vc                                   
+  1  inventory_area             = vc                                   
+  1  product_class              = vc                                   
+  1  products                   = vc                                   
+  1  avail                      = vc                                   
+  1  assign                     = vc                                   
+  1  quar                       = vc                                   
+  1  dispense                   = vc                                   
+  1  total                      = vc                                   
+  1  rpt_id                     = vc                                   
+  1  rpt_page                   = vc                                   
+  1  printed                    = vc                                   
+  1  user                       = vc                                   
+  1  end_of_report              = vc                                   
+  1  rpt_all                    = vc											  
+)                                                                      
+                                                                       
+set captions->rpt_title = uar_i18ngetmessage(i18nHandle,               
+  "rpt_title", "S T O C K   S T A T U S   S U M M A R Y")              
+set captions->rpt_time = uar_i18ngetmessage(i18nHandle,                
+  "rpt_time", "Time:")                                                 
+set captions->rpt_as_of_date = uar_i18ngetmessage(i18nHandle,          
+  "rpt_as_of_date", "As of Date:")                                     
+set captions->derivatives = uar_i18ngetmessage(i18nHandle,             
+  "derivatives", "(Derivatives)")                                      
+set captions->blood_bank_owner = uar_i18ngetmessage(i18nHandle,        
+  "blood_bank_owner", "Blood Bank Owner: ")                            
+set captions->inventory_area = uar_i18ngetmessage(i18nHandle,          
+  "inventory_area", "Inventory Area: ")                                
+set captions->product_class = uar_i18ngetmessage(i18nHandle,           
+  "product_class", "Product Class:")                                   
+set captions->product_category = uar_i18ngetmessage(i18nHandle,        
+  "product_category", "Product Category:")                             
+set captions->products = uar_i18ngetmessage(i18nHandle,                
+  "products", "Products:")                                             
+set captions->avail = uar_i18ngetmessage(i18nHandle,                   
+  "avail", "Avail")                                                    
+set captions->assign = uar_i18ngetmessage(i18nHandle,                  
+  "assign", "Assign")                                                  
+set captions->quar = uar_i18ngetmessage(i18nHandle,                    
+  "quar", "Quar")                                                      
+set captions->dispense = uar_i18ngetmessage(i18nHandle,                
+  "dispense", "Dispense")                                              
+set captions->total = uar_i18ngetmessage(i18nHandle,                   
+  "total", "Total")                                                    
+set captions->all = uar_i18ngetmessage(i18nHandle,                     
+  "all", "All")                                                        
+set captions->rpt_id = uar_i18ngetmessage(i18nHandle,                  
+  "rpt_id", "Report ID: BBT_RPT_STK_STAT_DE")                          
+set captions->rpt_page = uar_i18ngetmessage(i18nHandle,                
+  "rpt_page", "Page:")                                                 
+set captions->printed = uar_i18ngetmessage(i18nHandle,                 
+  "printed", "Printed:")                                               
+set captions->user = uar_i18ngetmessage(i18nHandle,                    
+  "user", "User:")                                                     
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,           
+  "end_of_report", "* * * End of Report * * *")                        
+set captions->rpt_all = uar_i18ngetmessage(i18nHandle,		           
+  "rpt_all", "(All)")  									     	                   
+
+/*****************************************************************************
+* Script                                                                     *
+*****************************************************************************/
+declare reportByUsername = vc with protect, noconstant("")
+set reportByUsername = GET_USERNAME(reqinfo->updt_id)
+
+if (trim(request->batch_selection) > " ")
+  ;default to all categories from Operations.
+  set request->dsss_product_cat_cd = 0
+
+  set temp_string = cnvtupper(trim(request->batch_selection))
+  call CHECK_OWNER_CD ("bbt_rpt_stk_stat_de")
+  call CHECK_INVENTORY_CD ("bbt_rpt_stk_stat_de")
+  call CHECK_LOCATION_CD ("bbt_rpt_stk_stat_de")
+endif
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc      
+%i cclsource:bbt_get_location_info.inc          
+
+set firsttime          = "Y"
+set prod_list [30]     = fillstring(20," ")
+set cnt                = 1
+set match_found        = "N"
+set avail_cnt          = 0
+set assigned_cnt       = 0
+set quar_cnt           = 0
+set dispense_cnt       = 0
+set deriv_cnt          = 0
+set code_val  [4]      = 0.0
+set code_rank [4]      = " " 
+set code_index         = 1
+set line               = fillstring(125,"_")
+set xx = initarray(code_val, 0)
+set xx = initarray(code_rank, " ")
+
+set code_index         = 1
+
+set cur_owner_area_disp = fillstring(40," ")
+set cur_inv_area_disp = fillstring(40, " ")
+
+/* Retrieve display values for requested Owner Area and Inventory Area */  
+if (request->cur_owner_area_cd = 0.0)
+   set cur_owner_area_disp = captions->all
+else
+   set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+endif
+
+if (request->cur_inv_area_cd = 0.0)
+   set cur_inv_area_disp = captions->all
+else
+   set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+endif
+
+select into "nl:"
+      c.code_value
+from  code_value c
+where c.code_set = 1610
+detail
+      if (c.cdf_meaning = "1")
+        code_val [code_index] = c.code_value
+        code_rank [code_index] = "1"
+        code_index = code_index + 1
+      elseif (c.cdf_meaning = "2")
+        code_val [code_index] = c.code_value
+        code_rank [code_index] = "2"
+        code_index = code_index + 1
+      elseif (c.cdf_meaning = "4")
+        code_val [code_index] = c.code_value
+        code_rank [code_index] = "3"
+        code_index = code_index + 1
+      elseif (c.cdf_meaning = "12")
+        code_val [code_index] = c.code_value
+        code_rank [code_index] = "4"
+        code_index = code_index + 1
+      endif
+with  nocounter,
+      check
+
+set derivative_class_cd = 0.0
+set cdf_meaning = fillstring(12," ")
+set cdf_meaning = "DERIVATIVE"
+set stat = uar_get_meaning_by_codeset(1606,cdf_meaning,1,derivative_class_cd)
+
+set prod_col = 20
+set xx = initarray(prod_list, " ")
+
+if (request->dsss_product_cat_cd = 0)
+
+set reply->status_data->status = "F"
+set select_ok_ind = 0 
+
+set rpt_cnt = 0
+
+execute cpm_create_file_name_logical "bbt_stck_stat_de", "txt", "x"
+
+select into cpm_cfn_info->file_name_logical
+       pi.product_class_cd,
+       pi.product_cat_cd,
+       pi.product_cd,
+       pe.product_id,
+       de.cur_avail_qty,
+       an.cur_assign_qty,
+       pd.cur_dispense_qty,
+       qu.cur_quar_qty,
+       pe.product_event_id,
+       pe.event_type_cd,
+       pr.product_cd,
+       pr.product_cat_cd,
+       pr.product_class_cd,
+       product_type_display = uar_get_code_display(pi.product_cd),
+       product_cat_display = uar_get_code_display(pi.product_cat_cd),       
+       product_class_display = uar_get_code_display(pi.product_class_cd),
+       decode_flag = decode(de.seq, "DE", "NO")
+from   
+       product_index pi,
+       (dummyt d1 with seq = 1),
+       product pr,
+       (dummyt d6 with seq = 1),       
+       product_event pe,
+       (dummyt d7 with seq = 1),
+       derivative de,
+       (dummyt d3 with seq = 1),
+       assign an,
+       (dummyt d4 with seq = 1),
+       patient_dispense pd,
+       (dummyt d5 with seq = 1),
+       quarantine qu
+plan    pi where pi.product_class_cd = derivative_class_cd and 
+                 pi.product_cat_cd   > 0 and
+                 pi.product_cd       > 0 and
+                 pi.active_ind       = 1
+join    d1 where d1.seq = 1
+join    pr where pi.product_cd       = pr.product_cd
+                          and ((request->cur_owner_area_cd > 0.0
+                                and request->cur_owner_area_cd = pr.cur_owner_area_cd)
+                            or (request->cur_owner_area_cd = 0.0))
+                          and ((request->cur_inv_area_cd > 0.0
+                                and request->cur_inv_area_cd = pr.cur_inv_area_cd)
+                            or (request->cur_inv_area_cd = 0.0))
+join    d6 where d6.seq = 1   
+join    pe where pr.product_id       = pe.product_id and
+                 pe.active_ind       = 1 and
+                 (pe.event_type_cd   = code_val [1] or
+                 pe.event_type_cd    = code_val [2] or
+                 pe.event_type_cd    = code_val [3] or
+                 pe.event_type_cd    = code_val [4])
+join    d7 where d7.seq = 1                 
+join    de where pe.product_id       = de.product_id and
+                 de.active_ind       = 1
+join    d3 where d3.seq = 1
+join    an where pe.product_event_id = an.product_event_id and
+                 an.active_ind       = 1
+join    d4 where d4.seq = 1
+join    pd where pe.product_event_id = pd.product_event_id and
+                 pd.active_ind       = 1
+join    d5 where d5.seq = 1
+join    qu where pe.product_event_id = qu.product_event_id and
+                 qu.active_ind       = 1
+order by 
+         pi.product_class_cd,
+         pi.product_cat_cd,
+         pi.product_cd,
+         pe.product_id,
+         pe.product_event_id
+
+head report
+    select_ok_ind = 0
+
+head page
+      call center(captions->rpt_title,1,125)                          
+      col 104, captions->rpt_time                                      
+      COL 118, CURTIME "@TIMENOSECONDS;;M", 
+      ROW + 1
+      col 104, captions->rpt_as_of_date                                
+      COL 118, CURDATE "@DATECONDENSED;;d",  
+%i cclsource:bbt_print_location_info.inc        
+      SAVE_ROW = ROW
+      ROW 1
+      call center(captions->derivatives,1,125)                 
+      row SAVE_ROW
+      row + 1
+      col   1, captions->blood_bank_owner                             
+      col  19, cur_owner_area_disp,
+      row + 1
+      col   1, captions->inventory_area      
+      col  17, cur_inv_area_disp
+      row + 2
+      col   1, captions->product_class                       
+      col  21, product_class_display
+      row + 2
+      col   1, captions->product_category                         
+      col  21, product_cat_display 
+      row + 2
+      col   1, captions->products                                     
+
+head  pi.product_class_cd
+      row + 0
+
+head  pi.product_cat_cd
+    if (firsttime = "Y")
+      firsttime = "N"
+    else
+      break
+    endif
+
+head  pi.product_cd
+      row + 0
+
+head pe.product_event_id
+      row + 0
+
+detail
+      row + 0
+
+foot  pi.product_class_cd
+      row + 0
+
+foot  pi.product_cat_cd
+        prod_col = 20
+        row + 3
+        col  38, captions->avail                                        
+        col  51, captions->assign                                        
+        col  65, captions->quar                                          
+        col  76, captions->dispense                                     
+        col  90, captions->total                                       
+        row + 1
+        col  37, "--------",
+        col  50, "--------",
+        col  63, "--------",
+        col  76, "--------",
+        col  89, "--------",
+        row + 1
+        col  39, avail_cnt     "#####;p "       
+        col  52, assigned_cnt  "#####;p "       
+        col  65, quar_cnt      "#####;p "       
+        col  78, dispense_cnt  "#####;p "       
+        col  91, deriv_cnt     "#####;p "
+        xx = initarray(prod_list, " ")
+        avail_cnt    = 0
+        assigned_cnt = 0
+        quar_cnt     = 0
+        dispense_cnt = 0
+        deriv_cnt    = 0
+
+foot  pi.product_cd
+        cnt = 1
+        col   1
+        display_product = substring(1,22,product_type_display) 
+        col + prod_col, display_product,
+        if (prod_col > 80)
+          row + 1
+          prod_col = 20
+        else
+          prod_col = prod_col + 25
+        endif
+        cnt = cnt + 1
+
+foot pe.product_event_id
+       if (decode_flag = "DE")
+         code_index = 1
+         match_found = "N"
+         while ((match_found = "N") and (code_index < 5))
+           if (pe.event_type_cd = code_val [code_index])
+             match_found = "Y"
+             if (code_rank [code_index] = "1")
+               assigned_cnt = assigned_cnt + an.cur_assign_qty
+               deriv_cnt = deriv_cnt + an.cur_assign_qty
+             endif
+             if (code_rank [code_index] = "2")
+               quar_cnt = quar_cnt + qu.cur_quar_qty
+               deriv_cnt = deriv_cnt + qu.cur_quar_qty
+             endif
+             if (code_rank [code_index] = "3")
+               dispense_cnt = dispense_cnt + pd.cur_dispense_qty
+               deriv_cnt = deriv_cnt + pd.cur_dispense_qty
+             endif
+             if (code_rank [code_index] = "4")
+               avail_cnt = avail_cnt + de.cur_avail_qty
+               deriv_cnt = deriv_cnt + de.cur_avail_qty
+             endif
+           else
+             code_index = code_index + 1
+           endif
+         endwhile
+       endif
+
+foot page
+      row  57
+      col   1, line,
+      row + 1
+      col   1, captions->rpt_id                                      
+      col  58, captions->rpt_page                                      
+      col  64, curpage "###",
+      col 100, captions->printed                                      
+      col 110, curdate "@DATECONDENSED;;d"
+      col 120, curtime "@TIMENOSECONDS;;M"
+
+foot report
+      row  54
+      col   1, captions->user                                        
+      col  20, reportByUsername
+      row + 1
+      col   1, captions->product_category                             
+      col  20, captions->all                                          
+      row  60
+      col  51, captions->end_of_report                                
+      select_ok_ind = 1
+
+with  nullreport, 
+      nocounter,
+      check,
+      outerjoin (d1),
+      outerjoin (d6),
+      outerjoin (d3),
+      outerjoin (d4),
+      outerjoin (d7),
+      dontcare  (an),
+      dontcare  (pd),
+      maxrow = 61,
+      nolandscape,
+      compress
+endif
+
+if (request->dsss_product_cat_cd > 0)
+
+set reply->status_data->status = "F"
+set select_ok_ind = 0 
+set rpt_cnt = 0
+execute cpm_create_file_name_logical "bbt_stck_stat_de", "txt", "x"
+
+select into cpm_cfn_info->file_name_logical
+       pi.product_class_cd,
+       pi.product_cat_cd,
+       pi.product_cd,
+       pe.product_id,
+       de.cur_avail_qty,
+       an.cur_assign_qty,
+       pd.cur_dispense_qty,
+       qu.cur_quar_qty,
+       pe.product_event_id,
+       pe.event_type_cd,
+       pr.product_cd,
+       pr.product_cat_cd,
+       pr.product_class_cd,
+       product_type_display = uar_get_code_display(pi.product_cd), 
+       product_cat_display = uar_get_code_display(pi.product_cat_cd),      
+       product_class_display = uar_get_code_display(pi.product_class_cd), 
+       decode_flag = decode(de.seq, "DE", "NO")
+from   
+       product_index pi,
+       (dummyt d1 with seq = 1),
+       product pr,
+       (dummyt d6 with seq = 1),
+       product_event pe,
+       (dummyt d7 with seq = 1),
+       derivative de,
+       (dummyt d3 with seq = 1),
+       assign an,
+       (dummyt d4 with seq = 1),
+       patient_dispense pd,
+       (dummyt d5 with seq = 1),
+       quarantine qu
+plan    pi where pi.product_cat_cd = request->dsss_product_cat_cd and
+                 pi.product_cat_cd > 0 and
+                 pi.product_class_cd = derivative_class_cd and
+                 pi.active_ind       = 1
+join    d1 where d1.seq = 1
+join    pr where pi.product_cd       = pr.product_cd
+                          and ((request->cur_owner_area_cd > 0.0
+                                and request->cur_owner_area_cd = pr.cur_owner_area_cd)
+                            or (request->cur_owner_area_cd = 0.0))
+                          and ((request->cur_inv_area_cd > 0.0
+                                and request->cur_inv_area_cd = pr.cur_inv_area_cd)
+                            or (request->cur_inv_area_cd = 0.0))
+join	d6 where d6.seq = 1                            
+join    pe where pr.product_id       = pe.product_id and
+                 pe.active_ind       = 1 and
+                 (pe.event_type_cd   = code_val [1] or
+                 pe.event_type_cd    = code_val [2] or
+                 pe.event_type_cd    = code_val [3] or
+                 pe.event_type_cd    = code_val [4])
+join 	d7 where d7.seq = 1                 
+join    de where pe.product_id       = de.product_id and
+                 de.active_ind       = 1
+join    d3 where d3.seq = 1
+join    an where pe.product_event_id = an.product_event_id and
+                 an.active_ind       = 1
+join    d4 where d4.seq = 1
+join    pd where pe.product_event_id = pd.product_event_id and
+                 pd.active_ind       = 1
+join    d5 where d5.seq = 1
+join    qu where pe.product_event_id = qu.product_event_id and
+                 qu.active_ind       = 1
+order by
+         pi.product_class_cd,
+         pi.product_cat_cd,
+         pi.product_cd,
+         pe.product_id,
+         pe.product_event_id
+
+head report
+    select_ok_ind = 0
+
+head page
+      call center(captions->rpt_title,1,125)                          
+      col 107, captions->rpt_time                                      
+      COL 121, CURTIME "@TIMENOSECONDS;;M",
+      ROW + 1
+      col 107, captions->rpt_as_of_date                               
+      COL 119, CURDATE  "@DATECONDENSED;;d",
+%i cclsource:bbt_print_location_info.inc        
+      SAVE_ROW = ROW
+      ROW 1
+      call center(captions->derivatives,1,125)                         
+      row SAVE_ROW
+      row + 1
+      col  1, captions->blood_bank_owner                              
+      col 19, cur_owner_area_disp,
+      row + 1
+      col  1, captions->inventory_area                                
+      col 17, cur_inv_area_disp
+      row + 2
+      col   1, captions->product_class                                 
+      col  21, product_class_display 
+      row + 2
+      col   1, captions->product_category                             
+      col  21, product_cat_display 
+      row + 2
+      col   1, captions->products                                    
+
+head  pi.product_class_cd
+      row + 0
+
+head  pi.product_cat_cd
+    if (firsttime = "Y")
+      firsttime = "N"
+    else
+      break
+    endif
+
+head  pi.product_cd
+      row + 0
+
+head pe.product_event_id
+      row + 0
+
+detail
+      row + 0
+
+foot  pi.product_class_cd
+      row + 0
+
+foot  pi.product_cat_cd
+        prod_col = 20
+        row + 3
+        col  38, captions->avail                                         
+        col  51, captions->assign                                        
+        col  65, captions->quar                                          
+        col  76, captions->dispense                                    
+        col  90, captions->total                                        
+        row + 1
+        col  37, "--------",
+        col  50, "--------",
+        col  63, "--------",
+        col  76, "--------",
+        col  89, "--------",
+        row + 1
+        col  39, avail_cnt     "####;p "       
+        col  52, assigned_cnt  "####;p "       
+        col  65, quar_cnt      "####;p "       
+        col  78, dispense_cnt  "####;p "       
+        col  91, deriv_cnt     "####;p "       
+        xx = initarray(prod_list, " ")
+        avail_cnt    = 0
+        assigned_cnt = 0
+        quar_cnt     = 0
+        dispense_cnt = 0
+        deriv_cnt    = 0
+
+foot  pi.product_cd
+        cnt = 1
+        col   1
+        display_product = substring(1,22,product_type_display) 
+        col + prod_col, display_product,
+        if (prod_col > 80)
+          row + 1
+          prod_col = 20
+        else
+          prod_col = prod_col + 25
+        endif
+        cnt = cnt + 1
+
+foot pe.product_event_id
+       if (decode_flag = "DE")
+         code_index = 1
+         match_found = "N"
+         while ((match_found = "N") and (code_index < 5))
+           if (pe.event_type_cd = code_val [code_index])
+             match_found = "Y"
+             if (code_rank [code_index] = "1")
+               assigned_cnt = assigned_cnt + an.cur_assign_qty
+               deriv_cnt = deriv_cnt + an.cur_assign_qty
+             endif
+             if (code_rank [code_index] = "2")
+               quar_cnt = quar_cnt + qu.cur_quar_qty
+               deriv_cnt = deriv_cnt + qu.cur_quar_qty
+             endif
+             if (code_rank [code_index] = "3")
+               dispense_cnt = dispense_cnt + pd.cur_dispense_qty
+               deriv_cnt = deriv_cnt + pd.cur_dispense_qty
+             endif
+             if (code_rank [code_index] = "4")
+               avail_cnt = avail_cnt + de.cur_avail_qty
+               deriv_cnt = deriv_cnt + de.cur_avail_qty
+             endif
+           else
+             code_index = code_index + 1
+           endif
+         endwhile
+       endif
+
+foot page
+      row  57
+      col   1, line,
+      row + 1
+      col   1, captions->rpt_id                                     
+      col  58, captions->rpt_page                    
+      col  64, curpage "###",
+      col 100, captions->printed                                      
+      col 110, curdate "@DATECONDENSED;;d"
+      col 120, curtime "@TIMENOSECONDS;;M"
+       
+foot report
+      row  54
+      col   1, captions->user                                        
+      col  20, reportByUsername "##########;L"
+      row + 1
+      col   1, captions->product_category                           
+      col  20, product_cat_display 
+      row  60
+      col  51, captions->end_of_report                            
+      select_ok_ind = 1
+
+with  nullreport, 
+      nocounter,
+      check,
+      outerjoin (d1),
+      outerjoin (d6),
+      outerjoin (d3),
+      outerjoin (d4),
+      outerjoin (d7),
+      dontcare  (an),
+      dontcare  (pd),
+      maxrow = 61,
+      compress,
+      nolandscape
+endif
+
+#EXIT_SCRIPT
+
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+
+if (select_ok_ind = 1)
+    set reply->status_data->status = "S"
+    If (trim(request->batch_selection) > " ")
+        set spool value(reply->rpt_list[rpt_cnt].rpt_filename) value(request->output_dist)    
+    EndIf
+endif
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

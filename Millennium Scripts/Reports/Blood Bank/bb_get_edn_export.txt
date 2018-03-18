@@ -1,0 +1,321 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/bb_get_edn_export/Bb_get_edn_export.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *       Revision      (c) 1984-2006 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+ 
+        Source file name:       bb_get_edn_export.prg
+        Object name:            bb_get_edn_export
+        Request #:              225955
+ 
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        This script will create a CSV of
+                                data from all imported EDN files
+ 
+        Tables read:            bb_edn_admin, bb_edn_dscrpncy_ovrd,
+                                bb_edn_product, product
+ 
+        Tables updated:         none
+ 
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    * Mod Date     Engineer             Comment                            *
+;    * --- -------- -------------------- ---------------------------------- *
+;    * 001 12/13/06  Matt Cummings        Initial Release                   *
+;    * 002 01/16/07  Matt Cummings        Updated join logic to handle      *
+;    *                                    change in data relationship.      *
+;    * 003 07/04/12  Satish Joshi         Modified the script to execute the  *
+;                                       EKS_GET_SOURCE and return the export*
+;                                       file content                        *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+drop program   bb_get_edn_export:dba go
+create program bb_get_edn_export:dba
+ 
+;**************************************
+;* request record
+;**************************************
+;record Request
+;(
+;  1 beg_dt_tm         = dq8
+;  1 end_dt_tm         = dq8
+;  1 cur_owner_area_cd = f8
+;)
+ 
+;**************************************
+;* reply record
+;**************************************
+record Reply
+(
+  1 rpt_list[*]
+    2 rpt_filename = vc
+    2 node         = vc
+	2 data_blob                 = gvc
+	2 data_blob_size            = i4
+ 
+%i cclsource:status_block.inc
+)
+ 
+set reply->status_data->status = "F"
+ 
+;*****************************************************************************
+;* Include scripts                                              *
+;*****************************************************************************
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC
+; Internationalization include
+%i cclsource:i18n_uar.inc
+%i cclsource:bbt_read_report_file.inc
+ 
+SET LOG_PROGRAM_NAME = "BB_GET_EDN_EXPORT"
+ 
+call LOG_MESSAGE("Starting BB_GET_EDN_EXPORT...",LOG_LEVEL_DEBUG)
+ 
+;**************************************
+;* captions record
+;**************************************
+record Captions
+(
+  1 Filename = vc
+  1 ExportDateTime = vc
+  1 BeginDateTime = vc
+  1 EndDateTime = vc
+  1 OwnerArea = vc
+  1 OrderDateTime = vc
+  1 OrderNumber = vc
+  1 ProductNumber = vc
+  1 ProductType = vc
+  1 DeliveryType = vc
+)
+ 
+call LOG_MESSAGE("Translating captions...",LOG_LEVEL_DEBUG)
+ 
+;Initialize internationalization handle
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+;Translate captions
+set Captions->Filename = uar_i18ngetmessage(i18nHandle,
+  "filename",
+  '"Filename"')
+set Captions->ExportDateTime = uar_i18ngetmessage(i18nHandle,
+  "export_date_time",
+  '"Export Date and Time"')
+set Captions->BeginDateTime = uar_i18ngetmessage(i18nHandle,
+  "begin_date_time",
+  '"Begin Date and Time"')
+set Captions->EndDateTime = uar_i18ngetmessage(i18nHandle,
+  "end_date_time",
+  '"End Date and Time"')
+set Captions->OwnerArea = uar_i18ngetmessage(i18nHandle,
+  "owner_area",
+  '"Owner Area"')
+set Captions->OrderDateTime = uar_i18ngetmessage(i18nHandle,
+  "order_date_time",
+  '"Order Date and Time"')
+set Captions->OrderNumber = uar_i18ngetmessage(i18nHandle,
+  "order_number",
+  '"Order Number"')
+set Captions->ProductNumber = uar_i18ngetmessage(i18nHandle,
+  "product_number",
+  '"Product Number"')
+set Captions->ProductType = uar_i18ngetmessage(i18nHandle,
+  "product_type",
+  '"Product Type"')
+set Captions->DeliveryType = uar_i18ngetmessage(i18nHandle,
+  "delivery_type",
+  '"Delivery Type"')
+ 
+declare ErrorHandler (OperationStatus     = c1,
+                       TargetObjectName   = vc,
+                        TargetObjectValue = vc ) = null
+ 
+declare sSCRIPT_NAME             = vc   with protect,   constant("BB_GET_EDN_EXPORT")
+declare lStat                    = i4   with protect,   noconstant(0)
+ 
+declare BEG_DT_TM = dq8 with protect,constant( cnvtdatetime(request->beg_dt_tm) )
+declare END_DT_TM = dq8 with protect,constant( cnvtdatetime(request->end_dt_tm) )
+declare CUR_DT_TM = dq8 with protect,constant( cnvtdatetime(curdate,curtime3) )
+declare CUR_OWNER_AREA_CD = f8 with protect,constant(request->cur_owner_area_cd)
+declare OWNER_AREA_DISPLAY = vc with protect,constant(
+                               trim(uar_get_code_display( request->cur_owner_area_cd ))
+                               )
+; Error message declarations.
+declare errmsg                   = c132 with protect, noconstant(fillstring(132," "))
+declare error_check              = i2   with protect, noconstant(error(errmsg,1))
+ 
+;test value from OWNER_AREA_DISPLAY
+declare deliveryTypeDisplay = vc with protect,noconstant("")
+declare orderNumber = vc with protect,noconstant("")
+declare productNumber = vc with protect,noconstant("")
+declare productTypeDisplay = vc with protect,noconstant("")
+ 
+declare stat = i2 with protect,noconstant(0)
+ 
+call LOG_MESSAGE("Opening file ELEC_BLD_ORDER...",LOG_LEVEL_DEBUG)
+ 
+execute cpm_create_file_name_logical "ELEC_BLD_ORDER", "csv", "x"
+ 
+call LOG_MESSAGE("Writing file...",LOG_LEVEL_DEBUG)
+ 
+;Get all products that were received through EDN Mode of BBReceiveProducts.
+select into cpm_cfn_info->file_name_logical
+  admin.admin_dt_tm
+  ,admin.order_nbr_ident
+from
+  bb_edn_admin admin,
+  bb_edn_product edn_prod,
+  product prod,
+  bb_edn_dscrpncy_ovrd edn_ovrd
+                  ;Get all EDN files for the specified supplier(cur_owner_area_cd)
+plan admin where (admin.admin_dt_tm between cnvtdatetime(BEG_DT_TM) and cnvtdatetime(END_DT_TM))
+             and (admin.destination_loc_cd = CUR_OWNER_AREA_CD)
+join edn_prod where edn_prod.bb_edn_admin_id = admin.bb_edn_admin_id
+                ;"product_id > 0" indicates that a product was recieved.
+                and edn_prod.product_id > 0
+                and edn_prod.bb_edn_product_id > 0
+join prod where prod.product_id = edn_prod.product_id
+join edn_ovrd where (edn_ovrd.bb_edn_product_id = outerjoin(edn_prod.bb_edn_product_id))
+                and (edn_ovrd.product_id > outerjoin(0))
+order by admin.admin_dt_tm, admin.order_nbr_ident
+head report
+  row 0
+  col 1,   Captions->Filename, ", "
+  col col, Captions->ExportDateTime, ", "
+  col col, Captions->BeginDateTime, ", "
+  col col, Captions->EndDateTime, ", "
+  col col, Captions->OwnerArea, ", "
+  col col, Captions->OrderDateTime, ", "
+  col col, Captions->OrderNumber, ", "
+  col col, Captions->ProductNumber, ", "
+  col col, Captions->ProductType, ", "
+  col col, Captions->DeliveryType
+detail
+  row + 1
+  ;Output "File Name"
+  col 1, '"','Elec_Bld_Order','"',', '
+ 
+  ;Output "Export Date and Time"
+  col col, '"', CUR_DT_TM 'mm/dd/yyyy hh:mm;;d','"',', '
+ 
+  ;Output "Begin Date and Time"
+  col col, '"', BEG_DT_TM 'mm/dd/yyyy hh:mm;;d', '"', ', '
+ 
+  ;Output "End Date and Time"
+  col col, '"', END_DT_TM 'mm/dd/yyyy hh:mm;;d', '"', ', '
+ 
+  ;Output "Owner Area"
+  col col, '"', OWNER_AREA_DISPLAY, '"', ', '
+ 
+  ;Output "Order Date and Time"
+  col col, '"', admin.admin_dt_tm 'mm/dd/yyyy hh:mm;;d', '"', ', '
+ 
+  ;Output "Order Number"
+  orderNumber = trim( admin.order_nbr_ident )
+  col col, '"', orderNumber, '"', ', '
+ 
+  ;Output "Product Number"
+  if(edn_ovrd.bb_edn_dscrpncy_ovrd_id > 0)
+    ;Product not in EDN file.
+    productNumber = trim( edn_ovrd.edn_product_nbr_ident )
+  else
+    ;Product is in EDN file.
+    productNumber = trim( edn_prod.edn_product_nbr_ident )
+  endif
+  col col, '"', productNumber, '"', ', '
+ 
+  ;Product Type
+  if(edn_ovrd.bb_edn_dscrpncy_ovrd_id > 0)
+    ;Product not in EDN file.
+    productTypeDisplay = trim(uar_get_code_display(edn_ovrd.product_cd))
+  else
+    ;Product is in EDN file.
+    productTypeDisplay = trim(uar_get_code_display(prod.product_cd))
+  endif
+  col col, '"', productTypeDisplay, '"', ', '
+ 
+  ;Delivery Type
+  if(edn_prod.delivery_type_cd = 0)
+    ;Product is in the box, but not the EDN list. No delivery type is available.
+    deliveryTypeDisplay = " "
+  else
+    ;Product is listed in the EDN file. Show delivery type from file.
+    deliveryTypeDisplay = trim(uar_get_code_display( edn_prod.delivery_type_cd ))
+  endif
+ 
+  col col, '"', deliveryTypeDisplay, '"'
+with   maxrow = 5000,
+       maxcol = 260,
+       nullreport,
+       nocounter
+ 
+; Check for any CCL errors
+set error_check = error(errmsg,0)
+if (error_check != 0)
+   call ErrorHandler("F", "Select EDN Purge Rows", errmsg)
+endif
+ 
+subroutine ErrorHandler(OperationStatus,
+                        TargetObjectName,
+                        TargetObjectValue)
+  declare error_cnt = i2 with private, noconstant(0)
+ 
+  set error_cnt = size(reply->status_data.subeventstatus, 5)
+  if (error_cnt > 1 or
+     (error_cnt = 1 and reply->status_data.subeventstatus[error_cnt].OperationStatus != ""))
+      set error_cnt = error_cnt + 1
+      set lStat = alter(reply->status_data.subeventstatus, error_cnt)
+  endif
+ 
+  set reply->status_data.status = "F"
+  set reply->status_data.subeventstatus[error_cnt].OperationName = sSCRIPT_NAME
+  set reply->status_data.subeventstatus[error_cnt].OperationStatus = OperationStatus
+  set reply->status_data.subeventstatus[error_cnt].TargetObjectName = TargetObjectName
+  set reply->status_data.subeventstatus[error_cnt].TargetObjectValue = TargetObjectValue
+ 
+  go to EXIT_SCRIPT
+end
+ 
+set stat = alterlist(reply->rpt_list, 1)
+set reply->rpt_list[1].rpt_filename = cpm_cfn_info->file_name_path
+set reply->rpt_list[1].node = curnode
+
+call ReadExportFile(reply->rpt_list[1].rpt_filename)
+if (EKSREPLY->status_data[1].status = "S")
+	set reply->rpt_list[1]->data_blob = EKSREPLY->data_blob
+	set reply->rpt_list[1]->data_blob_size =EKSREPLY->data_blob_size
+else
+   call ErrorHandler("F", "BB_GET_EDN_EXPORT", "Failure to read the EDN EXPORT file")
+endif
+ 
+set reply->status_data->status = "S"
+ 
+call LOG_MESSAGE("Ending BB_GET_EDN_EXPORT...",LOG_LEVEL_DEBUG)
+ 
+#EXIT_SCRIPT
+  
+end
+go
+
+;Generated by GNU enscript 1.6.4.

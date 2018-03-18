@@ -1,0 +1,1637 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BbtGetBBPreference/bbt_getBBPreference.inc Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2006 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~************************************************************************
+      *                   PathNet Blood Bank Transfusion                     *
+      *                           V500 Script                                *
+      *                     BBT_GetBBPreference.inc                          *
+      *                                                                      *
+      * PURPOSE:          This is the def include file for determining the   *
+      *                   blood bank preferences                             *
+      *                                                                      *
+      ************************************************************************/
+;~DB~ ************************************************************************
+;     *                      GENERATED MODIFICATION CONTROL LOG              *
+;     ***************************************************************************
+;     *                                                                         *
+;     *Mod Date     Engineer             Comment                                *
+;     *--- -------- -------------------- -------------------------------------- *
+;     *000 05/16/06 Tom Brecht           Initial Release.                       *
+;     *001 09/08/06 Abraham Areguy       Updated to include preference for      *
+;     *                                  a custom packing list.                 *
+;     *002 09/20/06 Jason Coy            Updated to included flexible           *
+;     *                                  specimen preferences.                  *
+;     *003 03/16/07 Jason Coy            Add BbtGetBBTestingFacility().         *
+;     *                                  Updated                                *
+;     *                                  BbtGetHistoricInfoPreference() and     *
+;     *                                  BbtGetCustomPackListPreference() to    *
+;     *                                  utilize BbtGetBBTestingFacility().     *
+;     *004 04/09/07 Matt Cummings        Add BbtGetEncounterLocations() *
+;     *005 11/27/07 Ronda Zheng          Added BbtGetXMTagPreference()          *
+;                                              BbtGetComponentTagPreference()   *
+;                                              BbtGetEmergencyTagPreference()   *
+;     *006 04/19/10 Sachin Yadav         Added required courier preferences for *
+;                                         dispenseAssign and returnProducts.    *
+;     *007 03/31/11 Amy Gum	            Added interfaced devices preference     *
+;     *008 02/14/12 Archita S           To destroy the handles created for UAR  *
+;                                       Preference calls at every return point  *
+;     *009 10/29/13 Satish S Joshi      Added a new method to read the flexible  *
+;                                       preference filter value
+;     *010 10/30/13 Satish S Joshi      Removed undeclared variable from 
+;                                       BbtGetInterfacedDevicesPreference 
+;	  *011 01/31/14 Gayatri Samala      fix for CR 1-3910498727 (ability to extend
+;									    expired specimens)
+;     *012 01/24/14 Fitsum Abebe        Added BbtDispGetProductOrderAssocPreference()  
+;                                       subroutine
+;     *013 04/16/14 Satish S Joshi      Reading flex preferences when flex is on.
+;     *014 04/21/14 Satish S Joshi      Reading the dispense flex preferences when the flxe is on.
+;                                       
+;~DE~ ***************************************************************************
+ 
+%i cclsource:glb_script_logging.inc
+ 
+; Utilize validate to handle scenarios where this include file gets included more than once.
+if (validate(BBT_GET_PREF_DEF, 999) = 999)
+  declare BBT_GET_PREF_DEF = i2 with protect, constant(1)
+  ;******************************************************************************************
+  ;* BBPreference record                                                                    *
+  ;******************************************************************************************
+  record PrefValues
+  (
+    1 Prefs[*]
+      2 value    = vc
+  )
+  
+  ;******************************************************************************************
+  ;* Flexible Specimen expiration parameters record                                         *
+  ;* (utilized by BbtGetFlexSpecTransfusionParameters sub routine)                          *
+  ;******************************************************************************************
+  record FlexSpecTransParams
+  (
+    1 Params[*]
+      2 Index                      = i4      ; order of params
+      2 TransfusionStartRange      = i4
+      2 TransfusionEndRange        = i4
+      2 SpecimenExpiration         = i4
+  )
+ 
+  ;******************************************************************************************
+  ;* Encounter locations record                                           *
+  ;* (utilized by BbtGetEncounterLocations sub routine)                          *
+  ;******************************************************************************************
+  record EncounterLocations
+  (
+    1 Locs[*]
+      2 EncFacilityCd              = f8
+  )
+  
+  ;******************************************************************************************
+  ;* Constant Declarations                                                                           *
+  ;******************************************************************************************
+  declare PREF_LEVEL_BB             = i2 with public, constant(1)
+  declare PREF_LEVEL_FLEX           = i2 with public, constant(2)
+  declare FLEX_SPEC_GROUP           = vc with protect, constant("flexible specimen")
+  declare PREF_FLEX_SPEC_YES        = vc with protect, constant("YES")
+  declare PREF_FLEX_SPEC_NO        = vc with protect, constant("NO")
+  ;******************************************************************************************
+  ;* Variable Declarations                                                                           *
+  ;******************************************************************************************
+ 
+  ;This value is set by GetBBPreference and no other function.
+  ;This value is read by BbtGetEncounterLocations.
+  declare PrefEntryExists           = i2 with protect, noconstant(0)
+  declare StatBBPref                = i2 with protect, noconstant(0)
+endif
+ 
+declare BbtGetEncounterLocations                 (facility_code = f8 (value),level_flag = i2 (value)) = i2
+declare BbtGetHistoricInfoPreference             (facility_code = f8 (value)) = i2
+declare BbtGetCustomPackListPreference           (facility_code = f8 (value)) = vc
+declare BbtGetBBTestingFacility                  (facility_code = f8 (value)) = f8
+declare BbtGetRequiredCourierDispenseAssignPreference (facility_code = f8 (value)) = i2
+declare BbtGetRequiredCourierReturnProductsPreference (facility_code = f8 (value)) = i2
+declare BbtGetXMTagPreference                    (facility_code = f8 (value)) = vc
+declare BbtGetComponentTagPreference             (facility_code = f8 (value)) = vc
+declare BbtGetEmergencyTagPreference             (facility_code = f8 (value)) = vc
+declare BbtGetInterfacedDevicesPreference 		 (facility_code = f8 (value)) = i2
+declare BbtDispGetProductOrderAssocPreference    (facility_code = f8 (value)) = vc
+ 
+; Flexible specimen preferences
+declare BbtGetFlexSpecTestingFacility               (facility_code = f8 (value)) = f8
+declare BbtGetFlexSpecEnableFlexExpiration          (facility_code = f8 (value)) = i2
+declare BbtGetFlexSpecDefClinSigAntibodyParams      (facility_code = f8 (value)) = i2
+declare BbtGetFlexSpecXMAlloExpUnits                (facility_code = f8 (value)) = i4
+declare BbtGetFlexSpecXMAutoExpUnits                (facility_code = f8 (value)) = i4
+declare BbtGetFlexSpecMaxSpecExpUnits               (facility_code = f8 (value)) = i4
+declare BbtGetFlexSpecClinSigAntibodiesExpUnits     (facility_code = f8 (value)) = i4
+declare BbtGetFlexSpecExpUnitTypeMean               (facility_code = f8 (value)) = c12
+declare BbtGetFlexSpecXMTagsPrinter                 (facility_code = f8 (value)) = vc
+declare BbtGetFlexSpecExceptionRptPrinter           (facility_code = f8 (value)) = vc
+declare BbtGetFlexSpecTransfusionParameters         (facility_code = f8 (value)) = i2
+declare BbtGetFlexSpecExtendTransfOverride		    (facility_code = f8 (value)) = i2
+declare BbtGetFlexSpecCalcPostTransfspecsFromDawnDt (facility_code = f8 (value)) = i2
+declare BbtGetFlexFilterByFacility		    		(facility_code = f8 (value)) = i2
+declare BbtGetFlexSpecNeonateDaysDefined            (facility_code = f8 (value)) = i4 
+declare BbtGetFlexExpiredSpecimenExpirationOvrd 	(facility_code = f8 (value)) = i2
+declare BbtGetDispOnCurrentABORH					(facility_code = f8 (value)) = i2
+declare BbtGetDispOnSecondABORH						(facility_code = f8 (value)) = i2
+ 
+declare GetBBPreference(sFacilityCtx = vc, sPositionCtx = vc, sUserCtx = vc, sSubGroup=vc, sPrefEntry = vc) = i2
+ 
+;******************************************************************************************
+;* Subroutines                                                                            *
+;******************************************************************************************
+ 
+subroutine BbtGetEncounterLocations( facility_code , level_flag )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains all patient encounter locations. This sub routine will not return
+    ; the preferences, instead it will return a status and populate the
+    ; FlexSpecEncLocs defined above.
+;*************** LOCAL VARIABLES ****************
+    declare index                = i2 with protect, noconstant(0)
+    declare locCnt               = i2 with protect, noconstant(0)
+    declare prefCount            = i2 with protect, noconstant(0)
+ 
+    declare FlexPrefEntry        = vc with protect, constant("patient encounter locations")
+;***************** INSTRUCTIONS *****************
+     ; Initialize encounter locations record.
+    set StatBBPref = initrec(EncounterLocations)
+ 
+    ; Obtain preference
+    ;Retrieve flexible specimen level encounter locations.
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, FlexPrefEntry)
+ 
+ 
+    if( StatBBPref = -1 )
+ 
+      if( PrefEntryExists = 1 )
+ 
+        ;The preference entry exists for this facility. There are not any
+        ;encounter facilities.
+        return (1)
+ 
+      else
+ 
+        ;There was an error while retrieving the preference.
+        return(-1)
+ 
+      endif
+ 
+    endif
+ 
+    set prefCount = size(PrefValues->Prefs,5)
+ 
+    if( prefCount = 0 )
+        ;There are not any encounter facilities.
+        return (1)
+    endif
+ 
+    ; Evaluate the preferences returned, populate EncounterLocations.
+    for (index = 1 to prefCount)
+ 
+        ;If this facility is a valid facility to return.
+        if( cnvtreal( PrefValues->Prefs[index].value ) > 0.0 )
+ 
+          set locCnt = locCnt + 1
+          if( size(EncounterLocations->Locs,5) < locCnt)
+ 
+            ;Increment encounters list by 10.
+            set stat = alterlist(EncounterLocations->Locs,locCnt+9)
+ 
+          endif
+ 
+          ;Store the pref value in the encounter locations list.
+          set EncounterLocations->Locs[locCnt].EncFacilityCd = cnvtreal( PrefValues->Prefs[index].value )
+ 
+        endif
+ 
+    endfor
+ 
+    ;Remove unused elements from the end of the encounters list.
+    set stat = alterlist(EncounterLocations->Locs,locCnt)
+ 
+    return(1)
+end
+ 
+subroutine BbtGetHistoricInfoPreference( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the print historical demographics preference
+;*************** LOCAL VARIABLES ****************
+    declare historical_demog_ind = i2 with protect, noconstant(0)
+    declare testing_facility_cd  = f8 with protect, noconstant(0.0)
+    declare strLogMessage 		 = vc with protect, noconstant
+ 
+    declare PrefEntry            = vc with protect, constant("print historical demographics")
+    declare code_set             = i4 with protect, constant(20790)
+    declare historyCd            = f8 with protect, constant(uar_get_code_by("MEANING", code_set, "HISTORY"))
+;***************** INSTRUCTIONS *****************
+    if( historyCd = -1 )
+        return(0)
+    endif
+ 
+    select into "nl:"
+    from code_value_extension cve
+    where cve.code_value = historyCd
+      and cve.field_name = "OPTION"
+      and cve.code_set = code_set
+    detail
+      if (trim(cve.field_value,3) = "1")
+        historical_demog_ind = 1
+      endif
+    with nocounter
+ 
+    if( historical_demog_ind = 0 )
+        return(0)
+    endif
+ 
+    ; Obtain transfusion service facility
+    set testing_facility_cd = BbtGetBBTestingFacility(facility_code)
+    if (testing_facility_cd = -1)
+        call log_message( "Error getting BB transfusion service facility preference.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    if (testing_facility_cd = 0.0)
+        ; Transfusion service facility pref does not exist or is not populated. This should only be the case if prefs were
+        ; defined previous to the version of the bb preference manager where patient location association became available
+        ; at the blood bank level. Treat no transfusion service facility pref as the encounter location facility being the
+        ; transfusion service facility pref.
+        set  testing_facility_cd = facility_code
+    endif
+ 
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(testing_facility_cd,32,2)), "", "", "", PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+        if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", testing_facility_cd)
+	        call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+ 	set strLogMessage = build("PrefEntry- ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:",testing_facility_cd)
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if( PrefValues->Prefs[1].value = "Yes" )
+        return(1)
+    else
+        return(0)
+    endif
+end
+ 
+subroutine BbtGetCustomPackListPreference( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the custom packing list program name preference
+;*************** LOCAL VARIABLES ****************
+    declare testing_facility_cd  = f8 with protect, noconstant(0.0)
+ 
+    declare PrefEntry            = vc with protect, constant("custom packing list program name")
+ 
+	declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain transfusion service facility
+    set testing_facility_cd = BbtGetBBTestingFacility(facility_code)
+    if (testing_facility_cd = -1)
+        call log_message( "Error getting BB transfusion service facility preference.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    if (testing_facility_cd = 0.0)
+        ; Transfusion service facility pref does not exist or is not populated. This should only be the case if prefs were
+        ; defined previous to the version of the bb preference manager where patient location association became available
+        ; at the blood bank level. Treat no transfusion service facility pref as the encounter location facility being the
+        ; transfusion service facility pref.
+        set testing_facility_cd = facility_code
+    endif
+ 
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(testing_facility_cd,32,2)), "", "", "", PrefEntry)
+ 
+    ;Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", testing_facility_cd)
+	        call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return ("")
+    endif
+ 
+ 	set strLogMessage = build("PrefEntry- ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:",testing_facility_cd)
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if( PrefValues->Prefs[1].value = trim(""))
+        return("")
+    else
+        return(trim(PrefValues->Prefs[1].value))
+    endif
+end
+ 
+subroutine BbtGetRequiredCourierDispenseAssignPreference( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the required courier preference for dispense assign
+;*************** LOCAL VARIABLES ****************
+    declare testing_facility_cd  = f8 with protect, noconstant(0.0)
+ 
+    declare PrefEntry            = vc with protect, constant("require dispense courier")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain transfusion service facility
+    set testing_facility_cd = BbtGetBBTestingFacility(facility_code)
+    if (testing_facility_cd = -1)
+        call log_message( "Error getting BB transfusion service facility preference.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    if (testing_facility_cd = 0.0)
+        ; Transfusion service facility pref does not exist or is not populated. This should only be the case if prefs were
+        ; defined previous to the version of the bb preference manager where patient location association became available
+        ; at the blood bank level. Treat no transfusion service facility pref as the encounter location facility being the
+        ; transfusion service facility pref.
+        set testing_facility_cd = facility_code
+    endif
+ 
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(testing_facility_cd,32,2)), "", "", "", PrefEntry)
+ 
+    ;Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", testing_facility_cd)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return ("")
+    endif
+ 
+ 	set strLogMessage = build("PrefEntry- ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:",testing_facility_cd)
+ 	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if( PrefValues->Prefs[1].value = trim(""))
+        return("")
+    else
+        return(trim(PrefValues->Prefs[1].value))
+    endif
+end
+
+subroutine BbtGetRequiredCourierReturnProductsPreference( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the required courier preference for return products
+;*************** LOCAL VARIABLES ****************
+    declare testing_facility_cd  = f8 with protect, noconstant(0.0)
+ 
+    declare PrefEntry            = vc with protect, constant("require return courier")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain transfusion service facility
+    set testing_facility_cd = BbtGetBBTestingFacility(facility_code)
+    if (testing_facility_cd = -1)
+        call log_message( "Error getting BB transfusion service facility preference.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    if (testing_facility_cd = 0.0)
+        ; Transfusion service facility pref does not exist or is not populated. This should only be the case if prefs were
+        ; defined previous to the version of the bb preference manager where patient location association became available
+        ; at the blood bank level. Treat no transfusion service facility pref as the encounter location facility being the
+        ; transfusion service facility pref.
+        set testing_facility_cd = facility_code
+    endif
+ 
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(testing_facility_cd,32,2)), "", "", "", PrefEntry)
+ 
+    ;Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", testing_facility_cd)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return ("")
+    endif
+ 
+ 	set strLogMessage = build("PrefEntry- ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:",testing_facility_cd)
+
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if( PrefValues->Prefs[1].value = trim(""))
+        return("")
+    else
+        return(trim(PrefValues->Prefs[1].value))
+    endif
+end
+ 
+subroutine BbtGetInterfacedDevicesPreference ( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the required courier preference for return products
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("uses interfaced devices")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+ 
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", "", PrefEntry)
+ 
+    ;Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+		if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (0)
+    endif
+ 
+ 	set strLogMessage = build("PrefEntry- ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:",facility_code)
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if( PrefValues->Prefs[1].value = "1" )
+        return(1)
+    else
+        return(0)
+    endif
+end
+ 
+subroutine BbtGetBBTestingFacility( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Accepts the patient encounter location and obtains the blood bank transfusion service facility preference.
+    ; This is at the blood bank preference level.
+;*************** LOCAL VARIABLES ****************
+    
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    return(BbtGetFlexSpecTestingFacility( facility_code ))
+ 
+end
+ 
+subroutine BbtGetFlexSpecTestingFacility( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Accepts the patient encounter location and obtains the flexible specimen transfusion service facility preference.
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("transfusion service facility")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref = -1) or (size(PrefValues->Prefs,5) > 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+ 	set strLogMessage = build("PrefEntry- ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:",facility_code)
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if (size(PrefValues->Prefs,5) = 1)
+        if(size(trim(PrefValues->Prefs[1].value)) > 0)
+		 	set strLogMessage = build("PrefEntry- ", PrefEntry, ":", PrefValues->Prefs[1].value, ",Facility Code:",facility_code)
+			call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+            return(cnvtreal(trim(PrefValues->Prefs[1].value,3)))
+        else
+            return(0.0)
+        endif
+    else
+        return(0.0)
+    endif
+end
+ 
+subroutine BbtGetFlexSpecEnableFlexExpiration( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the flexible specimen use new preferences preference.
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("enable flex expiration")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref = -1) or (size(PrefValues->Prefs,5) > 1))
+        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+        call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+    
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+     ; Evaluate the preference returned, return proper value.
+    if (size(PrefValues->Prefs,5) = 1)
+        if( PrefValues->Prefs[1].value = "1" )
+            return( 1 )
+        else
+            return( 0 )
+        endif
+    else
+        return( 0 )
+    endif
+end
+ 
+subroutine BbtGetFlexSpecDefClinSigAntibodyParams( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the flexible specimen define clinically significant antibody parameters preference.
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("def clin sig antibody params")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+	        call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+   	
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if( PrefValues->Prefs[1].value = "1" )
+        return( 1 )
+    else
+        return( 0 )
+    endif
+end
+ 
+subroutine BbtGetFlexSpecXMAlloExpUnits( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the flexible specimen crossmatch allogeneic expire units preference
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("xm allogeneic expire units")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+    
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if(size(trim(PrefValues->Prefs[1].value)) > 0)
+        return(cnvtint(trim(PrefValues->Prefs[1].value,3)))
+    else
+        return(0)
+    endif
+end
+ 
+subroutine BbtGetFlexSpecXMAutoExpUnits( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the flexible specimen crossmatch autologous expire units preference
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("xm autologous expire units")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+   	
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if(size(trim(PrefValues->Prefs[1].value)) > 0)
+        return(cnvtint(trim(PrefValues->Prefs[1].value,3)))
+    else
+        return(0)
+    endif
+end
+ 
+subroutine BbtGetFlexSpecMaxSpecExpUnits( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the flexible specimen maximum specimen expire units preference.
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("max specimen expire units")
+ 
+	declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+    
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if(size(trim(PrefValues->Prefs[1].value)) > 0)
+        return(cnvtint(trim(PrefValues->Prefs[1].value,3)))
+    else
+        return(0)
+    endif
+end
+ 
+subroutine BbtGetFlexSpecClinSigAntibodiesExpUnits( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the flexible specimen clinically significant antibodies expire units preference.
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("clin sig antibodies exp units")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+  	
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if(size(trim(PrefValues->Prefs[1].value)) > 0)
+        return(cnvtint(trim(PrefValues->Prefs[1].value,3)))
+    else
+        return(0)
+    endif
+end
+ 
+subroutine BbtGetFlexSpecExtendTransfOverride ( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the flexible specimen use new preferences preference.
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("extend transf override")
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+    
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    if (size(trim(PrefValues->Prefs[1].value)) > 0)
+        if (cnvtupper(trim(PrefValues->Prefs[1].value,3)) = cnvtupper(PREF_FLEX_SPEC_YES))
+        	return(1)
+    	elseif (cnvtupper(trim(PrefValues->Prefs[1].value,3)) = cnvtupper(PREF_FLEX_SPEC_NO))
+        	return(0)
+        else
+        	return(1)
+        endif
+    else
+    	return(1)
+    endif
+end
+ 
+subroutine BbtGetFlexSpecCalcPostTransfspecsFromDawnDt( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the flexible specimen use new preferences preference.
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("calc post transf specs from drawn dt")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+        	set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+        	call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+    
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    if (size(trim(PrefValues->Prefs[1].value)) > 0)
+    	if (cnvtupper(trim(PrefValues->Prefs[1].value,3)) = cnvtupper(PREF_FLEX_SPEC_YES))
+        	return(1)
+    	elseif (cnvtupper(trim(PrefValues->Prefs[1].value,3)) =	cnvtupper(PREF_FLEX_SPEC_NO))
+    		return(0)
+        else
+        	return(0)
+        endif
+    else
+    	return(0)
+    endif
+end
+ 
+subroutine BbtGetFlexSpecExpUnitTypeMean( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the flexible specimen expiration unit type preference.
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc  with protect, constant("flex spec expiration unit type")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+	        call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return ("")
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+   	
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value
+    if (size(trim(PrefValues->Prefs[1].value)) > 0)
+        return(trim(PrefValues->Prefs[1].value,3))
+    else
+        return("")
+    endif
+end
+ 
+ 
+subroutine BbtGetFlexSpecXMTagsPrinter( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the flexible specimen crossmatch tags printer preference
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("xm tags printer")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+		if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+	        call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return ("")
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Return value.
+    return(trim(PrefValues->Prefs[1].value))
+end
+ 
+subroutine BbtGetFlexSpecExceptionRptPrinter( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the flexible specimen exception report printer preference
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("exception rpt printer")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "",  FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return ("")
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+ 	
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Return value.
+    return(trim(PrefValues->Prefs[1].value))
+end
+ 
+subroutine BbtGetFlexSpecTransfusionParameters( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the flexible specimen expiration parameters preference. This sub routine will
+    ; not return the preferences, instead it will return a status and populate the FlexSpecTransParams record
+    ; defined above.
+;*************** LOCAL VARIABLES ****************
+    declare index                = i2 with protect, noconstant(0)
+    declare prefCount            = i2 with protect, noconstant(0)
+    declare strPosHold           = i2 with protect, noconstant(0)
+    declare strPrevPosHold       = i2 with protect, noconstant(0)
+    declare strSize              = i2 with protect, noconstant(0)
+ 	declare strLogMessage		 = vc with protect, noconstant
+ 
+    declare maxParamItems        = i2 with protect, constant(4)
+    declare PrefEntry            = vc with protect, constant("transfusion parameters")
+;***************** INSTRUCTIONS *****************
+     ; Initialize flexible specimen expiration parameters record
+    set StatBBPref = initrec(FlexSpecTransParams)
+ 
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    set prefCount = size(PrefValues->Prefs,5)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (prefCount < 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+    set StatBBPref = alterlist(FlexSpecTransParams->Params,prefCount)
+ 
+    ; Evaluate the preferences returned, populate FlexSpecTransParams.
+    for (index = 1 to prefCount)
+    	; Obtain the size of the preference value string.
+        set strSize = 0
+        set strSize = size(PrefValues->Prefs[index].value)
+ 
+        ; Find the position of the first comma.
+        set strPosHold = findstring(",",PrefValues->Prefs[index].value)
+ 
+        ; Obtain expiration parameters index
+        set FlexSpecTransParams->Params[index].Index = cnvtint(substring(1,strPosHold - 1, PrefValues->Prefs[index].value))
+ 
+        ; Find the position of the second comma.
+        set strPrevPosHold = strPosHold
+        set strPosHold = findstring(",",PrefValues->Prefs[index].value,strPrevPosHold+1)
+ 
+        ; Obtain expiration parameters transfusion start days
+        set FlexSpecTransParams->Params[index].TransfusionStartRange = cnvtint( substring(strPrevPosHold+1,
+                                                                                       strPosHold - strPrevPosHold - 1,
+                                                                                       PrefValues->Prefs[index].value) )
+ 
+        ; Find the position of the third comma.
+        set strPrevPosHold = strPosHold
+        set strPosHold = findstring(",",PrefValues->Prefs[index].value,strPrevPosHold+1)
+ 
+        ; Obtain expiration parameters transfusion end days.
+        set FlexSpecTransParams->Params[index].TransfusionEndRange = cnvtint( substring(strPrevPosHold+1,
+                                                                                      strPosHold - strPrevPosHold - 1,
+                                                                                      PrefValues->Prefs[index].value) )
+ 
+        ; Obtain expiration parameters expiration days.
+        set FlexSpecTransParams->Params[index].SpecimenExpiration = cnvtint( substring(strPosHold + 1,
+                                                                                         strSize - strPosHold,
+                                                                                         PrefValues->Prefs[index].value) )
+    endfor
+ 
+    return(1)
+end
+ 
+subroutine GetBBPreference( sFacilityCtx, sPositionCtx, sUserCtx, sSubGroup, sPrefEntry )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains requested preference
+;*************** LOCAL VARIABLES ****************
+    declare success_ind    = i2   with protect, noconstant(0)
+    declare hPref          = i4   with protect, noconstant(0)
+    declare hGroup         = i4   with protect, noconstant(0)
+    declare hSection       = i4   with protect, noconstant(0)
+    declare hGroup2        = i4   with protect, noconstant(0)
+    declare hSubGroup      = i4   with protect, noconstant(0)
+    declare hSubGroup2     = i4   with protect, noconstant(0)
+    declare hVal           = i4   with protect, noconstant(0)
+    declare hAttr          = i4   with protect, noconstant(0)
+    declare hEntry         = i4   with protect, noconstant(0)
+    declare idxEntry       = i4   with protect, noconstant(0)
+    declare idxAttr        = i4   with protect, noconstant(0)
+    declare idxVal         = i4   with protect, noconstant(0)
+    declare subGroupCount  = i4   with protect, noconstant(0)
+    declare nameLen        = i4   with protect, noconstant(255)
+    declare entryName      = c255 with protect, noconstant(fillstring(255, " "))
+    declare entryCount     = i4   with protect, noconstant(0)
+    declare attrCount      = i4   with protect, noconstant(0)
+    declare valCount       = i4   with protect, noconstant(0)
+    declare valName        = c255 with protect, noconstant(fillstring(255, " "))
+    declare subGroupExists = i2   with protect, noconstant(0)
+ 
+;***************** INSTRUCTIONS *****************
+    execute prefrtl
+ 
+     ; Initialize preference record
+    set StatBBPref = initrec(PrefValues)
+ 
+    set PrefEntryExists = 0
+ 
+    set hPref = uar_PrefCreateInstance (0) ;0=get
+ 
+    if (hPref = 0)
+        call log_message( "Bad hPref, try logging in", LOG_LEVEL_ERROR)
+        return(-1)
+    endif
+ 
+    set StatBBPref = uar_PrefAddContext (hPref, "default", "system")
+ 
+    if (StatBBPref != 1)
+    	call uar_PrefDestroyInstance(hPref)
+        call log_message( "Bad default context", LOG_LEVEL_ERROR)
+        return(-1)
+    endif
+ 
+ 
+    if( size(nullterm(sFacilityCtx)) > 0 )
+        set StatBBPref = uar_PrefAddContext (hPref, "facility", nullterm(sFacilityCtx))
+ 
+        if (StatBBPref != 1)
+        	call uar_PrefDestroyInstance(hPref)
+            call log_message( "Bad facility context", LOG_LEVEL_ERROR)
+            return(-1)
+        endif
+    endif
+ 
+    if( size(nullterm(sPositionCtx)) > 0 )
+        set StatBBPref = uar_PrefAddContext (hPref, "position", nullterm(sPositionCtx))
+ 
+        if (StatBBPref != 1)
+       		call uar_PrefDestroyInstance(hPref)
+            call log_message( "Bad position context", LOG_LEVEL_ERROR)
+            return(-1)
+        endif
+    endif
+ 
+    if( size(nullterm(sUserCtx)) > 0 )
+        set StatBBPref = uar_PrefAddContext (hPref, "user", nullterm(sUserCtx))
+ 
+        if (StatBBPref != 1)
+        	call uar_PrefDestroyInstance(hPref)
+            call log_message( "Bad user context", LOG_LEVEL_ERROR)
+            return(-1)
+        endif
+    endif
+ 
+    set StatBBPref = uar_PrefSetSection (hPref, "module")
+ 
+    if (StatBBPref != 1)
+    	call uar_PrefDestroyInstance(hPref)
+        call log_message( "Bad section", LOG_LEVEL_ERROR)
+        return(-1)
+    endif
+ 
+    set hGroup = uar_PrefCreateGroup ()
+ 
+    set StatBBPref = uar_PrefSetGroupName (hGroup, "blood bank")
+ 
+    if (StatBBPref != 1)
+    	call uar_PrefDestroyGroup(hGroup)
+    	call uar_PrefDestroyInstance(hPref)
+        call log_message( "Bad group name", LOG_LEVEL_ERROR)
+        return(-1)
+    endif
+ 
+    set StatBBPref = uar_PrefAddGroup (hPref, hGroup)
+ 
+    if (StatBBPref != 1)
+    	call uar_PrefDestroyGroup(hGroup)
+		call uar_PrefDestroyInstance(hPref)
+        call log_message( "Error adding group", LOG_LEVEL_ERROR)
+        return(-1)
+    endif
+ 
+    ; Add sub group
+    if (size(nullterm(sSubGroup)) > 0)
+        set subGroupExists = 1
+ 
+        set hSubGroup = uar_PrefAddSubGroup(hGroup, nullterm(sSubGroup))
+ 
+        if (hSubGroup <= 0)
+        	call uar_PrefDestroyGroup(hGroup)
+			call uar_PrefDestroyInstance(hPref)
+            call log_message( "Error adding sub group", LOG_LEVEL_ERROR)
+            return(-1)
+        endif
+    endif
+ 
+    ; Request preferences
+    set StatBBPref = uar_PrefPerform (hPref)
+ 
+    if (StatBBPref != 1)
+    	call uar_PrefDestroyGroup(hGroup)
+		call uar_PrefDestroyInstance(hPref)
+        call log_message( "Error performing preference query", LOG_LEVEL_ERROR)
+        return(-1)
+    endif
+ 
+    ; Get module section
+    set hSection = uar_PrefGetSectionByName (hPref, "module")
+ 
+    ; Get blood bank group
+    set hGroup2 = uar_PrefGetGroupByName (hSection, "blood bank")
+ 
+    ; Check if requesting a sub group
+    if (subGroupExists = 1)
+        ; Get sub group
+        set hSubGroup2 = uar_PrefGetSubGroup(hGroup2, 0)
+ 
+        if (hSubGroup2 <= 0)
+        	call uar_PrefDestroySection(hSection)
+        	call uar_PrefDestroyGroup(hGroup2)
+            call uar_PrefDestroyGroup(hGroup)
+			call uar_PrefDestroyInstance(hPref)
+            call log_message( "Error obtaining sub group", LOG_LEVEL_ERROR)
+            return(-1)
+        endif
+ 
+        ; Since sub groups are treated the same as a group we can set the hGroup2 = hSubGroup2
+        ; and continue as if the sub group were a group.
+        set hGroup2 = hSubGroup2
+    endif
+ 
+    set entryCount = 0
+    set StatBBPref = uar_PrefGetGroupEntryCount (hGroup2, entryCount)
+ 
+    if (StatBBPref != 1)
+        call uar_PrefDestroySection(hSection)
+        call uar_PrefDestroyGroup(hGroup2)
+        call uar_PrefDestroyGroup(hGroup)
+		call uar_PrefDestroyInstance(hPref)
+        call log_message( "Error getting group entry count", LOG_LEVEL_ERROR)
+        return(-1)
+    endif
+ 
+    if( entryCount <= 0 )
+        call uar_PrefDestroySection(hSection)
+        call uar_PrefDestroyGroup(hGroup2)
+        call uar_PrefDestroyGroup(hGroup)
+		call uar_PrefDestroyInstance(hPref)
+        call log_message( "Preferences not found", LOG_LEVEL_ERROR)
+        return( 0 )
+    endif
+ 
+    ; Find preference entry
+    for (idxEntry = 0 to entryCount - 1)
+       set hEntry = uar_PrefGetGroupEntry (hGroup2, idxEntry)
+       set nameLen = 255
+       set entryName = fillstring(255," ")
+ 
+       set StatBBPref = uar_PrefGetEntryName (hEntry, entryName, nameLen)
+ 
+       if (StatBBPref != 1)
+       	    call uar_PrefDestroyEntry(hEntry)
+        	call uar_PrefDestroySection(hSection)
+        	call uar_PrefDestroyGroup(hGroup2)
+        	call uar_PrefDestroyGroup(hGroup)
+			call uar_PrefDestroyInstance(hPref)
+           call log_message("Error getting entry name", LOG_LEVEL_ERROR)
+           return (-1)
+       endif
+ 
+       if (nullterm(entryName) = nullterm(sPrefEntry))
+           ; Found preference entry
+ 
+           ;Set flag that indicates that the pref entry for the passed
+           ;preference name has been found. This is used for passivity, it does
+           ;not modify the way this function behaves since other preference
+           ;logic has already been written to expect a -1 to be returned when
+           ;the pref entry exists but has no attributes present. Future logic
+           ;can be written to use this flag to discern this special case.
+           set PrefEntryExists = 1
+ 
+           ; Get attribute count
+           set attrCount = 0
+           set StatBBPref = uar_PrefGetEntryAttrCount (hEntry, attrCount)
+ 
+           if (StatBBPref != 1 or attrCount = 0)
+               call uar_PrefDestroyEntry(hEntry)
+               call uar_PrefDestroySection(hSection)
+        	   call uar_PrefDestroyGroup(hGroup2)
+        	   call uar_PrefDestroyGroup(hGroup)
+			   call uar_PrefDestroyInstance(hPref)
+               call log_message( "Bad entryAttrCount", LOG_LEVEL_ERROR)
+               return(-1)
+           endif
+ 
+           ; Find preference value
+           for (idxAttr = 0 to attrCount -1)
+              set hAttr = uar_PrefGetEntryAttr (hEntry, idxAttr)
+ 
+              declare attrName = c255
+              set nameLen = 255
+              set StatBBPref = uar_PrefGetATtrName (hAttr, attrName, nameLen)
+              if( nullterm(attrName) = "prefvalue" )
+ 
+                  ; Found preference value, get value count
+                  set valCount = 0
+                  set StatBBPref = uar_PrefGetAttrValCount (hAttr, valCount)
+                  set idxVal = 0
+                  set StatBBPref = alterlist(PrefValues->Prefs,valCount)
+ 
+                  ; Load PrefValues record structure
+                  for (idxVal = 0 to valCount - 1)
+                     set valName = fillstring(255, " ")
+                     set nameLen = 255
+                     set hVal = uar_PrefGetAttrVal (hAttr, valName, nameLen, idxVal)
+ 
+                     set PrefValues->Prefs[idxVal+1].value = nullterm(valName)
+                  endfor
+ 
+ 				  if(hAttr > 0)
+     	    	  	call uar_PrefDestroyAttr(hAttr)
+     			  endif
+     			  if(hEntry > 0)
+     			  	call uar_PrefDestroyEntry(hEntry)
+     			  endif
+		     	  if(hSection > 0)
+		     		call uar_PrefDestroySection(hSection)
+		     	  endif
+     			  if(hGroup2 > 0)
+    				call uar_PrefDestroyGroup(hGroup2)
+     			  endif
+     			  if(hGroup > 0)
+    				call uar_PrefDestroyGroup(hGroup)
+     			  endif
+		     	  if(hPref > 0)
+		     		call uar_PrefDestroyInstance(hPref)
+		    	  endif
+ 
+                  return (1)
+              endif
+           endfor
+       endif
+    endfor
+ 
+	if(hAttr > 0)
+		call uar_PrefDestroyAttr(hAttr)
+	endif
+	if(hEntry > 0)
+		call uar_PrefDestroyEntry(hEntry)
+	endif
+	if(hSection > 0)
+		call uar_PrefDestroySection(hSection)
+	endif
+	if(hGroup2 > 0)
+		call uar_PrefDestroyGroup(hGroup2)
+	endif
+	if(hGroup > 0)
+		call uar_PrefDestroyGroup(hGroup)
+	endif
+	if(hPref > 0)
+		call uar_PrefDestroyInstance(hPref)
+	endif
+ 
+    ; Preference entry does not exist return zero status.
+    return (0)
+end
+ 
+ 
+subroutine BbtGetXMTagPreference( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the crossmatch program name preference
+;*************** LOCAL VARIABLES ****************
+    declare testing_facility_cd  = f8 with protect, noconstant(0.0)
+    declare strLogMessage		 = vc with protect, noconstant
+ 
+    declare PrefEntry            = vc with protect, constant("crossmatch tag program name")
+;***************** INSTRUCTIONS *****************
+    ; Obtain transfusion service facility
+    set testing_facility_cd = BbtGetBBTestingFacility(facility_code)
+    if (testing_facility_cd = -1)
+        call log_message( "Error getting BB transfusion service facility preference.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    if (testing_facility_cd = 0.0)
+        ; Transfusion service facility pref does not exist or is not populated. This should only be the case if prefs were
+        ; defined previous to the version of the bb preference manager where patient location association became available
+        ; at the blood bank level. Treat no transfusion service facility pref as the encounter location facility being the
+        ; transfusion service facility pref.
+        set testing_facility_cd = facility_code
+    endif
+ 
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(testing_facility_cd,32,2)), "", "", "", PrefEntry)
+ 
+ 
+    ;Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", testing_facility_cd)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+    	endif
+        return ("")
+    endif
+ 
+ 	set strLogMessage = build("PrefEntry- ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:",testing_facility_cd)
+    
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if( PrefValues->Prefs[1].value = trim(""))
+        return("")
+    else
+        return(trim(PrefValues->Prefs[1].value))
+    endif
+end
+ 
+subroutine BbtGetComponentTagPreference( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the component program name preference
+;*************** LOCAL VARIABLES ****************
+    declare testing_facility_cd  = f8 with protect, noconstant(0.0)
+ 
+    declare PrefEntry            = vc with protect, constant("component tag program name")
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain transfusion service facility
+    set testing_facility_cd = BbtGetBBTestingFacility(facility_code)
+    if (testing_facility_cd = -1)
+        call log_message( "Error getting BB transfusion service facility preference.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    if (testing_facility_cd = 0.0)
+        ; Transfusion service facility pref does not exist or is not populated. This should only be the case if prefs were
+        ; defined previous to the version of the bb preference manager where patient location association became available
+        ; at the blood bank level. Treat no transfusion service facility pref as the encounter location facility being the
+        ; transfusion service facility pref.
+        set testing_facility_cd = facility_code
+    endif
+ 
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(testing_facility_cd,32,2)), "", "", "", PrefEntry)
+ 
+    ;Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", testing_facility_cd)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+		endif
+        return ("")
+    endif
+ 
+ 	set strLogMessage = build("PrefEntry- ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:",testing_facility_cd)
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if( PrefValues->Prefs[1].value = trim(""))
+        return("")
+    else
+        return(trim(PrefValues->Prefs[1].value))
+    endif
+end
+ 
+subroutine BbtGetEmergencyTagPreference( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the emergency program name preference
+;*************** LOCAL VARIABLES ****************
+    declare testing_facility_cd  = f8 with protect, noconstant(0.0)
+    declare strLogMessage		 = vc with protect, noconstant
+ 
+    declare PrefEntry            = vc with protect, constant("emergency tag program name")
+;***************** INSTRUCTIONS *****************
+    ; Obtain transfusion service facility
+    set testing_facility_cd = BbtGetBBTestingFacility(facility_code)
+    if (testing_facility_cd = -1)
+        call log_message( "Error getting BB transfusion service facility preference.", LOG_LEVEL_ERROR)
+        return (-1)
+    endif
+ 
+    if (testing_facility_cd = 0.0)
+        ; Transfusion service facility pref does not exist or is not populated. This should only be the case if prefs were
+        ; defined previous to the version of the bb preference manager where patient location association became available
+        ; at the blood bank level. Treat no transfusion service facility pref as the encounter location facility being the
+        ; transfusion service facility pref.
+        set testing_facility_cd = facility_code
+    endif
+ 
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(testing_facility_cd,32,2)), "", "", "", PrefEntry)
+ 
+    ;Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", testing_facility_cd)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return ("")
+    endif
+ 
+ 	set strLogMessage = build("PrefEntry- ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:",testing_facility_cd)
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if( PrefValues->Prefs[1].value = trim(""))
+        return("")
+    else
+        return(trim(PrefValues->Prefs[1].value))
+    endif
+end
+ 
+ 
+subroutine BbtGetFlexFilterByFacility ( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the filter specimen by facility preference value
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("filter specimens by facility")
+    declare strLogMessage		 = vc with protect, noconstant
+	declare flex_on_ind          = i2 with protect, noconstant(0)
+;***************** INSTRUCTIONS *****************
+
+	set flex_on_ind = BbtGetFlexSpecEnableFlexExpiration(facility_code)
+	
+	if (flex_on_ind = 0)
+		return (0)
+	endif
+
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+ 
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    if (size(trim(PrefValues->Prefs[1].value)) > 0)
+        if (cnvtupper(trim(PrefValues->Prefs[1].value,3)) = cnvtupper(PREF_FLEX_SPEC_YES))
+        	return(1)
+        endif
+    endif
+    return(0)
+end
+ 
+
+subroutine BbtDispGetProductOrderAssocPreference( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the preference to associate dispensed products to product orders
+;*************** LOCAL VARIABLES ****************
+    declare testing_facility_cd  = f8 with protect, noconstant(0.0)
+ 
+    declare PrefEntry            = vc with protect, constant("associate to prod orders on dispense")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain transfusion service facility
+    set testing_facility_cd = BbtGetBBTestingFacility(facility_code)
+    if (testing_facility_cd = -1)
+        call log_message( "Error getting BB transfusion service facility preference.", LOG_LEVEL_ERROR)
+        return ("")
+    endif
+ 
+    if (testing_facility_cd = 0.0)
+        ; Transfusion service facility pref does not exist or is not populated. This should only be the case if prefs were
+        ; defined previous to the version of the bb preference manager where patient location association became available
+        ; at the blood bank level. Treat no transfusion service facility pref as the encounter location facility being the
+        ; transfusion service facility pref.
+        set testing_facility_cd = facility_code
+    endif
+ 
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(testing_facility_cd,32,2)), "", "", "", PrefEntry)
+ 
+    ;Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", testing_facility_cd)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return ("")
+    endif
+ 
+ 	set strLogMessage = build("PrefEntry- ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:",testing_facility_cd)
+ 	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if( PrefValues->Prefs[1].value = trim(""))
+        return("")
+    else
+        if(trim(PrefValues->Prefs[1].value) = "1")
+           return ("Yes")
+        else
+           return ("No")
+        endif
+    endif
+end
+subroutine BbtGetFlexSpecNeonateDaysDefined( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; read the value regarding number of days to be added to neonate date of birth for neonate override specimen.
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("neonate day spec override")
+ 
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+ 
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    ; Evaluate the preference returned, return proper value.
+    if(size(trim(PrefValues->Prefs[1].value)) > 0)
+        return(cnvtint(trim(PrefValues->Prefs[1].value,3)))
+    else
+        return(0)
+    endif
+end
+ 
+subroutine BbtGetFlexExpiredSpecimenExpirationOvrd ( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Read the value regarding extending expired specimen expiration preference value
+    ; testing facility will be passed as input parameter for this preference    
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("extend expired specimen expiration")
+    declare strLogMessage		 = vc with protect, noconstant
+;***************** INSTRUCTIONS *****************
+
+	set flex_on_ind = BbtGetFlexSpecEnableFlexExpiration(facility_code)
+ 
+	if (flex_on_ind = 0)
+		return (0)
+	endif
+	
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+ 
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    if (size(trim(PrefValues->Prefs[1].value)) > 0)
+        if (cnvtupper(trim(PrefValues->Prefs[1].value,3)) = cnvtupper(PREF_FLEX_SPEC_YES))
+        	return(1)
+        endif
+    endif
+    return(0)
+end
+
+subroutine BbtGetDispOnCurrentABORH( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the filter specimen by facility preference value
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("dispense based on current aborh")
+    declare strLogMessage		 = vc with protect, noconstant
+	declare flex_on_ind          = i2 with protect, noconstant(0)
+;***************** INSTRUCTIONS *****************
+
+	set flex_on_ind = BbtGetFlexSpecEnableFlexExpiration(facility_code)
+	
+	if (flex_on_ind = 0)
+		return (0)
+	endif
+	
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+ 
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    if (size(trim(PrefValues->Prefs[1].value)) > 0)
+        if (cnvtupper(trim(PrefValues->Prefs[1].value,3)) = cnvtupper(PREF_FLEX_SPEC_YES))
+        	return(1)
+        endif
+    endif
+    return(0)
+ 
+end
+
+
+subroutine BbtGetDispOnSecondABORH( facility_code )
+;*************** FUNCTION DETAILS ***************
+    ; Obtains the filter specimen by facility preference value
+;*************** LOCAL VARIABLES ****************
+    declare PrefEntry            = vc with protect, constant("dispense based on two aborh")
+    declare strLogMessage		 = vc with protect, noconstant
+	declare flex_on_ind          = i2 with protect, noconstant(0)
+;***************** INSTRUCTIONS *****************
+
+	set flex_on_ind = BbtGetFlexSpecEnableFlexExpiration(facility_code)
+	
+	if (flex_on_ind = 0)
+		return (0)
+	endif
+    ; Obtain preference
+    set StatBBPref = GetBBPreference(trim(cnvtstring(facility_code,32,2)), "", "", FLEX_SPEC_GROUP, PrefEntry)
+ 
+    ; Ensure only one preference value was returned.
+    if ((StatBBPref != 1) or (size(PrefValues->Prefs,5) != 1))
+    	if (StatBBPref <= 0)
+	        set strLogMessage = build(" Missing Preference :", PrefEntry, ", Facility Code ", facility_code)
+    	    call log_message( strLogMessage, LOG_LEVEL_ERROR)
+        endif
+        return (-1)
+    endif
+ 
+	set strLogMessage = build("Pref Entry - ", PrefEntry, " : ", PrefValues->Prefs[1].value, ",Facility Code:", facility_code)
+ 
+	call log_message( strLogMessage, LOG_LEVEL_DEBUG)
+ 
+    if (size(trim(PrefValues->Prefs[1].value)) > 0)
+        if (cnvtupper(trim(PrefValues->Prefs[1].value,3)) = cnvtupper(PREF_FLEX_SPEC_YES))
+        	return(1)
+        endif
+    endif
+    return(0)
+ 
+end
+
+;Generated by GNU enscript 1.6.4.

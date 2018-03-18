@@ -1,0 +1,401 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Producttool/bbt_modify_product_index.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Author:             Lisa Grayson
+        Date Written:       06/30/96
+        Source file name:   bbt_modify_product_index.prg
+        Object name:        bbt_modify_product_index
+        Request #:          225096
+
+        Product:            PathNet Transfusion                               
+        Product Team:       Transfusion
+        HNA Version:        500
+        CCL Version:        4.0
+        
+        Program purpose:    change attributes of product_index &/or code_value
+                            and/or add or change product_barcodes
+
+        Tables read:        code_value
+                            product_index
+
+                            product_barcode
+        Tables updated:     code_value
+                            product_index
+                            product_barcode
+
+        Executing from:     Blood Bank Product database tool
+
+        Special Notes:          ?
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 06/05/96 Lisa Grayson         Initial Release                     *
+;     ### 08/21/96 Lisa Grayson         Fix supplier ID not getting updated *
+;     ### 08/07/97 John Weekes &                                            *
+;                  Badari Kopparapu     facilitate multiple barcodes/product*
+;     ### 05/12/98 Darsit Bhakta        add storage_temp_cd column          *
+;     ### 07/09/98 Doug Saus            added drawn date ind                *
+;	  ### 09/26/05 Tom Brecht           added aliquot product type          *
+;	  ### 01/21/08 Vankadaru Kiran		added new index used to update 		*
+;										code_value table & updated the 		*
+;										active_ind value to 1				*
+;DE~**************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_modify_product_index:dba go
+create program bbt_modify_product_index:dba
+/***********************************************************************
+*   Request Record                                                     *
+***********************************************************************/
+/*
+record request
+(
+          1  qual[10]
+             2  active_ind = i1
+             2  product_cd = f8
+             2  product_disp = c40
+             2  product_desc = vc
+             2  product_cat_cd = f8
+             2  product_class_cd = f8
+             2  barcodelist[*]
+                 3  product_barcode_id   = f8
+                 3  product_barcode      = c15
+                 3  updt_cnt             = i4 
+                 3  active_ind           = i2
+             2  autologous_ind = i2
+             2  directed_ind = i2
+             2  max_days_expire = i4
+             2  max_hrs_expire = i4
+             2  default_volume = i4
+             2  default_unit_meas_cd = f8
+             2  default_supplier_id = f8
+             2  allow_dispense_ind = i2
+             2  auto_quarantine_min = i4
+             2  synonym_id = f8
+             2  validate_ag_ab_ind = i2
+             2  validate_trans_req_ind = i2
+             2  intl_units_ind = i2
+             2  storage_temp_cd = f8
+             2  drawn_dt_tm_ind = i2
+             2  aliquot_ind = i2
+)
+*/
+/***********************************************************************
+*   Reply Record                                                       *
+***********************************************************************/
+record reply
+( 
+   1  status_data
+      2  status = c1
+      2  subeventstatus[1]
+         3  SourceObjectName  = c15
+         3  SourceObjectQual  = i4
+         3  SourceObjectValue = c50
+         3  OperationName     = c15
+         3  OperationStatus   = c1
+         3  TargetObjectName  = c15
+         3  TargetObjectValue = vc
+)
+
+/***********************************************************************
+*   Script                                                             *
+***********************************************************************/
+
+%i cclsource:gm_u_code_value0619_def.inc
+
+set reply->status_data->status = "S"
+set failures = 0
+set cur_product_disp = fillstring(40, " ")
+set cur_product_desc = fillstring(60, " ")
+set failure_flag = "N"
+set insert_flag = "N"
+set nbr_to_chg = size(request->qual,5)
+set idx = 0
+set nidx = 0
+set cur_product_barcode = fillstring(15, " ")
+set new_product_barcode_id = 0.0
+
+for (idx = 1 to nbr_to_chg)
+ set insert_flag = "N"
+
+ set cur_product_disp = UAR_GET_CODE_DISPLAY(request->qual[idx].product_cd)
+ set cur_product_desc = UAR_GET_CODE_DESCRIPTION(request->qual[idx].product_cd)
+ 
+ if (cur_product_disp = "" or cur_product_desc = "")
+     set failure_flag = "Y"
+     set reply->status_data->subeventstatus[1]->OperationName
+       = "lock code_value forupdate",
+     set reply->status_data->subeventstatus[1]->OperationStatus
+       = "F",
+     set reply->status_data->subeventstatus[1]->TargetObjectName
+       = "product_index",
+     set reply->status_data->subeventstatus[1]->TargetObjectValue 
+       = cnvtstring(request->qual[idx].product_cd,32,2)
+      go to EXIT_SCRIPT
+ else
+      if ( cur_product_disp != request->qual[idx].product_disp or
+           cur_product_desc != request->qual[idx].product_desc )
+                
+           set gm_u_code_value0619_req->allow_partial_ind = 0
+		   set gm_u_code_value0619_req->force_updt_ind = 1
+		
+		   set gm_u_code_value0619_req->code_valuew  = 1
+		   set gm_u_code_value0619_req->code_setw    = 1
+		   set gm_u_code_value0619_req->displayf     = 1
+		   set gm_u_code_value0619_req->descriptionf = 1
+		   set gm_u_code_value0619_req->definitionf  = 1
+		   
+		   set gm_u_code_value0619_req->active_indf  = 1
+		   ;set gm_u_code_value0619_req->end_effective_dt_tmf = 1  
+		   
+		   set nidx = nidx + 1      
+                
+           set stat = alterlist(GM_U_CODE_VALUE0619_REQ->qual, nidx)
+           
+           set gm_u_code_value0619_req->qual[nidx].CODE_SET    = 1604
+	       set gm_u_code_value0619_req->qual[nidx].code_value  = request->qual[idx].product_cd
+	       set gm_u_code_value0619_req->qual[nidx].DISPLAY     = request->qual[idx]->product_disp
+	       set gm_u_code_value0619_req->qual[nidx].DESCRIPTION = request->qual[idx]->product_desc
+	       set gm_u_code_value0619_req->qual[nidx].DEFINITION  = request->qual[idx]->product_desc
+	       set gm_u_code_value0619_req->qual[nidx].ACTIVE_IND = 1
+	       ;set gm_u_code_value0619_req->qual[idx]->end_effective_dt_tm = cnvtdatetime(curdate, curtime3)
+	     
+	       execute gm_u_code_value0619 with replace("REQUEST", "GM_U_CODE_VALUE0619_REQ"),
+	                                     replace("REPLY", "GM_U_CODE_VALUE0619_REP")
+		                                        
+            if (GM_U_CODE_VALUE0619_REP->status_data.status != "S")    
+                set failure_flag = "Y"
+                set reply->status_data->subeventstatus[1]->OperationName
+                           = "update code_value",
+                set reply->status_data->subeventstatus[1]->OperationStatus
+                           = "F",
+                set reply->status_data->subeventstatus[1]->TargetObjectName
+                           = "code_value",
+                set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                           = cnvtstring(request->qual[idx].product_cd,32,2)             
+                go to EXIT_SCRIPT
+           endif
+     endif /* nothing on code_value table changed */
+ endif  
+
+if (failure_flag = "N")
+   set bar_cnt = cnvtint(size(request->qual[idx]->barcodelist, 5))
+
+   set bar = 0
+   for (bar = 1 to bar_cnt)
+        if (request->qual[idx]->barcodelist[bar]->product_barcode_id > 0)
+                UPDATE
+                      INTO product_barcode b
+                SET 
+                      b.active_ind             = 0,
+                      b.active_status_cd       = reqdata->inactive_status_cd,
+                      b.active_status_dt_tm    = cnvtdatetime(curdate,curtime3), 
+                      b.active_status_prsnl_id = reqinfo->updt_id,
+                      b.updt_cnt               = b.updt_cnt + 1,
+                      b.updt_id                = reqinfo->updt_id,
+                      b.updt_task              = reqinfo->updt_task,
+                      b.updt_applctx           = reqinfo->updt_applctx,
+                      b.updt_dt_tm             = cnvtdatetime(curdate,curtime3)
+                WHERE 
+                      b.product_barcode_id   
+                      = request->qual[idx]->barcodelist[bar]->product_barcode_id
+                AND   b.updt_cnt
+                      = request->qual[idx]->barcodelist[bar]->updt_cnt
+                
+                if (curqual = 0)
+                   set failure_flag = "Y",         
+                   set reply->status_data->subeventstatus[1]->OperationName
+                   = "update product_barcode",
+                   set reply->status_data->subeventstatus[1]->OperationStatus
+                   = "F",
+                   set reply->status_data->subeventstatus[1]->TargetObjectName
+                   = "product_barcode",
+                   set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                   = request->qual[idx]->barcodelist[bar]->product_barcode
+                   go to EXIT_SCRIPT
+                 endif
+        else
+;          if (trim(request->qual[idx]->barcodelsit[bar]->product_barcode) > "")
+                set new_product_barcode_id = 0.0
+                set new_product_barcode_id = NEXT_PATHNET_SEQ(0)
+
+                if (curqual = 0)
+                   set failure_flag = "Y",         
+                   set reply->status_data->subeventstatus[1]->OperationName
+                   = "get new product_barcode_id",
+                   set reply->status_data->subeventstatus[1]->OperationStatus
+                   = "F",
+                   set reply->status_data->subeventstatus[1]->TargetObjectName
+                   = "bbt_get_pathnet_seq_sub",
+                   set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                   = request->qual[idx]->barcodelist[bar]->product_barcode
+                   go to EXIT_SCRIPT
+                endif             
+
+                INSERT
+                   into product_barcode b
+                SET
+                   b.product_barcode_id   = new_product_barcode_id,
+                   b.product_barcode 
+                   = request->qual[idx]->barcodelist[bar]->product_barcode,
+                   b.product_cd = request->qual[idx].product_cd,
+                   b.product_cat_cd = request->qual[idx].product_cat_cd,
+                   b.product_class_cd = request->qual[idx].product_class_cd,
+                   b.active_ind = 1, 
+                   b.active_status_cd = reqdata->active_status_cd,
+                   b.active_status_dt_tm = cnvtdatetime(curdate,curtime3),
+                   b.active_status_prsnl_id = reqinfo->updt_id,
+                   b.updt_cnt = 0,
+                   b.updt_id = reqinfo->updt_id,
+                   b.updt_task = reqinfo->updt_task,
+                   b.updt_applctx = reqinfo->updt_applctx,
+                   b.updt_dt_tm = cnvtdatetime(curdate,curtime3)
+                WITH
+                   nocounter
+                
+                if (curqual = 0)
+                   set failure_flag = "Y"
+                   set reply->status_data->subeventstatus[1]->OperationName
+                   = "insert product_barcode"
+                   set reply->status_data->subeventstatus[1]->OperationStatus
+                   = "F"
+                   set reply->status_data->subeventstatus[1]->TargetObjectName
+                   = "product_barcode"
+                   set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                   = request->qual[idx]->barcodelist[bar]->product_barcode
+                   go to EXIT_SCRIPT
+                endif
+;           endif
+         endif
+     endfor
+endif
+
+if (failure_flag = "N")
+   SELECT 
+        INTO "nl:" p.*
+   FROM
+        product_index p
+   WHERE
+        request->qual[idx].product_cd = p.product_cd
+   WITH
+        nocounter,
+        forupdate(p)
+   if (curqual = 0)
+        set failure_flag = "Y"
+        set reply->status_data->subeventstatus[1]->OperationName
+        = "insert product_barcode",
+        set reply->status_data->subeventstatus[1]->OperationStatus
+        = "F",
+        set reply->status_data->subeventstatus[1]->TargetObjectName
+        = "product_barcode"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue 
+        = request->qual[idx]->barcodelist[bar]->product_barcode,
+        go to EXIT_SCRIPT
+   else
+        UPDATE 
+              into product_index p
+        SET
+              p.autologous_ind = request->qual[idx]->autologous_ind,
+              p.directed_ind = request->qual[idx]->directed_ind,
+              p.max_days_expire = request->qual[idx]->max_days_expire,
+              p.max_hrs_expire = request->qual[idx]->max_hrs_expire,
+              p.default_volume = request->qual[idx]->default_volume,
+              p.default_supplier_id = request->qual[idx]->default_supplier_id,
+              p.allow_dispense_ind = request->qual[idx]->allow_dispense_ind,
+              p.synonym_id = request->qual[idx].synonym_id,
+              p.auto_quarantine_min = request->qual[idx]->auto_quarantine_min,
+              p.validate_ag_ab_ind = request->qual[idx]->validate_ag_ab_ind,
+              p.validate_trans_req_ind = request->qual[idx]->validate_trans_req_ind,
+              p.intl_units_ind = request->qual[idx]->intl_units_ind,
+              p.updt_cnt = p.updt_cnt + 1,
+              p.updt_id = reqinfo->updt_id,
+              p.updt_task = reqinfo->updt_task,
+              p.updt_applctx = reqinfo->updt_applctx,
+              p.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+              p.storage_temp_cd = request->qual[idx]->storage_temp_cd,
+              p.drawn_dt_tm_ind = request->qual[idx]->drawn_dt_tm_ind,
+              p.aliquot_ind = request->qual[idx]->aliquot_ind
+        WHERE
+              request->qual[idx].product_cd = p.product_cd  
+        WITH
+              nocounter
+              
+              if (curqual = 0)
+                 set failure_flag = "Y",
+                 set reply->status_data->subeventstatus[1]->SourceObjectName
+                 = "script",
+                 set reply->status_data->subeventstatus[1]->SourceObjectValue
+                 = "bbd_modify_product_index",
+                 set reply->status_data->subeventstatus[1]->OperationName
+                 = "update",
+                 set reply->status_data->subeventstatus[1]->OperationStatus
+                 = "F",
+                 set reply->status_data->subeventstatus[1]->TargetObjectName
+                 = "product_index",
+                 set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                 = "product_index"
+              endif
+      endif
+ endif
+endfor
+go to EXIT_SCRIPT
+
+/* Get next pathnet_seq subroutine */
+%i cclsource:bbt_get_pathnet_seq_sub.inc
+
+/**************************************/
+/* Load reply with status information */
+/**************************************/ 
+#EXIT_SCRIPT
+   if (failure_flag = "N")
+     set reqinfo->commit_ind = 1
+   else
+     set reqinfo->commit_ind = 0
+   endif
+
+   if (failure_flag = "N") 
+     set reply->status_data->status = "S",
+     set reply->status_data->subeventstatus[1]->OperationName
+       = "SUCCESS",
+     set reply->status_data->subeventstatus[1]->OperationStatus
+       = "S",
+     set reply->status_data->subeventstatus[1]->TargetObjectName
+       = "product_index & product_barcode",
+     set reply->status_data->subeventstatus[1]->TargetObjectValue 
+       = "product_index & product_barcode"
+   else
+     set reply->status_data->status = "F"
+   endif    
+   
+%i cclsource:gm_u_code_value0619_cln.inc
+END
+GO
+
+;Generated by GNU enscript 1.6.4.

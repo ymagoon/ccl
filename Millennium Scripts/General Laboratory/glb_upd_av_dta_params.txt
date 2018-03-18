@@ -1,0 +1,386 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_upd_av_dta_params/glb_upd_av_dta_params.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_UPD_AV_DTA_PARAMS.PRG
+        Object name:            GLB_UPD_AV_DTA_PARAMS
+        Request #:              250126
+ 
+        Product:                General Lab - Quality Control
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Update autoverification parameters
+                                for a given service_resource
+ 
+        Tables read:            n/a
+ 
+        Tables updated:         autoverify
+                                lab_instrument
+ 
+        Executing from:         General Lab QC Maintenance
+ 
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 03/26/97 Chad Moats           Initial Release                     *
+;     001 05/25/98 Chad Moats           Added repeat_map, consistent_map,   *
+;                                       cons_nbr_hrs, and dest_codes logic  *
+;     002 02/23/00 Chris Heil           Return new av_ref_id when inserting.*
+;     003 04/05/00 Chris Heil           Retrieve from new delta_chk_flag    *
+;     004 06/21/00 Chris Heil           Send in new consistency params.     *
+;     005 10/04/00 Chris Heil           Update av_status_flag.              *
+;     006 02/27/01 Gary Runde           Add fields for QC exemption changes *
+;     007 07/22/06 Joe Troy             Add notify_range_ind
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+      drop   program GLB_UPD_AV_DTA_PARAMS:dba go
+      create program GLB_UPD_AV_DTA_PARAMS:dba
+ 
+%i cclsource:glb_script_logging.inc
+set log_program_name = "GLB_UPD_AV_DTA_PARAMS"
+set log_override_ind = 0
+ 
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 procs[*]
+           2  av_ref_id              = f8
+ 
+           2  service_resource_cd    = f8
+           2  task_assay_cd          = f8
+ 
+           2  prev_verf_ind          = i2
+           2  ref_range_ind          = i2
+           2  rev_range_ind          = i2
+           2  crit_range_ind         = i2
+           2  lin_range_ind          = i2
+           2  feas_range_ind         = i2
+           2  delta_chk_flag         = i2
+           2  unverf_prev_rslt_ind   = i2
+           2  dup_assay_ind          = i2
+           2  instr_error_code_ind   = i2
+           2  notify_range_ind       = i2
+           2  repeat_map             = vc
+
+           ;values to save to the database for qc exemption logic   ;006
+           2  validate_qc_schedule_ind = i2                         ;006
+           2  qc_instr_error_code_ind  = i2                         ;006
+ 
+           2  consistency_array[*]
+              3  av_consistency_flag     = i2
+              3  consistency_ind         = i2
+              3  consistency_minutes     = i4
+              3  consistency_units_cd    = f8
+              3  consistency_type_flag   = i2
+              3  consistency_variance    = f8
+ 
+      )
+ 
+*/
+ 
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+ 
+      record reply
+      (
+         1 procs[*]
+           2 av_ref_id             = f8
+           2 service_resource_cd   = f8
+           2 task_assay_cd         = f8
+           2 av_status_flag        = i2
+         1 status_data
+           2 status                = c1
+           2 subeventstatus[1]
+             3 OperationName       = c15
+             3 OperationStatus     = c1
+             3 TargetObjectName    = c15
+             3 TargetObjectValue   = vc
+      )
+ 
+     #Script
+      set failed = "F"
+      set reply->status_data->status = "F"
+      set action_flag = 0
+      set proc_cnt = size(request->procs,5)
+      set stat = alterlist(reply->procs, proc_cnt)
+ 
+/*******************************************************************/
+/* Update procedures                                               */
+/*******************************************************************/
+ 
+   for (cnt = 1 to proc_cnt)
+      set action_flag = 0 ;no action
+ 
+      if (request->procs[cnt].av_ref_id > 0)
+        SELECT into "nl:"
+           av.av_ref_id
+        FROM
+           auto_verify av
+        WHERE av.av_ref_id = request->procs[cnt].av_ref_id
+          and av.active_ind = 1
+        DETAIL
+          reply->procs[cnt].av_status_flag = av.av_status_flag
+        WITH nocounter
+ 
+        if (ERROR_MESSAGE(1) = 1)
+          set failed = "T"
+          go to exit_script
+        endif
+ 
+        if (curqual > 0)
+           set action_flag = 1 ;update
+        endif
+ 
+        if (action_flag = 1)
+           set action_flag = 2 ;insert
+ 
+           UPDATE
+             into auto_verify av
+           SET
+             av.active_ind = 0,
+             av.end_effective_dt_tm = cnvtdatetime(curdate,curtime3),
+             av.updt_cnt            = av.updt_cnt + 1,
+             av.updt_task           = reqinfo->updt_task,
+             av.updt_id             = reqinfo->updt_id,
+             av.updt_dt_tm          = cnvtdatetime(curdate,curtime3),
+             av.updt_applctx        = reqinfo->updt_applctx
+           WHERE av.av_ref_id = request->procs[cnt].av_ref_id
+             and av.active_ind = 1
+           WITH nocounter
+ 
+           if (ERROR_MESSAGE(1) = 1)
+             set failed = "T"
+             go to exit_script
+           endif
+ 
+           UPDATE
+             into av_consistency ac
+           SET
+             ac.active_ind = 0,
+             ac.end_effective_dt_tm = cnvtdatetime(curdate,curtime3),
+             ac.updt_cnt            = ac.updt_cnt + 1,
+             ac.updt_task           = reqinfo->updt_task,
+             ac.updt_id             = reqinfo->updt_id,
+             ac.updt_dt_tm          = cnvtdatetime(curdate,curtime3),
+             ac.updt_applctx        = reqinfo->updt_applctx
+           WHERE ac.av_ref_id = request->procs[cnt].av_ref_id
+             and ac.active_ind = 1
+           WITH nocounter
+ 
+           if (ERROR_MESSAGE(1) = 1)
+             set failed = "T"
+             go to exit_script
+           endif
+        endif
+      else
+        set action_flag = 2 ;insert
+        set reply->procs[cnt].av_status_flag = 0
+      endif
+ 
+      if (action_flag = 2)
+        SELECT into "nl:"
+            y = seq(reference_seq,nextval) "##################;rp0"
+        FROM
+          dual
+        DETAIL
+          reply->procs[cnt].av_ref_id = cnvtreal(y)
+        WITH
+          format, counter
+ 
+        if (ERROR_MESSAGE(1) = 1)
+          set failed = "T"
+          go to exit_script
+        endif
+ 
+        if (curqual = 0)
+          go to seq_failed
+        endif
+ 
+        INSERT
+          into auto_verify av
+        SET
+          av.av_ref_id               = reply->procs[cnt].av_ref_id,
+          av.service_resource_cd     = request->procs[cnt].service_resource_cd,
+          av.task_assay_cd           = request->procs[cnt].task_assay_cd,
+ 
+          av.prev_verf_ind           = request->procs[cnt].prev_verf_ind,
+          
+          ; if the current manual status is turned off because of QC out of control,
+          ;   leave the status.
+          ; Otherwise set it to the opposite of the prevent autoverify switch.
+          av.av_status_flag          = evaluate(reply->procs[cnt].av_status_flag,
+                                                2, 2,
+                                                evaluate(request->procs[cnt].prev_verf_ind,
+                                                         1, 0,
+                                                         0, 1,
+                                                         0)),
+          av.ref_range_ind           = request->procs[cnt].ref_range_ind,
+          av.rev_range_ind           = request->procs[cnt].rev_range_ind,
+          av.crit_range_ind          = request->procs[cnt].crit_range_ind,
+          av.lin_range_ind           = request->procs[cnt].lin_range_ind,
+          av.feas_range_ind          = 1,
+          av.delta_chk_flag          = request->procs[cnt].delta_chk_flag,
+          av.unverf_prev_rslt_ind    = request->procs[cnt].unverf_prev_rslt_ind,
+          av.dup_assay_ind           = request->procs[cnt].dup_assay_ind,
+          av.instr_error_code_ind    = request->procs[cnt].instr_error_code_ind,
+          av.notify_range_ind        = request->procs[cnt].notify_range_ind,
+          av.repeat_map              = request->procs[cnt].repeat_map,
+          
+          ;save the QC Exemption information to the database                           ;006
+          av.qc_instr_error_code_ind  = request->procs[cnt].qc_instr_error_code_ind,   ;006
+          av.validate_qc_schedule_ind = request->procs[cnt].validate_qc_schedule_ind,  ;006
+          
+          av.prev_rslt_ind           = 0,    /************************************/
+          av.repeat_flag             = 0,    /*                                  */
+          av.consistent_map          = "",   /* These fields are no longer used. */
+          av.cons_nbr_hrs            = 0,    /*                                  */
+          av.delta_chk_ind           = 0,    /*                                  */
+          av.dest_codes              = "",   /************************************/
+ 
+          av.active_ind              = 1,
+          av.beg_effective_dt_tm     = cnvtdatetime(curdate,curtime3),
+          av.end_effective_dt_tm     = cnvtdatetime("31 DEC 2100 00:00"),
+          av.updt_cnt                = 0,
+          av.updt_task               = reqinfo->updt_task,
+          av.updt_id                 = reqinfo->updt_id,
+          av.updt_dt_tm              = cnvtdatetime(curdate,curtime3),
+          av.updt_applctx            = reqinfo->updt_applctx
+        WITH
+           nocounter
+ 
+        if (ERROR_MESSAGE(1) = 1)
+          set failed = "T"
+          go to exit_script
+        endif
+ 
+        if (curqual = 0)
+           go to av_insert_failed
+        endif
+ 
+        for (cnt2 = 1 to 5)
+          INSERT
+            into av_consistency ac
+          SET
+            ac.av_ref_id               = reply->procs[cnt].av_ref_id,
+            ac.av_consistency_flag     = request->procs[cnt]->consistency_array[cnt2].av_consistency_flag,
+            ac.consistency_ind         = request->procs[cnt]->consistency_array[cnt2].consistency_ind,
+            ac.consistency_minutes     = request->procs[cnt]->consistency_array[cnt2].consistency_minutes,
+            ac.consistency_units_cd    = request->procs[cnt]->consistency_array[cnt2].consistency_units_cd,
+            ac.consistency_type_flag   = request->procs[cnt]->consistency_array[cnt2].consistency_type_flag,
+            ac.consistency_variance    = request->procs[cnt]->consistency_array[cnt2].consistency_variance,
+            ac.active_ind              = 1,
+            ac.beg_effective_dt_tm     = cnvtdatetime(curdate,curtime3),
+            ac.end_effective_dt_tm     = cnvtdatetime("31 DEC 2100 00:00"),
+            ac.updt_cnt                = 0,
+            ac.updt_task               = reqinfo->updt_task,
+            ac.updt_id                 = reqinfo->updt_id,
+            ac.updt_dt_tm              = cnvtdatetime(curdate,curtime3),
+            ac.updt_applctx            = reqinfo->updt_applctx
+          WITH
+             nocounter
+ 
+          if (ERROR_MESSAGE(1) = 1)
+            set failed = "T"
+            go to exit_script
+          endif
+ 
+          if (curqual = 0)
+             go to av_consistency_insert_failed
+          endif
+        endfor
+      endif
+ 
+      set reply->procs[cnt]->av_ref_id = reply->procs[cnt]->av_ref_id
+      set reply->procs[cnt]->service_resource_cd = request->procs[cnt]->service_resource_cd
+      set reply->procs[cnt]->task_assay_cd = request->procs[cnt]->task_assay_cd
+   endfor
+
+   go to exit_script 
+/********************************************************************/
+/*  Insert Failed                                                   */
+/********************************************************************/
+     #av_insert_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "auto_verify table"
+      set failed = "T"
+      go to exit_script
+ 
+     #av_consistency_insert_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "av_consistency table"
+      set failed = "T"
+      go to exit_script
+ 
+/********************************************************************/
+/*  Sequence failed                                                 */
+/********************************************************************/
+     #seq_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "sequence"
+      set failed = "T"
+      go to exit_script
+ 
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+      if (failed = "F")
+         set reply->status_data->status = "S"
+         commit
+      else
+         set reply->status_data->status = "F"
+         rollback
+      endif
+ 
+call uar_SysDestroyHandle(hSys)
+END GO
+ 
+
+;Generated by GNU enscript 1.6.4.

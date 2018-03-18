@@ -1,0 +1,364 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_rdm_upd_assay_processing_r/glb_rdm_upd_assay_processing_r.prg Turn on black mode
+
+	/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 2003 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 2003 Cerner Corporation                      *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+	Source file name:       glb_rdm_upd_assay_processing_r.prg
+	Object name:            glb_rdm_upd_assay_processing_r
+	Readme #:               0
+
+	Product:		        PathNet - General Lab
+	Product Team:		    PathNet - General Lab
+	HNA Version:            500
+	CCL Version:
+
+	Program purpose:        Update assay_processing_r to inactivate rows that
+	                        no longer are associated to a service resource.
+
+	Tables read,		TABLE_NAME		        METHOD (UNIQUE, RANGE, FULL)
+	and access method:  --------------------    -----------------------------
+                        PROFILE_TASK_R          RANGE
+                        ORC_RESOURCE_LIST       RANGE
+                        ASSAY_RESOURCE_LIST     RANGE        
+                        ASSAY_PROCESSING_R      RANGE
+
+	Tables updated:		ASSAY_PROCESSING_R
+
+	Executing from:
+
+	Special Notes:      Each section should clearly identify what the purpose
+                        of that README step is.
+
+	Run Occurance:		(select ONE of the following)
+				-----------------------------
+				[ ] 1. RUN ONCE
+				[X] 2. RUN MANY
+
+	ReadMe Category:	(select ONE of the following)
+				-----------------------------
+				[ ] 1. Data Load
+				[X] 2. Data Conversion
+				[ ] 3. Data Migration
+				[ ] 4. File Copy
+
+	Execution Time:		(select ONE of the following)
+				------------------------------------
+				[X] 1. Uptime before uptime schema.
+				[ ] 2. Uptime after uptime schema.
+				[ ] 3. Downtime before downtime schema.
+				[ ] 4. Downtime after downtime schema.
+				[ ] 5. Uptime after all other components.
+
+	Exec. Justification:  Needed to prevent service resources not associated to a
+	                      DTA from appearing in the drop-down list of service 
+	                      resources for reference ranges.
+	
+    Parent Script:      n/a
+
+	Check Script:		None
+
+	Data file for import:	None
+
+	Execution Duration:	(select ONE of the following)
+				----------------------------------
+				[ ] 1. Fixed Time
+				[X] 2. Driver Table: ASSAY_PROCESSING_R
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer		        Comment                             *
+;    *--- -------- --------------------	----------------------------------- *
+;     000 05/15/03 Nick Smith	        Initial Release                     *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program glb_rdm_upd_assay_processing_r:dba go
+create program glb_rdm_upd_assay_processing_r:dba
+
+%i cclsource:pathnet_ocd_subroutines.inc
+
+/**********************
+** Log Start Message **
+**                   **********************************
+** LOGSCRIPTSTART creates log row as:                **
+**    "Starting (<sREADME_NAME>) - [<date/time>]..." **
+******************************************************/
+#START_SCRIPT
+set sREADME_NAME = "glb_rdm_upd_assay_processing_r"
+CALL LOGSCRIPTSTART(sREADME_NAME)
+
+/************************
+** README ACTION STEPS **
+************************/
+#SCRIPT
+/* Records */
+record active_rows
+(
+  1 DTA[*]
+    2 task_assay_cd = f8
+    2 SR[*]
+      3 service_resource_cd = f8
+)
+
+record associated_rows
+(
+  1 DTA[*]
+    2 task_assay_cd = f8
+    2 SR[*]
+      3 service_resource_cd = f8
+)
+
+/* Variables */
+declare nSuccessInd = i2 with protect, noconstant(0)
+declare nColumnExists = i2 with protect, noconstant(0)
+declare sWhereClause = vc with protect, noconstant("")
+declare nDTA_count = i4 with protect, noconstant(0)
+declare nStatus = i4 with protect, noconstant(0)
+declare nSR_count = i4 with protect, noconstant(0)
+declare nCount = i4 with protect, noconstant(0)
+declare i = i4 with protect, noconstant(0)
+declare j = i4 with protect, noconstant(0)
+declare nRecord_size = i4 with protect, noconstant(0)
+declare nFound = i2 with protect, noconstant(0)
+declare nCommitInd = i2 with protect, noconstant(0)
+declare nErrorFlag = i2 with protect, noconstant(0)
+declare dRobotics = f8 with protect, noconstant(0.0)
+
+set nSuccessInd = 1
+set nCommitInd = 1
+set dRobotics = uar_get_code_by("MEANING", 223, NullTerm("ROBOTICS"))
+
+/*************************************************************/
+/* Determine if the loaded_service_resource_cd column exists */
+/*************************************************************/
+select into "nl:"
+from user_tab_columns u
+where u.table_name = "ASSAY_PROCESSING_R"
+  and u.column_name = "LOADED_SERVICE_RESOURCE_CD"
+detail
+  nColumnExists = 1
+with nocounter
+
+if(nColumnExists = 1)
+  set sWhereClause = "a.loaded_service_resource_cd = 0.0"
+else
+  set sWhereClause = "1 = 1"
+endif
+
+/**************************************************************/
+/* Load active rows on assay_processing_r for each task_assay */
+/**************************************************************/
+select into "nl:"
+from assay_processing_r a,                
+     service_resource s
+plan a where a.task_assay_cd > 0.0 
+                      and a.active_ind = 1
+                      and parser(sWhereClause)                                           
+join s where s.service_resource_cd = a.service_resource_cd
+         and s.service_resource_type_cd+0 != dRobotics         
+order by a.task_assay_cd, a.service_resource_cd
+head a.task_assay_cd
+  /* Increment DTA counter and reset service resource count */
+  nDTA_count = nDTA_count + 1
+  nSR_count = 0
+  
+  /* Resize record if needed */
+  if(mod(nDTA_count,10) = 1)
+    nStatus = alterlist(active_rows->DTA, nDTA_count + 9)
+  endif
+  
+  /* Load DTA into record */
+  active_rows->DTA[nDTA_count].task_assay_cd = a.task_assay_cd
+detail
+  /* Increment SR count */
+  nSR_count = nSR_count + 1
+  
+  /* Resize record as needed */
+  if(mod(nSR_count, 10) = 1)
+    nStatus = alterlist(active_rows->DTA[nDTA_count]->SR, nSR_count + 9)
+  endif
+  
+  /* Load SR into record */
+  active_rows->DTA[nDTA_count]->SR[nSR_count].service_resource_cd = a.service_resource_cd
+foot a.task_assay_cd
+  nStatus = alterlist(active_rows->DTA[nDTA_count]->SR, nSR_count)
+foot report
+  nStatus = alterlist(active_rows->DTA, nDTA_count)
+with nocounter
+
+/* Size record */
+set nStatus = alterlist(associated_rows->DTA, nDTA_count)
+
+/****************************/
+/* Loop for each task_assay */
+/****************************/
+for(nCount = 1 to nDTA_count)
+  
+  /* Load DTA into record */
+  set associated_rows->DTA[nCount].task_assay_cd = active_rows->DTA[nCount].task_assay_cd
+  set nSR_count = 0
+  
+  /************************************************************/
+  /* Get service resources for orderables with the task_assay */
+  /************************************************************/
+  select into "nl:"
+  from profile_task_r ptr, 
+    orc_resource_list orl
+  plan ptr where ptr.task_assay_cd = active_rows->DTA[nCount].task_assay_cd
+             and ptr.active_ind = 1
+  join orl where orl.catalog_cd = ptr.catalog_cd
+             and orl.active_ind = 1
+  order by orl.service_resource_cd
+  head orl.service_resource_cd
+    /* Resize record if needed */
+    nSR_count = nSR_count + 1
+    if(mod(nSR_count,10) = 1)
+      nStatus = alterlist(associated_rows->DTA[nCount]->SR, nSR_count + 9)
+    endif
+    
+    /* Load SR into record */
+    associated_rows->DTA[nCount]->SR[nSR_count].service_resource_cd = orl.service_resource_cd
+  detail
+    row + 0
+  with nocounter
+  
+  /*****************************************************/
+  /* Find service resources associated with task_assay */
+  /*****************************************************/
+  select into "nl:"
+  from assay_resource_list arl
+  where arl.task_assay_cd = active_rows->DTA[nCount].task_assay_cd
+    and arl.active_ind = 1
+  order by arl.service_resource_cd
+  detail
+    /* Resize record if needed */
+    nSR_count = nSR_count + 1
+    if(mod(nSR_count,10) = 1)
+      nStatus = alterlist(associated_rows->DTA[nCount]->SR, nSR_count + 9)
+    endif
+    
+    /* Load SR into record */
+    associated_rows->DTA[nCount]->SR[nSR_count].service_resource_cd = arl.service_resource_cd
+  with nocounter
+
+  /* Free up memory in record */
+  set nStatus = alterlist(associated_rows->DTA[nCount]->SR, nSR_count)
+
+endfor
+
+/* Compare the service resource lists */
+for(nCount = 1 to nDTA_count)
+  
+  set nRecord_size = size(associated_rows->DTA[nCount]->SR, 5)
+  set nSR_count = size(active_rows->DTA[nCount]->SR, 5)
+  
+  for(i = 1 to nSR_count)
+    set nFound = 0
+    set nCommitInd = 1
+
+    for(j = 1 to nRecord_size)
+      if(active_rows->DTA[nCount]->SR[i].service_resource_cd =
+         associated_rows->DTA[nCount]->SR[j].service_resource_cd)
+        set nFound = 1
+        set j = nRecord_size + 1
+      endif
+    endfor
+
+    /************************************************/
+    /* Inactivate the service resource if not found */
+    /************************************************/
+    if(nFound = 0)
+      /* Lock row for update */
+      select into "nl:"
+      from assay_processing_r a
+      where a.task_assay_cd = active_rows->DTA[nCount].task_assay_cd 
+        and a.service_resource_cd = active_rows->DTA[nCount]->SR[i].service_resource_cd
+        and parser(sWhereClause)
+      with nocounter, forupdate(a)
+      
+      if(curqual = 0)
+        set nSuccessInd = 0
+        set nCommitInd = 0
+        set nErrorFlag = 1
+      endif
+      
+      if(nCommitInd = 1)
+        /* Update row */
+        update into assay_processing_r a
+        set a.active_ind = 0,
+            a.updt_dt_tm = cnvtdatetime(curdate,curtime),
+            a.updt_cnt = a.updt_cnt + 1,
+            a.updt_id = reqinfo->updt_id,
+            a.updt_task = reqinfo->updt_task,
+            a.updt_applctx = reqinfo->updt_applctx
+        where a.task_assay_cd = active_rows->DTA[nCount].task_assay_cd
+          and a.service_resource_cd = active_rows->DTA[nCount]->SR[i].service_resource_cd
+          and parser(sWhereClause)
+        with nocounter
+        
+        if(curqual = 0)
+          set nSuccessInd = 0
+          set nErrorFlag = 2
+        endif
+      endif   
+      
+      /* Commit/Rollback changes as necessary */
+      if (nCommitInd = 1)
+        commit
+      else
+        rollback
+      endif
+               	
+    endif
+  endfor
+  
+endfor
+
+free record associated_rows
+free record active_rows
+
+#EXIT_SCRIPT
+/********************
+** Log End Message **
+**                   ******************************************
+** LOGSCRIPTEND creates log row as:                          **
+**    "Execution (<sREADME_NAME>) Complete - [<date/time>]." **
+**************************************************************/
+if (nSuccessInd = 0 and nErrorFlag = 1)
+  CALL LOGSTATUS("Unable to obtain lock for assay_processing_r", "F")
+elseif (nSuccessInd = 0 and nErrorFlag = 2)
+  CALL LOGSTATUS("Update of assay_processing_r failed", "F")
+else
+  CALL LOGSTATUS("Update of assay_processing_r sucessful", "S")
+endif
+
+CALL LOGSCRIPTEND(sREADME_NAME)
+
+end go
+
+;Generated by GNU enscript 1.6.4.

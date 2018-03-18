@@ -1,0 +1,251 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBANTIGEN/BBT_GET_ANTIGENS_FOR_PERSON.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       BBT_GET_ANTIGENS_FOR_PERSON.PRG
+        Object name:            bbt_get_antigens_for_person
+        Request #:              225411
+
+        Product:                Blood Bank Transfusion/Donor
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Return all antigens for the person requested
+
+        Tables read:            PERSON_ANTIGEN, 
+                                PERSON
+                                RESULT
+                                ORDERS,
+                                PERSON_NAME_HIST
+
+        Tables updated:         N/A
+
+        Executing from:         PatientAntigens dll
+
+        Special Notes:          N/A
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;         08/28/97 Badari Kopparapu     Initial Release                     *
+;     001 11/01/05 Paul Lessin          Return historical name              *
+;     002 03/18/09 Kiran Vankadaru      Return historic names after person combine*
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+        drop program bbt_get_antigens_for_person:dba go
+        create program bbt_get_antigens_for_person:dba
+
+/****************************************************************************
+*       Records                                                             *
+*****************************************************************************/
+        /*
+        record request
+        (
+          1  person_id = f8          
+          1  facility_cd = f8
+        )
+        */
+
+        record reply
+        (
+           1  person_id = f8
+           1  person_name = vc
+           1  historical_demog_ind = i2        
+           1  qual[*]
+              2  antigen_cd = f8
+              2  antigen_disp = c40
+              2  antigen_desc = vc
+              2  antigen_mean = c12
+              2  person_antigen_id   = f8
+              2  historical_name = c40
+              2  order_id = f8
+              2  anchor_dt_tm = dq8
+%I CCLSOURCE:STATUS_BLOCK.INC
+        )
+ 
+%i cclsource:bbt_getBBPreference.inc
+ 
+/****************************************************************************
+*       Initialize Variables                                                *
+*****************************************************************************/
+	declare lBATCHSIZE         = i4 with protect, constant(200)  ;Batch size for Expand
+
+	declare lIdx               = i4 with protect, noconstant(0)  ;Indexes for EXPAND
+	declare lIdx2              = i4 with protect, noconstant(0)   
+        
+	declare dCurrentNameTypeCd = f8 with protect, noconstant(0.0)
+	declare lAntigenCnt        = i4 with protect, noconstant(0)
+	declare lReplyCnt          = i4 with protect, noconstant(0)
+	declare sScriptName        = vc with protect, constant("bbt_get_antigens_for_person")
+ 
+	declare dCurrentPersonId   = f8 with protect, noconstant(0.0)
+	declare dCombineAddCd      = f8 with protect, noconstant(0.0)
+	declare dActiveStatusCd    = f8 with protect, noconstant(0.0)
+ 
+	;one minute, expressed as a fraction of a day, used for rounding up
+    declare dMINUTE                       = f8  with protect, constant(1/1440.0) 
+	
+    set err_cnt = 0 
+    set reply->status_data.status = "F"
+    set y = 0
+    set idx = 0
+    set failed = "F"
+ 
+	set stat = uar_get_meaning_by_codeset(213, "CURRENT", 1, dCurrentNameTypeCd)
+	if (stat = 1)
+     	set reply->status_data->subeventstatus[1].TargetObjectName = "get CURRENT code value"
+		set reply->status_data->subeventstatus[1].OperationName = sScriptName
+	    go to EXIT_PROGRAM
+	endif
+ 
+	set stat = uar_get_meaning_by_codeset(327, "ADD", 1, dCombineAddCd)
+	if (stat = 1)
+     	set reply->status_data->subeventstatus[1].TargetObjectName = "get Combine action Add code value"
+		set reply->status_data->subeventstatus[1].OperationName = sScriptName
+	    go to EXIT_PROGRAM
+	endif
+	
+	set stat = uar_get_meaning_by_codeset(48, "ACTIVE", 1, dActiveStatusCd)
+	if (stat = 1)
+     	set reply->status_data->subeventstatus[1].TargetObjectName = "get active status code value"
+		set reply->status_data->subeventstatus[1].OperationName = sScriptName
+	    go to EXIT_PROGRAM
+	endif    
+	
+/**********************************************************
+*       Determine whether client stores historical records 
+*/
+    set reply->historical_demog_ind = BbtGetHistoricInfoPreference(request->facility_cd)
+ 
+/******************** load the patient information ***********************/
+
+     select into "nl:"
+        per.name_full_formatted 
+     from 
+        person per
+     where per.person_id = request->person_id
+     detail 
+        reply->person_name = per.name_full_formatted
+     with nocounter
+     
+/****************************************************************************
+*       Read Person_antigen table for this person                           *
+*****************************************************************************/
+        select into "nl:"
+              pa.antigen_cd
+        from
+              person_antigen pa,
+              result r,
+              orders o
+        plan pa where pa.person_id = request->person_id
+                and pa.active_ind = 1
+        join r where r.result_id = pa.result_id
+        join o where o.order_id = r.order_id
+        order by pa.antigen_cd, o.current_start_dt_tm desc
+        head  report
+              err_cnt = 0
+              lReplyCnt = 0
+              stat = alterlist(reply->qual, lReplyCnt)
+        head pa.antigen_cd
+              lReplyCnt = lReplyCnt + 1
+              stat = alterlist(reply->qual, lReplyCnt)
+              reply->qual[lReplyCnt].antigen_cd = pa.antigen_cd
+              reply->qual[lReplyCnt].person_antigen_id = pa.person_antigen_id
+              reply->qual[lReplyCnt]->order_id = o.order_id
+              reply->qual[lReplyCnt]->anchor_dt_tm = o.current_start_dt_tm
+ 
+        with format, nocounter
+
+          if (curqual = 0)
+              set err_cnt = err_cnt + 1
+              set reply->status_data->subeventstatus[err_cnt]->OperationName
+                 = "select"
+              set reply->status_data->subeventstatus[err_cnt]->OperationStatus
+                 = "Z"
+              set reply->status_data->subeventstatus[err_cnt]->TargetObjectName
+                 = "person_antigen"
+              set reply->status_data->subeventstatus[err_cnt]->TargetObjectValue 
+                 = "unable to return person antigens specified"
+              set reply->status_data.status = "Z"
+           else
+           
+			;Get historical names if history is stored
+			if (reply->historical_demog_ind = 1)
+ 
+			;loop through the each active antigen
+	           for (lIdx = 1 to lReplyCnt)
+	              set dCurrentPersonId = request->person_id
+ 
+                  select into "nl:"
+                      pc.from_person_id
+                  from person_combine_det pcd,
+                       person_combine pc
+                  plan pcd where reply->qual[lIdx]->order_id > 0
+                  		   and pcd.entity_id = reply->qual[lIdx]->order_id
+                           and pcd.entity_name = "ORDERS"
+                  join pc where pc.person_combine_id = pcd.person_combine_id
+                           and pc.active_status_cd = dActiveStatusCd
+                           and pc.active_status_dt_tm >= cnvtdatetime(reply->qual[lIdx]->anchor_dt_tm)
+                           and pc.active_ind = 1
+ 
+                  order by pc.active_status_dt_tm
+ 
+                  Head Report
+                       dCurrentPersonId = pc.from_person_id
+                  with nocounter
+ 
+                  select into "nl:"
+                       pnh.name_full
+                  from person_name_hist pnh
+                  plan pnh where pnh.person_id = dCurrentPersonId
+                           and pnh.name_type_cd = dCurrentNameTypeCd
+                           and pnh.transaction_dt_tm <=
+                                 cnvtdatetime(datetimeadd(reply->qual[lIdx]->anchor_dt_tm, dMINUTE))
+                           and not exists (select
+                                               pcd.entity_id
+                                           from person_combine_det pcd
+                                           where pcd.entity_id = pnh.person_name_hist_id
+                                                 and pcd.entity_name = "PERSON_NAME_HIST"
+                                                 and pcd.combine_action_cd = dCombineAddCd)
+ 
+                  order by pnh.transaction_dt_tm desc
+ 
+                  head report
+			           reply->qual[lIdx].historical_name = pnh.name_full
+                  with nocounter
+               endfor
+             endif
+             set reply->status_data.status = "S"
+            
+          endif
+ 
+/****************************************************************************
+*       exit_script                                                         *
+*****************************************************************************/
+	#EXIT_PROGRAM
+           end go
+
+;Generated by GNU enscript 1.6.4.

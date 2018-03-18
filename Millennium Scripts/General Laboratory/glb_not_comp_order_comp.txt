@@ -1,0 +1,249 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_not_comp_order_comp/GLB_NOT_COMP_ORDER_COMP.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1997 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_NOT_COMP_ORDER_COMP.PRG
+        Object name:            GLB_NOT_COMP_ORDER_COMP
+        Request #:              250235
+ 
+        Product:                General Lab Audits
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Get a list of PathNet GL, BB, and HLA orders
+                                which should have an order status of complete,
+                                but do not. Complete these orders and
+                                Return the list in a reply
+                                structure or display a report containing
+                                order details of orders which failed to complete.
+ 
+        Tables read:            dm_info dm
+ 
+        Tables updated:         none
+ 
+        Executing from:         Pathnet General Lab Audits
+ 
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                    GENERATED MODIFICATION CONTROL LOG                *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 12/15/10 Abhroneel Chowdhury  Initial Release                     *
+;    *001 06/19/12 Veeresh Angadi       Exclude Blood bank Orders           *
+;~DE~************************************************************************
+ 
+drop   program GLB_NOT_COMP_ORDER_COMP:dba go
+create program GLB_NOT_COMP_ORDER_COMP:dba
+ 
+%i cclsource:glb_script_logging.inc
+ 
+/***********************************************************************
+ * Request Record                                                      *
+ ***********************************************************************/
+/*
+  record request
+  (
+    1 batch_selection  = vc
+    1 output_dist      = vc
+    1 ops_date         = dq8
+  )
+*/
+ 
+/***********************************************************************
+  * Reply Record                                                         *
+ ***********************************************************************/
+record reply
+  (
+    1 num_orders                   = i4
+    1 action_complete_cd           = f8
+    1 orders[*]
+      2  order_status_cd           = f8
+      2  order_status_disp         = vc
+      2  dept_status_cd            = f8
+      2  dept_status_disp          = vc
+      2  order_id                  = f8
+      2  order_mnemonic            = vc
+      2  accession                 = vc
+      2  updt_cnt                  = i4
+      2  catalog_cd                = f8
+      2  catalog_type_cd           = f8
+    1 output_dist      = vc
+%i cclsource:status_block.inc
+  )
+ 
+record temp_request
+  (
+    1  beg_dt_tm   = dq8
+    1  end_dt_tm   = dq8
+  )
+ 
+ 
+call LOG_MESSAGE("GLB_NOT_COMP_ORDER_COMP", log_level_debug)
+ 
+set reply->status_data.status = "F"
+ 
+declare PATHNET_DOMAIN      = vc  with public, constant("PATHNET")
+declare GLB_COMPLETE_ORDERS = vc  with public, constant("GLB_ORDER_COMPLETE_RECOVERY")
+declare PATHNET_STRNG       = vc  with public, constant("PATHNET")
+declare beg_dt_tm           = dq8 with public
+declare end_dt_tm      	    = dq8 with public
+declare order_cnt           = i4  with public, noconstant(0)
+declare oidx                = i4  with public, noconstant(0)
+declare num                 = i4  with public, noconstant(0)
+declare nQual_cnt           = i4  with public, noconstant(0)
+declare pos                 = i4  with public, noconstant(0)
+declare idx                 = i4  with public, noconstant(0)
+ 
+declare EVENT_VERF_CD      = f8 with Constant(uar_get_code_by("MEANING",1901,"VERIFIED")),protect
+declare EVENT_AUTOVERF_CD  = f8 with Constant(uar_get_code_by("MEANING",1901,"AUTOVERIFIED")),protect
+declare EVENT_CORRECTED_CD = f8 with Constant(uar_get_code_by("MEANING",1901,"CORRECTED")),protect
+ 
+declare Excl_BB_Orders = i2 with public, noconstant(0)											;001
+set strEcxl_BB_ORD =fillstring(100," ")															;001
+declare BB_activity_type_cd =  f8 with Constant(uar_get_code_by("MEANING",106,"BB")),protect	;001
+ 
+if(size(trim(request->batch_selection)) = 14)													;001
+	set strEcxl_BB_ORD=trim(request->batch_selection,3)											;001
+ 	if(substring(1,12,strEcxl_BB_ORD)="[ExclBBOrds=" and substring(14,1,strEcxl_BB_ORD)="]")	;001
+ 		if(cnvtint(value(substring(13,1,strEcxl_BB_ORD)))=1)									;001
+			set Excl_BB_Orders=1																;001
+		else																					;001
+			set Excl_BB_Orders=0																;001
+		endif																					;001
+	else																						;001
+		set Excl_BB_Orders=0																	;001
+	endif																						;001
+else																							;001
+	set Excl_BB_Orders=0																		;001
+endif																							;001
+ 
+if((EVENT_VERF_CD <= 0.0) or (EVENT_AUTOVERF_CD <= 0.0) or (EVENT_CORRECTED_CD <= 0.0))
+      Call LOG_MESSAGE ("Code Value Failure.", LOG_LEVEL_ERROR)
+      go to exit_script
+endif
+ 
+set end_dt_tm = cnvtdatetime(cnvtlookbehind("1,H"))
+ 
+/****************************************
+* Set reply values for operations       *
+*****************************************/
+ 
+set reply->output_dist = request->output_dist
+ 
+/****************************************
+* Determine the Lookback Duration       *
+*****************************************/
+ 
+select into "nl:"
+    dm.info_domain
+from
+    dm_info dm
+plan dm where dm.info_domain = PATHNET_DOMAIN
+      and dm.info_name = GLB_COMPLETE_ORDERS
+detail
+    beg_dt_tm = dm.info_date
+  with nocounter, forupdate(dm)
+ 
+if (error_message(0) > 0)
+   go to exit_script
+endif
+ 
+if (curqual = 0)
+    call LOG_MESSAGE("Row not found, insert dm_info row", log_level_debug)
+    /*****************************************
+    * Insert new row on dm_info table   .    *
+    *****************************************/
+ 
+    insert into dm_info dm
+    set
+      dm.info_char    = concat(request->batch_selection, " ",
+                               request->output_dist, " ",
+                               format(cnvtdatetime(end_dt_tm), ";;q")),
+      dm.info_date    = cnvtdatetime(end_dt_tm),
+      dm.info_domain  = PATHNET_STRNG,
+      dm.info_name    = GLB_COMPLETE_ORDERS,
+      dm.updt_dt_tm   = cnvtdatetime(curdate, curtime3),
+      dm.updt_id      = reqinfo->updt_id,
+      dm.updt_task    = reqinfo->updt_task,
+      dm.updt_applctx = reqinfo->updt_applctx,
+      dm.updt_cnt     = 0
+    with nocounter
+ 
+    if (error_message(0) > 0)
+      go to exit_script
+    endif
+ 
+    set beg_dt_tm = CNVTDATETIME(curdate-1,0)
+ 
+else
+    /*********************************************
+    * Row has been found on the dm_info table    *
+    * just update row's date/times and go on.    *
+    *********************************************/
+ 
+    call LOG_MESSAGE("dm_info row found, update dm_info row.", log_level_debug)
+ 
+    update into dm_info dm
+    set
+      dm.info_char    = concat(request->batch_selection, " ",
+                               request->output_dist, " ",
+                               format(cnvtdatetime(end_dt_tm), ";;q")),
+      dm.info_date    = cnvtdatetime(end_dt_tm),
+      dm.updt_dt_tm   = cnvtdatetime(curdate, curtime3),
+      dm.updt_id      = reqinfo->updt_id,
+      dm.updt_task    = reqinfo->updt_task,
+      dm.updt_applctx = reqinfo->updt_applctx,
+      dm.updt_cnt     = dm.updt_cnt + 1
+    plan dm
+    where dm.info_domain = PATHNET_STRNG
+      and dm.info_name = GLB_COMPLETE_ORDERS
+    with nocounter
+ 
+    if (error_message(0) > 0)
+      go to exit_script
+    endif
+ 
+endif
+ 
+Set temp_request->beg_dt_tm = beg_dt_tm
+Set temp_request->end_dt_tm = end_dt_tm
+ 
+ 
+execute GLB_NOT_COMP_ORDER_AUDIT with replace("REQUEST", temp_request),replace("REPLY", temp_reply)
+ 
+set order_cnt = size(temp_reply->qual, 5)
+set reply->action_complete_cd = temp_reply->action_complete_cd
+ 
+if(order_cnt > 0)
+  select
+  		 if(Excl_BB_Orders)																;001
+  		 	into "nl:"														
+   		 	o.order_id																		;001
+  			from																			;001
+    		orders o																		;001
+		  	where expand(num,1,order_cnt,o.order_id,temp_reply->qual[num].order_id)			;001
+ 			and not exists(SELECT e.result_id
+              FROM  result r,
+	          result_event e
+              

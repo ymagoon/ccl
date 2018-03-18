@@ -1,0 +1,364 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Productnotes/BBT_ADD_PRODUCT_NOTE.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_add_product_note.prg
+        Object name:            bbt_add_product_note
+        Request #:              225102
+
+        Product:                PathNet
+        Product Team:           Blood Bank Transfusion
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Add product notes for product_id
+
+        Tables read:            (none)
+
+        Tables updated:         product_note
+
+        Executing from:         VB - bbt comment class
+
+        Special Notes:          ??
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 06/26/96 Jon Weekes           Initial Release                     *
+;    *001 08/17/01 Christi Ditmars	Internationalize dt_tm_text         *
+;    *002 12/31/03 jg7520             39495: Expand SELECT with forupdate to*
+;                                      be a series of single table selects. *  
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_add_product_note:dba go
+create program bbt_add_product_note:dba
+
+/*
+record request
+(
+ 1  product_note_id             = f8
+ 1  product_id                  = f8
+ 1  updt_cnt                    = i4
+ 1  new_product_note_date       = c20
+ 1  new_product_note            = vc
+ 1  long_text_id                = f8
+ 1  long_text_updt_cnt          = i4
+)
+*/
+
+record reply
+(
+ 1  status                      = c1
+ 1  process                     = vc
+ 1  message                     = vc
+ 1  product_note_id             = f8
+ 1  product_note                = vc
+ 1  updt_cnt                    = i4
+ 1  long_text_id                = f8
+ 1  long_text_updt_cnt          = i4
+%i cclsource:status_block.inc
+)
+
+record cur_note
+(
+ 1  cur_product_note_id         = f8
+ 1  cur_product_note            = vc
+ 1  cur_updt_cnt                = i4
+ 1  cur_lt_updt_cnt             = i4
+ 1  long_text_id                = f8
+ 1  long_text_updt_cnt          = i4
+)
+
+record new_note
+(
+ 1  new_username                = c20
+ 1  new_product_note            = vc
+)
+
+/*
+ * Initialize Global Variables
+ */
+    set reply->status_data->status = "F"
+    set new_pathnet_seq = 0.0
+    set new_product_note_id = 0.0
+    set new_long_text_id = 0.0
+    set reqinfo->commit_ind = 0
+    set cur_note_cnt = 0
+    set count1 = 0
+        set new_note_ind = " "
+    set gsub_dummy = " "
+    set gsub_status = " "
+    set gsub_process = fillstring(200, " ")
+    set gsub_message = fillstring(200, " ")
+    set dt_tm_text = fillstring(20, " ")
+
+#BEGIN_MAIN
+    /* Set reply->status_data->status to I */
+    set reply->status = "I"  ; Incomplete
+
+    /* Determine if existing note */
+    set cur_note_cnt = 0
+    set new_note_ind = " "
+
+    select into "nl:"
+        pn.product_note_id,
+        pn.updt_cnt,
+        pn.long_text_id
+    from    product_note pn
+    plan    pn  where   pn.product_id           = request->product_id
+                          and pn.active_ind     = 1
+                          and pn.long_text_id   > 0                   
+    detail  
+        cur_note_cnt                      = cur_note_cnt + 1
+        cur_note->cur_product_note_id     = pn.product_note_id
+        cur_note->cur_updt_cnt            = pn.updt_cnt
+        cur_note->long_text_id            = pn.long_text_id
+
+    with    nocounter, forupdate(pn)
+    
+    if (curqual > 0)
+       select into "nl:"
+              lt.long_text_id
+          from    long_text lt
+          plan lt  where   lt.long_text_id = cur_note->long_text_id
+                        
+          detail  
+             cur_note->cur_product_note        = lt.long_text
+             cur_note->long_text_updt_cnt      = lt.updt_cnt
+
+          with    nocounter, forupdate(lt)
+    endif
+
+
+    if (curqual = 0)
+        if (request->product_note_id = 0)
+            if (request->product_note_id = 0
+            and request->updt_cnt = 0)
+                set new_note_ind = "Y"
+                go to ADD_PRODUCT_NOTE_CTRL
+            else
+                set reply->status = "F"
+                set reply->process = "update/archive product_note"
+                set reply->message = "existing product_note row found for create-new-note request"
+                go to EXIT_SCRIPT
+            endif                       
+        else
+            set reply->status = "F"
+            set reply->process = "update/archive product_note"
+            set reply->message = "existing product_note row to be updated/archived could not be found"
+            go to EXIT_SCRIPT
+        endif
+    else
+        if (cur_note_cnt = 1)
+            if (cur_note->cur_product_note_id = request->product_note_id
+            and cur_note->long_text_id = request->long_text_id)
+                if (cur_note->cur_updt_cnt = request->updt_cnt
+                and cur_note->long_text_updt_cnt = request->long_text_updt_cnt)
+                    go to ADD_PRODUCT_NOTE_CTRL
+                else
+                    set reply->status = "F"
+                    set reply->process = "update/archive product_note"
+                    set reply->message = "product_note row has been modified by another user--resubmit changes"
+                    go to EXIT_SCRIPT
+                endif
+            else
+                set reply->status = "F"
+                set reply->process = "update/archive product_note"
+                set reply->message = "current active product_note not found--note not added"
+                go to EXIT_SCRIPT               
+            endif
+        else
+            if (cur_note_cnt > 1)
+                set reply->status = "F"
+                set reply->process = "update/archive product_note"
+                set reply->message = "multiple active proudct_note rows exist--new note could not be appended"
+            else
+                set reply->status = "F"
+                set reply->process = "update/archive product_note"
+                set reply->message = "Script error:  rows selected but detail not processed (cur_note_cnt = 0)"
+            endif
+            go to EXIT_SCRIPT
+        endif
+    endif               ; endif curqual product_note = 0
+
+#ADD_PRODUCT_NOTE_CTRL
+    if (new_note_ind != "Y")
+        call ARCHIVE_PRODUCT_NOTE
+            (
+             /* product_note_id        */ request->product_note_id,
+             /* product_id             */ request->product_id,
+             /* product_note_updtt_cnt */ request->updt_cnt,
+             /* long_text_id           */ request->long_text_id,
+             /* long_text_updt_cnt     */ request->long_text_updt_cnt
+            )
+
+        if (gsub_status = "F")
+            set reply->status = gsub_status
+            set reply->process = gsub_process
+            set reply->message = gsub_message
+        endif
+    endif
+    if (reply->status != "F")
+        call CREATE_PRODUCT_NOTE(gsub_dummy)
+
+        if (reply->status != "F")
+            /* Load reply */
+            set reply->product_note_id      = new_product_note_id
+            set reply->product_note         = new_note->new_product_note
+            set reply->updt_cnt             = 0                     
+            set reply->long_text_id         = new_long_text_id
+            set reply->long_text_updt_cnt   = 0
+
+            set reply->status = "S"
+            set reply->process = "SUCCESS"
+            set reply->message = "product_note added"
+        endif
+    endif
+    go to EXIT_SCRIPT
+
+%i cclsource:bbt_archive_product_note.inc
+END             ; end subroutine ARCHIVE_PRODUCT_NOTE
+
+%i cclsource:bbt_chg_long_text.inc
+END             ; end subroutine CHG_LONG_TEXT
+
+subroutine CREATE_PRODUCT_NOTE(gsub_dummy2)
+
+    /* Retrieve username for insertion into product_note */
+
+    select into "nl:"
+        pnl.username
+    from
+        prsnl pnl
+    where   pnl.person_id   = reqinfo->updt_id
+
+    detail
+        new_note->new_username    = pnl.username
+
+    with    nocounter
+
+    if (curqual = 0)
+        set reply->status = "F"
+        set reply->process = "get personnel username"
+        set reply->message = "get personnel username failed--note not added"
+    else
+
+        /* compile new product_note */
+        set dt_tm_text = format(cnvtdatetime(curdate, curtime), cclfmt->mediumdatetime)
+
+        if (new_note_ind = "Y")
+            set new_note->new_product_note
+                = concat
+                    (
+                     ">> ",    ; record seperator to help in any neccessary conversion
+                     ;trim(request->new_product_note_date), 
+                     trim(dt_tm_text),
+                     "  ", trim(new_note->new_username), 
+                     "   ", trim(request->new_product_note)
+                    )
+        else
+            set new_note->new_product_note 
+                = concat
+                    (
+                     ">> ",    ; record seperator to help in any neccessary conversion
+                     ;trim(request->new_product_note_date), 
+                     trim(dt_tm_text),
+                     "  ", trim(new_note->new_username),
+                     "   ", trim(request->new_product_note),
+                     char(13), char(10), char(13), char(10),   ; carriage return, line feed to separate on display
+                     cur_note->cur_product_note
+                    )   
+        endif
+
+        Call ADD_PRODUCT_NOTE
+            (
+             /* product _id  */ request->product_id,
+             /* product_note */ new_note->new_product_note
+            )
+        
+        if (gsub_status = "F")
+            set reply->status = gsub_status
+            set reply->process = gsub_process
+            set reply->message = gsub_message
+        endif           ; endif gsub_status = "F"
+    endif           ; endif curqual = 0 personnel
+END     ; end subroutine CREATE_PRODUCT_NOTE
+        
+%i cclsource:bbt_add_product_note.inc
+END             ; end subroutine ADD_PRODUCT_NOTE
+
+%i cclsource:bbt_add_long_text.inc
+END             ; end subroutine ADD_LONG_TEXT
+
+#EXIT_SCRIPT
+set count1 = count1 + 1
+if (count1 > size(reply->status_data->subeventstatus,5))
+    set stat = alter(reply->status_data->subeventstatus, count1+1)
+endif
+if (reply->status = "S")
+    set reqinfo->commit_ind = 1
+    set reply->status_data->status = "S"
+    set reply->status_data->subeventstatus[count1]->OperationName = "Success"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "S"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_add_product_note"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "product note added" 
+else
+    set reqinfo->commit_ind = 0
+    set reply->status_data->status = reply->status
+    set reply->status_data->subeventstatus[count1]->OperationName = reply->process
+    set reply->status_data->subeventstatus[count1]->OperationStatus = reply->status
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_add_product_note"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = reply->message
+endif
+
+;for (x = 1 to count1)
+;    call echo(reply->status_data->subeventstatus[count1]->OperationName)
+;    call echo(reply->status_data->subeventstatus[count1]->OperationStatus)
+;    call echo(reply->status_data->subeventstatus[count1]->TargetObjectName)
+;    call echo(reply->status_data->subeventstatus[count1]->TargetObjectValue)
+;endfor
+
+;call echo("record reply:")
+;call echo(reply->status)
+;call echo(reply->process)
+;call echo(reply->message)
+;call echo(reply->product_note_id)
+;call echo(reply->product_note)
+;call echo(reply->updt_cnt)
+
+;call echo("record cur_note")
+;call echo(cur_note->cur_product_note_id)
+;call echo(cur_note->cur_product_note)
+;call echo(cur_note->cur_updt_cnt)
+
+;call echo("record new_note")
+;call echo(new_product_note_id)
+;call echo(new_note->new_username)
+;call echo(new_note->new_product_note)
+;call echo(new_long_text_id)
+
+end go
+
+;Generated by GNU enscript 1.6.4.

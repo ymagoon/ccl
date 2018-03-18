@@ -1,0 +1,341 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Producthistoryreview/bbt_get_prod_rsl_hist.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_prod_rsl_hist.prg
+        Object name:            bbt_get_prod_rsl_hist
+        Request #:              225157
+
+        Product:                Blood Bank
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Load task assay and result information
+                                for a given product for product history review.
+
+        Tables read:            assay_processing_list
+                                code_value
+                                data_map
+                                discrete_task_assay
+                                long_text
+                                perform_result
+                                product_event
+                                result
+                                result_comment
+
+        Tables updated:         None
+        Executing from:
+
+        Special Notes:
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 11/13/96 Linda DeJong         Initial Release                     *
+;    *001 08/22/97 Jon Weekes (JOW)     Modified to return result_event.    *
+;               event_type_cd for result_status_cd instead of               *
+;               result.result_status_cd, so that performed and verified     *
+;               status will show instead of just verified.                  *
+;     002 05/03/99 Doug Saus            Replaced code_value selects with uar*
+;     003 01/26/00 Doug Saus            Added return of delta,normal,critical and review cds
+;     004 01/16/02 Sasi Gandham         Add Order by for Head               *
+;     005 11/18/03 CD4140               Fix defect CAPEP00011607            *
+;     006 08/31/04 JC6727               Modified to return event_sequence.  *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+             drop program BBT_GET_PROD_RSL_HIST:dba go
+             create program BBT_GET_PROD_RSL_HIST:dba
+
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  assays[*]
+            2  task_assay_cd       = f8
+            2  order_id            = f8
+            2  service_resource_cd = f8
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      (
+         1  qual[*]
+            2  order_id                 = f8
+            2  service_resource_cd      = f8
+            2  task_assay_cd            = f8
+            2  task_assay_mnemonic      = vc
+            2  bb_result_processing_cd  = f8
+            2  bb_result_processing_disp = vc
+            2  bb_result_processing_mean = c12
+            2  results[*]
+               3  perform_result_id       = f8
+               3  result_id               = f8
+               3  bb_result_id            = f8
+               3  bb_control_cell_cd      = f8
+               3  result_status_cd        = f8
+               3  result_status_disp      = vc
+               3  result_status_mean      = c12
+               3  result_type_cd          = f8
+               3  result_type_disp        = vc
+               3  result_type_mean        = c12
+               3  nomenclature_id         = f8
+               3  short_string            = vc
+               3  result_value_mean       = c12
+               3  result_value_numeric    = f8
+               3  numeric_raw_value       = f8
+               3  result_value_alpha      = vc
+               3  result_value_dt_tm      = dq8
+               3  long_text_id            = f8     ;yck
+               3  rtf_text                = vc
+               3  ascii_text              = vc
+               3  result_comment_ind      = i2
+               3  perform_personnel_id    = f8
+               3  perform_personnel_name  = vc
+               3  perform_dt_tm           = dq8
+               3  result_code_set_cd      = f8
+               3  result_code_set_disp    = c40
+;003 begin
+               3  delta_cd                = f8
+               3  delta_disp              = vc
+               3  delta_mean              = c12
+               3  normal_cd               = f8
+               3  normal_disp             = vc
+               3  normal_mean             = c12
+               3  critical_cd             = f8
+               3  critical_disp           = vc
+               3  critical_mean           = c12
+               3  review_cd               = f8
+               3  review_disp             = vc
+               3  review_mean             = c12
+               3  event_sequence          = i4 
+;003 end
+%i cclsource:status_block.inc
+      )
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script
+/* do we only get blood bank tests? ???? */
+         set DATA_MAP_TYPE_FLAG          = 0    ;Fill out with correct value.
+         set nbr_of_assays = size(request->assays,5)
+         declare a_cnt                   = i4
+         declare r_cnt                   = i4
+         declare idx                     = i4
+         declare max_r_cnt               = i4
+	     declare skip_result_ind         = i2
+         set retrieve_results_yn         = "N"
+         set reply->status_data.status = "F"
+      /***********************************************************************
+      * Select the order status codes to avoid retrieving                    *
+      ***********************************************************************/
+;003 Begin
+        set in_progress_cd = 0.0
+        set crossmatch_cd = 0.0
+        set cdf_meaning = fillstring(12," ")
+        set cdf_meaning = "16"
+        set stat = uar_get_meaning_by_codeset(1610,cdf_meaning,1,in_progress_cd)
+        if (stat = 1)
+           go to Resize_Reply
+        endif
+;call echo(in_progress_cd)
+        set cdf_meaning = "3"
+        set stat = uar_get_meaning_by_codeset(1610,cdf_meaning,1,crossmatch_cd)
+        if (stat = 1)
+           go to Resize_Reply
+        endif
+;call echo(crossmatch_cd)
+;003 end
+
+      /***********************************************************************
+      * Select order information based on accession                          *
+      * Start with container_accession using the passed accession number     *
+      * Then go to order_serv_res_container (defines the orders/containers   *
+      * to be processed by a service resource) to retrieve the test site     *
+      * where the container will be used.  Next go to the orders table to    *
+      * retrieve the order information such as doctor from the prsnl table,  *
+
+      * the detail tests associated with the order (profile_task_assay) and  *
+      * detail test information.  If products are associated with the order  *
+      * they should be selected also.  If results exist, they will also be   *
+      * selected                                                             *
+      ***********************************************************************/
+         select into "nl:"
+;            result = uar_get_code_display(r.result_status_cd),
+;            result_event = uar_get_code_display(re.event_type_cd),
+;            ocr = uar_get_code_display(ocr.result_status_cd),
+;            result_event_2 = uar_get_code_display(re2.event_type_cd),
+            d.seq,
+            o.seq,
+            o.order_id,
+            dta.seq,
+            dta.task_assay_cd,
+            apr.seq,
+            d2.seq,
+            r.seq,
+            pr.seq,
+            lt.seq,
+            result_comment_yn = decode(rc.seq, "Y", o.seq, "N", "Z"),
+            rc.seq,
+            re.event_dt_tm,
+            prs.username
+         from
+            (dummyt d with seq = value(nbr_of_assays)),
+            orders o,
+            discrete_task_assay dta,
+            assay_processing_r apr,
+            dummyt d2,
+            result r,
+            perform_result pr,
+            nomenclature n,
+            long_text lt,
+            result_comment rc,
+            result_event re,
+            prsnl prs
+/* travel through the plan using a join to the results and then join to any products associated
+ * with the order.  The reason for the orjoin is due to:  example - 7 assay task exist for the order
+ * and 3 products are associated with the order.  The join will cause 21 product event occurrences due
+ * to joining to the product event 7 times.  Thus, need to do the orjoin to get an accurate product count */
+         plan   d
+         join    o    where o.order_id = request->assays[d.seq].order_id
+         join    dta  where dta.task_assay_cd = request->assays[d.seq].task_assay_cd
+         join    apr  where apr.service_resource_cd = request->assays[d.seq].service_resource_cd
+                            and apr.task_assay_cd = dta.task_assay_cd
+         join    r    where r.order_id = request->assays[d.seq].order_id
+                            and r.task_assay_cd = request->assays[d.seq].task_assay_cd
+         join    pr   where pr.result_id = r.result_id
+                            and pr.result_status_cd = r.result_status_cd
+         join    re   where pr.perform_result_id = re.perform_result_id
+                                        and pr.result_id = re.result_id
+         join    prs  where re.event_personnel_id = prs.person_id
+         join    lt   where lt.long_text_id = pr.long_text_id
+         join    n    where n.nomenclature_id = pr.nomenclature_id
+         join    d2   
+         join    rc   where rc.result_id = pr.result_id   
+				order by o.order_id, dta.task_assay_cd
+        head report
+            a_cnt = 0
+            r_cnt = 0
+            max_r_cnt = 0
+
+        head o.order_id
+            r_cnt = 0
+            max_r_cnt = 0
+
+        head dta.task_assay_cd
+        
+            r_cnt = 0                              
+            a_cnt = a_cnt + 1
+            stat = alterlist(reply->qual, a_cnt)
+            stat = alterlist(reply->qual[a_cnt].results, r_cnt)
+            reply->qual[a_cnt].task_assay_cd = dta.task_assay_cd
+            reply->qual[a_cnt].task_assay_mnemonic = dta.mnemonic
+            reply->qual[a_cnt].order_id = o.order_id
+            reply->qual[a_cnt].service_resource_cd = request->assays[d.seq].service_resource_cd
+            reply->qual[a_cnt].bb_result_processing_cd = dta.bb_result_processing_cd
+
+        detail
+            r_cnt = r_cnt + 1
+            /* determine if array resize is necessary */
+            stat = alterlist(reply->qual[a_cnt].results, r_cnt)
+            if (r_cnt > max_r_cnt)
+                max_r_cnt = r_cnt
+            endif
+            reply->qual[a_cnt].results[r_cnt].delta_cd = pr.delta_cd
+            reply->qual[a_cnt].results[r_cnt].normal_cd = pr.normal_cd
+            reply->qual[a_cnt].results[r_cnt].critical_cd = pr.critical_cd
+            reply->qual[a_cnt].results[r_cnt].review_cd = pr.review_cd
+            reply->qual[a_cnt].results[r_cnt].perform_result_id = pr.perform_result_id
+            reply->qual[a_cnt].results[r_cnt].result_id = r.result_id
+            reply->qual[a_cnt].results[r_cnt].bb_result_id = r.bb_result_id
+            reply->qual[a_cnt].results[r_cnt].bb_control_cell_cd = r.bb_control_cell_cd 
+            reply->qual[a_cnt].results[r_cnt].result_status_cd = re.event_type_cd       
+            reply->qual[a_cnt].results[r_cnt].event_sequence = re.event_sequence   
+            reply->qual[a_cnt].results[r_cnt].result_type_cd = pr.result_type_cd
+            if (pr.nomenclature_id > 0)
+                reply->qual[a_cnt].results[r_cnt].nomenclature_id = pr.nomenclature_id
+                reply->qual[a_cnt].results[r_cnt].short_string = n.short_string
+            endif
+            reply->qual[a_cnt].results[r_cnt].result_value_numeric = pr.result_value_numeric
+            reply->qual[a_cnt].results[r_cnt].numeric_raw_value = pr.numeric_raw_value
+            reply->qual[a_cnt].results[r_cnt].result_value_alpha = pr.result_value_alpha
+            reply->qual[a_cnt].results[r_cnt].result_value_dt_tm = pr.result_value_dt_tm
+            reply->qual[a_cnt].results[r_cnt].long_text_id = pr.long_text_id
+            if (lt.long_text_id > 0.0)
+                reply->qual[a_cnt].results[r_cnt].rtf_text = lt.long_text
+            endif
+            reply->qual[a_cnt].results[r_cnt].ascii_text = pr.ascii_text
+            reply->qual[a_cnt].results[r_cnt].perform_personnel_id = prs.person_id
+            reply->qual[a_cnt].results[r_cnt].perform_personnel_name = prs.username
+            reply->qual[a_cnt].results[r_cnt].perform_dt_tm = re.event_dt_tm
+            reply->qual[a_cnt].results[r_cnt].result_code_set_cd = pr.result_code_set_cd
+            if (result_comment_yn = "Y")
+                reply->qual[a_cnt].results[r_cnt].result_comment_ind = 1
+            else
+                reply->qual[a_cnt].results[r_cnt].result_comment_ind = 0
+            endif
+		 
+         foot o.order_id
+            row+0
+
+         foot dta.task_assay_cd
+            row+0
+
+         with
+            nocounter,
+            outerjoin = d2,
+            dontcare = rc,
+            maxqual(rc, 1),
+            memsort          ;Used MemSort option to avoid Unix Error caused by adding order by
+
+
+
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/
+      #Resize_Reply
+         if (a_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+            set a_cnt = 1
+            set max_r_cnt = 1
+         endif
+         end
+         go
+
+
+;Generated by GNU enscript 1.6.4.

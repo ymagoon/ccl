@@ -1,0 +1,590 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/RELEASEPRODUCTS/BBT_GET_XM_BATCH_RELEASE_INFO.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       BBT_GET_XM_BATCH_RELEASE_INFO.prg
+        Object name:            BBT_GET_XM_BATCH_RELEASE_INFO
+        Request #:              225214
+
+        Product:                Pathnet                              
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Get information for release crossmatch and/or
+                                assignment information for a product
+
+        Tables read:            product, blood product, derivative, 
+                                product_event, and product_event children
+                               
+        Tables updated:         none
+        Executing from:         Blood Bank invnetory search dll
+
+        Special Notes:          none
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     003 09/03/96 Martin Olson         Initial release                     *
+;     004 12/14/98 Jon Weekes           Added Supplier_Prefix to reply      *
+;     005 04/28/99 Doug Saus            Replaces code_value selects with uar*
+;     006 01/10/02 Sasi Gandham         Add order by for the Head           *
+;     007 09/08/03 Jason Coy            need to return crossmatch expiration*
+;                                       date and time.                      *
+;     008 11/05/03 Jason Coy            Modify to return formatted accession*
+;                                       number.								*
+;     009 02/08/08 Ronda Zheng          Added owner/inv area filter         *
+;                                       improved performance                *
+;     010 06/01/10 Archita S		Added qualification to where clause *
+;   					of Update, which do not update for  *
+;					product already locked(i.e.state-PL)*
+;     011 08/20/10 AS019178             Fix for CR 1-4112965511,to populate *
+;                                       reply structure by qualifying       *
+;                                       on primary accession for the order  *          
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+        drop program BBT_GET_XM_BATCH_RELEASE_INFO:dba go
+        create program BBT_GET_XM_BATCH_RELEASE_INFO:dba
+       
+       /*
+       record request
+        (
+         1 look_ahead_hrs = i4        ;look ahead hours for all expired crossmatches
+         1 inv_area_qual [*]
+         	2 inv_area_cd = f8
+        )
+        */
+
+        record reply
+        ( 1 qual[*]
+              ;product_table
+              2 product_id = f8
+              2 supplier_prefix = c5                    ; 004
+              2 product_nbr = c20
+              2 product_sub_nbr = c5
+              2 product_cd = f8
+              2 product_disp = c40
+              2 cur_unit_meas_cd = f8
+              2 cur_unit_meas_disp = c40
+              2 cur_expire_dt_tm = dq8
+              2 product_updt_cnt = i4
+
+              ;product notes
+              2 comments_ind = i2
+
+              ;comes from 'decode' in ccl            
+              2 product_type = c2
+      
+              ;blood_product
+              2 cur_abo_cd = f8
+              2 cur_abo_disp = c40
+              2 cur_rh_cd = f8
+              2 cur_rh_disp = c40
+
+              ;derivative
+              2 deriv_updt_cnt = i4
+
+              ;product_event
+              2 nbr_of_states = i4
+              2 qual2[*]
+                3 product_event_id = f8 
+                3 product_id = f8
+                3 person_id = f8
+                3 encntr_id = f8
+                3 order_id = f8
+                3 bb_result_id = f8                
+                3 event_type_cd = f8
+                3 event_type_disp = c40
+                3 event_type_mean = c60
+                3 event_dt_tm = dq8
+                3 event_prsnl_id = f8
+                3 event_updt_cnt = i4
+   
+                ;from crossmatch table
+                3 xm_updt_cnt = i4
+                3 xm_deriv_qty = i4
+                3 xm_reason_cd = f8
+                3 xm_reason_disp = c40
+                3 xm_crossmatch_exp_dt_tm = dq8
+
+                ;from person table
+                3 patient_name  = c100  
+          
+                ;form person_alias table
+                3 person_alias = c100          
+ 
+                ;from person_aborh
+                3 pat_abo_cd = f8
+                3 pat_abo_disp = c15
+                3 pat_rh_cd = f8
+                3 pat_rh_disp = c15
+
+                ;from order_accession_r
+                3 accession_number = c20
+          
+                ;from perform_result
+                3 xm_result = c20
+                 
+              2 status = c2
+              2 err_message =c20
+                            
+
+         1  status_data
+            2  status                    = c1
+            2  subeventstatus[*]
+               3  OperationName          = c15
+               3  OperationStatus        = c1
+               3  TargetObjectName       = c15
+               3  TargetObjectValue      = vc
+
+        )
+
+/* Initialize Variables */
+		declare num = i2 with protect, noconstant(0)
+		
+        set event_date = cnvtdatetime(curdate,curtime3)          
+
+        set reply->status_data->status = "F"
+        set count1 = 0
+        set count2 = 0
+        set xm_event_id = 0.0
+        set mrn_code = 0.0 ;005
+        set tablefrom = "   "
+
+        set crossmatch_event_type_cd = 0.0             ;3
+        set verified_status_cd = 0.0
+        set corrected_status_cd = 0.0
+        set xm_interp_cd = 0.0
+        set cdf_meaning = fillstring(12," ")
+
+        set stscnt = 0
+
+        set uar_failed = 0
+
+        set cdf_meaning = "HISTRY & UPD"
+        set stat = uar_get_meaning_by_codeset(1636,cdf_meaning,1,xm_interp_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_REST
+        endif   
+        
+        set cdf_meaning = "VERIFIED"
+        set stat = uar_get_meaning_by_codeset(1901,cdf_meaning,1,verified_status_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_REST
+        endif   
+
+        set cdf_meaning = "CORRECTED"
+        set stat = uar_get_meaning_by_codeset(1901,cdf_meaning,1,corrected_status_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_REST
+        endif   
+
+        set cdf_meaning = "MRN"
+        set stat = uar_get_meaning_by_codeset(4,cdf_meaning,1,mrn_code)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_REST
+        endif   
+
+        set cdf_meaning = "3"
+        set stat = uar_get_meaning_by_codeset(1610,cdf_meaning,1,crossmatch_event_type_cd)
+        if (stat = 1)
+            set uar_failed = 1
+            go to SKIP_REST
+        endif   
+
+
+#SKIP_REST
+        if (uar_failed = 1)
+           set reply->status_data->status = "F"
+           set stscnt = stscnt + 1
+           set stat = alterlist(reply->status_data->subeventstatus, stscnt)        
+           set reply->status_data->subeventstatus[stscnt]->OperationName = "get code values (uar_get_meaning_by_codeset)"
+           set reply->status_data->subeventstatus[stscnt]->OperationStatus = "F"
+           set reply->status_data->subeventstatus[stscnt]->TargetObjectName = cdf_meaning
+           set reply->status_data->subeventstatus[stscnt]->TargetObjectValue = "F" 
+           GO TO exit_script
+        endif   
+;005 end            
+
+     /****************************************************************************************************************/
+     /* The success of this script is based on the assumption of derivative products not being crossmatched by the   */
+     /* system.  If derivatives are crossmatched then the script will have to be rethought.                          */
+     /****************************************************************************************************************/
+
+        /*FIND ALL PRODUCT_ID's WITH THE EVENT TYPE CODES AND PRODUCT RELATED SPECIFICS AND LOAD THEM INTO THE REPLY
+          THEN JOIN TO THE ARRAY TO GET ALL THE DATA FROM THE TABLES*/
+       
+          set event_date = DATETIMEADD(event_date,request->look_ahead_hrs /24.0)
+
+          select 
+               if(SIZE(request->inv_area_qual, 5) > 0) ;Use filter with inventory areas
+                  plan xm where  (xm.active_ind = 1)
+                      and (CNVTDATETIME(event_date) >= xm.crossmatch_exp_dt_tm)
+                      and (xm.product_id != 0.0)
+                      and (xm.product_id != NULL)
+                  join p where ((xm.product_id = p.product_id)  
+                      and (p.product_id != 0.0)
+                      and (p.product_id != NULL)
+                      and (expand(num, 1, SIZE(request->inv_area_qual, 5), 
+                     p.cur_inv_area_cd, request->inv_area_qual[num].inv_area_cd)))
+               else
+                  plan xm where  (xm.active_ind = 1)
+                     and (CNVTDATETIME(event_date) >= xm.crossmatch_exp_dt_tm)
+                     and (xm.product_id != 0.0)
+                     and (xm.product_id != NULL)
+                  join p where ((xm.product_id = p.product_id)  
+                     and (p.product_id != 0.0)
+                     and (p.product_id != NULL))
+               endif
+          
+           distinct into "nl:"
+              xm.product_id,
+              p.product_id
+           from  
+              crossmatch xm,
+              product p
+    
+           order by p.product_id
+                       
+           head report 
+               count1 = 0
+
+           head p.product_id
+               count1 = count1 + 1
+               if (count1 > size(reply->qual, 5))
+                  stat = alterlist(reply->qual, count1 + 10)
+               endif
+               
+           detail
+               reply->qual[count1].product_id = p.product_id
+               if (p.locked_ind = 1)
+                  reply->qual[count1]->status = "PL"
+               endif
+           with nocounter
+    
+           set stat = alterlist(reply->qual,count1) 
+           set count2 = count1                  ;copy the value for the reply array into count2 so count1 is freed up 
+                                                ;for use in the followin .inc file
+    
+		 
+        /***************************************************************************************************************/
+        /* lock all of the products found, if the lock fails set the status in the reply->result array so that it is   */
+        /* not updated by the script                                                                                   */
+        /***************************************************************************************************************/
+        set count1 = cnvtint(size(reply->qual,5)) 
+        for (count = 1 to count1)
+           update into product p set
+               p.locked_ind = 1,
+               p.updt_cnt = p.updt_cnt + 1,
+               p.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+               p.updt_id = reqinfo->updt_id,
+               p.updt_task = reqinfo->updt_task,
+               p.updt_applctx = reqinfo->updt_applctx
+          plan p where (p.product_id = reply->qual[count].product_id)
+                        and (p.product_id != 0.0) 
+                        and (p.product_id != NULL)
+                        and (p.locked_ind = 0 or p.locked_ind = NULL)
+          with nocounter
+
+          if (curqual = 0)
+             ;item not locked
+             if (reply->qual[count]->status != "PL")
+                set reply->qual[count]->status = "LF"
+             endif
+             set reply->qual[count]->err_message = "Unable to lock product table"
+          else
+             ;increment the update count for the product             
+             set reply->qual[count].product_updt_cnt = reply->qual[count].product_updt_cnt + 1
+             set reply->qual[count]->status = "L"
+          endif
+        endfor
+        commit product
+
+
+     /****************************************************************************************************************/
+     /****************************************************************************************************************/
+     /*THE REST OF THE READS OF THE DATA BASE ARE DONE JOINING TO THE REPLY ARRAY FOR EFFICIENCY*/
+        /*GET THE PRODUCT INFORMATION*/
+        set count = 0
+        select into "nl:"
+                ;product
+                p.product_id,
+                p.product_nbr,
+                p.product_sub_nbr,
+                p.cur_expire_dt_tm,
+                  
+                p.product_cd,
+                p.updt_cnt,
+        
+                ;product note
+                pn.product_id,
+
+                ;blood_product
+                b.cur_volume, 
+                b.cur_abo_cd,
+                b.cur_rh_cd,
+
+                ;derivative
+                dr.updt_cnt,
+
+                com_found = decode(pn.seq, "cf","xx"),
+
+                tablefrom = decode(b.seq, "b", dr.seq, "d","x") 
+
+        from  
+              product p,
+              blood_product b,
+              derivative dr,
+              product_note pn,
+              (dummyt d_pn with seq = 1),
+              (dummyt d1 with seq = 1),                     ;dummy table for orjoin
+              (dummyt d with seq = value(count2))          ;dummy table for array
+         
+         plan d
+         join p where (reply->qual[d.seq]->product_id = p.product_id) 
+                      and (p.product_id != 0.0) 
+                      and (p.product_id != NULL)       
+         join (d1 where (d1.seq = 1)
+              join b where (b.product_id = p.product_id)
+              orjoin dr where (dr.product_id = p.product_id))
+         join (d_pn   where (d_pn.seq = 1)
+               join pn   where (pn.product_id = p.product_id)
+                         and pn.active_ind  = 1)
+
+        order by p.product_nbr, p.product_id
+   
+        head p.product_id        
+           count1 = d.seq             ;set the index of the reply array to allow use of inc file
+        detail
+                ;PRODUCT TABLE INFORMATION
+                reply->qual[count1].product_id = p.product_id
+                reply->qual[count1].product_nbr = p.product_nbr
+                reply->qual[count1].product_sub_nbr = p.product_sub_nbr
+                reply->qual[count1].product_updt_cnt = p.updt_cnt
+                reply->qual[count1].product_cd = p.product_cd
+                reply->qual[count1].cur_unit_meas_cd = p.cur_unit_meas_cd
+                reply->qual[count1].cur_expire_dt_tm = cnvtdatetime(p.cur_expire_dt_tm)
+
+                ;product comments
+                if (com_found = "cf" )
+                   reply->qual[count1].comments_ind  = 1               
+                else 
+                   reply->qual[count1].comments_ind  = 0
+                endif
+                
+
+                if (b.seq = 1)                
+                   ;BLOOD_PRODUCT TABLE INFORMATION  
+                   reply->qual[count1].product_type = "B"
+                   reply->qual[count1].supplier_prefix = b.supplier_prefix              ; 004
+                   reply->qual[count1].product_nbr = build(trim(b.supplier_prefix),trim(p.product_nbr))
+                   reply->qual[count1].cur_abo_cd = b.cur_abo_cd
+                   reply->qual[count1].cur_rh_cd = b.cur_rh_cd
+
+                elseif (d.seq = 1)
+                   ;DERIVATIVE INFORMATION
+                   reply->qual[count1].product_type = "D"
+                   reply->qual[count1].deriv_updt_cnt = dr.updt_cnt
+                endif   
+        with nocounter, outerjoin = d_pn
+
+     /****************************************************************************************************************/
+     /****************************************************************************************************************/
+        /*SECOND READ OF DATA BASE FOR PRODUCT EVENTS*/
+        /*Load crossmatch info*/
+        set count1 = size (reply->qual,5)
+        set count = 0
+        
+        select into "nl:" 
+             e.product_event_id,
+             e.product_id,
+             xm.product_event_id,
+             xm.crossmatch_exp_dt_tm
+            
+        from product_event e,
+             crossmatch xm,
+             person per,   
+             person_alias pra,
+             person_aborh abo,  
+             accession_order_r aor,
+             result r, 
+             discrete_task_assay dta,
+             perform_result pr,          
+             (dummyt d1 with seq = 1),        
+             (dummyt d with seq = value(count1))
+
+        plan d
+        
+        join xm  where xm.product_id = reply->qual[d.seq]->product_id
+                   and (xm.active_ind = 1)
+                   and (
+                        ((reply->qual[d.seq]->status != "LF") or (reply->qual[d.seq]->status != "PL"))
+                        and (reply->qual[d.seq]->status != "F")
+                       )
+        join e   where e.product_event_id = xm.product_event_id 
+                   and e.event_type_cd    = crossmatch_event_type_cd
+                   and e.active_ind       = 1
+                          
+        join per where per.person_id      = e.person_id                             
+                   and per.active_ind     = 1
+                   
+        join aor where aor.order_id       = e.order_id 
+                   and aor.primary_flag = 0
+        join pra where pra.person_id      = outerjoin(e.person_id)
+                   and pra.active_ind     = outerjoin(1)
+                   and pra.person_alias_type_cd = outerjoin(mrn_code)
+                      
+        join abo where abo.person_id      = outerjoin(e.person_id)
+                   and abo.active_ind     = outerjoin(1)  
+                  
+        join (d1 where (d1.seq = 1)   
+              join r where (r.bb_result_id = e.bb_result_id) and (e.event_type_cd = crossmatch_event_type_cd)
+              join dta where (dta.task_assay_cd = r.task_assay_cd)
+                              and (dta.bb_result_processing_cd = xm_interp_cd)
+                             
+              join pr  where (pr.result_id = r.result_id)
+                              and ((pr.result_status_cd = verified_status_cd)
+                                    or (pr.result_status_cd = corrected_status_cd))
+              )
+
+        order by xm.product_id 
+        
+        head xm.product_id 
+                  
+           count2 = 0
+           xm_event_id = 0.0
+        
+       detail
+          
+           if (xm_event_id != e.product_event_id)              
+              count2 = count2 + 1
+              stat = alterlist(reply->qual[d.seq]->qual2, count2)
+              ;load the product_event information
+              reply->qual[d.seq]->qual2[count2].product_event_id = e.product_event_id
+              reply->qual[d.seq]->qual2[count2].product_id       = e.product_id
+              reply->qual[d.seq]->qual2[count2].person_id        = e.person_id 
+              reply->qual[d.seq]->qual2[count2].encntr_id        = e.encntr_id
+              reply->qual[d.seq]->qual2[count2].order_id         = e.order_id
+              reply->qual[d.seq]->qual2[count2].event_type_cd    = e.event_type_cd
+              reply->qual[d.seq]->qual2[count2].event_dt_tm      = cnvtdatetime(e.event_dt_tm)
+              reply->qual[d.seq]->qual2[count2].event_prsnl_id   = e.event_prsnl_id
+              reply->qual[d.seq]->qual2[count2].event_updt_cnt   = e.updt_cnt      
+              
+              xm_event_id = e.product_event_id
+              reply->qual[d.seq]->qual2[count2]->xm_deriv_qty    = xm.crossmatch_qty
+              reply->qual[d.seq]->qual2[count2]->xm_updt_cnt     = xm.updt_cnt
+              reply->qual[d.seq]->qual2[count2]->xm_reason_cd    = xm.xm_reason_cd
+              reply->qual[d.seq]->qual2[count2]->xm_crossmatch_exp_dt_tm = cnvtdatetime(xm.crossmatch_exp_dt_tm)
+              ;load the person name
+              reply->qual[d.seq]->qual2[count2]->patient_name    = per.name_full_formatted
+              ;load the alternate_id
+              reply->qual[d.seq]->qual2[count2]->person_alias    = pra.alias
+              ;load the patient aborh
+              reply->qual[d.seq]->qual2[count2]->pat_abo_cd      = abo.abo_cd
+              reply->qual[d.seq]->qual2[count2]->pat_rh_cd       = abo.rh_cd
+              ;load the accession number
+              reply->qual[d.seq]->qual2[count2]->accession_number = cnvtacc(aor.accession)
+              ;load the crossmatch result
+              reply->qual[d.seq]->qual2[count2]->xm_result       = pr.result_value_alpha    
+           endif
+           
+       foot xm.product_id 
+           ;save the number of states
+           reply->qual[d.seq]->nbr_of_states = count2
+       with nocounter
+         
+         
+         
+       /*Load all active product_event*/         
+       select into "nl:" 
+             e.product_event_id
+            
+       from product_event e,                         
+             (dummyt d with seq = value(count1))
+
+       plan d
+        
+       join e   where reply->qual[d.seq]->product_id = e.product_id
+                  and e.active_ind = 1
+                  and (e.event_status_flag < 1 or e.event_status_flag = NULL)
+                  and (
+                       ((reply->qual[d.seq]->status != "LF") or (reply->qual[d.seq]->status != "PL"))
+                        and (reply->qual[d.seq]->status != "F")
+                      )
+                  and e.event_type_cd > 0.0 
+                  and e.event_type_cd != crossmatch_event_type_cd     
+                                    
+        order by e.product_id
+        
+        head e.product_id
+           
+           count2 = size(reply->qual[d.seq]->qual2, 5)
+           
+        detail
+        
+              count2 = count2 + 1
+              stat = alterlist(reply->qual[d.seq]->qual2, count2)
+              ;load the product_event information
+              reply->qual[d.seq]->qual2[count2].product_event_id = e.product_event_id
+              reply->qual[d.seq]->qual2[count2].product_id       = e.product_id
+              reply->qual[d.seq]->qual2[count2].person_id        = e.person_id 
+              reply->qual[d.seq]->qual2[count2].encntr_id        = e.encntr_id
+              reply->qual[d.seq]->qual2[count2].order_id         = e.order_id
+              reply->qual[d.seq]->qual2[count2].event_type_cd    = e.event_type_cd
+              reply->qual[d.seq]->qual2[count2].event_dt_tm      = cnvtdatetime(e.event_dt_tm)
+              reply->qual[d.seq]->qual2[count2].event_prsnl_id   = e.event_prsnl_id
+              reply->qual[d.seq]->qual2[count2].event_updt_cnt   = e.updt_cnt                     
+
+         foot e.product_id 
+              ;save the number of states
+              reply->qual[d.seq]->nbr_of_states = count2
+              
+         with nocounter
+         
+         
+        /*send optional sub status events*/
+         set count1 = size (reply->qual,5)
+         if (count1 = 0)
+            set reply->status_data.status = "Z"
+         else
+            set reply->status_data.status = "S"
+         endif
+
+#exit_script         
+
+end go
+
+
+
+;Generated by GNU enscript 1.6.4.

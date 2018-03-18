@@ -1,0 +1,268 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_upd_qc_data_map/glb_upd_qc_data_map.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       GLB_UPD_QC_DATA_MAP.PRG
+        Object name:            GLB_UPD_QC_DATA_MAP
+        Request #:              257546
+
+        Product:                General Lab / Quality Control
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        UPDATE data map entries for task_assay
+                                service_rescource match
+
+        Tables read:            data_map
+
+        Tables updated:         none
+
+        Executing from:         PathNet General Lab: DB QC Maintenance
+
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 02/26/97 Chad Moats           Initial Release                     *
+;     002 06/16/99 Gary Runde           Update updt_* fields on data map    *
+;                                       table when qc data map is updated   *
+;     003 09/09/03 Kyle Treadway        Added call to dta versioning.       *
+;                                       Also a couple minor bugfixes.       *
+;                                       Feature 35901                       *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program GLB_UPD_QC_DATA_MAP:dba go
+create program GLB_UPD_QC_DATA_MAP:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+/*
+record request
+(
+  1 service_resource_cd         = f8
+  1 procs[*]
+    2 task_assay_cd             = f8
+    2 max_digits		= i2
+    2 min_digits		= i2
+    2 min_decimal_places	= i2
+    2 active_ind		= i2
+)
+*/
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+record reply
+
+(
+%i cclsource:status_block.inc
+)
+
+/****************************************************************************
+*       Versioning records                                                  *
+*****************************************************************************/
+record version_request
+(
+  1 task_assay_cd         = f8
+)
+
+record version_reply
+(
+%i cclsource:status_block.inc
+)
+
+
+/****************************************************************************
+*       Initialize Variables                                                *
+*****************************************************************************/
+      set reply->status_data->status = "F"
+      set found_cnt = 0
+      set proc_cnt = size(request->procs,5)
+      set cnt = 0
+      set failed = "F"
+      set versioning_script_present = "F"
+      
+/* Make sure the DTA Versioning program exists */
+if( checkprg("DCP_ADD_DTA_VERSION") )
+  set versioning_script_present = "T"
+endif
+
+
+/****************************************************************************
+*       Select Records                                                      *
+*****************************************************************************/
+  for(cnt = 1 to proc_cnt)
+  
+  /****************************************************************************
+  *       Archive the current version of the dta before we update             *
+  *****************************************************************************/
+  if( versioning_script_present = "T" )
+    set version_request->task_assay_cd = request->procs[cnt]->task_assay_cd
+    execute dcp_add_dta_version
+    with replace("REQUEST","VERSION_REQUEST"),
+         replace("REPLY","VERSION_REPLY")
+
+    if (version_reply->status_data->status = "F")
+      go to versioning_failed
+    endif
+  endif
+  
+  
+  select into "nl:"
+    dm.task_assay_cd,
+    dm.service_resource_cd
+  from data_map dm
+  where dm.task_assay_cd = request->procs[cnt].task_assay_cd
+    and dm.service_resource_cd = request->service_resource_cd
+    and dm.data_map_type_flag = 1
+  detail
+     found_cnt = found_cnt + 1
+  with nocounter
+
+  if (curqual > 0)
+    update into data_map dm
+    set
+      dm.max_digits = request->procs[cnt].max_digits,
+      dm.min_digits = request->procs[cnt].min_digits,
+      dm.min_decimal_places = request->procs[cnt].min_decimal_places,
+      dm.active_ind = request->procs[cnt].active_ind,
+      dm.updt_cnt = dm.updt_cnt + 1,
+      dm.updt_dt_tm = cnvtdatetime(curdate,curtime3),     ;002
+      dm.updt_id = reqinfo->updt_id,                      ;002
+      dm.updt_task = reqinfo->updt_task,                  ;002
+      dm.updt_applctx = reqinfo->updt_applctx             ;002
+    plan dm
+    where dm.task_assay_cd = request->procs[cnt].task_assay_cd
+      and dm.service_resource_cd = request->service_resource_cd
+      and dm.data_map_type_flag = 1
+    with
+      nocounter
+
+    if (curqual = 0)
+      go to update_failed
+    endif
+  else
+    insert into data_map dm
+    set
+;       n.seq = 1,
+      dm.task_assay_cd = request->procs[cnt].task_assay_cd,
+      dm.service_resource_cd = request->service_resource_cd,
+      dm.data_map_type_flag = 1,
+      dm.active_ind  = request->procs[cnt].active_ind,
+      dm.active_status_cd = reqdata->active_status_cd,
+      dm.active_status_prsnl_id = reqinfo->updt_id,
+      dm.active_status_dt_tm = cnvtdatetime(curdate,curtime3),
+      dm.beg_effective_dt_tm = cnvtdatetime(curdate,curtime3),
+      dm.end_effective_dt_tm = cnvtdatetime("31-dec-2100 00:00:00.00"),
+      dm.result_entry_format   = 0,
+      dm.max_digits = request->procs[cnt].max_digits,
+      dm.min_digits = request->procs[cnt].min_digits,
+      dm.min_decimal_places = request->procs[cnt].min_decimal_places,
+      dm.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+      dm.updt_id = reqinfo->updt_id,
+      dm.updt_task = reqinfo->updt_task,
+      dm.updt_cnt = 0,
+      dm.updt_applctx = reqinfo->updt_applctx
+    plan dm
+    with nocounter
+
+    if (curqual = 0)
+      go to insert_failed
+    endif
+  endif
+  endfor
+
+  go to exit_script
+
+/********************************************************************/
+/* Executed if update to data_map table fails                       */
+/********************************************************************/
+     #update_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "update"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "data_map table"
+      set failed = "T" ; 003 changed from "F"
+      go to exit_script
+
+/********************************************************************/
+/* Executed if insert to data_map table fails                       */
+/********************************************************************/
+     #insert_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "data_map table"
+      set failed = "T" ; 003 changed from "F"
+      go to exit_script
+      
+
+/********************************************************************/
+/* Executed if dta versioning call fails                            */
+/********************************************************************/
+#versioning_failed
+     set reply->status_data->subeventstatus[1]->operationname =
+         "upd"
+     set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+     set reply->status_data->subeventstatus[1]->targetobjectname =
+         "dcp_add_dta_version"
+     set reply->status_data->subeventstatus[1]->targetobjectvalue =
+             build("Update aborted.  DTA Versioning failed:",
+                   version_reply->status_data->targetobjectvalue)
+     set failed = "T"
+     go to exit_script
+
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+#exit_script
+      if (failed = "F")
+         set reply->status_data->status = "S"
+         commit
+      else
+         set reply->status_data->status = "F"
+         rollback
+      endif
+
+free record version_request
+free record version_reply
+
+END
+GO
+
+;Generated by GNU enscript 1.6.4.

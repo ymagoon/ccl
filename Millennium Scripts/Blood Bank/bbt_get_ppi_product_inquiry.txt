@@ -1,0 +1,689 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Patprdinqry/BBT_GET_PPI_PRODUCT_INQUIRY.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Author:                 yck
+        Date Written:           11/28/95
+ 
+        Source file name:       bbt_get_ppi_product_inquiry.prg
+        Object name:            bbt_get_ppi_product_inquiry
+        Request #:              225110
+ 
+        Product:                Transfusion
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Retrieve assign, crossmatch, patient_dispense and transfuse product_event data
+                                for person_id for Patient-Product Inquiry
+ 
+        Tables read:            product, product_nbr, product_event, assign, crossmatch, patient_dispense, transfuse,
+                                bbhist_product, bbhist_product_event, bbhist_special_testing
+        Tables updated:         n/a
+        Executing from:         VB Patient-Product Inquiry
+ 
+        Special Notes:          ?
+ 
+******************************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 06/19/96 Jon Weekes           Initial Release                     *
+;     002 01/27/98 Jon Weekes           Restrutured second select and added *
+;                                       join to special_testing table       *
+;     003 03/03/98 David Hall		Added scans on bbhist_product_event *
+;     004 05/04/99 Matt Benson		Made uar change.		            *
+;     005 12/19/01 John Rieck           Updated to return historical        *
+;                                       products marked as transfused.      *
+;     006 02/14/02 Chris Noe            Modified the reply structure to     *
+;                                       return supplier prefix.             *
+;     007 09/02/05 JA7516               Retrieve electronic_entry_flag      *
+;     008 11/10/05 Paul Lessin			Return order_id                     *
+;	  009 01/11/08 Amy Gum				Added cur_Owner_Area_cd and 		*
+;										cur_inv_area_cd to reply			*
+;	  010 08/20/10 AS019178	            Fix for CR 1-4112965511,to populate *
+;                                       reply structure by qualifying       *
+;	                                    on primary accession for the order  *
+;	  011 02/07/10 Amy Gum					 Add Device to Reply
+;	  012 05/14/14 Gayatri Samala       Fix for CR 1-7925962655, regarding
+;										display of events for derivative when
+;										filter is selected  		 		*
+;~DE~************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program bbt_get_ppi_product_inquiry:dba go
+create program bbt_get_ppi_product_inquiry:dba
+ 
+/*
+record request
+(
+ 1  person_id           = f8
+ 1  eventlist[20]
+     2  event_type_cd   = f8
+ 1  begin_date
+     2  event_year       = i4
+     2  event_month      = i4
+     2  event_day        = i4
+ 1  end_date
+     2  event_year         = i4
+     2  event_month        = i4
+     2  event_day          = i4
+ 
+ 1  begin_dt_tm				= dq8
+ 1  end_dt_tm					= dq8
+)
+*/
+ 
+record reply
+(
+ 1  status                  = c1
+ 1  process                 = vc
+ 1  message                 = vc
+ 1  qual[*]
+     2  product_id          = f8
+     2  product_cd          = f8
+     2  product_disp        = c40
+     2  product_nbr         = c20
+     2  product_sub_nbr     = c5
+     2  cur_abo_cd          = f8
+     2  cur_abo_disp        = c20
+     2  cur_rh_cd           = f8
+     2  cur_rh_disp         = c20
+     2  derivative_ind      = i2
+     2  drv_cur_avail_qty   = i4
+     2  comments_ind        = i2
+     2  eventlist[*]
+         3  product_event_id    = f8
+         3  event_type_cd       = f8
+         3  event_type_disp     = c20
+         3  event_type_mean     = c12
+         3  event_dt_tm         = dq8
+         3  reason_cd           = f8
+         3  reason_disp         = c20
+         3  accession           = c20
+         3  quantity            = i4
+         3  intl_units          = i4
+         3  xm_expire_dt_tm     = dq8
+         3  formatted_accession = vc ; Set to the formatted accession
+         3  order_id            = f8
+     2  spectestlist[*]
+         3  special_testing_cd   = f8
+         3  special_testing_disp = c40
+     2  history_upload_ind		 = i2 ; Set to 1 if the product is pulled from history, otherwise 0
+     2  cross_reference			 = vc ; Cross reference number from the BBHIST_PRODUCT table
+     2  contributor_system_cd	 = f8 ; Contributor system code value from the BBHIST_PRODUCT table
+     2  contributor_system_disp  = c40 ; Contributor system display value from the BBHIST_PRODUCT table
+     2  upload_dt_tm			 = dq8 ; Upload date and time from the BBHIST_PRODUCT table
+     2  supplier_prefix          = c5  ;Supplier prefix from bbhist_product or blood_product
+     2  electronic_entry_flag    = i2  ;from PRODUCT table
+     2  cur_owner_area_cd		 = f8 
+     2	cur_inv_area_cd			 = f8
+     2  cur_device_id			 = f8
+     2	cur_device_desc			 = c40
+ 
+%i cclsource:status_block.inc
+)
+ 
+record internal
+(
+ 1  productlist[*]
+     2  product_id          = f8
+ 1  event_date
+     2  event_year          = i4
+     2  event_month         = i4
+     2  event_day           = i4
+ 1  eventlist[*]
+     2  product_id          = f8
+     2  product_cd          = f8
+     2  product_nbr         = c20
+     2  product_sub_nbr     = c5
+     2  cur_abo_cd          = f8
+     2  cur_rh_cd           = f8
+     2  derivative_ind      = i2
+     2  drv_cur_avail_qty   = i4
+     2  comments_ind        = i2
+     2  product_event_id    = f8
+     2  event_type_cd       = f8
+     2  event_dt_tm         = dq8
+     2  reason_cd           = f8
+     2  accession           = c20
+     2  quantity            = i4
+     2  intl_units          = i4
+     2  select_ind          = i2
+     2  xm_expire_dt_tm     = dq8
+)
+ 
+%i cclsource:bbt_get_code_value.inc
+ 
+/*
+ * Initialize Global Variables
+ */
+    set reply->status_data->status = "F"
+    set count1 = 0
+    set prod_cnt = 0
+    set prod = 0
+    set new_prod = 0
+    set prod_chk = 0
+    set event = "   "                       ; to be used in DECODE to indicate joined event type
+    set exception_f8 = cnvtreal(0)          ; to be used in DECODE as exception value
+    set exception_c20 = fillstring(20, " ") ; to be used in DECODE as accession exception
+    set exception_c40 = fillstring(40, " ") ; to be used in DECODE as device name exception
+    set event_cnt = 0
+    set max_event_cnt = 0
+    set req_event = 0
+    set req_event_cnt = 0
+    set prod_qual_cnt = 0
+    set prod_event_cnt = 0
+    set max_prod_event_cnt = 0
+    set select_cnt = 0
+    declare from_chk_date = q8  with noconstant(cnvtdatetime(curdate,curtime3))
+    declare to_chk_date = q8    with noconstant(cnvtdatetime(curdate,curtime3))
+ 
+ 
+#BEGIN_MAIN
+        set reply->status_data->status = "Z"
+ 
+		  ; For passivity, ensure that a begin and end date/time were sent in.  If not,
+		  ; use the previous way to search for products.
+        if ((request->begin_dt_tm > 0) and (request->end_dt_tm > 0))
+           set from_chk_date = request->begin_dt_tm
+           set to_chk_date = request->end_dt_tm
+        else
+           ; If the old code sent in 0's for the begin date and 9's for the end date,
+           ; change it to a valid date.
+           if ((request->begin_date->event_year = 0) and (request->end_date->event_year = 9999))
+              set from_chk_date = cnvtdatetime(cnvtdate2("01011800", "DDMMYYYY"),curtime3)
+              set to_chk_date = cnvtdatetime(cnvtdate2("31122100", "DDMMYYYY"),curtime3)
+           else
+              set from_chk_date = cnvtdatetime(cnvtdate2(concat(format(request->begin_date->event_day, "##;P0"),
+                                               format(request->begin_date->event_month, "##;P0"),
+                                               format(request->begin_date->event_year, "####;P0")), "DDMMYYYY"),curtime3)
+ 
+              set to_chk_date = cnvtdatetime(cnvtdate2(concat(format(request->end_date->event_day, "##;P0"),
+                                             format(request->end_date->event_month, "##;P0"),
+                                             format(request->end_date->event_year, "####;P0")), "DDMMYYYY"),curtime3)
+           endif
+	     endif
+ 
+        /*
+         * Retrieve product_id's for all person_id-related product_states from product_event
+         */
+        select into "nl:"
+            pe.product_id
+        from
+            product_event pe    where   pe.person_id                    = request->person_id
+                                          and pe.event_dt_tm between cnvtdatetime(from_chk_date) and cnvtdatetime(to_chk_date)
+                                          and pe.active_ind             = 1
+                                          and (pe.event_status_flag     < 1
+                                                or pe.event_status_flag = NULL)
+                                          and pe.product_id             != NULL
+                                          and pe.product_id             > 0
+ 
+        head report
+            prod_cnt = 0
+            stat = alterlist(internal->productlist, 20)
+ 
+        detail
+            new_prod = prod_cnt + 1
+            ; ** Determine if product_id previously found for another state.  If NOT add to productlist
+            for (prod_chk = 1 to prod_cnt)
+                if (internal->productlist[prod_chk]->product_id = pe.product_id)
+                    new_prod = prod_chk
+                    prod_chk = prod_cnt ; so that for loop is exited
+                endif
+            endfor
+            if (new_prod > prod_cnt)
+               ; ** move pe.event_dt_tm to event_date for comparison to reqeusted date range
+               prod_cnt = new_prod
+               if (mod(prod_cnt, 20) = 1 and prod_cnt != 1)
+                  stat = alterlist(internal->productlist, prod_cnt + 19)
+               endif
+               internal->productlist[prod_cnt]->product_id = pe.product_id
+            endif
+ 
+        with    nocounter
+ 
+;call echo(build("from_chk_date =", from_chk_date))
+;call echo(build("to_chk_date =", to_chk_date))
+
+        if (curqual > 0
+        and prod_cnt > 0)
+            /* resize internal->productlist to # of product_id's in product_event for person_id */
+            set stat = alterlist(internal->productlist, prod_cnt)
+            set req_event_cnt = size(request->eventlist, 5)
+            /*
+             * get blood_product/product_event data and remaining non-person_id product_events
+             */
+             select into "nl:"
+                table_ind = decode(bid.seq, "6bid ", pe.seq, "5pe ", st.seq, "4st ", pn.seq, "3pn ", drv.seq, "2drv",
+                    bp.seq, "1bp ", "xxx"),
+                bp_drv_flg = decode(drv.seq, "drv", bp.seq, "bp ", "xxx"),
+                pn_ind = decode(pn.seq, 1, 0),
+                pe = decode(pe.seq, "pe", "  "),
+                p.product_id,
+                p.product_nbr,
+                p.product_sub_nbr,
+                p.product_cd,
+                p.cur_inv_area_cd,
+                p.cur_owner_area_cd,
+                bp.supplier_prefix,
+                bp.cur_abo_cd,
+                bp.cur_rh_cd,
+                drv.cur_avail_qty,
+                pn.product_note_id,
+                st.special_testing_cd,
+                pe.product_id,
+                pe.product_event_id,
+                pe.event_type_cd,
+                pe.event_dt_tm,
+                pe.order_id,
+                pe.person_id,
+                accession = decode(aor.seq, aor.accession, exception_c20),
+                reason_cd = decode(a.seq, a.assign_reason_cd, xm.seq, xm.xm_reason_cd,
+                    pd.seq, pd.dispense_reason_cd, qu.seq, qu.quar_reason_cd,
+                    tfr.seq, tfr.transfer_reason_cd, exception_f8),
+                quantity = decode(a.seq, a.cur_assign_qty, pd.seq, pd.cur_dispense_qty,
+                    qu.seq, qu.cur_quar_qty, tfn.seq, tfn.cur_transfused_qty, 0),
+                intl_units = decode(a.seq, a.cur_assign_intl_units, pd.seq, pd.cur_dispense_intl_units,
+                    qu.seq, qu.cur_quar_intl_units, tfn.seq, tfn.transfused_intl_units, 0),
+                xm_expire_dt_tm = decode(xm.seq, cnvtdatetime(xm.crossmatch_exp_dt_tm), cnvtdatetime("")),
+                device_name = decode(bid.seq, bid.description, exception_c40)
+            from
+                (dummyt d1 with seq = value(prod_cnt)),
+                product p,
+                (dummyt d_p with seq = 1),
+                product_note pn,
+                blood_product bp,
+                derivative drv,
+                product_event pe,
+                (dummyt d_pe with seq = 1),
+                assign a,
+                auto_directed ad,
+                crossmatch xm,
+                (dummyt d_aor with seq = 1),
+                accession_order_r aor,
+                patient_dispense pd,
+                quarantine qu,
+                transfusion tfn,
+                transfer tfr,
+                special_testing st,
+                bb_inv_device bid
+ 
+            plan    d1
+            join    p       where   p.product_id = internal->productlist[d1.seq]->product_id
+            join    d_p     where   d_p.seq = 1
+                join    bp      where   bp.product_id = p.product_id
+                orjoin  drv     where   drv.product_id = p.product_id
+                orjoin  pn      where   pn.product_id = p.product_id
+                                          and pn.active_ind = 1
+                orjoin  st      where   st.product_id = p.product_id
+                                          and st.active_ind = 1
+                orjoin  (pe      where pe.product_id = internal->productlist[d1.seq]->product_id
+                                            and (pe.person_id = request->person_id
+                                              or pe.person_id = 0
+                                              or pe.person_id = NULL)
+                                            and pe.active_ind = 1
+                                            and (pe.event_status_flag = 0
+                                                or pe.event_status_flag = null)
+                    join    (d_pe   where   d_pe.seq = 1
+                      join  a       where   a.product_event_id = pe.product_event_id
+                                              and a.person_id  = request->person_id
+                      orjoin  ad      where   ad.product_event_id = pe.product_event_id
+                                              and ad.person_id  = request->person_id
+                      orjoin  (xm      where   xm.product_event_id = pe.product_event_id
+                                                 and xm.person_id  = request->person_id
+                          join    (d_aor    where d_aor.seq = 1
+                              join    aor     where   aor.order_id = pe.order_id
+                              					 and aor.primary_flag = 0))
+                      orjoin  pd      where   pd.product_event_id = pe.product_event_id
+                                              and pd.person_id  = request->person_id
+                      orjoin  qu      where   qu.product_event_id = pe.product_event_id
+                      orjoin  tfn     where   tfn.product_event_id = pe.product_event_id
+                                              and tfn.person_id  = request->person_id
+                      orjoin  tfr     where   tfr.product_event_id = pe.product_event_id))
+                orjoin  bid		where   bid.bb_inv_device_id = p.cur_dispense_device_id
+                						  and bid.active_ind = 1
+ 
+            order by    p.product_id, table_ind, st.special_testing_cd, pe.product_event_id
+ 
+            head report
+                req = 0
+                stat = alterlist(reply->qual, 10)
+ 
+            head p.product_id
+                prod_qual_cnt = prod_qual_cnt + 1
+
+                if (mod(prod_qual_cnt, 10) = 1 and prod_qual_cnt != 1)
+                    stat = alterlist(reply->qual, prod_qual_cnt + 9)
+                endif
+                reply->qual[prod_qual_cnt]->product_id                  = p.product_id
+                reply->qual[prod_qual_cnt]->product_cd                  = p.product_cd
+                reply->qual[prod_qual_cnt]->product_nbr                 = p.product_nbr
+                reply->qual[prod_qual_cnt]->product_sub_nbr             = p.product_sub_nbr
+                reply->qual[prod_qual_cnt]->cur_owner_area_cd				= p.cur_owner_area_cd  
+                reply->qual[prod_qual_cnt]->cur_inv_area_cd					= p.cur_inv_area_cd 
+                reply->qual[prod_qual_cnt]->electronic_entry_flag       = p.electronic_entry_flag
+                reply->qual[prod_qual_cnt]->cur_device_id				= p.cur_dispense_device_id
+                ; Set the historical product indicator to 0, since the product was pulled from live
+                reply->qual[prod_qual_cnt]->history_upload_ind          = 0
+ 
+                prod_event_cnt = 0
+                stat = alterlist(reply->qual[prod_qual_cnt]->eventlist, 0)
+                stat = alterlist(reply->qual[prod_qual_cnt]->eventlist, 5)
+                req_event_found_ind = 0
+ 				add_event_ind = 0
+                spec_test_cnt = 0
+                stat = alterlist(reply->qual[prod_qual_cnt]->spectestlist, 0)
+ 
+            detail
+                if (trim(table_ind) = "1bp")
+                    drv_ind = 0
+                    reply->qual[prod_qual_cnt]->cur_abo_cd              = bp.cur_abo_cd
+                    reply->qual[prod_qual_cnt]->cur_rh_cd               = bp.cur_rh_cd
+                    reply->qual[prod_qual_cnt]->derivative_ind          = 0
+                    reply->qual[prod_qual_cnt]->drv_cur_avail_qty       = 0
+                    reply->qual[prod_qual_cnt]->supplier_prefix         = bp.supplier_prefix
+                elseif (trim(table_ind) = "2drv")
+                    drv_ind = 1
+                    reply->qual[prod_qual_cnt]->cur_abo_cd              = 0
+                    reply->qual[prod_qual_cnt]->cur_rh_cd               = 0
+                    reply->qual[prod_qual_cnt]->derivative_ind          = 1
+                    reply->qual[prod_qual_cnt]->drv_cur_avail_qty       = drv.cur_avail_qty
+                elseif (trim(table_ind) = "3pn")
+                    reply->qual[prod_qual_cnt]->comments_ind            = pn_ind
+                elseif (trim(table_ind) = "4st")
+                    spec_test_cnt = spec_test_cnt + 1
+                    stat = alterlist(reply->qual[prod_qual_cnt]->spectestlist, spec_test_cnt)
+                    reply->qual[prod_qual_cnt]->spectestlist[spec_test_cnt]->special_testing_cd  = st.special_testing_cd
+                elseif (trim(table_ind) = "5pe"
+                and (drv_ind = 0
+                        or (drv_ind = 1
+                            and pe.person_id != NULL
+                            and pe.person_id > 0)))
+                   	; ** Check if requested event is present in the qualified events
+                    if (req_event_found_ind = 0)
+                    	for (req = 1 to req_event_cnt)
+                    		if (pe.event_type_cd = request->eventlist[req]->event_type_cd)
+                                req_event_found_ind = 1
+                                req = req_event_cnt
+                            endif
+                        endfor
+                    endif
+ 					; for derivatives, if it is requested event, then add to reply
+ 					; for blood products, always add the event to reply. In the foot section of product_id, if requested event
+ 					; is not present, then product will be removed from the reply
+                    if (drv_ind = 1)
+                    	if (req_event_found_ind = 1 and 
+                    		(pe.event_dt_tm between cnvtdatetime(from_chk_date) and cnvtdatetime(to_chk_date)))
+                    		add_event_ind = 1
+                    		req_event_found_ind = 0
+                    	else
+                    		add_event_ind = 0
+                    		req_event_found_ind = 0
+                    	endif
+                    else
+                    	add_event_ind = 1
+                    endif
+ 
+                    if (add_event_ind = 1)
+	                    prod_event_cnt = prod_event_cnt + 1
+	                    if (mod(prod_event_cnt, 5) = 1 and prod_event_cnt != 1)
+	                        stat = alterlist(reply->qual[prod_qual_cnt]->eventlist, prod_event_cnt + 4)
+	                    endif
+	                    reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->product_event_id = pe.product_event_id
+	                    reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->event_type_cd    = pe.event_type_cd
+	                    reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->event_dt_tm      = cnvtdatetime(pe.event_dt_tm)
+	                    reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->reason_cd        = reason_cd
+	                    reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->accession        = accession
+	                    reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->quantity         = quantity
+	                    reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->intl_units       = intl_units
+	                    reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->xm_expire_dt_tm  = xm_expire_dt_tm
+	                    ; Return the formatted accession number
+	                    reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->formatted_accession = cnvtacc(aor.accession)
+						reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->order_id = aor.order_id
+					endif
+                elseif (trim(table_ind) = "6bid")
+                	reply->qual[prod_qual_cnt]->cur_device_desc				= device_name
+                endif
+ 
+            foot p.product_id
+            	stat = alterlist(reply->qual[prod_qual_cnt]->eventlist, prod_event_cnt)
+                stat = alterlist(reply->qual[prod_qual_cnt]->spectestlist, spec_test_cnt)
+                ; for derivatives, if no events are qualified, then remove the product from the reply
+            	if (reply->qual[prod_qual_cnt]->derivative_ind = 1)
+            		if (prod_event_cnt = 0)
+            			; Remove product instance (no qualifying product_events)
+            			prod_qual_cnt = prod_qual_cnt - 1
+            		endif
+            	else
+            		if (req_event_found_ind = 0)
+            		; Remove product instance (no qualifying product_events)
+            		prod_qual_cnt = prod_qual_cnt - 1
+            		endif
+            	endif
+                 
+ 
+; [MOD 003]
+;            foot report
+; The following line was commented out because it was needed to be performed at the end of the script due
+; to the fact that an additional scan on bbhist_product_event might be necessary.
+;                stat = alterlist(reply->qual, prod_qual_cnt)
+ 
+            with    nocounter, outerjoin(d_pe), outerjoin(d_aor)
+ 
+            if (curqual = 0)
+                set reply->status_data->status = "F"
+                set count1 = count1 + 1
+                set stat = alterlist(reply->status_data->subeventstatus, count1+1)
+                set reply->status_data->subeventstatus[count1]->OperationName
+                    = "get blood_product/product_event"
+                set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+                set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_ppi_product_inquiry"
+                set reply->status_data->subeventstatus[count1]->TargetObjectValue
+     = "Database/Script Error:  blood_product/product_event data could not be retrieved for exiting secondary product_event rows"
+            else
+                if (prod_qual_cnt > 0)
+                    set reply->status_data->status = "S"
+                    set count1 = count1 + 1
+                    set stat = alter(reply->status_data->subeventstatus, count1)
+                    set reply->status_data->subeventstatus[count1]->OperationName
+                        = "SUCCESS"
+                    set reply->status_data->subeventstatus[count1]->OperationStatus = "S"
+                    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_ppi_product_inquiry"
+                    set reply->status_data->subeventstatus[count1]->TargetObjectValue = ""
+                endif
+            endif
+        endif
+#END_MAIN
+ 
+;[MOD 003]
+#CHECK_HISTORY_UPLOAD
+set transfused_event_type_cd = 0.0
+set req_event_cnt = size(request->eventlist, 5)
+ 
+/* find tranfused event type code */
+ 
+set transfused_event_type_cd = GET_CODE_VALUE(1610, "7")
+ 
+/* check bbhist_product_event for requested events */
+/* Currently, we are only looking for transfusion events because bbhist_product_event only allows transfused/destroyed events */
+/* As only transfused events are applicable for historical products, no filter is required for derivatives */
+for (req = 1 to req_event_cnt)
+    if ((transfused_event_type_cd = request->eventlist[req]->event_type_cd) and
+        (transfused_event_type_cd != 0))
+        /* find transfused products on history uploads table */
+        /* if we want to look for other events just add them to the above "if" statement */
+        select into "nl:"
+             hp.product_id
+             , hp.contributor_system_cd
+             , hp.cross_reference
+             , hp.upload_dt_tm
+             , hp.supplier_prefix
+             , product_class_meaning = uar_get_code_meaning(hp.product_class_cd)
+             , pn.product_note_id
+ 
+        from bbhist_product hp
+             , bbhist_product_event hpe
+             , product_note pn
+ 
+        plan hpe where hpe.person_id = request->person_id and
+        					  hpe.event_type_cd = request->eventlist[req]->event_type_cd and
+        					  hpe.event_dt_tm BETWEEN cnvtdatetime(request->begin_dt_tm) AND cnvtdatetime(request->end_dt_tm) and
+                       hpe.active_ind = 1
+ 
+        join hp where hp.product_id  = hpe.product_id
+ 
+        ; Join to the PRODUCT_NOTE table to determine if historical comments exist
+        join pn where pn.bbhist_product_id = OUTERJOIN(hpe.product_id)
+                  and pn.active_ind = OUTERJOIN(1)
+ 
+        order by hpe.product_id, hpe.product_event_id
+ 
+	head report
+	   if (prod_qual_cnt = 0)
+	        stat = alterlist(reply->qual, 10)
+	   endif
+ 
+        head hpe.product_id
+            prod_qual_cnt = prod_qual_cnt + 1
+ 
+            if (mod(prod_qual_cnt, 10) = 1 and prod_qual_cnt != 1)
+                stat = alterlist(reply->qual, prod_qual_cnt + 9)
+            endif
+ 
+            reply->qual[prod_qual_cnt]->product_id                  = hp.product_id
+            reply->qual[prod_qual_cnt]->product_cd                  = hp.product_cd
+            reply->qual[prod_qual_cnt]->product_nbr                 = hp.product_nbr
+            reply->qual[prod_qual_cnt]->product_sub_nbr             = hp.product_sub_nbr
+            reply->qual[prod_qual_cnt]->cur_abo_cd                  = hp.abo_cd
+            reply->qual[prod_qual_cnt]->cur_rh_cd                   = hp.rh_cd
+            if (product_class_meaning = "BLOOD")
+               reply->qual[prod_qual_cnt]->derivative_ind           = 0
+               reply->qual[prod_qual_cnt]->supplier_prefix          = hp.supplier_prefix
+            elseif (product_class_meaning = "DERIVATIVE")
+               reply->qual[prod_qual_cnt]->derivative_ind           = 1
+            endif
+            reply->qual[prod_qual_cnt]->drv_cur_avail_qty           = 0
+            reply->qual[prod_qual_cnt]->comments_ind                = 0
+            reply->qual[prod_qual_cnt]->electronic_entry_flag       = 0
+            ; Set the historical product indicator to 1, since the product was pulled from history
+            reply->qual[prod_qual_cnt]->history_upload_ind          = 1
+            ; Return the cross_reference, upload_dt_tm and contributor system information
+            reply->qual[prod_qual_cnt]->cross_reference  			  = hp.cross_reference
+            reply->qual[prod_qual_cnt]->upload_dt_tm  				  = hp.upload_dt_tm
+            reply->qual[prod_qual_cnt]->contributor_system_cd 		  = hp.contributor_system_cd
+ 
+            ; Check the PRODUCT_NOTE table to determine if comments exist
+            if (pn.product_note_id > 0.0)
+            	reply->qual[prod_qual_cnt]->comments_ind             = 1
+            endif
+ 
+            prod_event_cnt = 0
+            stat = alterlist(reply->qual[prod_qual_cnt]->eventlist, 5)
+            req_event_found_ind = 0
+ 
+        detail
+            prod_event_cnt = prod_event_cnt + 1
+ 
+            if (mod(prod_event_cnt, 5) = 1 and prod_event_cnt != 1)
+                stat = alterlist(reply->qual[prod_qual_cnt]->eventlist, prod_event_cnt + 4)
+            endif
+ 
+	    	reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->product_event_id = hpe.product_event_id
+            reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->event_type_cd    = hpe.event_type_cd
+            reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->event_dt_tm      = cnvtdatetime(hpe.event_dt_tm)
+            reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->reason_cd        = hpe.reason_cd
+            reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->accession        = ""
+            reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->quantity         = hpe.qty
+            reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->intl_units       = 0
+            reply->qual[prod_qual_cnt]->eventlist[prod_event_cnt]->xm_expire_dt_tm  = 0
+ 
+        foot hpe.product_id
+            stat = alterlist(reply->qual[prod_qual_cnt]->eventlist, prod_event_cnt)
+        with nocounter
+    endif
+endfor
+ 
+ 
+; Search BBHIST_SPECIAL_TESTING table for any special testing done on historical products.
+
+if (prod_qual_cnt > 0) ; 007 - Fixed CCL error seen in testing - only do this select if prod_qual_cnt > 0
+	select into "nl:"
+	   hst.special_testing_cd
+ 
+	from
+	   (dummyt d1 with seq = value(prod_qual_cnt))
+	   , bbhist_special_testing hst
+ 
+	plan d1
+ 
+	join hst where hst.product_id = reply->qual[d1.seq]->product_id
+	           and hst.active_ind = 1
+ 
+	order by hst.product_id
+ 
+	head hst.product_id
+	   spec_test_cnt = 0
+ 
+	detail
+	   spec_test_cnt = spec_test_cnt + 1
+ 
+	   if (mod(spec_test_cnt,3) = 1)
+	      stat = alterlist(reply->qual[d1.seq].spectestlist,spec_test_cnt+2)
+	   endif
+ 
+	   reply->qual[d1.seq].spectestlist[spec_test_cnt].special_testing_cd = hst.special_testing_cd
+ 
+	foot hst.product_id
+	   stat = alterlist(reply->qual[d1.seq].spectestlist, spec_test_cnt)
+ 
+	with nocounter
+endif
+ 
+;This alterlist is performed outside of both selects on purpose - do not move to the report writer sections!!
+;Since you can't really assume that either select will be successful, it's needed to be performed at the end (DH)
+set stat = alterlist(reply->qual, prod_qual_cnt)
+ 
+ 
+if (prod_qual_cnt > 0)
+    set reply->status_data->status = "S"
+    set count1 = count1 + 1
+    set stat = alter(reply->status_data->subeventstatus, count1)
+    set reply->status_data->subeventstatus[count1]->OperationName
+        = "SUCCESS"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "S"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "bbt_get_ppi_product_inquiry"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = ""
+endif
+ 
+#EXIT_SCRIPT
+ 
+end go
+
+;Generated by GNU enscript 1.6.4.

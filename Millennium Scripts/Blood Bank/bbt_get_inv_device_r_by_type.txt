@@ -1,0 +1,406 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBInventoryDeviceTool/BBT_GET_INV_DEVICE_R_BY_TYPE.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       bbt_get_inv_device_r_by_type.prg
+        Object name:            bbt_get_inv_device_r_by_type
+        Request #:              225539
+ 
+        Product:                PathNet Transfusion
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Get devices by using the bb_inv_device_r table
+ 
+        Tables read:
+        Tables updated:         none
+        Executing from:         variety
+ 
+        Special Notes:          ?
+ 
+******************************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 03/12/98 David Hall           Initial Release                     *
+;     001 03/25/99 Matt Benson          Switched to use UARs                *
+;     002 01/09/02 SD4221               Use the correct head in the main select
+;     003 12/10/03 Ronda Zheng          Changed the head from bbd_r.bb_inv_device_id
+;                                        back to bid.bb_inv_device_id
+;                                       because some coolers are not associated
+;                                       with location.                      *
+;     004 08/28/12 Satish S Joshi       Modified the script to filter the devices
+;                                       based on the inventory areas or the location codes.
+;                                       Filters added to improve performance, CR 1-6017343898.
+;~DE~************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program bbt_get_inv_device_r_by_type:dba go
+create program bbt_get_inv_device_r_by_type:dba
+ 
+/*
+record request
+(
+  1 device_r_type_mean          = c12
+  1 want_all_devices_ind        = i2  ;this was need for dispense assign to retrieve all coolers since they don't
+  1 typelist[*]                        necessarily have to have a location  
+        2 device_type_mean      = c12
+        2 device_type_cd        = f8
+  1 locationlist[*]
+  		2 location_cd			= f8
+)
+*/
+ 
+Record Reply
+(
+  1 r_list[*]
+    2 device_r_type_cd            = f8
+    2 device_r_type_disp          = vc
+    2 device_r_type_mean          = c12
+    2 device_r_cd                 = f8
+    2 device_r_disp               = vc
+    2 devicelist[*]
+      3 device_type_cd            = f8
+      3 device_type_disp          = vc
+      3 device_type_mean          = c12
+      3 bb_inv_device_id          = f8
+      3 description               = vc
+%i cclsource:status_block.inc
+)
+ 
+ 
+ 
+DECLARE num = I4
+ 
+set reply -> status_data -> status  =  "F"
+set r_cnt = 0
+set device_cnt = 0
+set inv_device_code_set = 17396
+set device_type_code_set = 14203
+set stat = alterlist(reply->r_list, 10)
+ 
+/********************************/
+/***  Get devices by meaning  ***/
+/********************************/
+
+/*********************************************/
+/***  Populate requested device_type_cd's  ***/
+/*********************************************/
+
+select into "nl:"
+        cv.code_value
+from  (dummyt d with seq = value(size(request->typelist,5)))
+      , code_value  cv
+ 
+plan  d
+join  cv  where cv.code_set = device_type_code_set
+                and cv.cdf_meaning = request->typelist[d.seq].device_type_mean
+                and cv.active_ind = 1
+                and cv.begin_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+                and cv.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3)
+ 
+detail
+      request->typelist[d.seq].device_type_cd = cv.code_value
+with nocounter
+ 
+ 
+if (trim(request->device_r_type_mean) > "")
+  set device_r_type_cd = get_code_value(inv_device_code_set, request->device_r_type_mean)
+else
+  set device_r_type_cd = 0.0
+endif
+ 
+
+
+if( validate(request->locationlist) = 0)
+call GET_DEVICES_ALL(null)
+GO TO EXIT_SCRIPT
+endif
+
+ 
+ 
+ 
+ 
+set locationsize = size(request->locationlist,5)
+ 
+ 
+ 
+/*********************
+If there are no input parameter has been provided, retrieve all the devices
+belonging to all the locations/inventory areas.
+*/
+if (locationsize = 0)
+call GET_DEVICES_ALL(null)
+else
+/**************************************
+If the inventory areas or the locations have been provided as input parameters then the
+devices are filtered based on those inputs.
+*/
+select  into "nl:"
+        bid_r.device_r_cd
+        , bid_r.device_r_type_cd
+        , bid.bb_inv_device_id
+        , bid.device_type_cd
+        , bid.description
+        , device_r_type = uar_get_code_display(bid_r.device_r_type_cd)
+        , device_r =  uar_get_code_display(bid_r.device_r_cd)
+        , device_r_type = uar_get_code_display(bid_r.device_r_type_cd)
+        , device_type = uar_get_code_display(bid.device_type_cd)
+ 
+from  (dummyt d with seq = value(size(request->typelist,5)))
+      , bb_inv_device     bid
+      , (dummyt d1 with seq = 1)
+      , bb_inv_device_r     bid_r
+ 
+plan  d     where   d.seq <= size(request->typelist, 5)
+join  bid   where   bid.device_type_cd = request->typelist[d.seq].device_type_cd
+                    and bid.active_ind = 1
+join  (d1   where   d1.seq = 1
+      join  bid_r   where   expand(num,1, locationsize,
+      							bid_r.DEVICE_R_CD,request->locationlist[num]->location_cd)
+      						and bid_r.bb_inv_device_id = bid.bb_inv_device_id 
+      						and (device_r_type_cd > 0.0 and bid_r.device_r_type_cd = device_r_type_cd)
+                            and bid_r.active_ind = 1)
+ 
+order by bid_r.device_r_cd, bid.bb_inv_device_id
+ 
+ 
+ 
+ 
+head report
+    r_cnt = 0
+ 
+head bid_r.device_r_cd
+    call AddLocation(bid_r.device_r_cd,bid_r.device_r_type_cd)
+head bid.bb_inv_device_id
+    call AddDevice(bid.bb_inv_device_id,bid.device_type_cd,bid_r.device_r_cd,bid.description)
+foot bid_r.device_r_cd
+    if (request->want_all_devices_ind = 1 or bid_r.device_r_cd > 0.0)
+      stat = alterlist(reply->r_list[r_cnt].devicelist, device_cnt)
+    endif
+foot report
+    stat = alterlist(reply->r_list, r_cnt)
+ 
+with nocounter
+
+if (request->want_all_devices_ind = 1)
+call GET_DEVICE_WITH_NO_ASSOCIATIONS(null)
+call GET_ALL_DEVICES_WITH_ASSOCIATIONS(null)
+endif
+
+
+
+GO TO EXIT_SCRIPT
+endif
+
+declare GET_DEVICES_ALL(null) = null
+
+subroutine GET_DEVICES_ALL(null)
+select  into "nl:"
+        bid_r.device_r_cd
+        , bid_r.device_r_type_cd
+        , bid.bb_inv_device_id
+        , bid.device_type_cd
+        , bid.description
+        , device_r_type = uar_get_code_display(bid_r.device_r_type_cd)
+        , device_r =  uar_get_code_display(bid_r.device_r_cd)
+        , device_r_type = uar_get_code_display(bid_r.device_r_type_cd)
+        , device_type = uar_get_code_display(bid.device_type_cd)
+ 
+from  (dummyt d with seq = value(size(request->typelist,5)))
+      , bb_inv_device     bid
+      , (dummyt d1 with seq = 1)
+      , bb_inv_device_r     bid_r
+ 
+plan  d     where   d.seq <= size(request->typelist, 5)
+join  bid   where   bid.device_type_cd = request->typelist[d.seq].device_type_cd
+                    and bid.active_ind = 1
+join  (d1   where   d1.seq = 1
+      join  bid_r   where   bid_r.bb_inv_device_id = bid.bb_inv_device_id
+                            and (device_r_type_cd = 0.0)
+                            or (device_r_type_cd > 0.0 and bid_r.device_r_type_cd = device_r_type_cd)
+                            and bid_r.active_ind = 1)
+ 
+order by bid_r.device_r_cd, bid.bb_inv_device_id
+ 
+head report
+    r_cnt = 0
+ 
+head bid_r.device_r_cd
+     call AddLocation(bid_r.device_r_cd,bid_r.device_r_type_cd)
+head bid.bb_inv_device_id
+    call AddDevice(bid.bb_inv_device_id,bid.device_type_cd,bid_r.device_r_cd,bid.description)
+foot bid_r.device_r_cd
+    if (request->want_all_devices_ind = 1 or bid_r.device_r_cd > 0.0)
+      stat = alterlist(reply->r_list[r_cnt].devicelist, device_cnt)
+    endif
+foot report
+    stat = alterlist(reply->r_list, r_cnt)
+ 
+with nocounter, outerjoin = d1
+
+end
+
+declare GET_DEVICE_WITH_NO_ASSOCIATIONS(null) = null
+
+subroutine  GET_DEVICE_WITH_NO_ASSOCIATIONS(null)
+
+SELECT
+	bid.bb_inv_device_id
+	, bid.device_type_cd
+	, bid.description
+FROM
+	bb_inv_device   bid
+
+plan  bid where not exists (SELECT bid_r.bb_inv_device_id from bb_inv_device_r bid_r where bid.bb_inv_device_id = bid_r.
+bb_inv_device_id  and bid_r.active_ind = 1) and bid.ACTIVE_IND = 1 order by bid.BB_INV_DEVICE_ID
+head report
+r_cnt = r_cnt + 1
+stat = alterlist(reply->r_list, r_cnt)
+device_cnt = 0
+
+stat = alterlist(reply->r_list[r_cnt].devicelist, device_cnt + 4)
+head bid.BB_INV_DEVICE_ID
+
+call AddDevice(bid.bb_inv_device_id,bid.device_type_cd,0.0,bid.description)
+foot report
+     stat = alterlist(reply->r_list[r_cnt].devicelist, device_cnt)
+end
+ 
+declare GET_CODE_VALUE(sub_code_set, sub_cdf_meaning) = f8
+subroutine GET_CODE_VALUE(sub_code_set, sub_cdf_meaning)
+    /*
+     * Retrieve code_value using passed code_set and meaning
+     */
+    set gsub_code_value = 0.0
+ 
+ 
+    set stat = uar_get_meaning_by_codeset(sub_code_set, sub_cdf_meaning, 1, gsub_code_value)  ;001
+ 
+    RETURN(gsub_code_value)
+END     ; end subroutine GET_CODE_VALUE
+ 
+ 
+#EXIT_SCRIPT
+ 
+set stat = alterlist(reply->r_list, r_cnt)
+if (r_cnt != 0)
+   set reply -> status_data -> status = "S"
+else
+   set reply -> status_data -> status = "Z"
+endif
+ 
+DECLARE AddLocation(device_r_cd=f8 (value),device_r_type_cd=f8(value)) = NULL
+ 
+ 
+SUBROUTINE AddLocation(device_r_cd,device_r_type_cd)
+    if (request->want_all_devices_ind = 1 or device_r_cd > 0.0)
+      set r_cnt = r_cnt + 1
+      if (mod(r_cnt, 10) = 0 and r_cnt != 1)
+        set stat = alterlist(reply->r_list, r_cnt + 9)
+      endif
+ 
+ 
+      set reply->r_list[r_cnt].device_r_cd                = device_r_cd
+      set reply->r_list[r_cnt].device_r_type_cd           = device_r_type_cd
+ 
+      set device_cnt = 0
+      set stat = alterlist(reply->r_list[r_cnt].devicelist, 5)
+    endif
+ 
+END
+ 
+DECLARE AdddDevice(bb_inv_device_id=f8(value),device_type_cd=f8(value),device_r_cd = f8(value),description=vc(value)) = NULL
+ 
+SUBROUTINE AddDevice(bb_inv_device_id,device_type_cd,device_r_cd,description)
+ 
+    if (request->want_all_devices_ind = 1 or device_r_cd > 0.0)
+      set device_cnt = device_cnt + 1
+      if (mod(device_cnt, 5) = 0 and device_cnt != 1)
+        set stat = alterlist(reply->r_list[r_cnt].devicelist, device_cnt + 4)
+      endif
+ 
+      set reply->r_list[r_cnt].devicelist[device_cnt].bb_inv_device_id    = bb_inv_device_id
+      set reply->r_list[r_cnt].devicelist[device_cnt].device_type_cd      = device_type_cd
+      set reply->r_list[r_cnt].devicelist[device_cnt].description         = description
+    endif
+ 
+END
+declare GET_ALL_DEVICES_WITH_ASSOCIATIONS(null) = NULL
+ 
+SUBROUTINE GET_ALL_DEVICES_WITH_ASSOCIATIONS(null)
+select  into "nl:"
+        bid_r.device_r_cd
+        , bid_r.device_r_type_cd
+        , bid.bb_inv_device_id
+        , bid.device_type_cd
+        , bid.description
+        , device_r_type = uar_get_code_display(bid_r.device_r_type_cd)
+        , device_r =  uar_get_code_display(bid_r.device_r_cd)
+        , device_r_type = uar_get_code_display(bid_r.device_r_type_cd)
+        , device_type = uar_get_code_display(bid.device_type_cd)
+ 
+from  (dummyt d with seq = value(size(request->typelist,5)))
+      , bb_inv_device     bid
+      , (dummyt d1 with seq = 1)
+      , bb_inv_device_r     bid_r
+ 
+plan  d     where   d.seq <= size(request->typelist, 5)
+join  bid   where   bid.device_type_cd = request->typelist[d.seq].device_type_cd
+                    and bid.active_ind = 1
+join  (d1   where   d1.seq = 1
+      join  bid_r   where   bid_r.bb_inv_device_id = bid.bb_inv_device_id
+                            and bid_r.active_ind = 1)
+ 
+order by bid.bb_inv_device_id
+ 
+head report
+ 
+r_cnt = r_cnt + 1
+stat = alterlist(reply->r_list, r_cnt)
+device_cnt = 0
+ 
+     reply->r_list[r_cnt].device_r_cd                = -1
+     stat = alterlist(reply->r_list[r_cnt].devicelist, device_cnt + 4)
+ 
+ 
+head bid.bb_inv_device_id
+    call AddDevice(bid.bb_inv_device_id,bid.device_type_cd,bid_r.device_r_cd,bid.description)
+foot report
+    stat = alterlist(reply->r_list, r_cnt)
+ 
+with counter, maxqual(bid_r, 1)
+ 
+ 
+END
+end go
+ 
+
+;Generated by GNU enscript 1.6.4.

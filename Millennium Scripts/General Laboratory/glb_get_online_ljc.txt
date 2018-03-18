@@ -1,0 +1,991 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_online_ljc/glb_get_online_ljc.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_ONLINE_LJC.PRG
+        Object name:            GLB_GET_ONLINE_LJC
+        Request #:              257537
+
+        Product:                General Lab - Quality Control
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Calculate statistics for a given time period
+
+        Tables read:            n/a
+
+        Tables updated:         qc_result
+
+        Executing from:         General Lab QC Inquiry
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 10/17/96 Chad Moats           Initial Release                     *
+;    *001 12/12/97 Kevin Brunner        Add auto verify logic               *
+;    *002 05/15/98 Chad Moats           Fix data map logic, sum of sqrs     *
+;                                       was using wrong index               *
+;    *003 07/17/98 Chad Moats           Return QC Accession for each data   *
+;                                       point rather than for each lot      *
+;    *004 08/17/98 Chad Moats           Add patient data logic              *
+;    *005 06/10/99 Gary Runde           Return expected mean/sd for each    *
+;					data pt rather than for each lot                        *
+;    *006 01/05/02 Sasi Gandham         Add Fields to Order by for Head, UAR*
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_ONLINE_LJC:dba go
+      create program GLB_GET_ONLINE_LJC:dba
+
+%i cclsource:pcs_subevent.inc
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 control_id              = f8
+         1 service_resource_cd     = f8
+         1 task_assay_cd           = f8
+         1 beg_dt_tm               = dq8
+         1 end_dt_tm               = dq8
+         1 qc_result_type_flag     = i2                 ;004 0=qc, 1=patient
+      )
+
+record reqinfo
+( 1 commit_ind  = i2
+  1 updt_id     = f8
+  1 position_cd = f8
+  1 updt_app    = i4
+  1 updt_task   = i4
+  1 updt_req    = i4
+  1 updt_applctx= i4
+)
+*/
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+         1 stats[*]
+           2 control_name       = vc
+           2 lot_id             = f8
+           2 lot_number         = vc
+           2 task_assay_cd      = f8
+           2 task_assay_disp    = vc
+;003           2 accession          = vc
+           2 service_resource_cd = f8
+           2 service_resource_disp = vc
+           2 sum_of_results     = f8
+           2 sum_of_squares     = f8
+           2 count              = i4
+           2 alpha_flag         = i2
+           2 mean               = f8
+           2 std_dev            = f8
+           2 co_var             = f8
+           2 fval               = f8
+           2 zstat              = f8
+           2 normal_cnt         = i4
+;005       2 expected_mean      = f8
+;005       2 expected_std_dev   = f8
+           2 abnormal_cnt       = i4
+           2 review_cnt         = i4
+           2 max_digits         = i2
+           2 min_decimal_places = i2
+           2 min_digits         = i2
+           2 procs[*]
+             3 expected_mean      	  = f8        ;005
+             3 expected_std_dev   	  = f8        ;005
+             3 lot_id                     = f8
+             3 qc_result_id               = f8
+             3 accession                  = vc                          ;003
+             3 perform_dt_tm              = dq8
+             3 result_type_cd             = f8
+             3 result_value_numeric       = f8
+             3 result_value_alpha         = vc
+             3 result_process_cd          = f8
+             3 result_process_disp        = vc
+             3 result_control_cd          = f8
+             3 result_control_disp        = vc
+             3 result_status_cd           = f8
+             3 result_status_disp               = vc
+             3 result_tech              = vc
+             3 review_tech              = vc
+         1 status_data
+           2 status                = c1
+           2 subeventstatus[1]
+             3 OperationName       = c15
+             3 OperationStatus     = c1
+             3 TargetObjectName    = c15
+             3 TargetObjectValue   = vc
+      )
+
+/***********************************************************************
+* Internal Records                                                     *
+***********************************************************************/
+      record control
+      (
+         1  cntrls[*]
+            2  control_id                = f8
+       )
+
+      record cumrec
+      (
+         1 cums[*]
+           2 cum_sequence                 = i4
+           2 control_name                 = c25
+           2 task_assay_cd                = f8
+           2 accession                    = vc
+           2 mnemonic                     = vc
+           2 lot_id                       = f8
+           2 lot_number                   = vc
+           2 lot_sequence                 = i4
+           2 cum_mean                     = f8
+           2 cum_sum_sqr                  = f8
+           2 cum_count                    = i4
+           2 expected_mean                = f8
+           2 expected_std_dev             = f8
+           2 normal_cnt                   = i4
+           2 abnormal_cnt                 = i4
+           2 review_cnt                   = i4
+       )
+
+         ;* Data used to format a numeric result
+         record formatted
+         (
+            01  template     = c33
+            01  negative_ind = i2
+            01  result_value = c36
+         )
+
+
+     #Script
+      set reply->status_data->status = "F"
+      set s_cnt = 0
+      set x = 0
+      set found = 0
+      declare RESULT_STATUS_CODESET = i4 with protect , constant(1901)
+      declare RESULT_STATUS_ACCEPT_CDF    = c12 with protect , constant("ACCEPT")
+      declare RESULT_STATUS_VERIFIED_CDF  = c12 with protect , constant("VERIFIED")
+      declare RESULT_STATUS_AUTO_VERF_CDF  = c12 with protect , constant("AUTOVERIFIED")
+      declare RESULT_STATUS_REVIEWED_CDF = c12 with protect , constant("REVIEWED")
+      declare RESULT_STATUS_CORRECTED_CDF = c12 with protect , constant("CORRECTED")
+      declare RESULT_STATUS_CHANGED_CDF = c12 with protect , constant("CHANGE")
+      declare RESULT_STATUS_REJECTED_CDF = c12 with protect , constant("REJECT")
+      declare ALPHA_CD = f8 with protect, noconstant(0.0)
+      declare NUMERIC_CD = f8 with protect, noconstant(0.0)
+      declare ALP_NORMAL_CD = f8 with protect, noconstant(0.0)
+      declare WITHIN_RANGE_CD = f8 with protect, noconstant(0.0)
+      declare ALP_ABNORMAL_CD = f8 with protect, noconstant(0.0)
+      declare ALP_REVIEW_CD = f8 with protect, noconstant(0.0)
+      declare result_status_accept_cd = f8 with protect, noconstant(0.0)
+      declare result_status_reviewed_cd  = f8 with protect, noconstant(0.0)
+      declare result_status_verified_cd  = f8 with protect, noconstant(0.0)
+      declare result_status_auto_verf_cd  = f8 with protect, noconstant(0.0)
+      declare result_status_corrected_cd = f8 with protect, noconstant(0.0)
+      declare result_status_changed_cd = f8 with protect, noconstant(0.0)
+      declare result_status_rejected_cd = f8 with protect, noconstant(0.0)
+      declare value = f8
+      declare mean = f8
+      declare std_dev = f8
+      declare variance1 = f8
+      declare variance2 = f8
+      declare cum_mean = i4
+      declare cum_std_dev = i4
+      set cum_mean = 0.0
+      set cum_std_dev = 0.0
+      set cum_cnt = 0
+      set lot_cnt = 0
+      set p_cnt = 0
+      set proc_cnt = 0
+      set mean = 0.00
+      set detail_cnt = 0
+      set count = 0
+      set std_dev = 0.00
+      set variance1 = 0.00
+      set variance2 = 0.00
+      set value = 0.00
+      set arg_min_digits = 0
+      set arg_max_digits = 0
+      set arg_min_dec_places = 0
+      set arg_less_great_flag = 0
+      set arg_raw_value = 0.0
+      set cntrl_cnt = 0
+      declare SERV_RES_TYPE_CODESET = i4 with protect, constant(223)
+      declare SERV_RES_SUBSECTION_CDF = c12 with protect, constant("SUBSECTION")
+      set data_map_level = 0                                           ;002
+      declare serv_res_subsection_cd  = f8 with protect, noconstant(0.0)
+
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+      if (request->qc_result_type_flag = NULL)			;004
+        set request->qc_result_type_flag = 0			;004
+      endif							;004
+
+   /***********************************************************************
+   * Load code values                                                     *
+   ***********************************************************************/
+
+	SET stat = UAR_GET_MEANING_BY_CODESET(SERV_RES_TYPE_CODESET,SERV_RES_SUBSECTION_CDF,1,serv_res_subsection_cd)
+
+    if (serv_res_subsection_cd = 0)
+        set failed = "T"
+        call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of SUBSECTION_CD (cs 223) failed.")
+        go to exit_script
+    endif
+
+ /***********************************************************************
+ * Load code values                                                     *
+ ***********************************************************************/
+
+SET stat = UAR_GET_MEANING_BY_CODESET(289,"2",1,ALPHA_CD)
+
+if (ALPHA_CD = 0)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of ALPHA (cs 289) failed.")
+  go to exit_script
+endif
+
+SET stat = UAR_GET_MEANING_BY_CODESET(289,"3",1,NUMERIC_CD)
+
+if (NUMERIC_CD = 0)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of NUMERIC (cs 289) failed.")
+  go to exit_script
+endif
+
+SET stat = UAR_GET_MEANING_BY_CODESET(1902,"WITHIN_RANGE",1,WITHIN_RANGE_CD)
+
+if (WITHIN_RANGE_CD = 0)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of WITHIN_RANGE (cs 1902) failed.")
+  go to exit_script
+endif
+
+SET stat = UAR_GET_MEANING_BY_CODESET(1902,"ALP_NORMAL",1,ALP_NORMAL_CD)
+
+if (ALP_NORMAL_CD = 0)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of ALP_NORMAL (cs 1902) failed.")
+  go to exit_script
+endif
+
+SET stat = UAR_GET_MEANING_BY_CODESET(1902,"ALP_ABNORMAL",1,ALP_ABNORMAL_CD)
+
+if (ALP_ABNORMAL_CD = 0)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of ALP_ABNORMAL (cs 1902) failed.")
+  go to exit_script
+endif
+
+SET stat = UAR_GET_MEANING_BY_CODESET(1902,"ALP_REVIEW",1,ALP_REVIEW_CD)
+
+if (ALP_REVIEW_CD = 0)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of ALP_REVIEW (cs 1902) failed.")
+  go to exit_script
+endif
+
+ /***********************************************************************
+ * Load result status code set                                          *
+ ***********************************************************************/
+
+SET stat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_ACCEPT_CDF,1,result_status_accept_cd)
+
+if (result_status_accept_cd = 0)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of ACCEPT (cs 1901) failed.")
+  go to exit_script
+endif
+
+SET stat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,"REVIEWED",1,result_status_reviewed_cd)
+
+if (result_status_reviewed_cd = 0)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of REVIEWED (cs 1901) failed.")
+  go to exit_script
+endif
+
+SET stat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,"VERIFIED",1,result_status_verified_cd)
+
+if (result_status_verified_cd = 0)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of VERIFIED (cs 1901) failed.")
+  go to exit_script
+endif
+
+SET stat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_AUTO_VERF_CDF,1,result_status_auto_verf_cd)
+
+if (result_status_auto_verf_cd = 0)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of AUTO_VERIFIED (cs 1901) failed.")
+  go to exit_script
+endif
+
+SET stat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_CORRECTED_CDF,1,result_status_corrected_cd)
+
+if (result_status_corrected_cd= 0 )
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of CORRECTED (cs 1901) failed.")
+  go to exit_script
+endif
+
+SET stat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_CHANGED_CDF,1,result_status_changed_cd)
+
+if (result_status_changed_cd = 0)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of CHANGED (cs 1901) failed.")
+  go to exit_script
+endif
+
+SET stat = UAR_GET_MEANING_BY_CODESET(RESULT_STATUS_CODESET,RESULT_STATUS_REJECTED_CDF,1,result_status_rejected_cd)
+
+if (result_status_rejected_cd = 0)
+  set failed = "T"
+  call subevent_add("SELECT","F","CODE_VALUE","Selecting for cdf_meaning of REJECTED (cs 1901) failed.")
+  go to exit_script
+endif
+
+        if (request->control_id = 0 and request->qc_result_type_flag = 0)	;004
+call echo("control_id = 0",1)
+          SELECT into "nl:"
+            arl.lot_id,
+            cl.lot_id,
+            cl.control_id
+          FROM
+            assay_resource_lot arl,
+            control_lot cl
+          PLAN arl
+            where arl.service_resource_cd = request->service_resource_cd
+            and arl.task_assay_cd = request->task_assay_cd
+            and request->control_id = 0
+          JOIN cl
+            where cl.lot_id = arl.lot_id
+          ORDER BY cl.control_id
+          HEAD cl.control_id
+           cntrl_cnt = cntrl_cnt + 1
+           if (mod(cntrl_cnt,5) = 1)
+              stat =  alterlist(control->cntrls,cntrl_cnt + 5)
+           endif
+           control->cntrls[cntrl_cnt].control_id = cl.control_id
+          DETAIL
+           detail_cnt = detail_cnt + 1
+          WITH
+            nocounter
+
+          set error_check = ERROR(sErrorMsg,0)   ;get error message
+          if (error_check != 0)
+            set reply->status_data->status = "F"
+            set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+            go to exit_script
+          endif
+
+          set stat = alterlist(control->cntrls, cntrl_cnt)
+
+        else
+call echo("control_id = 1",1)
+          set cntrl_cnt = 1
+          set stat = alterlist(control->cntrls, cntrl_cnt)
+          set control->cntrls[cntrl_cnt].control_id = request->control_id
+        endif
+
+call echo("cntrl_cnt = ", 0)
+call echo(cntrl_cnt, 1)
+
+/***********************************************************************
+* Load control's to search across for results.                         *
+***********************************************************************/
+
+      if (request->qc_result_type_flag = 0)		;004
+         select into "nl:"
+            d.seq,
+            cxc.control_id,
+            cxc.control_x_id
+         from
+            (dummyt d with seq = value(cntrl_cnt)),
+            control_x_check cxc
+         plan d
+         join cxc
+            where cxc.control_id = request->control_id
+         detail
+            found = 0
+            for (x=1 to cntrl_cnt)
+              if (control->cntrls[x].control_id = cxc.control_x_id)
+                found = 1
+                x = cntrl_cnt + 1
+              endif
+            endfor
+            if (found = 0)
+              cntrl_cnt = cntrl_cnt + 1,
+              stat = alterlist(control->cntrls, cntrl_cnt),
+              control->cntrls[cntrl_cnt].control_id = cxc.control_x_id
+            endif
+         with nocounter
+
+         set error_check = ERROR(sErrorMsg,0)   ;get error message
+         if (error_check != 0)
+           set reply->status_data->status = "F"
+           set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+           go to exit_script
+         endif
+      endif
+
+/********************************************************************/
+/* SELECT QC RESULTS                                                */
+/********************************************************************/
+
+    if (request->qc_result_type_flag = 0)		;003
+      ;use this select with qc data
+
+    SELECT
+       into "nl:"
+         d.seq,
+         c.lot_id,
+         c.control_id,
+         cm.control_id,
+         q.qc_result_id,
+         performdatetime = cnvtdatetime(q.perform_dt_tm),
+         q.task_assay_cd,
+         q.result_process_cd,
+         q.lot_id,
+         qrg.qc_group_id,
+         a.accession_id,
+         qe1.qc_result_id,
+         p1.person_id,
+         qe2.qc_result_id,
+         p2.person_id,
+         data_map_exists = decode(dm.seq, "Y", "N"),                   ;002
+         dm.task_assay_cd,                                             ;002
+         d_rg.seq,                                                     ;002
+         rg_exists = decode(rg.seq, "Y", "N"),                         ;002
+         rg.parent_service_resource_cd,                                ;002
+         rg.child_service_resource_cd,                                 ;002
+         rg.resource_group_type_cd,                                    ;002
+         rg.root_service_resource_cd                                   ;002
+       FROM
+         (dummyt d with seq = value(cntrl_cnt)),
+         control_lot c,
+         control_material cm,
+         qc_result q,
+         qc_result_grp qrg,
+         accession a,
+         qc_result_event qe1,
+         prsnl p1,
+         qc_result_event qe2,
+         prsnl p2,
+         data_map dm,                                                  ;002
+         (dummyt d_rg with seq = 1),                                   ;002
+         resource_group rg,                                            ;002
+         (dummyt d1 with seq = 1),
+         (dummyt d2 with seq = 1),
+         (dummyt d5 with seq = 1),
+         (dummyt d9 with seq = 1)
+       PLAN d
+       JOIN c
+          where c.control_id = control->cntrls[d.seq].control_id and
+          ((c.receive_dt_tm between cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm)) or
+          (c.expiration_dt_tm between cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm)) or
+          (c.receive_dt_tm < cnvtdatetime(request->beg_dt_tm) and c.expiration_dt_tm > cnvtdatetime(request->end_dt_tm)))
+       JOIN cm
+          where cm.control_id = c.control_id
+       JOIN d9
+          where d9.seq = 1
+       JOIN q
+         where  q.task_assay_cd = request->task_assay_cd and
+                q.control_id = cm.control_id and
+                q.service_resource_cd = request->service_resource_cd and
+               (q.perform_dt_tm between cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm) or
+                q.perform_dt_tm = cnvtdatetime(request->beg_dt_tm) or
+                q.perform_dt_tm = cnvtdatetime(request->end_dt_tm)) and
+                q.result_status_cd in (result_status_accept_cd,
+                                       result_status_verified_cd,
+                                       result_status_auto_verf_cd,  ;001
+                                       result_status_changed_cd,
+                                       result_status_corrected_cd,
+                                       result_status_rejected_cd)
+       JOIN qrg
+         where qrg.qc_group_id = q.qc_group_id
+       JOIN a
+         where a.accession_id = qrg.accession_id
+       JOIN d1 where d1.seq = 1
+       JOIN qe1
+         where qe1.qc_result_id = q.qc_result_id and
+               (qe1.event_type_cd = result_status_verified_cd
+               or qe1.event_type_cd = result_status_auto_verf_cd  ;001
+               or qe1.event_type_cd = result_status_changed_cd)
+       JOIN p1
+         where p1.person_id = qe1.event_personnel_id
+       JOIN d2 where d2.seq = 1
+       JOIN qe2
+         where qe2.qc_result_id = q.qc_result_id and
+               qe2.event_type_cd = result_status_reviewed_cd
+       JOIN p2
+         where p2.person_id = qe2.event_personnel_id
+       JOIN d5 where d5.seq = 1
+       JOIN dm                                                         ;002
+         where dm.task_assay_cd = q.task_assay_cd                      ;002
+           and dm.data_map_type_flag in (0, 1)                         ;002
+           and dm.active_ind = 1                                       ;002
+       JOIN d_rg                                                       ;002
+         where d_rg.seq = 1                                            ;002
+       JOIN rg                                                         ;002
+         where rg.parent_service_resource_cd = dm.service_resource_cd  ;002
+           and rg.child_service_resource_cd = q.service_resource_cd    ;002
+           and rg.resource_group_type_cd = serv_res_subsection_cd      ;002
+           and rg.root_service_resource_cd = 0.0                       ;002
+       ORDER BY
+         c.control_id,
+         c.lot_id,
+         performdatetime desc,
+         q.qc_result_id
+      HEAD c.lot_id
+           p_cnt = 0
+           s_cnt = s_cnt + 1
+           if (mod(s_cnt,5) = 1)
+              stat =  alterlist(reply->stats,s_cnt + 5)
+           endif
+           reply->stats[s_cnt].task_assay_cd = q.task_assay_cd
+           reply->stats[s_cnt].service_resource_cd = q.service_resource_cd
+           reply->stats[s_cnt].control_name = cm.short_description
+           reply->stats[s_cnt].lot_id = c.lot_id
+           reply->stats[s_cnt].lot_number = c.lot_number
+           cum_cnt = cum_cnt + 1
+           if (mod(cum_cnt,5) = 1)
+               stat = alterlist(cumrec->cums,cum_cnt + 5)
+           endif
+           cumrec->cums[cum_cnt].cum_sequence = cum_cnt,
+             arg_max_digits = 6
+             arg_min_dec_places = 1
+             arg_min_digits = 0
+             arg_less_great_flag = 0
+        HEAD q.qc_result_id
+         data_map_level = 0
+         if (q.lot_id = c.lot_id)
+         p_cnt = p_cnt + 1
+         if (mod(p_cnt,5) = 1)
+            stat =  alterlist(reply->stats[s_cnt].procs,p_cnt + 5)
+         endif
+         reply->stats[s_cnt]->procs[p_cnt].lot_id = q.lot_id,
+         reply->stats[s_cnt]->procs[p_cnt].qc_result_id = q.qc_result_id,
+         reply->stats[s_cnt]->procs[p_cnt].perform_dt_tm = q.perform_dt_tm,
+         reply->stats[s_cnt]->procs[p_cnt].result_type_cd = q.result_type_cd,
+         reply->stats[s_cnt]->procs[p_cnt].result_value_numeric = q.result_value_numeric,
+         reply->stats[s_cnt]->procs[p_cnt].result_value_alpha = q.result_value_alpha,
+         reply->stats[s_cnt]->procs[p_cnt].result_process_cd = q.result_process_cd,
+         reply->stats[s_cnt]->procs[p_cnt].result_control_cd = q.result_control_cd,
+         reply->stats[s_cnt]->procs[p_cnt].result_status_cd = q.result_status_cd
+         reply->stats[s_cnt]->procs[p_cnt].accession = a.accession              ;003
+
+         if (qe1.event_type_cd = result_status_verified_cd)
+           reply->stats[s_cnt]->procs[p_cnt].result_tech = p1.name_full_formatted
+         endif
+         if (qe1.event_type_cd = result_status_auto_verf_cd)  ;001
+           reply->stats[s_cnt]->procs[p_cnt].result_tech = p1.name_full_formatted  ;001
+         endif  ;001
+         if (qe1.event_type_cd = result_status_changed_cd)
+           reply->stats[s_cnt]->procs[p_cnt].result_tech = p1.name_full_formatted
+         endif
+         if (qe2.event_type_cd = result_status_reviewed_cd)
+           reply->stats[s_cnt]->procs[p_cnt].review_tech = p2.name_full_formatted
+         endif
+
+             cumrec->cums[cum_cnt].accession = a.accession
+             if (q.result_type_cd != alpha_cd)
+                cumrec->cums[cum_cnt].cum_mean = cumrec->cums[cum_cnt].cum_mean + q.result_value_numeric
+                cumrec->cums[cum_cnt].cum_sum_sqr = cumrec->cums[cum_cnt].cum_sum_sqr + q.result_value_numeric ** 2
+                cumrec->cums[cum_cnt].cum_count = cumrec->cums[cum_cnt].cum_count + 1
+                cumrec->cums[cum_cnt].expected_mean = q.mean,
+                cumrec->cums[cum_cnt].expected_std_dev = q.statistical_std_dev
+                reply->stats[s_cnt]->procs[p_cnt].expected_mean = q.mean  ;005
+                reply->stats[s_cnt]->procs[p_cnt].expected_std_dev     ;005
+					= q.statistical_std_dev        ;005
+             else
+               cumrec->cums[cum_cnt].cum_count = cumrec->cums[cum_cnt].cum_count + 1
+               if (q.result_process_cd = ALP_NORMAL_CD or q.result_process_cd = WITHIN_RANGE_CD)
+                 cumrec->cums[cum_cnt].normal_cnt = cumrec->cums[cum_cnt].normal_cnt + 1
+               elseif (q.result_process_cd = ALP_ABNORMAL_CD)
+                 cumrec->cums[cum_cnt].abnormal_cnt = cumrec->cums[cum_cnt].abnormal_cnt + 1
+               elseif (q.result_process_cd = ALP_REVIEW_CD)
+                 cumrec->cums[cum_cnt].review_cnt = cumrec->cums[cum_cnt].review_cnt + 1
+               endif
+             endif
+          endif
+       DETAIL
+         if (data_map_exists = "Y")                                    ;002
+            ;* Check for exact match on QC data map                    ;002
+            if (data_map_level <= 3                                    ;002
+            and dm.data_map_type_flag = 1                              ;002
+            and dm.service_resource_cd > 0.0                           ;002
+            and dm.service_resource_cd = q.service_resource_cd)        ;002
+               data_map_level = 4                                      ;002
+               arg_max_digits = dm.max_digits                          ;002
+               arg_min_dec_places = dm.min_decimal_places              ;002
+               arg_min_digits = dm.min_digits                          ;002
+            endif                                                      ;002
+            ;* Check for exact match on data map                       ;002
+            if (data_map_level <= 2                                    ;002
+            and dm.data_map_type_flag = 0                              ;002
+            and dm.service_resource_cd > 0.0                           ;002
+            and dm.service_resource_cd = q.service_resource_cd)        ;002
+               data_map_level = 3                                      ;002
+               arg_max_digits = dm.max_digits                          ;002
+               arg_min_dec_places = dm.min_decimal_places              ;002
+               arg_min_digits = dm.min_digits                          ;002
+            endif                                                      ;002
+            ;* Check for subsection level data map                     ;002
+            if (data_map_level <= 1                                    ;002
+            and dm.data_map_type_flag = 0                              ;002
+            and dm.service_resource_cd > 0.0                           ;002
+            and rg_exists = "Y"                                        ;002
+            and rg.parent_service_resource_cd = dm.service_resource_cd ;002
+            and rg.child_service_resource_cd = q.service_resource_cd)  ;002
+               data_map_level = 2                                      ;002
+               arg_max_digits = dm.max_digits                          ;002
+               arg_min_dec_places = dm.min_decimal_places              ;002
+               arg_min_digits = dm.min_digits                          ;002
+            endif                                                      ;002
+            ;* Check for default all resources level data map          ;002
+            if (data_map_level = 0                                     ;002
+            and dm.data_map_type_flag = 0                              ;002
+            and dm.service_resource_cd = 0.0)                          ;002
+               data_map_level = 1                                      ;002
+               arg_max_digits = dm.max_digits                          ;002
+               arg_min_dec_places = dm.min_decimal_places              ;002
+               arg_min_digits = dm.min_digits                          ;002
+            endif                                                      ;002
+         endif                                                         ;002
+        detail_cnt = detail_cnt + 1
+       FOOT c.lot_id
+;005       reply->stats[s_cnt].expected_mean = cumrec->cums[cum_cnt].expected_mean
+;005       reply->stats[s_cnt].expected_std_dev = cumrec->cums[cum_cnt].expected_std_dev
+           reply->stats[s_cnt].max_digits = arg_max_digits
+           reply->stats[s_cnt].min_decimal_places = arg_min_dec_places
+           reply->stats[s_cnt].min_digits = arg_min_digits
+           if (q.result_type_cd != alpha_cd)
+             value = 0
+               count = cumrec->cums[cum_cnt].cum_count
+               reply->stats[s_cnt].count = count
+               reply->stats[s_cnt].sum_of_results = cumrec->cums[cum_cnt].cum_mean
+               reply->stats[s_cnt].sum_of_squares = cumrec->cums[cum_cnt].cum_sum_sqr
+               reply->stats[s_cnt].mean = cumrec->cums[cum_cnt].cum_mean / count
+;002               stddev = (cumrec->cums[x].cum_sum_sqr - (cumrec->cums[cum_cnt].cum_mean **2)/count)/(count-1)
+               stddev = (cumrec->cums[cum_cnt].cum_sum_sqr - (cumrec->cums[cum_cnt].cum_mean **2)/count)/(count-1) ;002
+               stddev = stddev ** 0.5
+               reply->stats[s_cnt].std_dev = stddev
+               reply->stats[s_cnt].co_var = (stddev / reply->stats[s_cnt].mean) * 100
+call echo(reply->stats[s_cnt].co_var, 0)
+call echo(" = (", 0)
+CALL ECHO(stddev, 0)
+call echo(" / ", 0)
+call echo(reply->stats[s_cnt].mean, 0)
+call echo(") * 100", 1)
+;002               variance1 = cumrec->cums[x].expected_std_dev ** 2
+               variance1 = cumrec->cums[cum_cnt].expected_std_dev ** 2                  ;002
+               variance2 = stddev ** 2
+               if (variance1 > variance2)
+                 reply->stats[s_cnt].fval = variance1 / variance2
+               else
+                 reply->stats[s_cnt].fval = variance2 / variance1
+               endif
+               value = cumrec->cums[cum_cnt].cum_mean / count - cumrec->cums[cum_cnt].expected_mean
+               reply->stats[s_cnt].zstat = value / cumrec->cums[cum_cnt].expected_std_dev
+           else
+             reply->stats[s_cnt].alpha_flag = 1
+             reply->stats[s_cnt].count = cumrec->cums[cum_cnt].cum_count
+             reply->stats[s_cnt].normal_cnt = cumrec->cums[cum_cnt].normal_cnt
+             reply->stats[s_cnt].abnormal_cnt = cumrec->cums[cum_cnt].abnormal_cnt
+             reply->stats[s_cnt].review_cnt = cumrec->cums[cum_cnt].review_cnt
+           endif
+          stat = alterlist(reply->stats[s_cnt].procs,p_cnt)
+       WITH
+         outerjoin = d1,
+         dontcare = qe1,
+         dontcare = p1,
+         outerjoin = d2,
+         dontcare = qe2,
+         dontcare = p2,
+         outerjoin = d5,
+         dontcare = dm,                                                ;002
+         outerjoin = d_rg,                                             ;002
+         dontcare = rg,                                                ;002
+         outerjoin = d9,
+         nocounter
+
+     else    ;use this select for patient data
+
+    SELECT
+       into "nl:"
+         q.qc_result_id,
+         performdatetime = cnvtdatetime(q.perform_dt_tm),
+         q.task_assay_cd,
+         q.result_process_cd,
+         q.lot_id,
+         qe1.qc_result_id,
+         p1.person_id,
+         qe2.qc_result_id,
+         p2.person_id,
+         data_map_exists = decode(dm.seq, "Y", "N"),                   ;002
+         dm.task_assay_cd,                                             ;002
+         d_rg.seq,                                                     ;002
+         rg_exists = decode(rg.seq, "Y", "N"),                         ;002
+         rg.parent_service_resource_cd,                                ;002
+         rg.child_service_resource_cd,                                 ;002
+         rg.resource_group_type_cd,                                    ;002
+         rg.root_service_resource_cd                                   ;002
+       FROM
+         qc_result q,
+         qc_result_event qe1,
+         prsnl p1,
+         qc_result_event qe2,
+         prsnl p2,
+         data_map dm,                                                  ;002
+         (dummyt d_rg with seq = 1),                                   ;002
+         resource_group rg,                                            ;002
+         (dummyt d1 with seq = 1),
+         (dummyt d2 with seq = 1),
+         (dummyt d5 with seq = 1)
+       PLAN q
+         where  q.task_assay_cd = request->task_assay_cd and
+                q.control_id = 0 and
+                q.service_resource_cd = request->service_resource_cd and
+		q.qc_result_type_flag = 1 and
+               (q.perform_dt_tm between cnvtdatetime(request->beg_dt_tm) and cnvtdatetime(request->end_dt_tm) or
+                q.perform_dt_tm = cnvtdatetime(request->beg_dt_tm) or
+                q.perform_dt_tm = cnvtdatetime(request->end_dt_tm)) and
+                q.result_status_cd in (result_status_accept_cd,
+                                       result_status_verified_cd,
+                                       result_status_auto_verf_cd,
+                                       result_status_changed_cd,
+                                       result_status_corrected_cd,
+                                       result_status_rejected_cd)
+       JOIN d1 where d1.seq = 1
+       JOIN qe1
+         where qe1.qc_result_id = q.qc_result_id and
+               (qe1.event_type_cd = result_status_verified_cd
+               or qe1.event_type_cd = result_status_auto_verf_cd  ;001
+               or qe1.event_type_cd = result_status_changed_cd)
+       JOIN p1
+         where p1.person_id = qe1.event_personnel_id
+       JOIN d2 where d2.seq = 1
+       JOIN qe2
+         where qe2.qc_result_id = q.qc_result_id and
+               qe2.event_type_cd = result_status_reviewed_cd
+       JOIN p2
+         where p2.person_id = qe2.event_personnel_id
+       JOIN d5 where d5.seq = 1
+       JOIN dm                                                         ;002
+         where dm.task_assay_cd = q.task_assay_cd                      ;002
+           and dm.data_map_type_flag in (0, 1)                         ;002
+           and dm.active_ind = 1                                       ;002
+       JOIN d_rg                                                       ;002
+         where d_rg.seq = 1                                            ;002
+       JOIN rg                                                         ;002
+         where rg.parent_service_resource_cd = dm.service_resource_cd  ;002
+           and rg.child_service_resource_cd = q.service_resource_cd    ;002
+           and rg.resource_group_type_cd = serv_res_subsection_cd      ;002
+           and rg.root_service_resource_cd = 0.0                       ;002
+       ORDER BY
+         performdatetime desc, q.qc_result_id
+      HEAD REPORT
+           p_cnt = 0
+           s_cnt = s_cnt + 1
+           if (mod(s_cnt,5) = 1)
+              stat =  alterlist(reply->stats,s_cnt + 5)
+           endif
+           reply->stats[s_cnt].task_assay_cd = q.task_assay_cd
+           reply->stats[s_cnt].service_resource_cd = q.service_resource_cd
+           reply->stats[s_cnt].control_name = "Patient Data"
+           reply->stats[s_cnt].lot_id = 0
+           reply->stats[s_cnt].lot_number = "Patient Data"
+           cum_cnt = cum_cnt + 1
+           if (mod(cum_cnt,5) = 1)
+               stat = alterlist(cumrec->cums,cum_cnt + 5)
+           endif
+           cumrec->cums[cum_cnt].cum_sequence = cum_cnt,
+             arg_max_digits = 6
+             arg_min_dec_places = 1
+             arg_min_digits = 0
+             arg_less_great_flag = 0
+        HEAD q.qc_result_id
+         data_map_level = 0
+         p_cnt = p_cnt + 1
+         if (mod(p_cnt,5) = 1)
+            stat =  alterlist(reply->stats[s_cnt].procs,p_cnt + 5)
+         endif
+         reply->stats[s_cnt]->procs[p_cnt].lot_id = q.lot_id,
+         reply->stats[s_cnt]->procs[p_cnt].qc_result_id = q.qc_result_id,
+         reply->stats[s_cnt]->procs[p_cnt].perform_dt_tm = q.perform_dt_tm,
+         reply->stats[s_cnt]->procs[p_cnt].result_type_cd = q.result_type_cd,
+         reply->stats[s_cnt]->procs[p_cnt].result_value_numeric = q.result_value_numeric,
+         reply->stats[s_cnt]->procs[p_cnt].result_value_alpha = q.result_value_alpha,
+         reply->stats[s_cnt]->procs[p_cnt].result_process_cd = q.result_process_cd,
+         reply->stats[s_cnt]->procs[p_cnt].result_control_cd = q.result_control_cd,
+         reply->stats[s_cnt]->procs[p_cnt].result_status_cd = q.result_status_cd
+         reply->stats[s_cnt]->procs[p_cnt].accession = "None"
+         if (qe1.event_type_cd = result_status_verified_cd)
+           reply->stats[s_cnt]->procs[p_cnt].result_tech = p1.name_full_formatted
+         endif
+         if (qe1.event_type_cd = result_status_auto_verf_cd)
+           reply->stats[s_cnt]->procs[p_cnt].result_tech = p1.name_full_formatted
+         endif
+         if (qe1.event_type_cd = result_status_changed_cd)
+           reply->stats[s_cnt]->procs[p_cnt].result_tech = p1.name_full_formatted
+         endif
+         if (qe2.event_type_cd = result_status_reviewed_cd)
+           reply->stats[s_cnt]->procs[p_cnt].review_tech = p2.name_full_formatted
+         endif
+
+         cumrec->cums[cum_cnt].accession = ""
+         cumrec->cums[cum_cnt].cum_mean = cumrec->cums[cum_cnt].cum_mean + q.result_value_numeric
+         cumrec->cums[cum_cnt].cum_sum_sqr = cumrec->cums[cum_cnt].cum_sum_sqr + q.result_value_numeric ** 2
+         cumrec->cums[cum_cnt].cum_count = cumrec->cums[cum_cnt].cum_count + 1
+         cumrec->cums[cum_cnt].expected_mean = q.mean,
+         cumrec->cums[cum_cnt].expected_std_dev = q.statistical_std_dev
+	 reply->stats[s_cnt]->procs[p_cnt].expected_mean = q.mean,  ;005
+         reply->stats[s_cnt]->procs[p_cnt].expected_std_dev         ;005
+					= q.statistical_std_dev     ;005
+       DETAIL
+         if (data_map_exists = "Y")                                    ;002
+            ;* Check for exact match on QC data map                    ;002
+            if (data_map_level <= 3                                    ;002
+            and dm.data_map_type_flag = 1                              ;002
+            and dm.service_resource_cd > 0.0                           ;002
+            and dm.service_resource_cd = q.service_resource_cd)        ;002
+               data_map_level = 4                                      ;002
+               arg_max_digits = dm.max_digits                          ;002
+               arg_min_dec_places = dm.min_decimal_places              ;002
+               arg_min_digits = dm.min_digits                          ;002
+            endif                                                      ;002
+            ;* Check for exact match on data map                       ;002
+            if (data_map_level <= 2                                    ;002
+            and dm.data_map_type_flag = 0                              ;002
+            and dm.service_resource_cd > 0.0                           ;002
+            and dm.service_resource_cd = q.service_resource_cd)        ;002
+               data_map_level = 3                                      ;002
+               arg_max_digits = dm.max_digits                          ;002
+               arg_min_dec_places = dm.min_decimal_places              ;002
+               arg_min_digits = dm.min_digits                          ;002
+            endif                                                      ;002
+            ;* Check for subsection level data map                     ;002
+            if (data_map_level <= 1                                    ;002
+            and dm.data_map_type_flag = 0                              ;002
+            and dm.service_resource_cd > 0.0                           ;002
+            and rg_exists = "Y"                                        ;002
+            and rg.parent_service_resource_cd = dm.service_resource_cd ;002
+            and rg.child_service_resource_cd = q.service_resource_cd)  ;002
+               data_map_level = 2                                      ;002
+               arg_max_digits = dm.max_digits                          ;002
+               arg_min_dec_places = dm.min_decimal_places              ;002
+               arg_min_digits = dm.min_digits                          ;002
+            endif                                                      ;002
+            ;* Check for default all resources level data map          ;002
+            if (data_map_level = 0                                     ;002
+            and dm.data_map_type_flag = 0                              ;002
+            and dm.service_resource_cd = 0.0)                          ;002
+               data_map_level = 1                                      ;002
+               arg_max_digits = dm.max_digits                          ;002
+               arg_min_dec_places = dm.min_decimal_places              ;002
+               arg_min_digits = dm.min_digits                          ;002
+            endif                                                      ;002
+         endif                                                         ;002
+        detail_cnt = detail_cnt + 1
+       FOOT REPORT
+;005       reply->stats[s_cnt].expected_mean = cumrec->cums[cum_cnt].expected_mean
+;005       reply->stats[s_cnt].expected_std_dev = cumrec->cums[cum_cnt].expected_std_dev
+           reply->stats[s_cnt].max_digits = arg_max_digits
+           reply->stats[s_cnt].min_decimal_places = arg_min_dec_places
+           reply->stats[s_cnt].min_digits = arg_min_digits
+           value = 0
+           count = cumrec->cums[cum_cnt].cum_count
+           reply->stats[s_cnt].count = count
+           reply->stats[s_cnt].sum_of_results = cumrec->cums[cum_cnt].cum_mean
+           reply->stats[s_cnt].sum_of_squares = cumrec->cums[cum_cnt].cum_sum_sqr
+           reply->stats[s_cnt].mean = cumrec->cums[cum_cnt].cum_mean / count
+           stddev = (cumrec->cums[cum_cnt].cum_sum_sqr - (cumrec->cums[cum_cnt].cum_mean **2)/count)/(count-1) ;002
+           stddev = stddev ** 0.5
+           reply->stats[s_cnt].std_dev = stddev
+           reply->stats[s_cnt].co_var = (stddev / reply->stats[s_cnt].mean) * 100
+call echo(reply->stats[s_cnt].co_var, 0)
+call echo(" = (", 0)
+CALL ECHO(stddev, 0)
+call echo(" / ", 0)
+call echo(reply->stats[s_cnt].mean, 0)
+call echo(") * 100", 1)
+           variance1 = cumrec->cums[cum_cnt].expected_std_dev ** 2                  ;002
+           variance2 = stddev ** 2
+           if (variance1 > variance2)
+             reply->stats[s_cnt].fval = variance1 / variance2
+           else
+             reply->stats[s_cnt].fval = variance2 / variance1
+           endif
+           value = cumrec->cums[cum_cnt].cum_mean / count - cumrec->cums[cum_cnt].expected_mean
+           reply->stats[s_cnt].zstat = value / cumrec->cums[cum_cnt].expected_std_dev
+
+           stat = alterlist(reply->stats[s_cnt].procs,p_cnt)
+       WITH
+         outerjoin = d1,
+         dontcare = qe1,
+         dontcare = p1,
+         outerjoin = d2,
+         dontcare = qe2,
+         dontcare = p2,
+         outerjoin = d5,
+         dontcare = dm,                                                ;002
+         outerjoin = d_rg,                                             ;002
+         dontcare = rg,                                                ;002
+         nocounter
+
+
+      endif
+
+      set stat = alterlist(reply->stats, s_cnt)
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+      if (curqual = 0)
+         set reply->status_data->status = "Z"
+      else
+         set reply->status_data->status = "S"
+      endif
+
+      go to exit_script
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+     
+END GO
+
+;Generated by GNU enscript 1.6.4.

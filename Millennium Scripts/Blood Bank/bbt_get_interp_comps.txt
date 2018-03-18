@@ -1,0 +1,321 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Interpretationtool/bbt_get_interp_comps.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_get_interp_comps.prg
+        Object name:            bbt_get_interp_comps
+        Request #:              225150
+
+        Product:                Pathnet                        
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Retrieve components associated the interp
+                                task assay
+
+        Tables read:            interp_component
+        Tables updated:         none
+        Executing from:         Interpretation Tool
+
+        Special Notes:          
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 08/09/96 Mike Goings          Initial Release                     *
+;     002 04/29/97 Mike Goings          Donor Interps                       *
+;     003 12/16/97 Mike Goings          Changed source_string to mnemonic   *
+;     004 02/24/98 Mike Goings          Returned days_ineligible and changes*
+;                                       for performance                     *
+;     005 03/06/98 Mike Goings          Returning component type            *
+;     006 12/02/98 Mike Goings          returning unknown_age_ind for range *
+;     007 04/06/99 Matt Benson          Changed selects on CV to uar calls  *
+;     008 08/22/05 Jim Jensen           Retrieve new biohazard_ind.         *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+Drop Program   BBT_GET_INTERP_COMPS : dba go
+Create Program  BBT_GET_INTERP_COMPS : dba
+
+/*
+Record Request
+(
+   1  interp_id = f8
+   1  donor_interp_ind = i2
+)
+*/
+
+Record  Reply
+(
+  1 comp_data[*]
+    2  interp_detail_id    =  f8
+    2  inc_assay_cd        =  f8
+    2  inc_assay_disp      =  vc
+    2  sequence            =  i2
+    2  verified_flag       =  i2
+    2  result_status_cd_disp =  vc
+    2  cross_tm_ind        =  i2
+    2  time_min            =  i4
+    2  time_units_cd       =  F8
+    2  time_units_cd_disp  =  vc
+    2  result_req_flag     =  i4
+    2  meaning             =  vc
+    2  updt_cnt            =  i4
+    2  bb_result_cd        =  f8
+    2  bb_result_cd_disp   =  c40
+    2  bb_result_cd_mean   =  c12
+  1 range_data[*]
+    2  interp_range_id     = f8
+    2  inc_assay_cd        = f8
+    2  sequence            = i4
+    2  nomenclature_id     = f8
+    2  nomenclature_disp    = vc
+    2  age_from_units      = i4
+    2  age_from_units_cd   = f8
+    2  age_from_units_disp = vc
+    2  age_to_units        = i4
+    2  age_to_units_cd     = f8
+    2  age_to_units_cd_disp = vc
+    2  species_cd          = f8
+    2  species_cd_disp     = vc
+    2  race_cd             = f8
+    2  race_cd_disp        = vc
+    2  gender_cd           = f8
+    2  gender_cd_disp      = vc
+    2  updt_cnt            = i4
+    2  unknown_age_ind     = i2
+ 1  hash_data[*]
+    2  result_hash_id            = f8
+    2  inc_assay_cd              = f8
+    2  sequence                  = i4
+    2  from_result_range         = f8
+    2  to_result_range           = f8
+    2  result_hash               = vc
+    2  nomenclature_id           = f8
+    2  nomenclature_disp         = vc
+    2  donor_eligibility_cd      = f8
+    2  donor_eligibility_cd_disp = vc
+    2  donor_reason_cd           = f8
+    2  donor_reason_cd_disp      = vc
+    2  days_ineligible           = i4
+    2  result_cd                 = f8
+    2  result_cd_disp            = vc
+    2  interp_range_id           = f8
+    2  updt_cnt                  = i4
+    2  biohazard_ind             = i2
+%i cclsource:status_block.inc
+)
+set reply->status_data.status  =  "F" 
+set comp_cnt = 0
+set rng_cnt = 0
+set hash_cnt = 0
+set hold_comp_id = 0.0
+set hold_from = 0.0
+set hold_to = 0.0
+set c_idx = 0
+
+if (request->donor_interp_ind = 1)
+   select into "nl:"   
+          ic.*,
+          apr.default_result_type_cd,
+          d.default_result_type_cd,
+          cdf_meaning = decode(apr.seq, uar_get_code_meaning(apr.default_result_type_cd),       ;007
+                uar_get_code_meaning(d.default_result_type_cd))                                 ;007
+
+   from   
+           interp_component ic,
+           interp_task_assay ita,
+           service_directory s,
+           discrete_task_assay d,
+           assay_processing_r apr,
+           (dummyt d1 with seq = 1),
+           (dummyt d2 with seq = 1)
+
+   plan ic where ic.interp_id = request->interp_id and
+           ic.active_ind = 1
+   join d where ic.included_assay_cd = d.task_assay_cd
+   join (d1 where d1.seq = 1
+      join apr where  apr.task_assay_cd = d.task_assay_cd and
+           apr.active_ind  = 1)
+
+   join d2 where d2.seq = 1
+   join ita where ita.task_assay_cd = ic.included_assay_cd and
+           ita.active_ind = 1
+   join s   where s.catalog_cd = ita.order_cat_cd and
+           s.active_ind = 1
+
+   detail
+    if (hold_comp_id != d.task_assay_cd)
+     hold_comp_id = d.task_assay_cd,
+     comp_cnt = comp_cnt + 1,
+     stat = alterlist (reply->comp_data, comp_cnt),
+     reply->comp_data[comp_cnt].interp_detail_id = ic.interp_detail_id,
+     reply->comp_data[comp_cnt].sequence = ic.sequence,
+     reply->comp_data[comp_cnt].verified_flag = ic.verified_flag,
+     reply->comp_data[comp_cnt].inc_assay_cd = ic.included_assay_cd,
+     reply->comp_data[comp_cnt].inc_assay_disp = d.mnemonic,
+     reply->comp_data[comp_cnt].cross_tm_ind = ic.cross_drawn_dt_tm_ind,
+     reply->comp_data[comp_cnt].time_min = ic.time_window_minutes,
+     reply->comp_data[comp_cnt].time_units_cd= ic.time_window_units_cd,
+     reply->comp_data[comp_cnt].result_req_flag = ic.result_req_flag,
+     reply->comp_data[comp_cnt].updt_cnt = ic.updt_cnt,
+     reply->comp_data[comp_cnt].bb_result_cd = s.bb_processing_cd,
+     reply->comp_data[comp_cnt].meaning = cdf_meaning                                           ;007
+   endif
+   with counter, outerjoin(d1), outerjoin = d2
+
+   if (curqual != 0)
+    set reply->status_data->status = "S"        
+   else
+     set reply->status_data->status = "Z",
+     go to exitscript
+   endif
+
+else
+  
+   select into "nl:"   
+          ic.*,
+          cdf_meaning = decode(apr.seq, uar_get_code_meaning(apr.default_result_type_cd),       ;007
+                                uar_get_code_meaning(d.default_result_type_cd))                 ;007
+   from   
+           interp_component ic,
+           discrete_task_assay d,
+           assay_processing_r apr,
+           (dummyt d1 with seq = 1)
+
+   plan ic where ic.interp_id = request->interp_id and
+           ic.active_ind = 1
+   join d where ic.included_assay_cd = d.task_assay_cd
+   join (d1 where d1.seq = 1
+      join apr where  apr.task_assay_cd = d.task_assay_cd and
+           apr.active_ind  = 1)
+
+   detail
+    if (hold_comp_id != d.task_assay_cd)
+     hold_comp_id = d.task_assay_cd,
+     comp_cnt = comp_cnt + 1,
+     stat = alterlist (reply->comp_data, comp_cnt),
+     reply->comp_data[comp_cnt].interp_detail_id = ic.interp_detail_id,
+     reply->comp_data[comp_cnt].sequence = ic.sequence,
+     reply->comp_data[comp_cnt].verified_flag = ic.verified_flag,
+     reply->comp_data[comp_cnt].inc_assay_cd = ic.included_assay_cd,
+     reply->comp_data[comp_cnt].inc_assay_disp = d.mnemonic,
+     reply->comp_data[comp_cnt].cross_tm_ind = ic.cross_drawn_dt_tm_ind,
+     reply->comp_data[comp_cnt].time_min = ic.time_window_minutes,
+     reply->comp_data[comp_cnt].time_units_cd= ic.time_window_units_cd,
+     reply->comp_data[comp_cnt].result_req_flag = ic.result_req_flag,
+     reply->comp_data[comp_cnt].updt_cnt = ic.updt_cnt,
+     reply->comp_data[comp_cnt].bb_result_cd = 0,
+     reply->comp_data[comp_cnt].meaning = cdf_meaning                                   ;007
+    endif
+   with counter, outerjoin(d1)
+
+   if (curqual != 0)
+    set reply->status_data->status = "S"        
+   else
+     set reply->status_data->status = "Z",
+     go to exitscript
+   endif
+endif
+
+select into "nl:"   
+       ir.*
+from   
+        interp_range ir
+
+where ir.interp_id = request->interp_id and
+      ir.active_ind = 1
+
+detail
+  rng_cnt = rng_cnt +1,
+  stat = alterlist (reply->range_data, rng_cnt),
+  reply->range_data[rng_cnt].interp_range_id = ir.interp_range_id,
+  reply->range_data[rng_cnt].sequence = ir.sequence,
+  reply->range_data[rng_cnt].inc_assay_cd = ir.included_assay_cd,
+  reply->range_data[rng_cnt].age_from_units = ir.age_from_minutes,
+  reply->range_data[rng_cnt].age_from_units_cd = ir.age_from_units_cd,
+  reply->range_data[rng_cnt].age_to_units = ir.age_to_minutes,
+  reply->range_data[rng_cnt].age_to_units_cd = ir.age_to_units_cd,
+  reply->range_data[rng_cnt].species_cd = ir.species_cd,
+  reply->range_data[rng_cnt].race_cd = ir.race_cd,
+  reply->range_data[rng_cnt].gender_cd = ir.gender_cd,
+  reply->range_data[rng_cnt].unknown_age_ind = ir.unknown_age_ind,
+  reply->range_data[rng_cnt].updt_cnt = ir.updt_cnt
+with counter
+
+if (curqual != 0) 
+  set reply->status_data->status = "S"        
+else
+  set reply->status_data->status = "R",
+  go to exitscript
+endif
+
+select into "nl:"   
+  rh.*
+from   
+        result_hash rh,
+        nomenclature n
+plan  rh where       rh.interp_id = request->interp_id and
+                    rh.active_ind = 1
+join  n  where n.nomenclature_id = rh.nomenclature_id
+
+detail 
+   hash_cnt = hash_cnt + 1,
+   stat = alterlist (reply -> hash_data, hash_cnt),
+   reply->hash_data[hash_cnt].result_hash_id = rh.result_hash_id,
+   reply->hash_data[hash_cnt].sequence = rh.sequence,
+   reply->hash_data[hash_cnt].from_result_range = rh.from_result_range,
+   reply->hash_data[hash_cnt].to_result_range = rh.to_result_range,
+   reply->hash_data[hash_cnt].result_hash = rh.result_hash,
+   reply->hash_data[hash_cnt].nomenclature_id = rh.nomenclature_id,
+   reply->hash_data[hash_cnt].nomenclature_disp = n.mnemonic,
+   reply->hash_data[hash_cnt].result_cd = rh.result_cd,
+   reply->hash_data[hash_cnt].updt_cnt = rh.updt_cnt,
+   reply->hash_data[hash_cnt].interp_range_id = rh.interp_range_id,
+   reply->hash_data[hash_cnt].inc_assay_cd = rh.included_assay_cd,
+   reply->hash_data[hash_cnt].days_ineligible = rh.days_ineligible,
+   reply->hash_data[hash_cnt].donor_eligibility_cd = rh.donor_eligibility_cd,
+   reply->hash_data[hash_cnt].result_cd = rh.result_cd,
+   reply->hash_data[hash_cnt].donor_reason_cd = rh.donor_reason_cd,
+   reply->hash_data[hash_cnt].biohazard_ind   = rh.biohazard_ind
+
+with counter
+
+if (curqual != 0)  
+  set reply->status_data->status = "S"        
+else
+  set reply->status_data->status = "Z",
+  go to exitscript
+endif
+
+#exitscript
+
+end go
+
+;Generated by GNU enscript 1.6.4.

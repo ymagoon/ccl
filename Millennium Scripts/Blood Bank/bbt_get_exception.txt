@@ -1,0 +1,2151 @@
+ ;;Solution_Test/script/PathNet -- BB Donor/BBDReviewExceptions/BBT_GET_EXCEPTION.PRG Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-1995 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_get_exception.prg
+        Object name:            bbt_get_exception
+        Request #:              225453
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Get blood bank exceptions
+
+        Tables read:            code_value,
+                                bb_exception,
+                                product_event,
+                                product,
+                                blood_product,
+                                person,
+                                encntr_alias,
+                                encntr_prsnl_reltn,
+                                prsnl,
+                                result,
+                                accession_order_r
+
+        Tables updated:         none
+
+        Executing from:         VB
+
+        Special Notes:          none
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 10/20/97 Erin Fisher          Initial Release                     *
+;     002 11/19/97 Erin Fisher          Added continuation logic            *
+;     003 07/10/03 David Bireta         Added  ,0  to order clause where    *
+;										select is distinct                  *
+;                                                                           *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_get_exception:dba go
+create program bbt_get_exception:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+        /*
+        record request
+        (
+          1  beg_dt_tm                = di8
+          1  end_dt_tm                = di8
+          1  exception_type_cd        = f8          
+          1  cdf_meaning              = c12
+          1  last_exception_id        = f8
+          )
+        */
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+        record reply
+        (
+         1  qual[*]
+            2  updt_cnt                      = i4
+            2  exception_id                  = f8
+            2  product_nbr                   = c20
+            2  product_type                  = vc
+            2  cur_expire_dt_tm              = dq8
+            2  accession                     = c20
+            2  physician_name_full_formatted = c100
+            2  patient_name_full_formatted   = c100
+            2  usr_name_full_formatted       = c100
+            2  alias                         = c200
+            2  reason                        = c20     
+            2  active_status_dt_tm           = dq8
+            2  review_dt_tm                  = dq8
+            2  review_status_cd              = f8
+            2  review_by_prsnl_id            = f8
+            2  review_doc_id                 = f8
+            2  long_text                     = vc
+            2  patient_abo_rh                = c20
+            2  product_abo_rh                = c20
+            2  current_abo_rh                = c20
+            2  resulted_abo_rh               = c20
+            2  previous_abo_rh               = c20
+            2  product_antigens              = c20
+            2  patient_antibodies            = c20
+            2  transfusion_req               = c20
+            2  product_att                   = c20
+            2  product_sub_nbr               = c20
+            2  procedure                     = c20
+            2  result                        = c20
+            2  donor_name_full_formatted     =c100
+            2  donor_nbr                     = c20
+            2  donor_abo_rh                  = c20
+            2  eligibility_status            = c20
+            2  donation_procedure            = c20
+%I CCLSOURCE:STATUS_BLOCK.INC
+        )
+/****************************************************************************
+*       Aborh record                                                        *
+*****************************************************************************/
+record aborh
+(
+ 1  aborh_list[*]
+    2  aborh_display = c6
+    2  abo_code      = f8
+    2  rh_code       = f8
+)
+
+
+/****************************************************************************
+*       Antigens record                                                     *
+*****************************************************************************/
+record streq
+(
+ 1  st_list[*]
+    2  st_code     = f8
+    2  st_display  = c20
+)
+
+/****************************************************************************
+*       Antibodies record                                                   *
+*****************************************************************************/
+record anreq
+(
+ 1  an_list[*]
+    2  an_code     = f8
+    2  an_display  = c20
+)
+
+/****************************************************************************
+*       Transfusion Rquirements record                                      *
+*****************************************************************************/
+record trnreq
+(
+ 1  req_list[*]
+    2  trn_code     = f8
+    2  trn_display  = c20
+)
+
+
+/****************************************************************************
+*       Set Statements                                                      *
+*****************************************************************************/
+set stat = alterlist(reply->qual, 10)
+set qual_index = 0
+set mrn_code = 0.0
+set encntr_mrn_code = 0.0
+set admitdoc = 0.0
+set donorid_code = 0.0
+set inprocess_code= 0.0
+/****************************************************************************
+*       Start Code                                                          *
+*****************************************************************************/
+/****************************************************************************
+*       Load encntr_mrn Code                                                *
+*****************************************************************************/
+if (trim(request->cdf_meaning) = "EXPUNITXM" or
+    trim(request->cdf_meaning) = "EXPUNITDIS" or
+    trim(request->cdf_meaning) = "UNCONFDIS" or
+    trim(request->cdf_meaning) = "UNMATXM" or
+    trim(request->cdf_meaning) = "NOTREQDIS" or
+    trim(request->cdf_meaning) = "EXPSPECIMEN" or
+    trim(request->cdf_meaning) = "EXPXMDIS" or
+    trim(request->cdf_meaning) = "NOAGDIS" or
+    trim(request->cdf_meaning) = "UNCORSSIDS" or
+    trim(request->cdf_meaning) = "UNMATDIS")
+    select into "nl:"
+          c.code_value
+    from  code_value c
+    where c.code_set = 319 and
+          c.cdf_meaning = "MRN" and
+          c.active_ind = 1
+    detail
+          encntr_mrn_code = c.code_value
+    with nocounter
+endif
+/****************************************************************************
+*       Load mrn Code                                                       *
+*****************************************************************************/
+if (trim(request->cdf_meaning) = "EXPUNITXM" or
+    trim(request->cdf_meaning) = "EXPUNITDIS" or
+    trim(request->cdf_meaning) = "EXPSPECIMEN" or
+    trim(request->cdf_meaning) = "EXPXMDIS" or
+    trim(request->cdf_meaning) = "NOTREQDIS" or
+    trim(request->cdf_meaning) = "NOAGDIS" or
+    trim(request->cdf_meaning) = "UNCORSSIDS" or
+    trim(request->cdf_meaning) = "UNMATDIS" or
+    trim(request->cdf_meaning) = "UNCONFDIS" or
+    trim(request->cdf_meaning) = "UNMATXM")
+    select into "nl:"
+          c.code_value
+    from  code_value c
+    where c.code_set = 4 and
+        c.cdf_meaning = "MRN" and
+        c.active_ind = 1
+    detail
+        mrn_code = c.code_value
+    with  nocounter
+endif
+/****************************************************************************
+*       Load inprocess_code                                                 *
+*****************************************************************************/
+;used by all
+select into "nl:"
+      c.code_value
+from  code_value c
+where c.code_set = 16229 and
+      c.cdf_meaning = "INPROCESS" and
+      c.active_ind = 1
+detail
+      inprocess_code = c.code_value
+with  nocounter
+
+/****************************************************************************
+*       Load admitdoc Code                                                  *
+*****************************************************************************/
+if (trim(request->cdf_meaning) = "EXPUNITXM" or
+    trim(request->cdf_meaning) = "EXPUNITDIS" or
+    trim(request->cdf_meaning) = "EXPSPECIMEN" or
+    trim(request->cdf_meaning) = "EXPXMDIS" or
+    trim(request->cdf_meaning) = "NOAGDIS" or
+    trim(request->cdf_meaning) = "NOTREQDIS" or
+    trim(request->cdf_meaning) = "PTGTCHG" or
+    trim(request->cdf_meaning) = "PTGTNOCHG" or
+    trim(request->cdf_meaning) = "UNCORSSIDS" or
+    trim(request->cdf_meaning) = "UNMATDIS" or
+    trim(request->cdf_meaning) = "UNCONFDIS" or
+    trim(request->cdf_meaning) = "UNMATXM" or
+    trim(request->cdf_meaning) = "UNGTCHG" or
+    trim(request->cdf_meaning) = "UNGTNOCHG")
+
+    select into "nl:"
+          c.code_value
+    from  code_value c
+    where c.code_set = 333 and
+          c.cdf_meaning = "ADMITDOC" and
+          c.active_ind = 1
+    detail
+          admitdoc = c.code_value
+    with  nocounter
+endif
+/****************************************************************************
+*       Load ddonorid Code                                                  *
+*****************************************************************************/
+if (trim(request->cdf_meaning) = "DONINELIG" or
+    trim(request->cdf_meaning) = "DONPERM" or
+    trim(request->cdf_meaning) = "DONPERMOVER" or
+    trim(request->cdf_meaning) = "REGPERM" or
+    trim(request->cdf_meaning) = "REGPERMOVER" or
+    trim(request->cdf_meaning) = "REGINELIG" or
+    trim(request->cdf_meaning) = "DONVOLEXCD" or
+    trim(request->cdf_meaning) = "REGVOLEXCD" or
+    trim(request->cdf_meaning) = "DONDIRNOMATC" or
+    trim(request->cdf_meaning) = "REGDIRNOMATC")
+    select into "nl:"
+          c.code_value
+    from  code_value c 
+    where c.code_set = 4 and
+          c.cdf_meaning = "DONORID" and
+          c.active_ind = 1
+    detail
+          donorid_code = c.code_value
+    with  nocounter
+endif
+
+/****************************************************************************
+*       Load Aborh Codes                                                    *
+*****************************************************************************/
+if (trim(request->cdf_meaning) = "DONDIRNOMATC" or
+    trim(request->cdf_meaning) = "REGDIRNOMATC" or
+    trim(request->cdf_meaning) = "UNCONFDIS" or
+    trim(request->cdf_meaning) = "UNMATXM" or
+    trim(request->cdf_meaning) = "UNGTCHG" or
+    trim(request->cdf_meaning) = "UNGTNOCHG" or
+    trim(request->cdf_meaning) = "EXPSPECIMEN" or
+    trim(request->cdf_meaning) = "EXPXMDIS" or
+    trim(request->cdf_meaning) = "NOAGDIS" or
+    trim(request->cdf_meaning) = "NOTREQDIS" or
+    trim(request->cdf_meaning) = "PTGTCHG" or
+    trim(request->cdf_meaning) = "PTGTNOCHG" or
+    trim(request->cdf_meaning) = "UNCORSSIDS" or
+    trim(request->cdf_meaning) = "UNMATDIS")
+    
+    set stat = alterlist(aborh->aborh_list, 10)
+
+    set aborh_index = 0
+    select into "nl:"       
+    from    code_value cv1, 
+            code_value_extension cve1, 
+            code_value_extension cve2,
+            (dummyt d1 with seq = 1),
+            code_value cv2,
+            (dummyt d2 with seq = 1),
+            code_value cv3
+    plan    cv1 where cv1.code_set = 1640 and
+            cv1.active_ind = 1
+    join    cve1 where cve1.code_set = 1640 and
+            cv1.code_value = cve1.code_value and
+            cve1.field_name = "ABOOnly_cd"
+    join    cve2 where cve2.code_set = 1640 and
+            cv1.code_value = cve2.code_value and
+            cve2.field_name = "RhOnly_cd"
+    join    d1 where d1.seq = 1
+    join    cv2 where cv2.code_set = 1641 and
+            cnvtint(cve1.field_value) = cv2.code_value
+    join    d2 where d2.seq = 1
+    join    cv3 where cv3.code_set = 1642 and
+            cnvtint(cve2.field_value) = cv3.code_value
+    order by   cve1.field_value,
+            cve2.field_value
+    detail
+            aborh_index = aborh_index + 1
+            if (mod(aborh_index, 10) = 1 and aborh_index != 1)
+                stat = alterlist(aborh->aborh_list, aborh_index + 9)
+            endif
+            aborh->aborh_list[aborh_index]->aborh_display = cv1.display
+            aborh->aborh_list[aborh_index]->abo_code = cv2.code_value
+            aborh->aborh_list[aborh_index]->rh_code  = cv3.code_value
+    with    outerjoin (d1),
+            outerjoin (d2),
+            check,
+            nocounter
+    if (curqual > 0)
+        set stat = alterlist(aborh->aborh_list, aborh_index)
+    endif
+endif
+/****************************************************************************
+*       Load Antigens                                                       *
+*****************************************************************************/
+if (trim(request->cdf_meaning) = "NOAGDIS" or
+    trim(request->cdf_meaning) = "NOTREQDIS")
+    
+    set stat = alterlist(streq->st_list, 10)
+    set st_idx = 0         ;st = specialtesting
+    select into "nl:"
+    from  code_value c1
+    where c1.code_set = 1612 and
+          c1.code_value > 0
+    detail
+          st_idx = st_idx + 1
+          if (mod(st_idx, 10) = 1 and st_idx != 1)
+             stat = alterlist(streq->st_list, st_idx + 9)
+          endif
+          streq->st_list[st_idx]->st_code = c1.code_value
+          streq->st_list[st_idx]->st_display = c1.display
+    with  nocounter
+
+    if (curqual > 0)
+       set stat = alterlist(streq->st_list, st_idx)
+    endif
+endif
+/****************************************************************************
+*       Load Antibodies                                                     *
+*****************************************************************************/
+if (trim(request->cdf_meaning) = "NOAGDIS")
+    set stat = alterlist(anreq->an_list, 10)
+
+    set an_idx = 0         ;an = antibodies
+    select into "nl:"
+    from  code_value c1
+    where c1.code_set = 1613 and
+          c1.code_value > 0
+    detail
+          an_idx = an_idx + 1
+          if (mod(an_idx, 10) = 1 and an_idx != 1)
+              stat = alterlist(anreq->an_list, an_idx + 9)
+          endif
+          anreq->an_list[an_idx]->an_code = c1.code_value
+          anreq->an_list[an_idx]->an_display = c1.display
+    with  nocounter
+
+    if (curqual > 0)
+        set stat = alterlist(anreq->an_list, an_idx)
+    endif
+endif
+/****************************************************************************
+*       Load Transfussion Requirment                                        *
+*****************************************************************************/
+if (trim(request->cdf_meaning) = "NOTREQDIS")
+    set stat = alterlist(trnreq->req_list, 10)
+
+    set req_idx = 0
+    select into "nl:" 
+    from  code_value c1
+    where c1.code_set = 1611 and
+          c1.code_value > 0
+    detail
+          req_idx = req_idx + 1
+          if (mod(req_idx, 10) = 1 and req_idx != 1)
+              stat = alterlist(trnreq->req_list, req_idx + 9)
+          endif
+          trnreq->req_list[req_idx]->trn_code = c1.code_value
+          trnreq->req_list[req_idx]->trn_display = c1.display
+    with  nocounter
+
+    if (curqual > 0)
+        set stat = alterlist(trnreq->req_list, req_idx)
+    endif
+endif
+
+
+/****************************************************************************
+*       Load Product Attribute                                              *
+*****************************************************************************/
+if (trim(request->cdf_meaning) = "NOAGDIS" or
+    trim(request->cdf_meaning) = "NOTREQDIS")
+    
+    set stat = alterlist(streq->st_list, 10)
+    set st_idx = 0         ;st = specialtesting
+    select into "nl:"
+    from  code_value c1
+    where c1.code_set = 1612 and
+        c1.code_value > 0
+    detail
+        st_idx = st_idx + 1
+        if (mod(st_idx, 10) = 1 and st_idx != 1)
+            stat = alterlist(streq->st_list, st_idx + 9)
+        endif
+        streq->st_list[st_idx]->st_code = c1.code_value
+        streq->st_list[st_idx]->st_display = c1.display
+    with  nocounter
+
+    if (curqual > 0)
+       set stat = alterlist(streq->st_list, st_idx)
+    endif
+endif
+/*********************************************************************
+ * Exception type: Expired Unit Crossmatched (EXPUNITXM)             *
+ * Exception type: Expired Unit Dispensed (EXPUNITDIS)               *
+ *********************************************************************/ 
+
+if (trim(request->cdf_meaning) = "EXPUNITXM" or 
+        trim(request->cdf_meaning)= "EXPUNITDIS")
+
+        select into "nl:"
+              pe.product_event_id,
+              pr.product_nbr,
+              pr.product_sub_nbr,
+              pr.cur_expire_dt_tm,
+              bb.exception_id,
+              bb.active_status_dt_tm,
+              bb.person_id,
+              bb.review_dt_tm,
+              bb.review_status_cd,
+              bb.review_by_prsnl_id,
+              bb.review_doc_id,
+              per.name_full_formatted,
+              ea.alias,
+              prs.name_full_formatted,
+              usr.name_full_formatted,
+              ac.accession
+        from  bb_exception bb,
+              product_event pe,
+              product pr,
+              blood_product bp,
+              person per,
+              encntr_alias ea,
+              (dummyt d2 with seq = 1),
+              (dummyt d3 with seq = 1),
+              (dummyt d4 with seq = 1),
+              encntr_prsnl_reltn epr,
+              prsnl prs,
+              prsnl usr,
+              result re,
+              accession_order_r ac    
+      
+        plan bb where 
+                bb.active_status_dt_tm >= cnvtdatetime(request->beg_dt_tm) and
+                bb.active_status_dt_tm <= cnvtdatetime(request->end_dt_tm) and
+                bb.exception_id > request->last_exception_id and 
+                bb.exception_type_cd = cnvtint(request->exception_type_cd) and
+               (bb.review_status_cd = 0 or
+                bb.review_status_cd =  inprocess_code)
+        join  usr where bb.active_status_prsnl_id = usr.person_id
+
+        join  pe where bb.product_event_id = pe.product_event_id
+
+        join  pr where pe.product_id = pr.product_id
+                         
+        join  bp where pe.product_id = bp.product_id
+        join  per where pe.person_id = per.person_id
+        
+        join (d4 where d4.seq = 1
+        join  ea where pe.encntr_id = ea.encntr_id and
+              ea.encntr_alias_type_cd = encntr_mrn_code)
+
+        join  (d3 where d3.seq = 1
+        join  re  where bb.result_id = re.result_id
+        join  ac  where re.order_id = ac.order_id)
+
+        join  (d2 where d2.seq = 1
+        join  epr  where epr.encntr_prsnl_r_cd = admitdoc and
+                                  pe.encntr_id = epr.encntr_id and
+                                  pe.encntr_id > 0
+        join  prs where  epr.prsnl_person_id = prs.person_id)
+     
+        detail
+                
+              if (bb.exception_id > 0)
+                  qual_index = qual_index + 1
+                  if (mod(qual_index, 10) = 1 and qual_index != 1)
+                      stat = alterlist(reply->qual, qual_index + 9)
+                  endif
+                  reply->qual[qual_index]->exception_id = bb.exception_id 
+                  reply->qual[qual_index]->updt_cnt = bb.updt_cnt 
+                  reply->qual[qual_index]->product_nbr = pr.product_nbr
+                  reply->qual[qual_index]->product_type = uar_get_code_display(pr.product_cd)
+                  reply->qual[qual_index]->cur_expire_dt_tm = pr.cur_expire_dt_tm 
+                  reply->qual[qual_index]->accession = ac.accession 
+                  reply->qual[qual_index]->patient_name_full_formatted = per.name_full_formatted
+                  reply->qual[qual_index]->physician_name_full_formatted = prs.name_full_formatted
+                  reply->qual[qual_index]->alias = ea.alias
+                  reply->qual[qual_index]->reason = uar_get_code_display(bb.override_reason_cd)
+                  reply->qual[qual_index]->usr_name_full_formatted = usr.name_full_formatted
+                  reply->qual[qual_index]->active_status_dt_tm = bb.active_status_dt_tm
+                  reply->qual[qual_index]->review_dt_tm = bb.review_dt_tm
+                  reply->qual[qual_index]->review_status_cd = bb.review_status_cd
+                  reply->qual[qual_index]->review_by_prsnl_id = bb.review_by_prsnl_id
+                  reply->qual[qual_index]->review_doc_id = bb.review_doc_id
+/*************************************************************************
+                  col 5, pr.product_nbr
+                  col 15, pr.cur_expire_dt_tm
+                  col 40, ac.accession
+                  col 60, per.name_full_formatted "##############################"
+                  col 95, prs.name_full_formatted "##############################"
+                  row + 1
+                  col 5, ea.alias "###########################"
+                  col 35, c2.display
+                  col 75, usr.name_full_formatted "###################"
+                  col 100, bb.active_status_dt_tm
+                  row + 1
+                  col 5 bb.exception_id
+                  row + 2
+                 
+************************************************************************/
+              endif
+        
+         with nocounter,
+         orahint("index (bb xie7bb_exception)"),
+         maxqual(bb, 100),
+         outerjoin (d2),
+         outerjoin (d3),
+         outerjoin (d4),
+         dontcare  (ea),
+         dontcare  (re),
+         dontcare  (epr)
+      
+endif            
+
+
+/***********************************************************************
+ * Exception type: Unit Crossmatched to Expired Speciman (EXPSPECIMEN) *
+ * Exception type: Unit Dispensed with Expired Crossmatch (EXPXMDIS)   *
+ ***********************************************************************/
+
+if (trim(request->cdf_meaning) = "EXPSPECIMEN" or 
+    trim(request->cdf_meaning)= "EXPXMDIS")            
+      select into "nl:"
+              xm.crossmatch_exp_dt_tm,
+              pa.abo_cd,
+              pa.rh_cd,
+              pe.product_event_id,
+              pr.product_nbr,
+              pr.product_sub_nbr,
+              pr.cur_expire_dt_tm,
+              bb.exception_id,
+              bb.active_status_dt_tm,
+              bb.person_id,
+              bb.review_dt_tm,
+              bb.review_status_cd,
+              bb.review_by_prsnl_id,
+              bb.review_doc_id,
+              per.name_full_formatted,
+              ea.alias,
+              prs.name_full_formatted,
+              usr.name_full_formatted,
+              ac.accession
+        from  bb_exception bb,
+              product_event pe,
+              crossmatch xm,
+              product pr,
+              blood_product bp,
+              person_aborh pa,
+              person per,
+              encntr_alias ea,
+              (dummyt d2 with seq = 1),
+              (dummyt d3 with seq = 1),
+              (dummyt d4 with seq =4),
+              (dummyt d5 with seq = 5),
+              encntr_prsnl_reltn epr,
+              prsnl prs,
+              prsnl usr,
+              result re,
+              accession_order_r ac    
+      
+        plan bb where 
+                bb.active_status_dt_tm >= cnvtdatetime(request->beg_dt_tm) and
+                bb.active_status_dt_tm <= cnvtdatetime(request->end_dt_tm) and
+                bb.exception_id > request->last_exception_id and 
+                bb.exception_type_cd = cnvtint(request->exception_type_cd) and
+               (bb.review_status_cd = 0 or
+                bb.review_status_cd =  inprocess_code)
+        join  usr where bb.active_status_prsnl_id = usr.person_id
+
+        join  pe where bb.product_event_id = pe.product_event_id
+            
+        join  xm where pe.product_event_id = xm.product_event_id
+        join  pr where pe.product_id = pr.product_id
+        join  bp where pe.product_id = bp.product_id
+        join  per where pe.person_id = per.person_id
+
+        join  (d5 where d5.seq = 1 
+        join  ea where pe.encntr_id = ea.encntr_id and
+               ea.encntr_alias_type_cd = encntr_mrn_code)
+        
+        join  (d3 where d3.seq = 1
+        join  re  where bb.result_id = re.result_id
+        join  ac  where re.order_id = ac.order_id)
+
+        join  (d2 where d2.seq = 1
+        join  epr  where epr.encntr_prsnl_r_cd = admitdoc and
+                         pe.encntr_id = epr.encntr_id and
+                         pe.encntr_id > 0
+                         
+        join  prs where  epr.prsnl_person_id = prs.person_id)
+        join  (d4 where d4.seq = 1
+        join  pa where pe.person_id = pa.person_id and
+               pa.active_ind = 1)
+
+        detail
+                
+              if (bb.exception_id > 0)
+                  qual_index = qual_index + 1
+                  if (mod(qual_index, 10) = 1 and qual_index != 1)
+                      stat = alterlist(reply->qual, qual_index + 9)
+                  endif
+                  reply->qual[qual_index]->exception_id = bb.exception_id 
+                  reply->qual[qual_index]->updt_cnt = bb.updt_cnt 
+                  reply->qual[qual_index]->product_nbr = pr.product_nbr
+                  reply->qual[qual_index]->product_type = uar_get_code_display(pr.product_cd)
+                  reply->qual[qual_index]->cur_expire_dt_tm = xm.crossmatch_exp_dt_tm
+                  reply->qual[qual_index]->accession = ac.accession 
+                  reply->qual[qual_index]->patient_name_full_formatted = per.name_full_formatted
+                  reply->qual[qual_index]->physician_name_full_formatted = prs.name_full_formatted
+                  reply->qual[qual_index]->alias = ea.alias
+                  reply->qual[qual_index]->reason = uar_get_code_display(bb.override_reason_cd)
+                  reply->qual[qual_index]->usr_name_full_formatted = usr.name_full_formatted
+                  reply->qual[qual_index]->active_status_dt_tm = bb.active_status_dt_tm
+                  reply->qual[qual_index]->review_dt_tm = bb.review_dt_tm
+                  reply->qual[qual_index]->review_status_cd = bb.review_status_cd
+                  reply->qual[qual_index]->review_by_prsnl_id = bb.review_by_prsnl_id
+                  reply->qual[qual_index]->review_doc_id = bb.review_doc_id
+                        
+        /*********************************************************
+         * Find abo/rh descirption using unit code's             *  
+         *********************************************************/
+                  idx_a = 1
+                  finish_flag = "N"
+                  while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                        if ((bp.cur_abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                            (bp.cur_rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                                reply->qual[qual_index]->product_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                                finish_flag = "Y"
+                        else
+                                idx_a = idx_a + 1 
+                        endif
+                  endwhile          
+        /********************************************************* 
+         * Find abo/rh descirption using patient code's          * 
+         *********************************************************/
+                  idx_a = 1
+                  finish_flag = "N"
+                  while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                       if ((pa.abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                           (pa.rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                               reply->qual[qual_index]->patient_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                               finish_flag = "Y"
+                       else
+                               idx_a = idx_a + 1
+                       endif
+                  endwhile          
+
+/*************************************************************************
+                  col 5, pr.product_nbr
+                  col 15, pr.cur_expire_dt_tm
+                  col 30, ac.accession
+                  col 50, per.name_full_formatted "##############################"
+                  col 95, prs.name_full_formatted "##############################"
+                  row + 1
+                  col 5, ea.alias "###########################"
+                  col 35, c2.display
+                  col 75, usr.name_full_formatted "###################"
+                  col 100, bb.active_status_dt_tm
+                  row + 1
+                  col 5 bb.exception_id
+                  row + 2
+                 
+************************************************************************/
+              endif
+        
+      with nocounter,
+           orahint("index (bb xie7bb_exception)"),
+           maxqual(bb, 100),
+             outerjoin (d2),
+           outerjoin (d3),
+           outerjoin (d4),
+           outerjoin (d5),
+           dontcare  (ea),
+           dontcare  (re),
+           dontcare  (epr),
+           dontcare  (pa)
+endif            
+
+/***********************************************************************
+ * Exception type: Unit dispensed contrary to AG/AB (NOAGDIS)          *
+ ***********************************************************************/
+
+if (trim(request->cdf_meaning) = "NOAGDIS")
+        select into "nl:"
+              bb.exception_id,
+              bb.updt_cnt,
+              bb.active_status_dt_tm,
+              bb.person_id,
+              bb.review_dt_tm,
+              bb.review_status_cd,
+              bb.review_by_prsnl_id,
+              bb.review_doc_id,
+              bb1.exception_id,
+              bb1.requirement_cd,
+              bb1.special_testing_cd,
+              pa.abo_cd,
+              pa.rh_cd,
+              pr.cur_expire_dt_tm,
+              pe.event_dt_tm,
+              pe.person_id,
+              pe.product_event_id,
+              pr.product_nbr,
+              pr.product_sub_nbr,
+              per.name_full_formatted,
+              ea.alias,
+              prs.name_full_formatted,
+              usr.name_full_formatted,
+              ac.accession
+              
+        from  bb_exception bb,
+              bb_reqs_exception bb1,
+              product_event pe,
+              product pr,
+              blood_product bp,
+              person_aborh pa,
+              person per,
+              encntr_alias ea,
+              (dummyt d2 with seq = 1),
+              (dummyt d3 with seq = 1),
+              (dummyt d4 with seq = 1),
+              (dummyt d5 with seq = 1),
+              (dummyt d6 with seq = 1),
+              encntr_prsnl_reltn epr,
+              prsnl prs,
+              prsnl usr,
+              result re,
+              accession_order_r ac    
+              
+        plan bb where 
+                bb.active_status_dt_tm >= cnvtdatetime(request->beg_dt_tm) and
+                bb.active_status_dt_tm <= cnvtdatetime(request->end_dt_tm) and
+                bb.exception_id > request->last_exception_id and 
+                bb.exception_type_cd = cnvtint(request->exception_type_cd) and
+               (bb.review_status_cd = 0 or
+                bb.review_status_cd =  inprocess_code)
+        join  usr where bb.active_status_prsnl_id = usr.person_id
+        
+        join  pe where bb.product_event_id = pe.product_event_id
+                      
+        join  pr where pe.product_id = pr.product_id
+                          
+        join  bp where pe.product_id = bp.product_id
+        join  per where pe.person_id = per.person_id
+        
+        join  (d6 where d6.seq = 1
+        join  ea where pe.encntr_id = ea.encntr_id and
+              ea.encntr_alias_type_cd = encntr_mrn_code)
+        join  (d3 where d3.seq = 1
+        join  re  where bb.result_id = re.result_id
+        join  ac  where re.order_id = ac.order_id)
+                
+        join  (d2 where d2.seq = 1
+        join  epr  where epr.encntr_prsnl_r_cd = admitdoc and
+                         pe.encntr_id = epr.encntr_id and
+                         pe.encntr_id > 0
+        join  prs where epr.prsnl_person_id = prs.person_id)
+        
+        join  (d4 where d4.seq = 1
+        join  pa where pe.person_id = pa.person_id and
+                       pa.active_ind = 1)
+
+        orjoin (d5 where d5.seq = 1
+        join  bb1 where bb.exception_id = bb1.exception_id)
+
+        detail
+              if (bb.exception_id > 0)
+                  qual_index = qual_index + 1
+                  if (mod(qual_index, 10) = 1 and qual_index != 1)
+                      stat = alterlist(reply->qual, qual_index + 9)
+                  endif
+                  reply->qual[qual_index]->exception_id = bb.exception_id 
+                  reply->qual[qual_index]->updt_cnt = bb.updt_cnt 
+                  reply->qual[qual_index]->product_nbr = pr.product_nbr
+                  reply->qual[qual_index]->accession = ac.accession 
+                  reply->qual[qual_index]->patient_name_full_formatted = per.name_full_formatted
+                  reply->qual[qual_index]->physician_name_full_formatted = prs.name_full_formatted
+                  reply->qual[qual_index]->alias = ea.alias
+                  reply->qual[qual_index]->reason = uar_get_code_display(bb.override_reason_cd)
+                  reply->qual[qual_index]->usr_name_full_formatted = usr.name_full_formatted
+                  reply->qual[qual_index]->active_status_dt_tm = bb.active_status_dt_tm
+                  reply->qual[qual_index]->review_dt_tm = bb.review_dt_tm
+                  reply->qual[qual_index]->review_status_cd = bb.review_status_cd
+                  reply->qual[qual_index]->review_by_prsnl_id = bb.review_by_prsnl_id
+                  reply->qual[qual_index]->review_doc_id = bb.review_doc_id
+                        
+        /*********************************************************
+         * Find abo/rh descirption using unit code's             *  
+         *********************************************************/
+                  idx_a = 1
+                  finish_flag = "N"
+                  while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                        if ((bp.cur_abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                            (bp.cur_rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                                reply->qual[qual_index]->product_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                                finish_flag = "Y"
+                        else
+                                idx_a = idx_a + 1 
+                        endif
+                  endwhile          
+        /********************************************************* 
+         * Find abo/rh descirption using patient code's          * 
+         *********************************************************/
+                  idx_a = 1
+                  finish_flag = "N"
+                  while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                       if ((pa.abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                           (pa.rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                               reply->qual[qual_index]->patient_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                               finish_flag = "Y"
+                       else
+                               idx_a = idx_a + 1
+                       endif
+                  endwhile          
+
+        /********************************************************* 
+         * Find Antibodies using patient code's                  * 
+         *********************************************************/
+
+                idx_a = 1
+                finish_flag = "N"
+                while ((idx_a <= an_idx) and (finish_flag = "N"))
+                   if (bb1.requirement_cd = anreq->an_list[idx_a]->an_code)
+                      reply->qual[qual_index]->patient_antibodies = anreq->an_list[idx_a]->an_display
+                      finish_flag = "Y"
+                   else
+                     idx_a = idx_a + 1
+                   endif
+                endwhile          
+
+        /********************************************************* 
+         * Find Antigens using product code's                    * 
+         *********************************************************/
+
+                idx_a = 1
+                finish_flag = "N"
+                while ((idx_a <= st_idx) and (finish_flag = "N"))
+                   if (bb1.special_testing_cd = streq->st_list[idx_a]->st_code)
+                      reply->qual[qual_index]->product_antigens =  streq->st_list[idx_a]->st_display
+                      finish_flag = "Y"
+                   else
+                      idx_a = idx_a + 1
+                   endif
+                endwhile          
+
+           /***************************************************************
+                col 5, pr.product_nbr
+                col 30, ac.accession
+                col 50, per.name_full_formatted "##############################"
+                col 95, prs.name_full_formatted "##############################"
+                row + 1
+                col 5, ea.alias "###########################"
+                col 35, c2.display
+                col 75, usr.name_full_formatted "###################"
+                col 100, bb.active_status_dt_tm
+                row + 1
+                col 5 bb.exception_id
+                row + 2                 
+            ****************************************************************/
+      endif
+      
+      with  nocounter,
+            orahint("index (bb xie7bb_exception)"),
+            maxqual(bb, 100),
+              outerjoin (d2),
+            outerjoin (d3),
+            outerjoin (d4),
+            outerjoin (d6),
+            dontcare  (ea),
+            dontcare  (re),
+            dontcare  (epr),
+            dontcare  (pa)
+endif
+
+
+/***********************************************************************
+ * Exception type: Unit dispensed contrary to transf. req. (NOTREQDIS) *
+ ***********************************************************************/
+if (trim(request->cdf_meaning) = "NOTREQDIS")
+
+        select into "nl:"
+              bb.exception_id,
+              bb.updt_cnt,
+              bb.active_status_dt_tm,
+              bb.person_id,
+              bb.review_dt_tm,
+              bb.review_status_cd,
+              bb.review_by_prsnl_id,
+              bb.review_doc_id,             
+              bb1.exception_id,
+              bb1.requirement_cd,
+              bb1.special_testing_cd,
+              pa.abo_cd,
+              pa.rh_cd,
+              pr.cur_expire_dt_tm,
+              pe.event_dt_tm,
+              pe.person_id,
+              pe.product_event_id,
+              pr.product_nbr,
+              pr.product_sub_nbr,
+              per.name_full_formatted,
+              ea.alias,
+              prs.name_full_formatted,
+              usr.username,
+              ac.accession
+      
+        from  bb_exception bb,
+              bb_reqs_exception bb1,
+              product_event pe,
+              product pr,
+              blood_product bp,
+              person_aborh pa,
+              person per,
+              encntr_alias ea,
+              (dummyt d2 with seq = 1),
+              (dummyt d3 with seq = 1),
+              (dummyt d4 with seq = 1),
+              (dummyt d5 with seq = 1),
+              (dummyt d6 with seq = 1),
+              encntr_prsnl_reltn epr,
+              prsnl prs,
+              prsnl usr,
+              result re,
+              accession_order_r ac    
+              
+        plan bb where 
+                bb.active_status_dt_tm >= cnvtdatetime(request->beg_dt_tm) and
+                bb.active_status_dt_tm <= cnvtdatetime(request->end_dt_tm) and
+                bb.exception_id > request->last_exception_id and 
+                bb.exception_type_cd = cnvtint(request->exception_type_cd) and
+               (bb.review_status_cd = 0 or
+                bb.review_status_cd =  inprocess_code)
+        join  usr where bb.active_status_prsnl_id = usr.person_id
+
+        join  pe where bb.product_event_id = pe.product_event_id
+        
+        join  pr where pe.product_id = pr.product_id
+        join  bp where pe.product_id = bp.product_id
+        join  per where pe.person_id = per.person_id
+        join (d6 where d6.seq = 1
+        join  ea where pe.encntr_id = ea.encntr_id and
+               ea.encntr_alias_type_cd = encntr_mrn_code)     
+
+        join  (d3 where d3.seq = 1
+        join  re  where bb.result_id = re.result_id
+        join  ac  where re.order_id = ac.order_id)
+        
+        join  (d2 where d2.seq = 1
+        join  epr  where epr.encntr_prsnl_r_cd = admitdoc and
+                                  pe.encntr_id = epr.encntr_id and
+                          pe.encntr_id > 0
+        join  prs where  epr.prsnl_person_id = prs.person_id)
+        
+        join  (d4 where d4.seq = 1
+        join  pa where pe.person_id = pa.person_id and
+                       pa.active_ind = 1)
+        orjoin (d5 where d5.seq = 1
+        join  bb1 where bb.exception_id = bb1.exception_id)
+        
+
+        detail
+
+                if (bb.exception_id > 0)
+                  qual_index = qual_index + 1
+                  if (mod(qual_index, 10) = 1 and qual_index != 1)
+                      stat = alterlist(reply->qual, qual_index + 9)
+                  endif
+                  reply->qual[qual_index]->exception_id = bb.exception_id 
+                  reply->qual[qual_index]->updt_cnt = bb.updt_cnt 
+                  reply->qual[qual_index]->product_nbr = pr.product_nbr
+                  reply->qual[qual_index]->product_type = uar_get_code_display(pr.product_cd)
+                  reply->qual[qual_index]->accession = ac.accession 
+                  reply->qual[qual_index]->patient_name_full_formatted = per.name_full_formatted
+                  reply->qual[qual_index]->physician_name_full_formatted = prs.name_full_formatted
+                  reply->qual[qual_index]->alias = ea.alias
+                  reply->qual[qual_index]->reason = uar_get_code_display(bb.override_reason_cd)
+                  reply->qual[qual_index]->usr_name_full_formatted = usr.name_full_formatted
+                  reply->qual[qual_index]->active_status_dt_tm = bb.active_status_dt_tm
+                  reply->qual[qual_index]->review_dt_tm = bb.review_dt_tm
+                  reply->qual[qual_index]->review_status_cd = bb.review_status_cd
+                  reply->qual[qual_index]->review_by_prsnl_id = bb.review_by_prsnl_id
+                  reply->qual[qual_index]->review_doc_id = bb.review_doc_id
+                        
+                 /*********************************************************
+                  * Find abo/rh descirption using unit code's             *  
+                  *********************************************************/
+                  idx_a = 1
+                  finish_flag = "N"
+                  while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                        if ((bp.cur_abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                            (bp.cur_rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                                reply->qual[qual_index]->product_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                                finish_flag = "Y"
+                        else
+                                idx_a = idx_a + 1 
+                        endif
+                  endwhile          
+                 /********************************************************* 
+                  * Find abo/rh descirption using patient code's          * 
+                  *********************************************************/
+                  idx_a = 1
+                  finish_flag = "N"
+                  while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                       if ((pa.abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                           (pa.rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                               reply->qual[qual_index]->patient_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                               finish_flag = "Y"
+                       else
+                               idx_a = idx_a + 1
+                       endif
+                  endwhile          
+
+
+                 /******************************************************************
+                  * Choose Transfusion Requirment                                  *
+                  ******************************************************************/
+                  idx_a = 1
+                  finish_flag = "N"
+                  while ((idx_a <= req_idx) and (finish_flag = "N"))
+                    if (bb1.requirement_cd = trnreq->req_list[idx_a]->trn_code)
+                       reply->qual[qual_index]->transfusion_req = trnreq->req_list[idx_a]->trn_display
+                       finish_flag = "Y"
+                    else
+                      idx_a = idx_a + 1
+                    endif
+                  endwhile          
+
+                 /******************************************************************
+                  * Choose Product Attribute                                       *
+                  ******************************************************************/
+                  idx_a = 1
+                  finish_flag = "N"
+                  while ((idx_a <= st_idx) and (finish_flag = "N"))
+                    if (bb1.special_testing_cd = streq->st_list[idx_a]->st_code)
+                        reply->qual[qual_index]->product_att = streq->st_list[idx_a]->st_display
+                        finish_flag = "Y"
+                    else
+                        idx_a = idx_a + 1
+                    endif
+                  endwhile          
+
+
+               /***************************************************************
+                col 5, pr.product_nbr
+                col 30, ac.accession
+                col 50, per.name_full_formatted "##############################"
+                col 95, prs.name_full_formatted "##############################"
+                row + 1
+                col 5, ea.alias "###########################"
+                col 75, usr.name_full_formatted "###################"
+                col 100, bb.active_status_dt_tm
+                row + 1
+                col 5 bb.exception_id
+                row + 2                 
+                ***************************************************************/
+        endif
+        with  nocounter,
+              orahint("index (bb xie7bb_exception)"),
+              maxqual(bb, 100),
+              outerjoin (d2),
+              outerjoin (d3),
+              outerjoin (d4),
+              outerjoin (d6),
+              dontcare  (re),
+              dontcare  (epr),
+              dontcare  (pa)
+endif
+
+/***********************************************************************
+ *  Exception type: Override System Interpretation (OVERINTERP)        *
+ ***********************************************************************/
+if (trim(request->cdf_meaning) = "OVERINTERP")
+
+        select into "nl:"
+            bb.exception_id,
+            bb.updt_dt_tm,
+            bb.updt_cnt,
+            bb.active_status_dt_tm,
+            bb.person_id,
+            bb.review_dt_tm,
+            bb.review_status_cd,
+            bb.review_by_prsnl_id,
+            bb.review_doc_id,             
+            usr.username,
+            dta.mnemonic,
+            perr.result_value_alpha,
+            perr.result_value_numeric,
+            perr.result_value_dt_tm,
+            per.name_full_formatted,
+            pra.alias,
+            ac.accession,
+            pr.product_nbr,
+            pr.product_sub_nbr
+
+        from (dummyt d2 with seq = 1),
+            bb_exception bb,
+            prsnl usr,
+            discrete_task_assay dta,
+            perform_result perr,
+            result re,
+            orders o,
+            (dummyt d4 with seq = 1),
+            person per,
+            person_alias pra,
+            (dummyt d5 with seq = 1),
+            accession_order_r ac,
+            (dummyt d6 with seq = 1),
+            product pr
+        plan bb where 
+                bb.active_status_dt_tm >= cnvtdatetime(request->beg_dt_tm) and
+                bb.active_status_dt_tm <= cnvtdatetime(request->end_dt_tm) and
+                bb.exception_id > request->last_exception_id and 
+                bb.exception_type_cd = cnvtint(request->exception_type_cd) and
+               (bb.review_status_cd = 0 or
+                bb.review_status_cd =  inprocess_code)
+        join  usr where bb.active_status_prsnl_id = usr.person_id
+        
+        join (d2 where d2.seq = 1
+        join   perr where bb.perform_result_id = perr.perform_result_id and
+                                  bb.result_id = perr.result_id
+        join   re  where bb.result_id = re.result_id
+        join   o  where re.order_id = o.order_id
+        join   dta where re.task_assay_cd = dta.task_assay_cd)
+
+        join  (d5 where d5.seq = 1
+        join  ac where re.order_id  = ac.order_id)
+
+        join (d6 where d6.seq = 1
+          join pr where o.product_id = pr.product_id and
+                                pr.product_id > 0)
+        join (d4 where d4.seq = 1
+        join per where o.person_id = per.person_id
+        join pra where pra.person_alias_type_cd = mrn_code and
+                                 o.person_id = pra.person_id)
+
+        detail
+        if (bb.exception_id > 0)
+            qual_index = qual_index + 1
+            if (mod(qual_index, 10) = 1 and qual_index != 1)
+               stat = alterlist(reply->qual, qual_index + 9)
+            endif
+            reply->qual[qual_index]->exception_id = bb.exception_id 
+            reply->qual[qual_index]->updt_cnt = bb.updt_cnt 
+            reply->qual[qual_index]->product_nbr = pr.product_nbr ;Unit
+            reply->qual[qual_index]->patient_name_full_formatted = per.name_full_formatted
+            reply->qual[qual_index]->alias = pra.alias
+            reply->qual[qual_index]->reason = uar_get_code_display(bb.override_reason_cd)
+            reply->qual[qual_index]->usr_name_full_formatted = usr.name_full_formatted
+            reply->qual[qual_index]->active_status_dt_tm = bb.active_status_dt_tm
+            reply->qual[qual_index]->review_dt_tm = bb.review_dt_tm
+            reply->qual[qual_index]->review_status_cd = bb.review_status_cd
+            reply->qual[qual_index]->review_by_prsnl_id = bb.review_by_prsnl_id
+            reply->qual[qual_index]->review_doc_id = bb.review_doc_id
+            reply->qual[qual_index]->procedure = dta.mnemonic
+            reply->qual[qual_index]->result = perr.result_value_alpha 
+            reply->qual[qual_index]->product_sub_nbr = pr.product_sub_nbr
+        
+           /***************************************************************
+                col 5, pr.product_nbr
+                col 30, ac.accession
+                col 50, per.name_full_formatted "####################"
+                col 75, pra.alias "####################"
+                    col 100, usr.name_full_formatted "###################"
+                                
+                row + 1
+                col 50, bb.active_status_dt_tm
+                col 65, dta.mnemonic "###############"
+                    col 86, perr.result_value_alpha "#################"
+                    col 107, pr.product_sub_nbr "################"
+                    row + 1
+                col 5 bb.exception_id
+                row + 2                 
+            ****************************************************************/
+        endif            
+      with  nocounter,
+            orahint("index (bb xie7bb_exception)"),
+            maxqual(bb, 100),
+            outerjoin (d2),
+            outerjoin (d4),
+            outerjoin (d5),
+            outerjoin (d6),
+            dontcare  (ac),
+            dontcare  (pr),
+            dontcare  (c3)
+endif
+
+/***********************************************************************
+ *  Exception type: Patient Grp/Type Changed (PTGTCHG)                 *
+ *  Exception type: Patient Grp/Type NOT Changed (PTGTNOCHG)           * 
+ ***********************************************************************/
+if (trim(request->cdf_meaning) = "PTGTCHG" or
+    trim(request->cdf_meaning) = "PTGTNOCHG")
+        select into "nl:"
+            bb.exception_id,
+            bb.updt_dt_tm,
+            bb.updt_cnt,
+            bb.active_status_dt_tm,
+            bb.person_id,
+            bb.review_dt_tm,
+            bb.review_status_cd,
+            bb.review_by_prsnl_id,
+            bb.review_doc_id,             
+            pa.abo_cd,
+            pa.rh_cd,
+            per.name_full_formatted,
+            pra.alias,
+            prs.name_full_formatted,
+            usr.username,
+            ac.accession
+        from  bb_exception bb,
+              person_aborh pa,
+              person per,
+              person_alias pra,
+              (dummyt d3 with seq = 1),
+              (dummyt d4 with seq = 1),
+              (dummyt d5 with seq = 1),
+              encntr_prsnl_reltn epr,
+              prsnl prs,
+              prsnl usr,
+              result re,
+              accession_order_r ac,
+              orders o    
+              
+        plan bb where 
+                bb.active_status_dt_tm >= cnvtdatetime(request->beg_dt_tm) and
+                bb.active_status_dt_tm <= cnvtdatetime(request->end_dt_tm) and
+                bb.exception_id > request->last_exception_id and 
+                bb.exception_type_cd = cnvtint(request->exception_type_cd) and
+               (bb.review_status_cd = 0 or
+                bb.review_status_cd =  inprocess_code)
+        join  usr where bb.active_status_prsnl_id = usr.person_id
+        
+        join  (d3 where d3.seq = 1
+        join  re  where bb.result_id = re.result_id
+        join  o   where re.order_id = o.order_id
+        join  ac  where re.order_id = ac.order_id
+        join  per where o.person_id = per.person_id
+        
+        join  epr  where epr.encntr_prsnl_r_cd = admitdoc and
+                                  o.encntr_id = epr.encntr_id and
+                          o.encntr_id > 0
+        join  prs where  epr.prsnl_person_id = prs.person_id)
+        
+        join  (d5 where d5.seq = 1
+        join pra  where pra.person_alias_type_cd = mrn_code and
+                                     o.person_id = pra.person_id)
+
+        join  (d4 where d4.seq = 1
+        join  pa where o.person_id = pa.person_id and
+                       pa.active_ind = 1)
+
+        detail
+        if (bb.exception_id > 0)
+           qual_index = qual_index + 1
+           if (mod(qual_index, 10) = 1 and qual_index != 1)
+               stat = alterlist(reply->qual, qual_index + 9)
+           endif
+           reply->qual[qual_index]->exception_id = bb.exception_id 
+           reply->qual[qual_index]->updt_cnt = bb.updt_cnt 
+           reply->qual[qual_index]->accession = ac.accession 
+           reply->qual[qual_index]->patient_name_full_formatted = per.name_full_formatted
+           reply->qual[qual_index]->physician_name_full_formatted = prs.name_full_formatted
+           reply->qual[qual_index]->alias = pra.alias
+           reply->qual[qual_index]->reason = uar_get_code_display(bb.override_reason_cd)
+           reply->qual[qual_index]->usr_name_full_formatted = usr.name_full_formatted
+           reply->qual[qual_index]->active_status_dt_tm = bb.active_status_dt_tm
+           reply->qual[qual_index]->review_dt_tm = bb.review_dt_tm
+           reply->qual[qual_index]->review_status_cd = bb.review_status_cd
+           reply->qual[qual_index]->review_by_prsnl_id = bb.review_by_prsnl_id
+           reply->qual[qual_index]->review_doc_id = bb.review_doc_id
+  
+          /***************************************************************
+           col 30, ac.accession
+           col 50, per.name_full_formatted "####################"
+           col 75, pra.alias "####################"
+           col 100, usr.name_full_formatted "###################"
+           row + 1
+           col 50, bb.active_status_dt_tm
+           row + 1
+           col 5 bb.exception_id
+           row + 2                 
+           ****************************************************************/
+          /********************************************************* 
+           * Find abo/rh descirption for Previous                  * 
+           *********************************************************/
+            idx_a = 1
+            finish_flag = "N"
+            while ((idx_a <= aborh_index) and (finish_flag = "N"))
+              if ((bb.from_abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                (bb.from_rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                reply->qual[qual_index]->previous_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                finish_flag = "Y"
+              else
+                idx_a = idx_a + 1
+              endif
+            endwhile          
+
+          /********************************************************* 
+           * Find abo/rh descirption for Resulted                  * 
+           *********************************************************/
+           idx_a = 1
+           finish_flag = "N"
+           while ((idx_a <= aborh_index) and (finish_flag = "N"))
+             if ((bb.to_abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+               (bb.to_rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+               reply->qual[qual_index]->resulted_abo_rh= aborh->aborh_list[idx_a]->aborh_display
+               finish_flag = "Y"
+             else
+               idx_a = idx_a + 1
+             endif
+           endwhile          
+
+          /********************************************************* 
+           * Find abo/rh descirption for Current                   * 
+           *********************************************************/
+           idx_a = 1
+           finish_flag = "N"
+           while ((idx_a <= aborh_index) and (finish_flag = "N"))
+             if ((pa.abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+               (pa.rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+               reply->qual[qual_index]->current_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+               finish_flag = "Y"
+             else
+               idx_a = idx_a + 1
+             endif
+           endwhile          
+
+        endif
+        with  nocounter,
+              orahint("index (bb xie7bb_exception)"),
+              maxqual(bb, 100),
+              outerjoin (d3),
+              outerjoin (d4),
+              outerjoin (d5)
+endif
+
+
+/***********************************************************************
+ *  Exception type: Product Dispensed Uncrossmatched (UNCROSSDIS)      *
+ *  Exception type: Unit of unmatched G/T dispensed (UNMATDIS)         * 
+ *  Exception type: Unconfirmed unit dispensed (UNCONFDIS)             * 
+ *  Exception type: Unit of unmatched G/T crossmatched (UNMATXM)       * 
+ ***********************************************************************/
+if (trim(request->cdf_meaning) = "UNCROSSDIS" or
+    trim(request->cdf_meaning) = "UNMATDIS" or
+    trim(request->cdf_meaning) = "UNMATXM" or
+    trim(request->cdf_meaning) = "UNCONFDIS")     
+        select into "nl:"
+              pa.abo_cd,
+              pa.rh_cd,
+              pr.cur_expire_dt_tm,
+              pe.event_dt_tm,
+              pe.person_id,
+              pe.product_event_id,
+              pr.product_nbr,
+              pr.product_sub_nbr,
+              bb.exception_id,
+              bb.updt_cnt,
+              bb.active_status_dt_tm,
+              bb.person_id,
+              bb.review_dt_tm,
+              bb.review_status_cd,
+              bb.review_by_prsnl_id,
+              bb.review_doc_id,      
+              per.name_full_formatted,
+              ea.alias,
+              prs.name_full_formatted,
+              usr.username,
+              ac.accession
+      
+        from  bb_exception bb,
+              product_event pe,
+              product pr,
+              blood_product bp,
+              person_aborh pa,
+              person per,
+              encntr_alias ea,
+              (dummyt d3 with seq = 1),
+              (dummyt d2 with seq = 1),
+              (dummyt d4 with seq = 1),
+              (dummyt d5 with seq = 1),
+              encntr_prsnl_reltn epr,
+              prsnl prs,
+              prsnl usr,
+              result re,
+              accession_order_r ac    
+              
+        plan bb where 
+                bb.active_status_dt_tm >= cnvtdatetime(request->beg_dt_tm) and
+                bb.active_status_dt_tm <= cnvtdatetime(request->end_dt_tm) and
+                bb.exception_id > request->last_exception_id and 
+                bb.exception_type_cd = cnvtint(request->exception_type_cd) and
+               (bb.review_status_cd = 0 or
+                bb.review_status_cd =  inprocess_code)
+        join  usr where bb.active_status_prsnl_id = usr.person_id
+        
+        join  pe where bb.product_event_id = pe.product_event_id
+             
+        join  pr where pe.product_id = pr.product_id
+        join  bp where pe.product_id = bp.product_id
+        join  per where pe.person_id = per.person_id
+        join  (d3 where d3.seq = 1
+        join  re  where bb.result_id = re.result_id
+        join  ac  where re.order_id = ac.order_id)
+        join  (d2 where d2.seq = 1
+        join  epr  where epr.encntr_prsnl_r_cd = admitdoc and
+                                  pe.encntr_id = epr.encntr_id and
+                          pe.encntr_id > 0
+        join  prs where  epr.prsnl_person_id = prs.person_id)
+        join  (d5 where d5.seq = 1
+        join  ea where pe.encntr_id = ea.encntr_id and
+              ea.encntr_alias_type_cd = encntr_mrn_code)
+        join  (d4 where d4.seq = 1
+        join  pa where pe.person_id = pa.person_id and
+                       pa.active_ind = 1)
+
+        detail
+              if (bb.exception_id > 0)
+                  qual_index = qual_index + 1
+                  if (mod(qual_index, 10) = 1 and qual_index != 1)
+                        stat = alterlist(reply->qual, qual_index + 9)
+                  endif
+                  reply->qual[qual_index]->exception_id = bb.exception_id 
+                  reply->qual[qual_index]->updt_cnt = bb.updt_cnt 
+                  reply->qual[qual_index]->product_nbr = pr.product_nbr
+                  reply->qual[qual_index]->product_type = uar_get_code_display(pr.product_cd)
+                  reply->qual[qual_index]->cur_expire_dt_tm = pr.cur_expire_dt_tm 
+                  reply->qual[qual_index]->accession = ac.accession 
+                  reply->qual[qual_index]->patient_name_full_formatted = per.name_full_formatted
+                  reply->qual[qual_index]->physician_name_full_formatted = prs.name_full_formatted
+                  reply->qual[qual_index]->alias = ea.alias
+                  reply->qual[qual_index]->reason = uar_get_code_display(bb.override_reason_cd)
+                  reply->qual[qual_index]->usr_name_full_formatted = usr.name_full_formatted
+                  reply->qual[qual_index]->active_status_dt_tm = bb.active_status_dt_tm
+                  reply->qual[qual_index]->review_dt_tm = bb.review_dt_tm
+                  reply->qual[qual_index]->review_status_cd = bb.review_status_cd
+                  reply->qual[qual_index]->review_by_prsnl_id = bb.review_by_prsnl_id
+                  reply->qual[qual_index]->review_doc_id = bb.review_doc_id
+                  
+                  /*********************************************************
+                   * Find abo/rh descirption using unit code's             *  
+                   *********************************************************/
+                  idx_a = 1
+                  finish_flag = "N"
+                  while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                        if ((bp.cur_abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                            (bp.cur_rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                                reply->qual[qual_index]->product_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                                finish_flag = "Y"
+                        else
+                                idx_a = idx_a + 1 
+                        endif
+                  endwhile          
+                  /********************************************************* 
+                   * Find abo/rh descirption using patient code's          * 
+                   *********************************************************/
+                  idx_a = 1
+                  finish_flag = "N"
+                  while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                       if ((pa.abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                           (pa.rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                               reply->qual[qual_index]->patient_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                               finish_flag = "Y"
+                       else
+                               idx_a = idx_a + 1
+                       endif
+                  endwhile          
+
+                /**********************************************************
+                  col 5, pr.product_nbr
+                  col 15, pr.cur_expire_dt_tm
+                  col 30, ac.accession
+                  col 50, per.name_full_formatted "##############################"
+                  col 95, prs.name_full_formatted "##############################"
+                  row + 1
+                  col 5, ea.alias "###########################"
+                  col 75, usr.name_full_formatted "###################"
+                  col 100, bb.active_status_dt_tm
+                  row + 1
+                  col 5 bb.exception_id
+                  row + 2
+                 *********************************************************/
+        endif
+
+        with  nocounter,
+              orahint("index (bb xie7bb_exception)"),
+              maxqual(bb, 100),
+              outerjoin (d2),
+              outerjoin (d3),
+              outerjoin (d4),
+              outerjoin (d5),
+              dontcare  (ea),
+              dontcare  (re),
+              dontcare  (epr),
+              dontcare  (pa)
+endif
+
+/***********************************************************************
+ *  Exception type: Unit Grp/Type Changed (UNGTCHG)                    *
+ *  Exception type: Unit Grp/Type Not Changed (UNGTNOCHG)              *
+ ***********************************************************************/
+if (trim(request->cdf_meaning) = "UNGTCHG" or
+    trim(request->cdf_meaning) = "UNGTNOCHG")
+        select into "nl:"
+              bb.exception_id,
+              bb.updt_dt_tm,
+              bb.updt_cnt,
+              bb.active_status_dt_tm,
+              bb.person_id,
+              bb.review_dt_tm,
+              bb.review_status_cd,
+              bb.review_by_prsnl_id,
+              bb.review_doc_id,      
+              usr.username,
+              pr.product_nbr,
+              pr.product_sub_nbr,
+              ac.accession
+      
+        from code_value c1,
+              (dummyt d1 with seq = 1),
+              (dummyt d2 with seq = 1),
+              (dummyt d3 with seq = 1),
+              bb_exception bb,
+              prsnl usr,
+              product pr,
+              blood_product bp,
+              prsnl prs,
+              encntr_prsnl_reltn epr,
+              result re,
+              orders o,
+              accession_order_r ac    
+
+        plan bb where 
+                bb.active_status_dt_tm >= cnvtdatetime(request->beg_dt_tm) and
+                bb.active_status_dt_tm <= cnvtdatetime(request->end_dt_tm) and
+                bb.exception_id > request->last_exception_id and 
+                bb.exception_type_cd = cnvtint(request->exception_type_cd) and
+               (bb.review_status_cd = 0 or
+                bb.review_status_cd =  inprocess_code)
+        join  usr where bb.active_status_prsnl_id = usr.person_id
+        join  (d2 where d2.seq = 1
+        join   re where bb.result_id > 0 and
+                        bb.result_id = re.result_id
+        join   ac  where re.order_id = ac.order_id
+        join   o  where re.order_id = o.order_id
+        join   pr where  o.product_id = pr.product_id
+        join   bp where pr.product_id = bp.product_id)
+        join  (d3 where d3.seq = 1
+        join  epr  where epr.encntr_prsnl_r_cd = admitdoc and
+                                 o.encntr_id = epr.encntr_id and
+                         o.encntr_id > 0
+        join  prs where  epr.prsnl_person_id = prs.person_id)
+
+        detail
+              if (bb.exception_id > 0)
+                  qual_index = qual_index + 1
+                  if (mod(qual_index, 10) = 1 and qual_index != 1)
+                        stat = alterlist(reply->qual, qual_index + 9)
+                  endif
+                  reply->qual[qual_index]->exception_id = bb.exception_id 
+                  reply->qual[qual_index]->updt_cnt = bb.updt_cnt 
+                  reply->qual[qual_index]->product_type = uar_get_code_display(pr.proudct_cd)
+                  reply->qual[qual_index]->product_nbr = pr.product_nbr
+                  reply->qual[qual_index]->physician_name_full_formatted = prs.name_full_formatted
+                  reply->qual[qual_index]->reason = uar_get_code_display(bb.override_reason_cd)
+                  reply->qual[qual_index]->usr_name_full_formatted = usr.name_full_formatted
+                  reply->qual[qual_index]->active_status_dt_tm = bb.active_status_dt_tm
+                  reply->qual[qual_index]->review_dt_tm = bb.review_dt_tm
+                  reply->qual[qual_index]->review_status_cd = bb.review_status_cd
+                  reply->qual[qual_index]->review_by_prsnl_id = bb.review_by_prsnl_id
+                  reply->qual[qual_index]->review_doc_id = bb.review_doc_id
+                  reply->qual[qual_index]->accession = ac.accession 
+                  /**********************************************************
+                    col 30, ac.accession
+                    col 60, pr.product_nbr
+                    col 100, usr.name_full_formatted "###################"
+                    row + 1
+                    col 50, bb.active_status_dt_tm
+                    row + 1
+                    col 5 bb.exception_id
+                    row + 2                 
+                   *********************************************************/
+                   /********************************************************* 
+                    * Find abo/rh descirption for Previous                  * 
+                    *********************************************************/
+                     idx_a = 1
+                     finish_flag = "N"
+                     while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                       if ((bb.from_abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                         (bb.from_rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                         reply->qual[qual_index]->previous_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                         finish_flag = "Y"
+                       else
+                         idx_a = idx_a + 1
+                       endif
+                     endwhile
+         
+                   /********************************************************* 
+                    * Find abo/rh descirption for Resulted                  * 
+                    *********************************************************/
+                    idx_a = 1
+                    finish_flag = "N"
+                    while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                      if ((bb.to_abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                        (bb.to_rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                        reply->qual[qual_index]->resulted_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                        finish_flag = "Y"
+                      else
+                        idx_a = idx_a + 1
+                      endif
+                    endwhile          
+         
+                   /********************************************************* 
+                    * Find abo/rh descirption for Current                   * 
+                    *********************************************************/
+                    idx_a = 1
+                    finish_flag = "N"
+                    while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                      if ((bp.cur_abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                        (bp.cur_rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                        reply->qual[qual_index]->current_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                        finish_flag = "Y"
+                      else
+                        idx_a = idx_a + 1
+                      endif
+                    endwhile          
+              endif
+
+        with  nocounter,
+              orahint("index (bb xie7bb_exception)"),
+              maxqual(bb, 100),
+              outerjoin (d2),
+              outerjoin (d3)
+endif
+
+/******************************************************************************
+ *  Exception type:  Donation recorded for ineligble donor (DONINELIG)        *
+ *  Exception type:  Donation recorded of permanently deferred (DONPERM)      *
+ *  Exception type:  Override of donation by permanent deferral (DONPERMOVER) *
+ *  Exception type:  Registered permanently deferred donor (REGPERM)          *
+ *  Exception type:  Override warning on registering perm def (REGPERMOVER)   *
+ ******************************************************************************/
+if (trim(request->cdf_meaning) = "DONINELIG" or
+    trim(request->cdf_meaning) = "DONPERM" or
+    trim(request->cdf_meaning) = "DONPERMOVER" or
+    trim(request->cdf_meaning) = "REGPERM" or
+    trim(request->cdf_meaning) = "REGPERMOVER")
+         select into "nl:"
+              bb.active_status_dt_tm,
+              bb.exception_id,
+              bb.updt_dt_tm,
+              bb.updt_cnt,
+              bb.person_id,
+              bb.review_dt_tm,
+              bb.review_status_cd,
+              bb.review_by_prsnl_id,
+              bb.review_doc_id,
+              usr.username,
+              do.person_id,
+              pra.alias
+         
+         from bb_exception bb,
+              (dummyt d1 with seq = 1),
+              (dummyt d2 with seq = 1),
+              (dummyt d3 with seq = 1),
+              (dummyt d4 with seq = 1),
+              prsnl usr,
+              result re,
+              bbd_donor_contact do,
+              person dnr,
+              person_alias pra,
+              person_donor pd,
+              bbd_donation_results dr
+
+        plan bb where 
+                bb.active_status_dt_tm >= cnvtdatetime(request->beg_dt_tm) and
+                bb.active_status_dt_tm <= cnvtdatetime(request->end_dt_tm) and
+                bb.exception_id > request->last_exception_id and 
+                bb.exception_type_cd = cnvtint(request->exception_type_cd) and
+               (bb.review_status_cd = 0 or
+                bb.review_status_cd =  inprocess_code)
+        join  do where bb.donor_contact_id = do.contact_id
+        join  dnr where do.person_id = dnr.person_id
+        join  pd where do.person_id = pd.person_id 
+        join  (d1 where d1.seq = 1
+        join  dr where dr.person_id = do.person_id and
+                       dr.encntr_id = do.encntr_id)
+        join  (d2 where d2.seq = 1
+        join  pra where pra.person_alias_type_cd = donorid_code and
+                                   do.person_id =  pra.person_id)
+        join  (d3 where d3.seq = 1
+        join  usr where bb.active_status_prsnl_id = usr.person_id)
+        join  (d4 where d4.seq = 1
+        join  re where bb.result_id > 0 and
+                        bb.result_id = re.result_id)
+        detail
+          if (bb.exception_id > 0)
+              qual_index = qual_index + 1
+              if (mod(qual_index, 10) = 1 and qual_index != 1)
+                    stat = alterlist(reply->qual, qual_index + 9)
+              endif
+
+              reply->qual[qual_index]->exception_id = bb.exception_id 
+              reply->qual[qual_index]->updt_cnt = bb.updt_cnt 
+              reply->qual[qual_index]->review_dt_tm = bb.review_dt_tm
+              reply->qual[qual_index]->review_status_cd = bb.review_status_cd
+              reply->qual[qual_index]->review_by_prsnl_id = bb.review_by_prsnl_id
+              reply->qual[qual_index]->review_doc_id = bb.review_doc_id
+                  
+              reply->qual[qual_index]->reason = uar_get_code_display(bb.override_reason_cd)
+              reply->qual[qual_index]->usr_name_full_formatted = usr.name_full_formatted
+              reply->qual[qual_index]->active_status_dt_tm = bb.active_status_dt_tm
+              reply->qual[qual_index]->donor_name_full_formatted = dnr.name_full_formatted
+              reply->qual[qual_index]->donor_nbr = pra.alias
+              reply->qual[qual_index]->eligibility_status = uar_get_code_display(pd.eligibility_type_cd)
+              reply->qual[qual_index]->donation_procedure = uar_get_code_display(dr.procedure_cd)
+          
+             /**********************************************************
+              col 01, dnr.name_full_formatted "###############"
+              col 20, pra.alias "###############"
+              col 40, usr.name_full_formatted "##########"
+              row+1
+              col 20, bb.active_status_dt_tm
+              row + 2                 
+              *********************************************************/
+          endif
+          with  nocounter,
+                orahint("index (bb xie7bb_exception)"),
+                maxqual(bb, 100),
+                outerjoin (d1),
+                outerjoin (d2),
+                outerjoin (d3),
+                outerjoin (d4),
+                dontcare  (re),
+                dontcare  (pra),
+                dontcare  (dr)
+ENDIF  
+
+/******************************************************************************
+ *  Exception type:  Registered ineligible donor (REGINELIG)                  *
+ ******************************************************************************/
+if (trim(request->cdf_meaning) = "REGINELIG")
+         select into "nl:"
+              bb.exception_id,
+              bb.updt_dt_tm,
+              bb.updt_cnt,
+              bb.active_status_dt_tm,
+              bb.person_id,
+              bb.review_dt_tm,
+              bb.review_status_cd,
+              bb.review_by_prsnl_id,
+              bb.review_doc_id,      
+              usr.username,
+              do.person_id,
+              pra.alias
+         
+         from (dummyt d1 with seq = 1),
+              (dummyt d2 with seq = 1),
+              (dummyt d3 with seq = 1),
+              bb_exception bb,
+              prsnl usr,
+              result re,
+              bbd_donor_contact do,
+              person dnr,
+              person_alias pra,
+              person_donor pd
+
+        plan bb where 
+                bb.active_status_dt_tm >= cnvtdatetime(request->beg_dt_tm) and
+                bb.active_status_dt_tm <= cnvtdatetime(request->end_dt_tm) and
+                bb.exception_id > request->last_exception_id and 
+                bb.exception_type_cd = cnvtint(request->exception_type_cd) and
+               (bb.review_status_cd = 0 or
+                bb.review_status_cd =  inprocess_code)
+        join  do where bb.donor_contact_id = do.contact_id
+        join  dnr where do.person_id = dnr.person_id
+        join  pd where do.person_id = pd.person_id 
+        
+        join  (d1 where d1.seq = 1
+        join  pra where pra.person_alias_type_cd = donorid_code and
+                                   do.person_id =  pra.person_id)
+        join  (d2 where d2.seq = 1
+        join  usr where bb.active_status_prsnl_id = usr.person_id)
+        join  (d3 where d3.seq = 1
+        join  re where bb.result_id > 0 and
+                        bb.result_id = re.result_id)
+        detail
+          if (bb.exception_id > 0)
+              qual_index = qual_index + 1
+              if (mod(qual_index, 10) = 1 and qual_index != 1)
+                    stat = alterlist(reply->qual, qual_index + 9)
+              endif
+
+              reply->qual[qual_index]->exception_id = bb.exception_id 
+              reply->qual[qual_index]->updt_cnt = bb.updt_cnt 
+              reply->qual[qual_index]->review_dt_tm = bb.review_dt_tm
+              reply->qual[qual_index]->review_status_cd = bb.review_status_cd
+              reply->qual[qual_index]->review_by_prsnl_id = bb.review_by_prsnl_id
+              reply->qual[qual_index]->review_doc_id = bb.review_doc_id
+                  
+              reply->qual[qual_index]->reason = uar_get_code_display(bb.override_reason_cd)
+              reply->qual[qual_index]->usr_name_full_formatted = usr.name_full_formatted
+              reply->qual[qual_index]->active_status_dt_tm = bb.active_status_dt_tm
+              reply->qual[qual_index]->donor_name_full_formatted = dnr.name_full_formatted
+              reply->qual[qual_index]->donor_nbr = pra.alias
+              reply->qual[qual_index]->eligibility_status = uar_get_code_display(pd.eligibility_type_cd)
+              
+             /**********************************************************
+              col 01, dnr.name_full_formatted "###############"
+              col 20, pra.alias "###############"
+              col 40, usr.name_full_formatted "##########"
+              row + 2                 
+              *********************************************************/
+          endif
+          with  nocounter,
+                orahint("index (bb xie7bb_exception)"),
+                maxqual(bb, 100),
+                outerjoin (d1),
+                outerjoin (d2),
+                outerjoin (d3),
+                dontcare  (re),
+                dontcare  (pra),
+                dontcare  (dr)
+ENDIF  
+
+/******************************************************************************
+ *  Exception type:  Donation recorded donor exceeded volume (DONVOLEXCD)     *
+ *  Exception type:  Registered donor with volume exceeding (REGVOLEXCD )     *
+ ******************************************************************************/
+if (trim(request->cdf_meaning) = "DONVOLEXCD" or
+    trim(request->cdf_meaning) = "REGVOLEXCD")
+              select into "nl:"
+              bb.exception_id,
+              bb.updt_dt_tm,
+              bb.updt_cnt,
+              bb.active_status_dt_tm,
+              bb.person_id,
+              bb.review_dt_tm,
+              bb.review_status_cd,
+              bb.review_by_prsnl_id,
+              bb.review_doc_id,      
+              usr.username,
+              do.person_id,
+              pra.alias
+         
+         from (dummyt d1 with seq = 1),
+              (dummyt d2 with seq = 1),
+              (dummyt d3 with seq = 1),
+              bb_exception bb,
+              prsnl usr,
+              result re,
+              bbd_donor_contact do,
+              person dnr,
+              person_alias pra
+
+        plan bb where 
+                bb.active_status_dt_tm >= cnvtdatetime(request->beg_dt_tm) and
+                bb.active_status_dt_tm <= cnvtdatetime(request->end_dt_tm) and
+                bb.exception_id > request->last_exception_id and 
+                bb.exception_type_cd = cnvtint(request->exception_type_cd) and
+               (bb.review_status_cd = 0 or
+                bb.review_status_cd =  inprocess_code)
+        join  do where bb.donor_contact_id = do.contact_id
+        join  dnr where do.person_id = dnr.person_id
+                  
+        join  (d1 where d1.seq = 1
+        join  pra where pra.person_alias_type_cd = donorid_code and
+                                   do.person_id =  pra.person_id)
+        join  (d2 where d2.seq = 1
+        join  usr where bb.active_status_prsnl_id = usr.person_id)
+        join  (d3 where d3.seq = 1
+        join  re where bb.result_id > 0 and
+                        bb.result_id = re.result_id)
+        detail
+          if (bb.exception_id > 0)
+              qual_index = qual_index + 1
+              if (mod(qual_index, 10) = 1 and qual_index != 1)
+                    stat = alterlist(reply->qual, qual_index + 9)
+              endif
+
+              reply->qual[qual_index]->exception_id = bb.exception_id 
+              reply->qual[qual_index]->updt_cnt = bb.updt_cnt 
+              reply->qual[qual_index]->review_dt_tm = bb.review_dt_tm
+              reply->qual[qual_index]->review_status_cd = bb.review_status_cd
+              reply->qual[qual_index]->review_by_prsnl_id = bb.review_by_prsnl_id
+              reply->qual[qual_index]->review_doc_id = bb.review_doc_id
+                  
+              reply->qual[qual_index]->reason = uar_get_code_display(bb.override_reason_cd)
+              reply->qual[qual_index]->usr_name_full_formatted = usr.name_full_formatted
+              reply->qual[qual_index]->active_status_dt_tm = bb.active_status_dt_tm
+              reply->qual[qual_index]->donor_name_full_formatted = dnr.name_full_formatted
+              reply->qual[qual_index]->donor_nbr = pra.alias
+              
+             /**********************************************************
+              col 01, dnr.name_full_formatted "###############"
+              col 20, pra.alias "###############"
+              col 40, usr.name_full_formatted "##########"
+              row + 2                 
+              *********************************************************/
+          endif
+          with  nocounter,
+                orahint("index (bb xie7bb_exception)"),
+                maxqual(bb, 100),
+                outerjoin (d1),
+                outerjoin (d2),
+                outerjoin (d3),
+                dontcare  (re),
+                dontcare  (pra),
+                dontcare  (dr)
+ENDIF  
+
+
+/******************************************************************************
+ *  Exception type:  Directed donation recorded donor ABO/Rh (DONDIRNOMATC)   *
+ *  Exception type:  Registered donor for directed proc ABO/Rh (REGDIRNOMATC) *
+ ******************************************************************************/
+if (trim(request->cdf_meaning) = "DONDIRNOMATC" or
+    trim(request->cdf_meaning) = "REGDIRNOMATC")
+              select into "nl:"
+              bb.exception_id,
+              bb.updt_dt_tm,
+              bb.updt_cnt,
+              bb.active_status_dt_tm,
+              bb.person_id,
+              bb.review_dt_tm,
+              bb.review_status_cd,
+              bb.review_by_prsnl_id,
+              bb.review_doc_id,      
+              usr.username,
+              do.person_id,
+              pra.alias,
+              pra1.alias,
+              pa.abo_cd,
+              pa.rh_cd,
+              pa1.abo_cd,
+              pa1.rh_cd,
+              per.name_full_formatted
+         from (dummyt d1 with seq = 1),
+              (dummyt d2 with seq = 1),
+              (dummyt d3 with seq = 1),
+              (dummyt d4 with seq = 1),
+              (dummyt d5 with seq = 1),
+              (dummyt d6 with seq = 1),
+              bb_exception bb,
+              prsnl usr,
+              result re,
+              bbd_donor_contact do,
+              person dnr,
+              person_alias pra,
+              person_alias pra1,
+              person per,
+              person_aborh pa,
+              person_aborh pa1
+        plan bb where 
+                bb.active_status_dt_tm >= cnvtdatetime(request->beg_dt_tm) and
+                bb.active_status_dt_tm <= cnvtdatetime(request->end_dt_tm) and
+                bb.exception_id > request->last_exception_id and 
+                bb.exception_type_cd = cnvtint(request->exception_type_cd) and
+               (bb.review_status_cd = 0 or
+                bb.review_status_cd =  inprocess_code)
+        join  per where bb.person_id = per.person_id
+        join  do where bb.donor_contact_id = do.contact_id
+        join  dnr where do.person_id = dnr.person_id
+                  
+        join  (d1 where d1.seq = 1
+        join  pra where pra.person_alias_type_cd = donorid_code and
+                                   do.person_id =  pra.person_id)
+        join  (d4 where d4.seq = 1
+        join  pra1 where pra1.person_alias_type_cd = mrn_code and
+                                   bb.person_id =  pra1.person_id)
+        join  (d2 where d2.seq = 1
+        join  usr where bb.active_status_prsnl_id = usr.person_id)
+        join  (d3 where d3.seq = 1
+        join  re where bb.result_id > 0 and
+                        bb.result_id = re.result_id)
+        
+        join  (d5 where d5.seq = 1
+        join  pa where bb.person_id = pa.person_id and
+               pa.active_ind = 1)
+        join  (d6 where d6.seq = 1
+        join  pa1 where dnr.person_id = pa1.person_id and
+                       pa1.active_ind = 1)
+
+        detail
+          if (bb.exception_id > 0)
+              qual_index = qual_index + 1
+              if (mod(qual_index, 10) = 1 and qual_index != 1)
+                    stat = alterlist(reply->qual, qual_index + 9)
+              endif
+
+              reply->qual[qual_index]->exception_id = bb.exception_id 
+              reply->qual[qual_index]->updt_cnt = bb.updt_cnt 
+              reply->qual[qual_index]->review_dt_tm = bb.review_dt_tm
+              reply->qual[qual_index]->review_status_cd = bb.review_status_cd
+              reply->qual[qual_index]->review_by_prsnl_id = bb.review_by_prsnl_id
+              reply->qual[qual_index]->review_doc_id = bb.review_doc_id
+                  
+              reply->qual[qual_index]->reason = uar_get_code_display(bb.override_reason_cd)
+              reply->qual[qual_index]->usr_name_full_formatted = usr.name_full_formatted
+              reply->qual[qual_index]->active_status_dt_tm = bb.active_status_dt_tm
+              reply->qual[qual_index]->donor_name_full_formatted = dnr.name_full_formatted
+              reply->qual[qual_index]->donor_nbr = pra.alias
+              reply->qual[qual_index]->patient_name_full_formatted = per.name_full_formatted
+              reply->qual[qual_index]->alias = pra1.alias
+
+             /*********************************************************
+              * Find abo/rh descirption using donor code's            *  
+              *********************************************************/
+              idx_a = 1
+              finish_flag = "N"
+              while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                    if ((pa1.abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                        (pa1.rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                            reply->qual[qual_index]->donor_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                            finish_flag = "Y"
+                    else
+                            idx_a = idx_a + 1 
+                    endif
+              endwhile          
+             /********************************************************* 
+              * Find abo/rh descirption using patient code's          * 
+              *********************************************************/
+              idx_a = 1
+              finish_flag = "N"
+              while ((idx_a <= aborh_index) and (finish_flag = "N"))
+                   if ((pa.abo_cd = aborh->aborh_list[idx_a]->abo_code) and
+                       (pa.rh_cd  =  aborh->aborh_list[idx_a]->rh_code))
+                           reply->qual[qual_index]->patient_abo_rh = aborh->aborh_list[idx_a]->aborh_display
+                           finish_flag = "Y"
+                   else
+                           idx_a = idx_a + 1
+                   endif
+              endwhile          
+
+             /**********************************************************
+              col 01, dnr.name_full_formatted "###############"
+              col 20, pra.alias "###############"
+              col 40, usr.name_full_formatted "##########"
+              row + 2                 
+              *********************************************************/
+          endif
+          with  nocounter,
+                orahint("index (bb xie7bb_exception)"),
+                maxqual(bb, 100),
+                outerjoin (d1),
+                outerjoin (d2),
+                outerjoin (d3),
+                outerjoin (d4),
+                outerjoin (d5),
+                outerjoin (d6),
+                dontcare  (re),
+                dontcare  (pra),
+                dontcare  (pra1),
+                dontcare  (dr),
+                dontcare  (pa),
+                dontcare  (pa1)
+ENDIF  
+
+
+/****************************************************************************
+
+ ****************************************************************************
+ *   Code Used for all Exceptions should be added here                      *
+ ****************************************************************************
+
+ ****************************************************************************/
+
+set stat = alterlist(reply->qual, qual_index)
+
+/*********************************************************
+ * Get long Text for Exception                           *
+ *********************************************************/
+if (value(qual_index) > 0)
+      select into "nl:"
+        from long_text l,
+              (dummyt d with seq = value(qual_index))
+        plan d
+        join l   
+        where l.long_text_id = reply->qual[d.seq]->review_doc_id and
+              l.long_text_id !=0 
+        detail
+            reply->qual[d.seq]->long_text = l.long_text
+        with nocounter
+endif
+set reply->status_data->status = "S"
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

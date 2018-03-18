@@ -1,0 +1,278 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBDMultiFacility/BBD_GET_MULTIFACILITY_INFO.PRG Turn on black mode
+
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbd_get_multifacility_info.prg
+        Object name:            bbd_get_multifacility_info.prg
+        Request #:              225599
+        Product:                Pathnet                        
+        Product Team:           Blood Bank
+        HNA Version:            Millenium
+        CCL Version:            5.0
+        Program purpose:        Retrieve location information for the user
+        Tables read:            prsnl_location_r, location_group, location
+        Tables updated:         none
+        Executing from:         VB Applications
+
+        Special Notes:          
+******************************************************************************/
+;~DB~************************************************************************
+;    *                 GENERATED MODIFICATION CONTROL LOG                   *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *001 12/28/98 Shellie Ninemire     Initial Release                     *
+;    *002 05/04/02 Ronda Zheng          reset x = 1 before while loop in the*
+;    *                                  section of retrieving all root locations*
+;    *003 01/31/08 Matt Cummings        Update script logic to retrieve all *
+;    *                                  owner areas the user has access to. *
+;~DE~************************************************************************
+
+        
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+Drop Program   bbd_get_multifacility_info:dba go
+Create Program bbd_get_multifacility_info:dba
+
+/*
+Record Request
+(
+1 person_id = f8
+1 drill_ind  = i2
+1 prev_loc_cd = f8
+1 prev_root_cd = f8
+1 required_type_mean = c12
+1 debug_ind = i2
+1 use_own_inv_filter_ind = i2
+)
+*/
+
+Record Reply
+(
+
+1 parent[*]
+        2 location_cd = f8
+        2 location_display = c60
+        2 location_mean = c12
+
+        2 location_type_cd = f8
+        2 location_type_mean = c12
+        2 location_type_display = c40
+
+        2 root_loc_cd = f8
+        2 root_loc_display = c60
+        2 root_loc_mean = c12
+
+        2 child_ind = i2 
+        2 previous_parent_ind = i2       
+        
+        2 inv_area_cnt = i4
+
+%i cclsource:bbd_status_data.inc
+)
+
+if (request->use_own_inv_filter_ind = 1)
+%i cclsource:scs_script_common.inc
+endif
+
+declare GetRestrictInd (OrgId = f8 ) = i2
+
+declare nCheckSecurityFlag           = i2    with protect, noconstant(0)
+declare LOC_TYPE_BBOWNERROOT_CD      = f8    with protect, noconstant(0.0)
+declare LOC_TYPE_BBOWNERROOT_MEAN    = vc    with protect, constant("BBOWNERROOT")
+
+if (request->use_own_inv_filter_ind = 1)
+   /* Check Security if needed   */
+   call ScsCheckOrgSecAndConfid(NULL)
+   if (encntr_org_sec_ind = 1 or confid_sec_ind = 1)
+%i cclsource:sacrtl_org.inc
+      set nCheckSecurityFlag = 1
+   endif
+endif
+
+set reply->status = "S"
+
+set required_type_cd = 0.0
+SET CDFMEANING = FILLSTRING(12, " ")
+if (request->required_type_mean !=  "")
+        set code_cnt = 1
+        SET CDFMEANING = REQUEST->REQUIRED_TYPE_MEAN
+        set stat = uar_get_meaning_by_codeset(222, CDFMEANING, code_cnt, required_type_cd)
+        if (required_type_cd = 0.0)
+                set reply->status = "F"
+                set reply->status_data->subeventstatus[1]->SourceObjectName
+                      = "bbd_get_multifacility_info.prg",
+                set reply->status_data->subeventstatus[1]->SourceObjectName
+                      = "bbd_get_multifacility_info.prg",
+                set reply->status_data->subeventstatus[1]->OperationName
+                      = "RETRIEVE",
+                set reply->status_data->subeventstatus[1]->TargetObjectName
+                      = "uar_get_meaning_by_codeset",
+                set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                      = "Unable to retrieve code value for code set 222.",
+                set reply->status_data->subeventstatus[1]->SourceObjectQual
+                              = 1,
+                go to exitscript
+        endif
+endif
+
+/* Get BBOWNERROOT location_group_type_cd */
+set stat =  uar_get_meaning_by_codeset(222,nullterm(LOC_TYPE_BBOWNERROOT_MEAN),1,LOC_TYPE_BBOWNERROOT_CD)
+if (LOC_TYPE_BBOWNERROOT_CD = 0.0)
+   set reply->status_data.status = "F"
+   set reply->status_data.subeventstatus[1].TargetObjectValue = "Code lookup for BBOWNERROOT in codeset 222 failed"
+   go to exitscript
+endif
+
+if (request->debug_ind = 1)
+        call echo(build("required type code -->", required_type_cd))
+        call echo(build("BBOWNERROOT type code -->", LOC_TYPE_BBOWNERROOT_CD))
+endif
+
+/*********************************************************************************
+ *   This procedure sends back all the owner areas that have at least one        *
+ *   inventory area that the user has access to.                                 *
+ *********************************************************************************/
+
+select into "nl:" 
+        lg.parent_loc_cd,
+        parent_display = uar_get_code_description(lg.parent_loc_cd),
+        parent_type_display = uar_get_code_display(lg.location_group_type_cd),
+        parent_type_mean = uar_get_code_meaning(lg.location_group_type_cd),
+        lg.location_group_type_cd,
+        lg.root_loc_cd,
+        root_mean = uar_get_code_meaning(lg.root_loc_cd),
+        root_display = uar_get_code_description(lg.root_loc_cd)
+        
+from
+        location_group lg, location loc
+plan lg  where lg.parent_loc_cd = lg.root_loc_cd and 
+                  lg.active_ind = 1 and
+                  lg.location_group_type_cd = LOC_TYPE_BBOWNERROOT_CD
+join loc where loc.location_cd = lg.child_loc_cd and
+               loc.active_ind = 1
+
+order by parent_display, lg.parent_loc_cd
+
+head report
+        idx = 0
+        x = 1
+        inv_access_cnt = 0
+detail ;Get the number of inventory areas in this owner area that the user has
+       ;access to.
+if (request->use_own_inv_filter_ind = 1 and nCheckSecurityFlag = 1)
+   if (GetRestrictInd(loc.organization_id) = 0)
+      inv_access_cnt = inv_access_cnt + 1
+   endif
+else
+   ;no filter, user has access to all organizations
+   inv_access_cnt = inv_access_cnt + 1
+endif
+
+foot lg.parent_loc_cd ;Insert ower area into reply
+if (inv_access_cnt > 0)
+   skip = 0
+   x = 1
+   while ( x <= idx)
+      if( lg.parent_loc_cd = reply->parent[x].location_cd AND
+          lg.root_loc_cd = reply->parent[x].root_loc_cd)
+         ;This owner area has already been added to the reply
+         skip = 1
+         x = idx 
+      endif
+      x = x + 1
+   endwhile
+   if(skip = 0)
+      idx = idx + 1
+      stat = alterlist(reply->parent, idx)
+
+      ;test for determining the default position of the tree view 
+      ;if it's a child to a root, set the parent code to be used 
+      if(lg.root_loc_cd = request->prev_root_cd and request->prev_loc_cd > 0)
+         reply->parent[idx].previous_parent_ind = 1
+         if(request->debug_ind = 1)
+            call echo(build("previous parent code = ", lg.parent_loc_cd))
+         endif
+      endif
+      if (request->debug_ind = 1)
+         call echo(build("Location code = ", lg.parent_loc_cd))
+      endif
+      reply->parent[idx].location_cd = lg.parent_loc_cd 
+      reply->parent[idx].location_display = parent_display
+
+      reply->parent[idx].location_type_cd = lg.location_group_type_cd
+      reply->parent[idx].location_type_mean = parent_type_mean
+      reply->parent[idx].location_type_display = parent_type_display
+        
+      reply->parent[idx].root_loc_cd = lg.root_loc_cd
+      reply->parent[idx].root_loc_mean = root_mean 
+      reply->parent[idx].root_loc_display = root_display
+      reply->parent[idx].inv_area_cnt = inv_access_cnt
+      if (inv_access_cnt > 0)
+          reply->parent[idx].child_ind = 1
+      endif
+   endif
+   inv_access_cnt = 0
+endif
+
+foot report
+        row + 0
+
+with    nocounter
+
+if (size(reply->parent,5) = 0)
+   set reply->status = "Z"
+endif
+
+#exitscript
+
+if (reply->status = "F")
+        set reply->status_data->status = "F"
+
+elseif (reply->status = "Z")
+        set reply->status_data->status = "Z"
+
+else
+        set reply->status_data->status = "S"
+endif
+if(request->debug_ind = 1)
+        CALL ECHO(BUILD("STATUS...", REPLY->STATUS_DATA.STATUS))
+endif
+
+subroutine GetRestrictInd(dOrgId)
+  declare lIdx           = i4   with protect, noconstant(0)
+  declare lCnt           = i4   with protect, noconstant(0)
+  
+  set lCnt = size(sac_org->organizations, 5)
+  for (lIdx = 1 to lCnt)
+    if (dOrgId = sac_org->organizations[lIdx].organization_id)
+        return (0)
+    endif
+  endfor
+  
+  return (1)
+end
+
+end go
+
+;Generated by GNU enscript 1.6.4.

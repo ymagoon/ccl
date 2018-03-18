@@ -1,0 +1,376 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBT_RDM_ADD_PROD_EVENT_24/BBT_RDM_ADD_PROD_EVENT_24.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2002 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+    Source file name:       BBT_RDM_ADD_PROD_EVENT_24.prg
+    Object name:            BBT_RDM_ADD_PROD_EVENT_24
+    Request #:              n/a
+
+    Product:                PathNet Blood Bank
+    Product Team:           Blood Bank
+    HNA Version:            500
+    CCL Version:
+
+    Program purpose:        This readme will create product event rows for
+                            blood bank products that were created as the
+                            result of a product modification. 
+
+
+    Tables read,            TABLE_NAME              METHOD (UNIQUE, RANGE, FULL)
+    and access method:      --------------------    -----------------------------
+                            product                 FULL
+                            product_event           UNIQUE
+
+    Tables updated:         product_event
+
+
+    Executing from:
+
+    Special Notes:          Each section should clearly identify what the purpose
+                            of that README step is.
+
+    Run Occurance:          (select ONE of the following)
+                            -----------------------------
+                            [X] 1. RUN ONCE
+                            [ ] 2. RUN MANY
+
+    ReadMe Category:        (select ONE of the following)
+                            -----------------------------
+                            [ ] 1. Data Load
+                            [X] 2. Data Conversion
+                            [ ] 3. Data Migration
+
+    Execution Time:         (select ONE of the following)
+                            ------------------------------------
+                            [ ] 1. Uptime before uptime schema.
+                            [X] 2. Uptime after uptime schema.
+                            [ ] 3. Downtime before downtime schema.
+                            [ ] 4. Downtime after downtime schema.
+                            [ ] 5. Uptime after all other components.
+
+    Exec. Justification:    n/a
+
+    Parent Script:          n/a
+
+    Check Script:           n/a
+
+    Data file for import:   n/a
+
+    Execution Duration:     (select ONE of the following)
+                            ----------------------------------
+                            [ ] 1. Fixed Time
+                            [X] 2. Driver Table: product_event
+
+******************************************************************************/
+;~DB~****************************************************************************************
+;*                      GENERATED MODIFICATION CONTROL LOG                                  *
+;********************************************************************************************
+;*                                                                                          *
+;*Mod Date     Engineer             ITN     Feature      Comment                            *
+;*--- -------- -------------------- ------- ------------ -----------------------------------*
+;*000 09/10/02 Hal Patchen          0100001 22267        Initial Release                    *
+;*001 06/30/05 Jeff Wain            0116901 63252        Removed cnvtint formatting on seqn *
+;*                                                       and changed record mod to          *
+;*                                                       modification due to protected name *
+;~DE~****************************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ***********************************/
+
+drop program BBT_RDM_ADD_PROD_EVENT_24:dba go
+create program BBT_RDM_ADD_PROD_EVENT_24:dba
+
+/****************************************************************************
+* Variable declaration                                                      *
+*****************************************************************************/
+declare sREADME_NAME                   = c25 with constant("BBT_RDM_ADD_PROD_EVENT_24")
+declare failed_ind                     = i2 with noconstant(0)
+declare inactive_status_cd             = f8 with noconstant(0.0)
+declare modified_cd                    = f8 with noconstant(0.0)
+declare modified_product_cd            = f8 with noconstant(0.0)
+declare p_cnt                          = i4 with noconstant(0)
+declare cnt                            = i4 with noconstant(0)
+declare stat                           = i2 with noconstant(0)
+declare sub_product_event_id               = f8 with noconstant(0.0)
+declare msg                            = c132 with noconstant(fillstring(132," "))
+%i cclsource:pathnet_ocd_subroutines.inc
+
+/**********************
+** Log Start Message **
+**                   **********************************
+** LOGSCRIPTSTART creates log row as:                **
+**    "Starting (<sREADME_NAME>) - [<date/time>]..." **
+******************************************************/
+#START_SCRIPT
+call LOGSCRIPTSTART(sREADME_NAME)
+
+/****************************************************************************
+* Internal record declaration                                               *
+****************************************************************************/
+record modification
+(
+   1  products[*]
+      2  product_id                     = f8
+      2  event_dt_tm                    = dq8
+      2  event_prsnl_id                 = f8
+)
+
+
+/****************************************************************************
+* Load inactive status code value from code set 48.                         *
+****************************************************************************/
+select into "nl:"
+   cv.code_value
+
+from
+   code_value cv
+
+plan cv where cv.code_set = 48
+          and cv.cdf_meaning = "INACTIVE"
+          and cv.active_ind = 1
+          and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+          and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+
+detail
+   inactive_status_cd = cv.code_value
+
+with nocounter
+
+if (curqual = 0)
+   set failed_ind = 1
+   set msg = "Missing required code value for cdf_meaning = INACTIVE on code set 48"
+   call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+   go to EXIT_SCRIPT
+endif
+
+/****************************************************************************
+* Load modified status code value from code set 1610.                       *
+****************************************************************************/
+select into "nl:"
+   cv.code_value
+
+from
+   code_value cv
+
+plan cv where cv.code_set = 1610
+          and cv.cdf_meaning = "8"  ;Modified
+          and cv.active_ind = 1
+          and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+          and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+
+detail
+   modified_cd = cv.code_value
+
+with nocounter
+
+if (curqual = 0)
+   set failed_ind = 1
+   set msg = "Missing required code value for cdf_meaning = 8 on code set 1610"
+   call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+   go to EXIT_SCRIPT
+endif
+
+/****************************************************************************
+* Load modified product status code value from code set 1610.               *
+****************************************************************************/
+select into "nl:"
+   cv.code_value
+
+from
+   code_value cv
+
+plan cv where cv.code_set = 1610
+          and cv.cdf_meaning = "24"  ;Modified Product
+          and cv.active_ind = 1
+          and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+          and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+
+detail
+   modified_product_cd = cv.code_value
+
+with nocounter
+
+if (curqual = 0)
+   set failed_ind = 1
+   set msg = "Missing required code value for cdf_meaning = 24 on code set 1610"
+   call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+   go to EXIT_SCRIPT
+endif
+
+/****************************************************************************
+* Load products that have been created as the result of a modification      *
+* where no "modified product" event exists.  Use the event date/time and    *
+* personnel id from the original modified product event when creating the   *
+* "modified product" event for the new product.                             *
+****************************************************************************/
+set p_cnt = 0
+
+select into "nl:"
+   p.product_id
+  ,pe.product_event_id
+  ,pe2.product_event_id
+from
+   product p
+  ,product_event pe
+  ,product_event pe2
+
+plan p   where p.modified_product_id > 0.0
+join pe  where pe.product_id = p.modified_product_id
+           and pe.event_type_cd+0 = modified_cd
+join pe2 where pe2.product_id = outerjoin(p.product_id)
+           and pe2.event_type_cd = outerjoin(modified_product_cd)
+
+order by
+   p.product_id
+
+head report
+   p_cnt = 0
+
+head p.product_id
+   ;* Determine if a "modified product" event exists for the product.
+   ;* If not, a product event needs to be created for this product.
+   if (pe2.product_event_id = 0.0)
+      p_cnt = p_cnt + 1
+      if (mod(p_cnt,100) = 1)
+         stat = alterlist(modification->products, p_cnt + 99)
+      endif
+      modification->products[p_cnt].product_id = p.product_id
+      modification->products[p_cnt].event_dt_tm = cnvtdatetime(pe.event_dt_tm)
+      modification->products[p_cnt].event_prsnl_id = pe.event_prsnl_id
+   endif
+
+foot report
+   stat = alterlist(modification->products, p_cnt)
+
+with
+   nocounter
+
+;* Check for the existence of products needing a "modified product" event.
+if (p_cnt = 0)
+   set failed_ind = 0
+   call LOGMSG("No products found needing a modified product event.", E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+   go to EXIT_SCRIPT
+endif
+
+
+/****************************************************************************
+* Add "modified product" event to each product.                             *
+****************************************************************************/
+for (cnt = 1 to p_cnt)
+   ;*    
+   ;* Generate new sub_product_event_id sequence value
+   ;*   
+   set sub_product_event_id = 0.0
+   select into "nl:"
+      seqn = seq(pathnet_seq,nextval)
+   from
+      dual
+   detail
+      sub_product_event_id = seqn
+   with
+     format, nocounter
+
+   if (sub_product_event_id = 0.0)
+      set failed_ind = 1
+      rollback
+      call LOGMSG("Unable to generate a new pathnet sequence id", E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+      go to EXIT_SCRIPT
+   endif
+   ;*
+   ;* Add "modified product" event to product_event table.
+   ;*
+   insert into product_event pe
+   set
+      pe.product_event_id = sub_product_event_id,
+      pe.product_id = modification->products[cnt].product_id,
+      pe.event_dt_tm = cnvtdatetime(modification->products[cnt].event_dt_tm),
+      pe.event_prsnl_id = modification->products[cnt].event_prsnl_id,
+      pe.event_type_cd = modified_product_cd,
+      pe.event_status_flag = 0,
+      pe.bb_result_id = 0.0,
+      pe.encntr_id = 0.0,
+      pe.person_id = 0.0,
+      pe.order_id = 0.0,
+      pe.override_ind = 0,
+      pe.override_reason_cd = 0.0,
+      pe.related_product_event_id = 0.0,
+      pe.active_ind = 0,
+      pe.active_status_cd = inactive_status_cd,
+      pe.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+      pe.active_status_prsnl_id = 0.0,
+      pe.updt_applctx = 0,
+      pe.updt_task = 0,
+      pe.updt_cnt = 0,
+      pe.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+      pe.updt_id = 0.0
+   where pe.product_event_id = sub_product_event_id
+   with nocounter
+   if (curqual = 0)
+      set failed_ind = 1
+      rollback
+      set msg = build("PRODUCT_EVENT table insert FAILED for sub_product_event_id =", sub_product_event_id)
+      call LOGMSG(msg, E_RDMSTATUS + E_DISPMSG + E_LOGTOFILE)
+      go to EXIT_SCRIPT
+   endif
+   commit
+endfor
+
+;---------------------------------------------------------
+#EXIT_SCRIPT
+/****************************
+**  LOG Execution Status.  **
+**                         ***************************************
+**  Note:  if you have a check script then you do not           **
+**  need to perform the LOGSTATUS in the RDM script.            **
+**  Explicit COMMIT and/or ROLLBACK must be perform             **
+**  In this section both in the README and the CHECK            **
+**  script.  For example:                                       **
+**     if (nCnt > 0)                                            **
+**       COMMIT  ;Just in case LOGSTATUS pulls an Oracle error. **
+**       CALL LOGSTATUS("Execution Successful.", "S")           **
+**     else                                                     **
+**       ROLLBACK                                               **
+**       CALL LOGSTATUS("Execution Failed because ...", "F")    **
+**     endif                                                    **
+**                                                              **
+*****************************************************************/
+if (failed_ind = 0)
+   commit  ;Just in case LOGSTATUS pulls an Oracle error.
+   call LOGSTATUS("Execution Successful.", "S")
+else
+   rollback
+   call LOGSTATUS("Execution Failed", "F")
+endif
+
+free record mod
+
+
+/********************
+** Log End Message **
+**                   ******************************************
+** LOGSCRIPTEND creates log row as:                          **
+**    "Execution (<sREADME_NAME>) Complete - [<date/time>]." **
+**************************************************************/
+call LOGSCRIPTEND(sREADME_NAME)
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

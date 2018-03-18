@@ -1,0 +1,206 @@
+ ;;Solution_Test/script/PathNet -- Common Services/ACCESSION_VALIDATE/ACCESSION_VALIDATE.PRG Turn on black mode
+
+;;--------------------------------------------------------------------------------------------------------------------;;
+;; File:  accession_validate.prg                                                                                      ;;
+;; Description: Accession validation routine.                                                                         ;;
+;; Request Nbr: 265058                                                                                                ;;
+;;                                                                                                                    ;;
+;;--------------------------------------------------------------------------------------------------------------------;;
+;; Notes                                                                                                              ;;
+;; ----- -------------------------------------------------------------------------------------------------------------;;
+;;                                                                                                                    ;;
+;;                                                                                                                    ;;
+;;--------------------------------------------------------------------------------------------------------------------;;
+;; Mod Date                  Feature    Description                                                                   ;;
+;; --- -------- -----------  ---------- ------------------------------------------------------------------------------;;
+;; 000 07/01/99 CERGYL       6255       File creation.                                                                ;;
+;;--------------------------------------------------------------------------------------------------------------------;;
+
+        drop program accession_validate:dba go
+        create program accession_validate:dba
+
+        ;********************************************************************
+        ;* ACTION_IND                                                       *
+        ;*------------------------------------------------------------------*
+        ;* 0 = validate and insert.                                         *
+        ;* 1 = validate only.                                               *
+        ;* 2 = validate and update.                                         *
+        ;********************************************************************
+
+        record reply
+        (
+         1 assignment_status              = i4
+         1 assignment_meaning             = c12 
+         1 qual[*]
+           2 order_id                     = f8
+           2 accession                    = c20
+           2 accession_updt_cnt           = i4
+           2 accession_id                 = f8
+           2 accession_status             = i2
+           2 accession_meaning            = vc 
+%I CCLSOURCE:STATUS_BLOCK.INC
+        )
+
+%I CCLSOURCE:ACCESSION_COMMON.INC
+
+        set err_cnt = 0
+        set reqinfo->commit_ind = 0
+        set reply->status_data->status = "F"
+
+        set assignment_status = ACC_ERROR
+
+        set nbr_of_accessions = size (request->qual, 5)
+        if (nbr_of_accessions = 0)
+          set reply->assignment_meaning = "No accessions in request" 
+          go to EXIT_SCRIPT
+        endif
+
+        select into "nl:" d1.seq, aax.site_prefix_cd, aax.accession_format_cd, aax.accession_assignment_pool_id
+        from  (dummyt d1 with seq = value (nbr_of_accessions)),
+               accession_assign_xref aax
+ 
+        plan d1
+          where request->qual[d1.seq].accession_pool_id = 0
+        join aax 
+          where aax.accession_format_cd = request->qual[d1.seq].accession_format_cd
+            and aax.site_prefix_cd = request->qual[d1.seq].site_prefix_cd
+ 
+        detail
+          request->qual[d1.seq].accession_pool_id = aax.accession_assignment_pool_id
+ 
+        with nocounter, outerjoin=d1, dontcare=aax 
+        
+        ;*
+        ;* Validate the accessions.
+        ;*
+ 
+        set stat = alterlist (reply->qual, nbr_of_accessions)
+
+        for (i = 1 to nbr_of_accessions)
+ 
+          if (request->qual[i].accession_pool_id > 0)
+
+            ;*
+            ;* Get the site prefix display
+            ;*
+
+            set acc_site_prefix_cd = request->qual[i].site_prefix_cd
+            execute accession_site_code
+            set request->qual[i].site_prefix_disp = acc_site_prefix
+ 
+            ;*
+            ;* Get the year from the accession when request->qual[i].accession_year
+            ;* does not match the year in the accession string.
+            ;*
+ 
+            if (request->qual[i].accession_format_cd > 0)
+              set acc_year = cnvtint (substring (8, 4, request->qual[i].accession))
+              if (acc_year > request->qual[i].accession_year)
+                set request->qual[i].accession_year = acc_year
+              endif
+            else
+              set acc_year = cnvtint (substring (6, 4, request->qual[i].accession))
+              if (acc_year > request->qual[i].accession_year)
+                set request->qual[i].accession_year = acc_year
+              endif
+            endif
+ 
+            set accession_str->accession_year = request->qual[i].accession_year
+            set accession_str->accession_day = request->qual[i].accession_day
+            set accession_str->alpha_prefix = request->qual[i].alpha_prefix
+            set accession_str->accession_seq_nbr = request->qual[i].accession_seq_nbr
+            set accession_str->accession_pool_id = request->qual[i].accession_pool_id
+ 
+            execute accession_string
+ 
+            set accession_chk->site_prefix_cd = request->qual[i].site_prefix_cd
+            set accession_chk->accession_year = request->qual[i].accession_year
+            set accession_chk->accession_day = request->qual[i].accession_day
+            set accession_chk->accession_pool_id = request->qual[i].accession_pool_id
+            set accession_chk->accession_seq_nbr = request->qual[i].accession_seq_nbr
+            set accession_chk->accession_class_cd = 0
+            set accession_chk->accession_format_cd = request->qual[i].accession_format_cd
+            set accession_chk->alpha_prefix = request->qual[i].alpha_prefix
+            set accession_chk->accession = accession_nbr
+            set accession_chk->accession_nbr_check = accession_nbr_chk
+            set accession_chk->action_ind = request->action_ind
+            set accession_chk->preactive_ind = request->qual[i].preactive_ind
+            set accession_chk->accession_updt_cnt = request->qual[i].accession_updt_cnt
+            set accession_chk->accession_id = request->qual[i].accession_id
+ 
+            execute accession_check
+
+            set reply->qual[i].accession = accession_nbr 
+            set reply->qual[i].accession_meaning = accession_meaning
+            set reply->qual[i].accession_status = accession_status
+            set reply->qual[i].accession_updt_cnt = accession_updt_cnt
+
+            if (accession_status = ACC_SUCCESS)
+              set reply->qual[i].accession_id = accession_id 
+            else
+              set err_cnt = err_cnt + 1
+              set reply->qual[i].accession_id = accession_dup_id 
+            endif
+          endif
+        endfor
+
+        if (err_cnt > 0)
+          set reply->assignment_status = ACC_ERROR
+          if (request->action_ind = 1) 
+            set reply->accession_meaning = "Not all accessions are valid"
+          else  
+            set reply->assignment_meaning = "Not all accessions assigned"
+          endif
+          go to EXIT_SCRIPT
+        endif
+
+        if (request->insert_aor_ind = 1)
+          insert into accession_order_r aor,
+                     (dummyt d1 with seq = value (nbr_of_accessions))
+
+          set 
+              aor.order_id = reply->qual[d1.seq].order_id,
+              aor.accession_id = reply->qual[d1.seq].accession_id,
+              aor.accession = reply->qual[d1.seq].accession,
+              aor.updt_dt_tm = cnvtdatetime (curdate, curtime3),
+              aor.updt_id = reqinfo->updt_id,
+              aor.updt_task = reqinfo->updt_task,
+              aor.updt_applctx = reqinfo->updt_applctx,
+              aor.updt_cnt = 0
+
+          plan d1
+            where reply->qual[d1.seq].order_id > 0 
+              and reply->qual[d1.seq].accession_status = 1
+          join aor
+          with nocounter
+
+          if (curqual != nbr_of_accessions)
+            set reply->assignment_status = ACC_ERROR
+            set reply->assignment_meaning = "Error inserting accession_order table"
+            go to EXIT_SCRIPT
+          endif
+        endif
+
+        set reply->status_data->status =  "S"
+        set reply->assignment_status = ACC_SUCCESS
+
+        case (request->action_ind)
+          of 0:
+            set reply->assignment_meaning = "All accessions assigned"
+          of 1:
+            set reply->assignment_meaning = "All accessions are valid"
+          of 2:
+            set reply->assignment_meaning = "All accessions modified"
+        endcase
+
+        #EXIT_SCRIPT
+
+        if (reply->status_data->status = "S") 
+          set reqinfo->commit_ind = 1
+        else
+          set reqinfo->commit_ind = 0
+        endif
+
+        end go
+
+;Generated by GNU enscript 1.6.4.

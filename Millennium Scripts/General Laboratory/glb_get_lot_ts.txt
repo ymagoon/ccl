@@ -1,0 +1,307 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_lot_ts/glb_get_lot_ts.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_LOT_TS.PRG
+        Object name:            GLB_GET_LOT_TS
+        Request #:              257510
+
+        Product:                General Lab/Quality Control
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve test site info associated with
+                                the given lot
+
+        Tables read:            resource_lot_r
+                                resource_accession
+                                accession
+
+        Tables updated:         n/a
+
+        Executing from:         General Lab Build/Maintain Control Material
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 07/03/96 Chad Moats           Initial Release                     *
+;     001 01/03/02 Sasi Gandham         Changed Head to Detail              *
+;     002 09/16/02 Mark Brooks          Added service resource security.    *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_LOT_TS:dba go
+      create program GLB_GET_LOT_TS:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 control_id = f8
+         1 lots[*]
+           2 lot_id   = f8
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+         1 ts_cnt                    = i2
+         1 testsites[*]
+           2 service_resource_cd     = f8
+           2 service_resource_disp   = vc
+	       2 service_resource_mean   = vc
+	       2 lots[*]
+             3 lot_id                = f8
+             3 activation_dt_tm      = dq8
+             3 deactivation_dt_tm    = dq8
+           2 a_cnt                   = i2
+           2 accessions[*]
+             3 accession_id          = f8
+             3 accession             = c20
+             3 preactive_ind         = i2
+             3 instr_x_ref           = c20
+	     3 symbology             = c2
+
+%i cclsource:status_block.inc
+      )
+
+%i cclsource:pcs_resource_security.inc                                    ;002
+
+
+
+     #Script
+      set found_testsite = "F"
+      set ts_cnt = 0
+      set reply->status_data->status = "F"
+      set lots_to_get = size(request->lots, 5)
+      set a_cnt = 0
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+      declare dServiceResourceCd     = f8 with protect, noconstant(0.0)   ;002
+      declare nResourceSecInd        = i2 with protect, noconstant(0)     ;002
+
+      /* Initialize service resource security */
+      call InitResourceSecurity(1)                                        ;002
+
+
+/*******************************************************************/
+/* If no lots were passed in, look up lots for control material    */
+/*******************************************************************/
+
+  if (lots_to_get = 0)
+
+      SELECT into "nl:"
+         cm.control_id,
+         cl.lot_id
+      FROM
+         control_material cm,
+	     control_lot cl
+      PLAN cm
+         where cm.control_id = request->control_id
+      JOIN cl
+         where cl.control_id = cm.control_id and
+               cl.lot_flag > 0
+      DETAIL
+         lots_to_get = lots_to_get + 1
+         IF (mod(lots_to_get, 5) = 1)
+            stat = alterlist(request->lots, lots_to_get + 5)
+         ENDIF
+         request->lots[lots_to_get].lot_id = cl.lot_id
+      WITH nocounter
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+         set reply->status_data->status = "F"
+         set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+         go to exit_script
+      endif
+   endif
+
+/*******************************************************************/
+/* Get test site info from the database                            */
+/*******************************************************************/
+
+      SELECT into "nl:"
+          d1.seq,
+          rl.lot_id,
+	      rl.service_resource_cd
+      FROM
+          resource_lot_r rl,
+          (dummyt d1 with seq = value(lots_to_get))
+      PLAN d1
+      JOIN rl
+          where rl.lot_id = request->lots[d1.seq].lot_id ;cl.lot_id
+      ORDER BY
+          rl.service_resource_cd,
+	      rl.lot_id
+      HEAD rl.service_resource_cd                                 ;002
+          dServiceResourceCd = rl.service_resource_cd             ;002
+          IF (IsResourceViewable(dServiceResourceCd))             ;002
+              a_cnt = 0
+	          l_cnt = 0
+              ts_cnt = ts_cnt + 1
+              IF (mod(ts_cnt, 5) = 1)
+                  stat = alterlist(reply->testsites, ts_cnt + 5)
+              ENDIF
+              reply->ts_cnt = ts_cnt
+              reply->testsites[ts_cnt]->service_resource_cd =
+                      rl.service_resource_cd
+              nResourceSecInd = 1                                 ;002
+          ENDIF                                                   ;002
+      HEAD rl.lot_id
+          IF (nResourceSecInd = 1)                                ;002
+              l_cnt = l_cnt + 1
+              IF (mod(l_cnt, 5) = 1)
+                 stat = alterlist(reply->testsites[ts_cnt].lots, l_cnt + 5)
+              ENDIF
+              reply->testsites[ts_cnt]->lots[l_cnt]->lot_id = rl.lot_id
+              reply->testsites[ts_cnt]->lots[l_cnt]->activation_dt_tm = rl.defined_active_dt_tm
+              reply->testsites[ts_cnt]->lots[l_cnt]->deactivation_dt_tm = rl.defined_inactive_dt_tm
+
+              CALL echo("active_date  = ",0)
+              CALL echo(reply->testsites[ts_cnt]->lots[l_cnt]->activation_dt_tm, 1)
+              CALL echo("deactive_date  = ",0)
+              CALL echo(reply->testsites[ts_cnt]->lots[l_cnt]->deactivation_dt_tm, 1)
+          ENDIF                                                   ;002
+      DETAIL
+          row + 0
+      FOOT rl.service_resource_cd
+          if (nResourceSecInd = 1)                                ;002
+               stat = alterlist(reply->testsites[ts_cnt].lots,l_cnt)
+          endif                                                   ;002
+          nResourceSecInd = 0                                     ;002
+      WITH
+          nocounter
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+      if ( (curqual = 0) or (ts_cnt = 0) )                        ;002
+         go to testsite_failed
+      else
+        set reply->status_data->status = "S"
+      endif
+
+      set stat = alterlist(reply->testsites,ts_cnt)
+
+/*******************************************************************/
+/* Get accession info for test site				   */
+/*******************************************************************/
+
+      SELECT into "nl:"
+	 d1.seq,
+         ra.accession_id,
+         ra.service_resource_cd,
+          a.accession
+      FROM
+         resource_accession_r ra,
+         accession a,
+         (dummyt d1 with seq = value(ts_cnt)),
+         (dummyt d2 with seq = 1)
+      PLAN d1
+      JOIN d2
+        where d2.seq = 1
+      JOIN ra
+         where ra.service_resource_cd = reply->testsites[d1.seq].service_resource_cd
+               and ra.control_id = request->control_id
+      JOIN a
+         where a.accession_id = ra.accession_id
+      ORDER BY d1.seq,
+               ra.accession_id
+      HEAD d1.seq
+        a_cnt = 0
+      HEAD ra.accession_id
+        a_cnt = a_cnt + 1
+        IF (mod(a_cnt, 5) = 1)
+          stat = alterlist(reply->testsites[d1.seq].accessions, a_cnt + 5)
+        ENDIF
+        reply->testsites[d1.seq]->a_cnt = a_cnt
+        reply->testsites[d1.seq]->accessions[a_cnt].accession_id = ra.accession_id
+        reply->testsites[d1.seq]->accessions[a_cnt].accession = a.accession
+call echo(reply->testsites[d1.seq]->accessions[a_cnt].accession, 0)
+call echo("  ",0)
+        reply->testsites[d1.seq]->accessions[a_cnt].preactive_ind = a.preactive_ind
+call echo(reply->testsites[d1.seq]->accessions[a_cnt].preactive_ind, 1)
+        reply->testsites[d1.seq]->accessions[a_cnt].instr_x_ref = ra.instr_xref
+        reply->testsites[d1.seq]->accessions[a_cnt].symbology = ra.symbology
+      DETAIL
+        row + 0
+      FOOT d1.seq
+        stat = alterlist(reply->testsites[d1.seq].accessions,a_cnt)
+      WITH
+         nocounter,
+	 outerjoin = d2
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+      go to exit_script
+
+/********************************************************************/
+/* Executed if get test site info is unsuccessful                   */
+/********************************************************************/
+     #testsite_failed
+      set reply->status_data->subeventstatus[1]->operationname =
+         "get"
+      set reply->status_data->subeventstatus[1]->operationstatus =
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname =
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue =
+         "resource_lot_r table"
+      set reply->status_data->status = "Z"
+
+      go to exit_script
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+
+      IF ((reply->status_data->status != "F") AND
+          (GetResourceSecurityStatus(0) != "S"))                         ;002
+          CALL PopulateResSecStatusBlock(0)                              ;002
+          SET reply->status_data->status = GetResourceSecurityStatus(0)  ;002
+      ENDIF
+
+END GO
+
+
+;Generated by GNU enscript 1.6.4.

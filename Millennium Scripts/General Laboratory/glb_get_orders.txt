@@ -1,0 +1,898 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_orders/glb_get_orders.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1998 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       glb_get_orders.prg
+        Object name:            glb_get_orders
+        Request #:              250143
+
+        Product:                General Lab
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            
+
+        Program purpose:        Load General Lab orders and task assays
+                                for a number of accessions.
+                                Optionally, filter by catalog_cd and/or
+                                service_resource_cd.
+
+        Tables read:            accession_order_r
+                                assay_processing_r
+                                code_value
+                                container
+                                discrete_task_assay
+                                order_comment
+                                order_laboratory
+                                order_procedure_exception
+                                order_serv_res_container
+                                orders
+                                person
+                                profile_task_r
+                                prsnl
+                                result
+                                perform_result
+
+        Tables updated:         None
+        Executing from:         
+
+        Special Notes:          Currently this script should only be called 
+                                one accession at a time.  The check for 
+                                canceled orders will only work if a single
+                                accession is passed in.
+
+******************************************************************************/
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 01/16/98 Hal Patchen          Initial Release                     *
+;    *001 05/20/98 Hal Patchen          Return flag for canceled orders     *
+;    *002 08/27/99 Chris Heil           Check for rescheduled accessions    *
+;    *003 04/21/00 Gary Runde           Filter by BB activity type code also*
+;    *004 08/02/00 Gary Runde           Return sequence off of PTR to seq   *
+;                                       outbound results                    *
+;    *031 12/21/00 Gary Runde           Return "DELETED" as canceled orders *  
+;    *034 10/03/02 Chuck Figas          Added service resource security.    *  
+;    *005 07/16/03 Ekta Agarwal         Remove ORAHINT                      *
+;    *006 01/19/04 Nirmal Sanganee      Added activity_subtype_mean to reply*
+;                                       and the join  on order_catalog table* 
+;    *007 08/29/07 Jason Osborn         Ensure chronological sorting.       *
+;    *008 12/14/10 Steve Hendrick       Add performing_serv_res_cd to       *
+;                                       request record to check for results *
+;                                       performed on that service resource. *
+;    *009 05/01/11 Ryan Manuel          Support subsections                 *
+;    *010 09/16/11 Hal Patchen          CBO performance enhancements        *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program GLB_GET_ORDERS:dba go
+create program GLB_GET_ORDERS:dba
+
+%i cclsource:pcs_resource_security.inc
+%i cclsource:mic_expand_subs.inc
+     
+      /***********************************************************************
+      * Request Record                                                       *
+      ***********************************************************************/
+      /*
+      record request
+      (
+         1  catalog_cd                   = f8    ;Optional
+         1  service_resource_cd          = f8    ;Optional
+         1  accns[*]
+            2  accession                 = c20
+         1  resource_security_ind        = i2
+         1  performing_serv_res_cd       = f8    ;Optional
+      )
+      */
+
+      /***********************************************************************
+      * Reply Record                                                         *
+      ***********************************************************************/
+      record reply
+      ( 
+         1  qual[*]
+            2  accession                 = c20
+            2  accession_id              = f8
+            2  cs_order_id               = f8
+            2  order_id                  = f8
+            2  updt_cnt                  = i4
+            2  order_mnemonic            = vc
+            2  person_id                 = f8
+            2  person_name               = vc
+            2  encntr_id                 = f8
+            2  catalog_cd                = f8
+            2  catalog_type_cd           = f8
+            2  activity_type_cd          = f8
+            2  activity_type_disp        = vc
+            2  activity_type_mean        = c12 
+            2  order_status_cd           = f8
+            2  order_status_disp         = vc
+            2  order_status_mean         = c12
+            2  last_action_sequence      = i4
+            2  last_update_provider_id   = f8
+            2  last_update_provider_name = vc
+            2  report_priority_cd        = f8
+            2  report_priority_disp      = vc
+            2  report_priority_mean      = c12
+            2  review_required_ind       = i2
+            2  pending_review_ind        = i2
+            2  order_comment_ind         = i2
+            2  order_comment_action_seq  = i4
+            2  order_note_action_seq     = i4
+            2  route_level               = i2
+            2  container_serv_res_cnt    = i4
+            2  activity_subtype_mean     = c12            
+            2  container_serv_res[*]
+               3  container_id           = f8
+               3  in_lab_dt_tm           = dq8
+               3  service_resource_cd    = f8
+               3  service_resource_disp  = vc
+               3  instr_service_resource_cd = f8
+               3  status_flag            = i2
+               3  specimen_type_cd       = f8
+               3  drawn_dt_tm            = dq8
+               3  assays_cnt             = i4
+               3  assays[*]
+                  4  task_assay_cd              = f8
+                  4  ptr_sequence               = i4                    ;004
+                  4  delta_lvl_flag             = i2
+                  4  rel_assay_ind              = i2
+                  4  task_assay_mnemonic        = vc
+                  4  display_sequence           = i4
+                  4  restrict_display_ind       = i2
+                  4  event_cd                   = f8
+                  4  pending_ind                = i2
+                  4  default_result_type_cd     = f8
+                  4  default_result_type_disp   = vc
+                  4  default_result_type_mean   = c12
+                  4  default_result_template_id = f8
+                  4  result_id                  = f8
+                  4  result_status_cd           = f8
+                  4  result_status_disp         = vc
+                  4  result_status_mean         = c12
+                  4  result_updt_cnt            = i4
+         1  fail_reason_flag             = i2                          ;001
+            ; 1 = All orders canceled
+            ; 2 = All orders rescheduled                               ;002
+%i cclsource:status_block.inc
+      )
+      
+      /***********************************************************************
+      * Temporary Record Structures                                          *
+      ***********************************************************************/
+      record valid_service_resources
+      (
+         1  service_resources[*]
+            2  service_resource_cd = f8
+      )
+      
+      
+      record activity_type
+      (
+         1  codes[*]
+            2  code_value = f8
+      )
+      
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+      #Script      
+;031         set CV_REQUIRED_RECS            = 3
+         set CV_REQUIRED_RECS            = 4             ;031
+         declare cv_cnt                  = i4
+         set ACTIVITY_TYPE_CODESET       = 106
+         set ACTIVITY_TYPE_GLB_CDF       = "GLB"
+         set ACTIVITY_TYPE_HLA_CDF       = "HLA"
+         set ACTIVITY_TYPE_BB_CDF        = "BBDONORPROD"                        ;003
+         set ORDER_STATUS_CODESET        = 6004
+         set ORDER_STATUS_CANCELED_CDF   = "CANCELED"
+         set ORDER_STATUS_DELETED_CDF    = "DELETED"				;031
+         set ORDER_COMMENT_CODESET       = 14
+         set ORDER_COMMENT_CDF           = "ORD COMMENT"
+         set ORDER_NOTE_CDF              = "ORD NOTE"
+         declare order_status_canceled_cd   = f8
+         declare order_status_deleted_cd    = f8             ;031
+         declare order_comment_cd         = f8
+         declare order_note_cd            = f8
+         declare act_type_cnt             = i4 with protect, noconstant(0)
+         declare x                        = i4 with protect, noconstant(0)
+         declare nbr_of_accns             = i4 with protect, noconstant(0)
+         declare q_cnt                    = i4 with protect, noconstant(0)
+         declare c_cnt                    = i4 with protect, noconstant(0)
+         declare a_cnt                    = i4 with protect, noconstant(0)
+         declare max_q_cnt                = i4 with protect, noconstant(0)
+         declare max_c_cnt                = i4 with protect, noconstant(0)
+         declare max_a_cnt                = i4 with protect, noconstant(0)
+         declare dSUBSECTION_CD           = f8 with protect, constant(uar_get_code_by("MEANING", 223, "SUBSECTION"))
+         declare lValidServiceResourceCnt = i4 with protect, noconstant(0)
+         declare lIdx                     = i4 with protect, noconstant(0)
+         declare lActualSize              = i4 with protect, noconstant(0)
+         declare lExpandSize              = i4 with protect, noconstant(0)
+         declare lExpandTotal             = i4 with protect, noconstant(0)
+         declare lExpandStart             = i4 with protect, noconstant(1)
+
+         set reply->status_data.status = "F"
+         
+      /***********************************************************************
+      * Load valid service resources related to the requested performing     *
+      * service resource.                                                    *
+      ***********************************************************************/
+         set lValidServiceResourceCnt = 1
+         set stat = alterlist(valid_service_resources->service_resources, 10)
+         set valid_service_resources->service_resources[lValidServiceResourceCnt].service_resource_cd = 
+                                                                                  request->performing_serv_res_cd
+         if (uar_get_code_meaning(request->performing_serv_res_cd) = "SUBSECTION")
+           select into "nl:"
+           from resource_group rg
+           plan rg where rg.parent_service_resource_cd = request->performing_serv_res_cd
+                     and rg.root_service_resource_cd+0.0 = 0.0
+                     and rg.resource_group_type_cd = dSUBSECTION_CD
+                     and rg.active_ind = 1
+                     and not exists (select wr.worklist_ref_id
+                                     from worklist_ref wr
+                                     where wr.active_ind = 1 
+                                     and wr.service_resource_cd = rg.child_service_resource_cd 
+                                     and wr.automatic_worklist_ind = 1)
+           detail
+             lValidServiceResourceCnt = lValidServiceResourceCnt + 1
+             if (mod(lValidServiceResourceCnt, 10) = 1)
+               stat = alterlist(valid_service_resources->service_resources, lValidServiceResourceCnt + 9)
+             endif
+             valid_service_resources->service_resources[lValidServiceResourceCnt].service_resource_cd = 
+                                                                                  rg.child_service_resource_cd
+           with nocounter
+         endif
+         set stat = alterlist(valid_service_resources->service_resources, lValidServiceResourceCnt)
+
+         ;initialize resource security
+         declare dServResCd = f8 with protect, noconstant(0.0)
+         declare is_resource_viewable = i2 with protect, noconstant(0)
+         call InitResourceSecurity(request->resource_security_ind)
+
+      /***********************************************************************
+      * Load required code values                                            *
+      ***********************************************************************/
+         set cv_cnt = 0
+
+         select into "nl:"
+            cv.code_set,
+            cv.code_value
+         from
+            code_value cv
+         where ((cv.code_set = ORDER_STATUS_CODESET
+;031             and cv.cdf_meaning = ORDER_STATUS_CANCELED_CDF)
+             and cv.cdf_meaning in ( ORDER_STATUS_CANCELED_CDF,                   ;031
+                                     ORDER_STATUS_DELETED_CDF))                    ;031
+           or   (cv.code_set = ORDER_COMMENT_CODESET
+             and cv.cdf_meaning in ( ORDER_COMMENT_CDF,
+                                     ORDER_NOTE_CDF )))
+           and cv.active_ind = 1
+           and (cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+             and  cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3))
+         detail
+            if (cv.code_set = ORDER_STATUS_CODESET)
+               case (cv.cdf_meaning)
+                 of ORDER_STATUS_DELETED_CDF:                        ;031
+                    order_status_deleted_cd = cv.code_value          ;031
+                    cv_cnt = cv_cnt + 1                              ;031
+                 of ORDER_STATUS_CANCELED_CDF:
+                    order_status_canceled_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+            if (cv.code_set = ORDER_COMMENT_CODESET)
+               case (cv.cdf_meaning)
+                 of ORDER_COMMENT_CDF:
+                    order_comment_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+                 of ORDER_NOTE_CDF:
+                    order_note_cd = cv.code_value
+                    cv_cnt = cv_cnt + 1
+               endcase
+            endif
+         with nocounter
+
+         ;* Verify that all required code value records were read.
+         if (cv_cnt != CV_REQUIRED_RECS)
+            set reply->status_data.subeventstatus[1].OperationName =
+               "SELECT"
+            set reply->status_data.subeventstatus[1].OperationStatus =
+               "F"
+            set reply->status_data.subeventstatus[1].TargetObjectName =
+               "CODE_VALUE TABLE"
+            set reply->status_data.subeventstatus[1].TargetObjectValue =
+               "Unable to load all required code values for script execution"
+            go to Exit_Script
+         endif
+
+      /***********************************************************************
+      * Load activity type code values                                       *
+      ***********************************************************************/
+         set act_type_cnt = 0
+
+         select into "nl:"
+            cv.code_value
+         from
+            code_value cv
+         plan    cv   where cv.code_set = ACTIVITY_TYPE_CODESET
+                        and (cv.cdf_meaning = ACTIVITY_TYPE_GLB_CDF
+                          or cv.cdf_meaning = ACTIVITY_TYPE_HLA_CDF
+                          or cv.cdf_meaning = ACTIVITY_TYPE_BB_CDF)
+         head report
+            stat = alterlist(activity_type->codes, 3)
+         detail
+            act_type_cnt = act_type_cnt + 1
+            if (act_type_cnt > 3)
+               stat = alterlist(activity_type->codes, act_type_cnt)
+            endif
+            activity_type->codes[act_type_cnt].code_value = cv.code_value
+         with nocounter
+         
+         if (act_type_cnt = 0)
+            set reply->status_data.subeventstatus[1].OperationName =
+               "SELECT"
+            set reply->status_data.subeventstatus[1].OperationStatus =
+               "F"
+            set reply->status_data.subeventstatus[1].TargetObjectName =
+               "CODE_VALUE TABLE"
+            set reply->status_data.subeventstatus[1].TargetObjectValue =
+               "No required activity types found on code set 106"
+            set reply->status_data.status = "Z"
+            go to Exit_Script
+         endif
+
+      
+      /***********************************************************************
+      * Determine route level of order based on accession                    *
+      ***********************************************************************/
+         set nbr_of_accns = size(request->accns, 5)
+         if (nbr_of_accns = 0)
+            set reply->status_data.status = "Z"
+            go to Exit_Script
+         endif
+
+         set max_q_cnt = 0
+
+         ;populate expand variables
+         set lExpandStart = 1
+         set lActualSize = nbr_of_accns
+         set lExpandSize = DetermineExpandSize(lActualSize, 10)
+         set lExpandTotal = DetermineExpandTotal(lActualSize, lExpandSize)
+         set stat = alterlist(request->accns, lExpandTotal)
+         for (i = lActualSize + 1 to lExpandTotal)
+            set request->accns[i].accession = request->accns[lActualSize].accession
+         endfor
+
+         select into "nl:"
+            lIndex = locateval(lIdx, lExpandStart, lExpandStart + lExpandSize - 1,
+                               aor.accession, request->accns[lIdx].accession),
+            aor.seq,
+            o.seq,
+            ol.seq,
+            p1.seq,
+            p.seq,
+            osrc.container_id,
+            osrc.order_id,
+            osrc.service_resource_cd,
+            c.seq,
+            oc_exists = evaluate(nullind(oc.order_id),0,"Y","N"),
+            oc.action_sequence
+
+         from
+            (dummyt d with seq = value(lExpandTotal/lExpandSize)),
+            accession_order_r aor,
+            orders o,
+            order_laboratory ol,
+            person p1,
+            prsnl p,
+            order_serv_res_container osrc,
+            container c,
+            container_accession ca,
+            order_comment oc,
+            order_catalog ocat
+
+         plan    d    where assign(lExpandStart, evaluate(d.seq, 1, 1, lExpandStart + lExpandSize))
+         join    aor  where expand(lIdx, lExpandStart, lExpandStart + lExpandSize - 1,
+                                   aor.accession, request->accns[lIdx].accession)
+                        and aor.primary_flag = 0
+         join    o    where o.order_id = aor.order_id
+                        and o.order_status_cd not in (order_status_canceled_cd,
+                                                      order_status_deleted_cd)
+                        and ((request->catalog_cd = 0.0 and o.catalog_cd > 0.0)
+                          or (request->catalog_cd > 0.0 and o.catalog_cd = request->catalog_cd))
+                        and expand(x, 1, act_type_cnt, o.activity_type_cd, activity_type->codes[x].code_value)
+         join    ol   where ol.order_id = o.order_id
+         join    ocat where ocat.catalog_cd = o.catalog_cd                        
+         join    p1   where p1.person_id = o.person_id
+         join    p    where p.person_id = o.last_update_provider_id
+         join    ca   where ca.accession_id = aor.accession_id
+         join    c    where c.container_id = ca.container_id
+         join    osrc where osrc.container_id = c.container_id
+                        and osrc.order_id = o.order_id
+                        and ((request->service_resource_cd = 0.0 and osrc.service_resource_cd > 0.0)
+                          or (request->service_resource_cd > 0.0 and osrc.service_resource_cd = request->service_resource_cd))
+         join    oc   where oc.order_id = outerjoin(o.order_id)
+                        and oc.action_sequence <= outerjoin(o.last_action_sequence)
+
+         order by
+            lIndex,
+            o.catalog_cd,
+            osrc.order_id,
+            osrc.service_resource_cd,
+            ca.accession_container_nbr,
+            oc.action_sequence
+
+         head report
+            q_cnt = 0
+            c_cnt = 0
+            max_c_cnt = 0
+
+         head lIndex
+            row+0
+
+         head osrc.order_id
+            q_cnt = q_cnt + 1
+            if (size(reply->qual, 5) < q_cnt)
+               stat = alterlist(reply->qual, q_cnt + 10)
+            endif
+            reply->qual[q_cnt].accession = aor.accession
+            reply->qual[q_cnt].accession_id = aor.accession_id
+            reply->qual[q_cnt].cs_order_id = o.cs_order_id
+            reply->qual[q_cnt].order_id = osrc.order_id
+            reply->qual[q_cnt].updt_cnt = o.updt_cnt
+            reply->qual[q_cnt].order_mnemonic = o.order_mnemonic
+            reply->qual[q_cnt].person_id = o.person_id
+            reply->qual[q_cnt].person_name = p1.name_full_formatted
+            reply->qual[q_cnt].encntr_id = o.encntr_id
+            reply->qual[q_cnt].catalog_cd = o.catalog_cd
+            reply->qual[q_cnt].catalog_type_cd = o.catalog_type_cd
+            reply->qual[q_cnt].activity_type_cd = o.activity_type_cd
+            reply->qual[q_cnt].activity_subtype_mean = uar_get_code_meaning(ocat.activity_subtype_cd)
+            reply->qual[q_cnt].order_status_cd = o.order_status_cd
+            reply->qual[q_cnt].last_action_sequence = o.last_action_sequence
+            reply->qual[q_cnt].last_update_provider_id = o.last_update_provider_id
+            reply->qual[q_cnt].report_priority_cd = ol.report_priority_cd
+            reply->qual[q_cnt].route_level = ol.resource_route_level_flag
+            reply->qual[q_cnt].review_required_ind = ol.review_required_ind
+            reply->qual[q_cnt].pending_review_ind = ol.pending_review_ind
+            if (p.person_id > 0.0)
+               reply->qual[q_cnt].last_update_provider_name = 
+                 p.name_full_formatted
+            endif
+            ;* Set order comment field defaults
+            reply->qual[q_cnt].order_comment_ind = 0
+            reply->qual[q_cnt].order_comment_action_seq = 0
+            reply->qual[q_cnt].order_note_action_seq = 0
+            c_cnt = 0
+
+         head osrc.service_resource_cd
+            ;* Ensure user has service resource security to view activity before qualifying on the container.
+            dServResCd = osrc.service_resource_cd
+            is_resource_viewable = IsResourceViewable(dServResCd)
+            if (is_resource_viewable = TRUE)
+               c_cnt = c_cnt + 1
+               if (mod(c_cnt,10) = 1)
+                  stat = alterlist(reply->qual[q_cnt].container_serv_res, c_cnt + 10)
+               endif
+               if (c_cnt > max_c_cnt)
+                  max_c_cnt = c_cnt
+               endif
+               reply->qual[q_cnt].container_serv_res_cnt = c_cnt
+               reply->qual[q_cnt].container_serv_res[c_cnt].status_flag = -1
+            endif
+
+         head ca.accession_container_nbr
+            if (is_resource_viewable = TRUE)
+               ;* Only return the container with the appropriate osrc status
+               ;* in the following status order:
+               ;*    1 = In Lab
+               ;*    2 = Completed
+               ;*    0 = Not in lab
+               if (reply->qual[q_cnt].container_serv_res[c_cnt].status_flag = -1
+               or (reply->qual[q_cnt].container_serv_res[c_cnt].status_flag = 0
+                 and osrc.status_flag in (1, 2))
+               or (reply->qual[q_cnt].container_serv_res[c_cnt].status_flag = 2
+                 and osrc.status_flag = 1))
+                  reply->qual[q_cnt].container_serv_res[c_cnt].container_id =
+                    osrc.container_id
+                  reply->qual[q_cnt].container_serv_res[c_cnt].in_lab_dt_tm =
+                    cnvtdatetime(osrc.in_lab_dt_tm)
+                  reply->qual[q_cnt].container_serv_res[c_cnt]
+                    .service_resource_cd = osrc.service_resource_cd
+                  reply->qual[q_cnt].container_serv_res[c_cnt].status_flag =
+                    osrc.status_flag
+                  reply->qual[q_cnt].container_serv_res[c_cnt].specimen_type_cd =
+                    c.specimen_type_cd
+                  reply->qual[q_cnt].container_serv_res[c_cnt].drawn_dt_tm =
+                    c.drawn_dt_tm
+                  reply->qual[q_cnt].container_serv_res[c_cnt].assays_cnt = 0
+               endif
+            endif
+
+         detail
+            if (is_resource_viewable = TRUE
+            and oc_exists = "Y")
+               ; Populate order comment data if an order comment/footnote exist.
+               if (oc.comment_type_cd = order_comment_cd)
+                  reply->qual[q_cnt].order_comment_ind = 1
+                  reply->qual[q_cnt].order_comment_action_seq = 
+                    oc.action_sequence
+               endif
+               if (oc.comment_type_cd = order_note_cd)
+                  reply->qual[q_cnt].order_comment_ind = 1
+                  reply->qual[q_cnt].order_note_action_seq = 
+                    oc.action_sequence
+               endif
+            endif
+
+
+         foot ca.accession_container_nbr
+            row+0
+
+         foot osrc.service_resource_cd
+            row+0
+
+         foot osrc.order_id
+            stat = alterlist(reply->qual[q_cnt].container_serv_res, c_cnt)
+            if (c_cnt = 0 and q_cnt > 0)
+               q_cnt = q_cnt - 1
+            endif
+
+         foot lIndex
+            row+0
+
+         foot report
+            stat = alterlist(reply->qual, q_cnt)
+
+         with 
+            nocounter
+
+         set stat = alterlist(request->accns, lActualSize)
+         set max_q_cnt = q_cnt
+
+      /***********************************************************************
+      * Check for canceled or rescheduled orders if necessary                *
+      ***********************************************************************/
+         if (q_cnt = 0)                                                ;001
+            select into "nl:"                                          ;001
+               aor.accession,                                          ;001
+               o.order_status_cd                                       ;001
+            from                                                       ;001
+               (dummyt d with seq = value(lExpandTotal/lExpandSize)),
+               accession_order_r aor,                                  ;001
+               orders o                                                ;001
+            plan d    where assign(lExpandStart, evaluate(d.seq, 1, 1, lExpandStart + lExpandSize))
+            join aor  where expand(lIdx, lExpandStart, lExpandStart + lExpandSize - 1,
+                                   aor.accession, request->accns[lIdx].accession)
+            join o    where o.order_id = aor.order_id                  ;001
+                        and expand(x, 1, act_type_cnt, o.activity_type_cd, activity_type->codes[x].code_value)
+            head report                                                ;001
+               all_canceled_ind = 1                                    ;002
+               all_rescheduled_ind = 1                                 ;002
+               all_rescheduled_or_canceled_ind = 1                     ;002
+            detail                                                     ;001
+               ;* Verify that order was rescheduled                    ;002
+               if (aor.primary_flag != 1)                              ;002
+                  all_rescheduled_ind = 0                              ;002
+               endif                                                   ;002
+
+               ;* Verify that all orders were actually canceled        ;001
+;031               if (o.order_status_cd != order_status_canceled_cd)      ;019
+               if (o.order_status_cd not in (order_status_canceled_cd,                  ;031
+                                             order_status_deleted_cd))                  ;031
+;002                  reply->fail_reason_flag = 0                          ;001
+                  all_canceled_ind = 0                                 ;002
+               endif                                                   ;001
+
+               ;* Verify that all orders are canceled or rescheduled   ;002
+               if (aor.primary_flag != 1 and                           ;002
+;031                   o.order_status_cd != order_status_canceled_cd)      ;023
+                   o.order_status_cd not in (order_status_canceled_cd,                 ;031
+                                             order_status_deleted_cd))                 ;031
+                  all_rescheduled_or_canceled_ind = 0                  ;002
+               endif                                                   ;002
+            foot report                                                ;002
+               if (all_rescheduled_ind = 1)                            ;002
+                  reply->fail_reason_flag = 2                          ;002
+               elseif (all_canceled_ind = 1 or                         ;002
+                       all_rescheduled_or_canceled_ind = 1)            ;002
+                  reply->fail_reason_flag = 1                          ;002
+               endif                                                   ;002
+            with nocounter                                             ;001
+         endif                                                         ;001
+
+      /***********************************************************************
+      * Load assays based on route level                                     *
+      ***********************************************************************/
+         if (max_q_cnt = 0
+         or  max_c_cnt = 0)
+            go to Resize_Reply
+         endif
+         
+         for (q_cnt = 1 to max_q_cnt)
+            set max_c_cnt = reply->qual[q_cnt].container_serv_res_cnt
+            if (max_c_cnt > 0)
+               ; Check for level 1 or level 2 routed orders.           
+               if (reply->qual[q_cnt].route_level = 1)
+                  ; Process level 1 routed orders
+                  select into "nl:"
+                     lIndex = locateval(lIdx, 1, max_c_cnt,
+                                apr.service_resource_cd, reply->qual[q_cnt].container_serv_res[lIdx].service_resource_cd),
+                     ptr.task_assay_cd,
+                     dta.task_assay_cd,
+                     apr.display_sequence,
+                     r.result_id
+                     
+                  from
+                     profile_task_r ptr,
+                     discrete_task_assay dta,
+                     assay_processing_r apr,
+                     result r,
+                     perform_result pr
+   
+                  plan  ptr where ptr.catalog_cd = reply->qual[q_cnt].catalog_cd
+                              and ptr.active_ind = 1
+                  join  dta where dta.task_assay_cd = ptr.task_assay_cd
+                              and dta.active_ind = 1
+                  join  apr where apr.task_assay_cd = dta.task_assay_cd
+                              and expand(x, 1, max_c_cnt, 
+                                    apr.service_resource_cd, reply->qual[q_cnt].container_serv_res[x].service_resource_cd)
+                              and apr.loaded_service_resource_cd >= 0.0
+                  join  r   where r.order_id = outerjoin(reply->qual[q_cnt].order_id)
+                              and r.task_assay_cd = outerjoin(apr.task_assay_cd)
+                              and r.result_status_cd != outerjoin(0.0)
+                  join  pr  where pr.result_id = outerjoin(r.result_id)
+                              and pr.result_status_cd = outerjoin(r.result_status_cd) 
+      
+                  order by
+                     lIndex,
+                     apr.display_sequence,
+                     ptr.task_assay_cd,
+                     r.result_id
+         
+                  head report
+                     prev_result_id = 0.0
+                     a_cnt = 0
+         
+                  head lIndex
+                     prev_result_id = 0.0
+                     a_cnt = 0
+                     c_cnt = lIndex
+                     reply->qual[q_cnt].container_serv_res[c_cnt].assays_cnt = 0
+                     
+                  head apr.display_sequence
+                     row+0
+         
+                  head ptr.task_assay_cd
+                     prev_result_id = -1.0
+         
+                  detail
+                     if ((r.result_id = 0.0)
+                     or  (r.result_id > 0.0 
+                       and locateval(lIdx, 1, lValidServiceResourceCnt, 
+                             pr.service_resource_cd, valid_service_resources->service_resources[lIdx].service_resource_cd) > 0
+                       and r.result_id != prev_result_id)
+                     or  (r.result_id > 0.0 
+                       and request->performing_serv_res_cd = 0.0 
+                       and r.result_id != prev_result_id))
+                        prev_result_id = r.result_id  ;set the new previous result id
+                        a_cnt = a_cnt + 1
+                        if (mod(a_cnt,10) = 1)
+                           stat = alterlist(reply->qual[q_cnt].container_serv_res[c_cnt].assays, a_cnt + 10)
+                        endif
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays_cnt = 
+                          a_cnt
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .task_assay_cd = ptr.task_assay_cd
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .ptr_sequence = ptr.sequence
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .delta_lvl_flag = dta.delta_lvl_flag
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .rel_assay_ind = dta.rel_assay_ind
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .task_assay_mnemonic = dta.mnemonic
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .display_sequence = apr.display_sequence
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .restrict_display_ind = ptr.restrict_display_ind
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .event_cd = dta.event_cd
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .pending_ind = ptr.pending_ind
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .default_result_type_cd = apr.default_result_type_cd
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .default_result_template_id = apr.default_result_template_id
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .result_id = r.result_id
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .result_status_cd = r.result_status_cd
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .result_updt_cnt = r.updt_cnt
+                     endif
+        
+                  foot ptr.task_assay_cd
+                     row+0
+                                             
+                  foot apr.display_sequence
+                     row+0
+                  
+                  foot lIndex
+                     if (a_cnt > 0)
+                        stat = alterlist(reply->qual[q_cnt].container_serv_res[c_cnt].assays, a_cnt)
+                     endif
+                     
+                  with 
+                     nocounter
+
+               elseif (reply->qual[q_cnt].route_level = 2)
+                  ; Process level 2 routed orders
+                  select into "nl:"
+                     lIndex = locateval(lIdx, 1, max_c_cnt,
+                                ope.service_resource_cd, reply->qual[q_cnt].container_serv_res[lIdx].service_resource_cd),
+                     ptr.task_assay_cd,
+                     dta.task_assay_cd,
+                     ope.order_id,
+                     apr.display_sequence,
+                     r.result_id
+   
+                  from   
+                     profile_task_r ptr,
+                     discrete_task_assay dta,
+                     order_procedure_exception ope,
+                     assay_processing_r apr,
+                     result r,
+                     perform_result pr
+      
+                  plan  ptr where reply->qual[q_cnt].route_level = 2
+                              and ptr.catalog_cd = reply->qual[q_cnt].catalog_cd
+                              and ptr.active_ind = 1
+                  join  dta where dta.task_assay_cd = ptr.task_assay_cd
+                              and dta.active_ind = 1
+                  join  ope where ope.order_id = reply->qual[q_cnt].order_id
+                              and ope.task_assay_cd = dta.task_assay_cd
+                              and expand(x, 1, max_c_cnt, 
+                                    ope.service_resource_cd, reply->qual[q_cnt].container_serv_res[x].service_resource_cd)
+                  join  apr where apr.task_assay_cd = ope.task_assay_cd
+                              and apr.service_resource_cd = ope.service_resource_cd
+                              and apr.loaded_service_resource_cd >= 0.0
+                  join  r   where r.order_id = outerjoin(reply->qual[q_cnt].order_id)
+                              and r.task_assay_cd = outerjoin(apr.task_assay_cd)
+                              and r.result_status_cd != outerjoin(0.0)
+                  join  pr  where pr.result_id = outerjoin(r.result_id)
+                              and pr.result_status_cd = outerjoin(r.result_status_cd)
+         
+                  order by
+                     lIndex,
+                     apr.display_sequence,
+                     ptr.task_assay_cd,
+                     r.result_id
+            
+                  head report
+                     prev_result_id = 0.0
+                     a_cnt = 0
+            
+                  head lIndex
+                     prev_result_id = 0.0
+                     a_cnt = 0
+                     c_cnt = lIndex
+                     reply->qual[q_cnt].container_serv_res[c_cnt].assays_cnt = 0
+                     
+                  head apr.display_sequence
+                     row+0
+                                 
+                  head ptr.task_assay_cd
+                     prev_result_id = -1.0
+            
+                  detail
+                     if ((r.result_id = 0.0)
+                     or  (r.result_id > 0.0 
+                       and locateval(lIdx, 1, lValidServiceResourceCnt, 
+                             pr.service_resource_cd, valid_service_resources->service_resources[lIdx].service_resource_cd) > 0
+                       and r.result_id != prev_result_id)
+                     or  (r.result_id > 0.0 
+                       and request->performing_serv_res_cd = 0.0
+                       and r.result_id != prev_result_id))
+                        prev_result_id = r.result_id  ;set the new current result id
+                        a_cnt = a_cnt + 1
+                        if (mod(a_cnt,10) = 1)
+                           stat = alterlist(reply->qual[q_cnt].container_serv_res[c_cnt].assays, a_cnt + 10)
+                        endif
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays_cnt = 
+                          a_cnt
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .task_assay_cd = ptr.task_assay_cd
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .ptr_sequence = ptr.sequence
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .delta_lvl_flag = dta.delta_lvl_flag
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .rel_assay_ind = dta.rel_assay_ind
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .task_assay_mnemonic = dta.mnemonic
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .display_sequence = apr.display_sequence
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .restrict_display_ind = ptr.restrict_display_ind
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .event_cd = dta.event_cd
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .pending_ind = ptr.pending_ind
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .default_result_type_cd = apr.default_result_type_cd
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .default_result_template_id = apr.default_result_template_id
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .result_id = r.result_id
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .result_status_cd = r.result_status_cd
+                        reply->qual[q_cnt].container_serv_res[c_cnt].assays[a_cnt]
+                          .result_updt_cnt = r.updt_cnt
+                     endif
+           
+                  foot ptr.task_assay_cd
+                     row+0
+                        
+                  foot apr.display_sequence
+                     row+0
+                     
+                  foot lIndex
+                     if (a_cnt > 0)
+                        stat = alterlist(reply->qual[q_cnt].container_serv_res[c_cnt].assays, a_cnt)
+                     endif
+
+                  with 
+                     nocounter
+               endif
+            endif
+         endfor
+         
+
+      /***********************************************************************
+      * Resize reply record                                                  *
+      ***********************************************************************/
+      #Resize_Reply
+         if (GetResourceSecurityStatus(0) != "S")
+            call PopulateResSecStatusBlock(0)
+            set reply->status_data.status = GetResourceSecurityStatus(0)
+         elseif (max_q_cnt > 0)
+            set reply->status_data.status = "S"    ;Successful
+         else
+            set reply->status_data.status = "Z"    ;Zero
+         endif
+
+      #Exit_Script
+         free record valid_service_resources
+         free record activity_types
+
+         end
+         go      
+
+;Generated by GNU enscript 1.6.4.

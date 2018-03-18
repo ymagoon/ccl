@@ -1,0 +1,469 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/pfmt_gl_to_event_epi/pfmt_gl_to_event_epi.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1996 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       pfmt_gl_to_event_epi.prg
+        Object name:            pfmt_gl_to_event_epi
+        Request #:              NONE
+
+        Product:                General Lab
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Checks to see if the clinical event server returned a 
+                                success.  If so, we will delete the pn_recovery* rows
+                                for this order.  If not, we will update the failure_cnt, 
+                                failure_dt_tm, and in_process_flag so the operations
+                                script will try to reprocess this order.
+
+        Notes:                  To access the glb_upd_lab_results request
+                                and reply by using the "request->" structure, the 
+                                request->request and/or request->reply only have to be used if
+                                the field is not unique between the request and reply 
+                                (ie..order_id is under the orders structure in the request 
+                                and the reply)
+
+                                To access the clinical_event request and reply by using 
+                                the "reply->" structure, the reply->request and/or reply->reply
+                                only have to be used if the field is not unique between 
+                                the request and reply..same as above
+								                        
+        Tables read:            pn_recovery
+
+        Tables updated:         pn_recovery
+                                pn_recovery_child
+                                pn_recovery_detail
+
+        Executing from:         Process Server
+
+        Special Notes:
+
+******************************************************************************/
+
+
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 09/21/01 Gary Runde           Initial Release                     *
+;    *001 03/20/02 Gary Runde           Result Recovery Logic               *
+;    *002 10/16/02 Kevin Power          Capture valid_from_dt_tm            *
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop   program pfmt_gl_to_event_epi:dba go
+create program pfmt_gl_to_event_epi:dba
+
+%i CCLSOURCE:GLB_SCRIPT_LOGGING.INC
+  set log_program_name = "PFMT_GL_TO_EVENT_EPI"
+
+
+/* To create request for 1040002 (PCS_DEL_RES_CD_ARGS) */
+%i cclsource:pm_dynamic_query.inc
+%i cclsource:pm_create_request.inc
+
+  call cr_createRequest(0, 1040002, "req1040002")
+  
+  declare ARG_DB_CD = f8 with protect, noconstant(uar_get_code_by("MEANING" , 4002244 , "ARG_DB"))
+  declare lEventListSize = i4 with protect, noconstant(0)
+  select into "nl:" 
+  from 
+    (dummyt d1 with seq = size(reply->request->clin_event->child_event_list, 5)),
+    (dummyt d2 with seq = 1)
+  plan d1
+    where maxrec(d2, size(reply->request->clin_event->child_event_list[d1.seq].assignment_method_list, 5))
+  join d2
+    where reply->request->clin_event->child_event_list[d1.seq].assignment_method_list[d2.seq].assignment_method_code = ARG_DB_CD
+  detail
+    lEventListSize = lEventListSize + 1
+    stat = alterlist(req1040002->event_list, lEventListSize)
+    req1040002->event_list[lEventListSize].contributor_system_cd = 
+      reply->request->clin_event->child_event_list[d1.seq].contributor_system_cd
+    req1040002->event_list[lEventListSize].reference_nbr = 
+      reply->request->clin_event->child_event_list[d1.seq].reference_nbr
+  with nocounter
+  
+    select into "nl:" 
+  from 
+    (dummyt d1 with seq = size(reply->request->clin_event->child_event_list, 5)),
+    (dummyt d2 with seq = 1),
+    (dummyt d3 with seq = 1)
+  plan d1
+    where maxrec(d2, size(reply->request->clin_event->child_event_list[d1.seq].child_event_list, 5))
+  join d2
+    where maxrec(d3, 
+      size(reply->request->clin_event->child_event_list[d1.seq].child_event_list[d2.seq].assignment_method_list, 5))
+  join d3
+    where reply->request->clin_event->child_event_list[d1.seq].child_event_list[d2.seq].assignment_method_list[d3.seq]
+      .assignment_method_code = ARG_DB_CD
+  detail
+    lEventListSize = lEventListSize + 1
+    stat = alterlist(req1040002->event_list, lEventListSize)
+    req1040002->event_list[lEventListSize].contributor_system_cd = 
+      reply->request->clin_event->child_event_list[d1.seq].child_event_list[d2.seq].contributor_system_cd
+    req1040002->event_list[lEventListSize].reference_nbr = 
+      reply->request->clin_event->child_event_list[d1.seq].child_event_list[d2.seq].reference_nbr
+  with nocounter
+
+  if (size(req1040002->event_list, 5) > 0)
+    call echorecord(req1040002)
+    execute pcs_del_res_cd_args with replace ("REQUEST" , "REQ1040002" ), replace ("REPLY" , "REP1040002" )
+    commit    
+  endif
+  /***********************************************************************
+  * Verify client has result recovery logic installed,                   *
+  * if not exit the script                                               *
+  ***********************************************************************/
+  if ( validate( pn_results->list_idx, -1 ) = -1 )
+
+    call LOG_MESSAGE("PN_RESULTS structure does not exist, exit this script", log_level_debug)
+    go to EXIT_SCRIPT
+  endif
+
+  /***********************************************************************
+  * check to make sure that the in_process_ind = 1.                      *
+  * if the in_process_ind = 0 then this call came from the               *
+  * hla_recipients processing and we do not want to process this script. *
+  ***********************************************************************/
+  if (pn_results->orders[pn_results->list_idx].in_process_ind = 0)
+    call LOG_MESSAGE("The in_process_ind = 0 for this order, exit script", log_level_debug)
+    go to EXIT_SCRIPT
+  endif
+    
+  /***********************************************************************
+  *   Initialize Constants -- These match types defined in OCF_TYPES.H. *
+  ***********************************************************************/
+  declare eSUCCESS   = i4 with public, constant(0)     /* success */
+  declare eINFO      = i4 with public, constant(1)     /* informational */
+  declare eWARNING   = i4 with public, constant(2)     /* WARNING */
+  declare eLOCK      = i4 with public, constant(3)     /* record locked errors - retry */
+  declare eREC_FATAL = i4 with public, constant(4)     /* data errors */
+  declare eDB_FATAL  = i4 with public, constant(5)     /* DB fatal errors e.g., Schema not found */
+  
+  ;Declare varaiables used
+  declare CurrOrderIndx           = i4 with public, noconstant(0)
+  declare num_childs              = i4 with public, noconstant(0)
+  declare pn_failure_cnt          = i4 with public, noconstant(0)
+    
+  ;variables to aquire the perform_result_id's that we need to delete
+  declare prev_orderIndx  = i4 with public, noconstant(0)
+  declare prev_assyIndx   = i4 with public, noconstant(0)
+  declare curr_assyIndx   = i4 with public, noconstant(0)
+  declare num_pr_ids      = i4 with public, noconstant(0)
+  declare stat            = i4 with public, noconstant(0)
+  declare num_curr_assays = i4 with public, noconstant(0)
+  declare num_prev_assays = i4 with public, noconstant(0)
+
+  declare pnr_indx  = i4 with public, noconstant(0)
+  declare pnrc_indx = i4 with public, noconstant(0)
+  declare pnr_cnt   = i4 with public, noconstant(0)
+  declare pnrc_cnt  = i4 with public, noconstant(0)
+
+  ;get the recovery_type_cd for PNRESULT from code set 28600
+  declare recovery_type_cd = f8 with public, noconstant(0.0)
+  call uar_get_meaning_by_codeset(28600, "PNRESULT    ", 1, recovery_type_cd)
+
+  ;record structure to hold the perform_result_id's that we need to delete
+  ;from the pn_recovery_child table
+  record perform_result_ids
+  (
+    1 qual[*]
+      2 perform_result_id       = f8
+  )
+
+  ;record structure to hold the pn_recovery_id's that we will delete
+  ;from the pn_recovery* tables
+  record pn_recovery_ids
+  (
+    1 parents[*]
+      2 pn_recovery_id       = f8
+    1 childs[*]
+      2 pn_recovery_child_id = f8
+  )
+  
+  ;get the current order index in the pn_results record structure
+  set CurrOrderIndx = pn_results->list_idx
+  
+  Call LOG_MESSAGE (build("Process CurrOrderIndx of", CurrOrderIndx), LOG_LEVEL_DEBUG)
+  
+  ;set the orders in process indicator to a zero to indicat it is no longer in process
+  set pn_results->orders[CurrOrderIndx].in_process_ind = 0
+
+  /***********************************************************************
+  *   check for succss from the clinical event server                  . *
+  ***********************************************************************/
+  ;check the clinical event table for this order_id and 
+  ;verified_dt_tm.  If any rows found for this order_id/event_dt_tm the
+  ;clinical event server call was successful
+  select into "nl:"
+    ce.order_id
+  from
+    clinical_event ce
+  plan ce
+    where ce.order_id = pn_results->orders[CurrOrderIndx]->order_id
+      and ce.verified_dt_tm = cnvtdatetime(pn_results->orders[CurrOrderIndx]->event_dt_tm)
+  detail
+    row +0
+  with nocounter  
+
+  if (error_message(0) = 1)
+    go to exit_script
+  endif
+
+  if (curqual > 0)
+
+    Call LOG_MESSAGE ("Clinical event server returned SUCCESS", LOG_LEVEL_DEBUG)
+
+    /* capture the valid_from_dt_tm used by the CE server */
+    set pn_results->last_valid_from_dt_tm = reply->reply->rb_list[1].valid_from_dt_tm
+
+    ;clinical event server call was successful, delete rows from the pn_recovery* tables.
+    set pn_results->orders[CurrOrderIndx].success_ind = 1
+    
+    ;The pfmt_gl_to_event_epi script will delete the rows from 
+    ;the pn_recovery* tables that match the successful perform_result_id's that 
+    ;posted to clinical events for the current order and all other 
+    ;perform_result_id's that have a lower pn_recovery_id value and 
+    ;have a matching result_id.
+    
+    set num_curr_assays = value(size(pn_results->orders[CurrOrderIndx].assays, 5))
+
+    ;loop through the current orders assays
+    for (curr_assyIndx = 1 to num_curr_assays )
+
+      set num_pr_ids = num_pr_ids + 1
+      set stat = alterlist(perform_result_ids->qual, num_pr_ids)
+      
+      ;store current orders assays perform_result_id into temporary structure
+      set perform_result_ids->qual[num_pr_ids].perform_result_id = 
+          pn_results->orders[CurrOrderIndx].assays[curr_assyIndx].perform_result_id
+      
+      ;loop through the other previous orders in the pn_Results structure
+      for (prev_orderIndx = 1 to (CurrOrderIndx - 1) )
+        ;check this orders order_id for a match
+        if ((pn_results->orders[prev_orderIndx].order_id = pn_results->orders[CurrOrderIndx].order_id )
+        and (pn_results->orders[prev_orderIndx].pn_recovery_id <= pn_results->orders[CurrOrderIndx].pn_recovery_id ))
+          
+          set num_prev_assays = value(size(pn_results->orders[prev_orderIndx].assays, 5))
+
+          ;loop through this orders assays looking for a match 
+          ;on the current orders result_id
+          for (prev_assyIndx = 1 to num_prev_assays )
+            
+            if (pn_results->orders[CurrOrderIndx].assays[curr_assyIndx].result_id = 
+                  pn_results->orders[prev_orderIndx].assays[prev_assyIndx].result_id)
+              ;if match, store the perform_result_id value into the temporary structure
+              set num_pr_ids = num_pr_ids + 1
+              set stat = alterlist(perform_result_ids->qual, num_pr_ids)
+              
+              ;store current orders assays perform_result_id into temporary structure
+              set perform_result_ids->qual[num_pr_ids].perform_result_id = 
+                  pn_results->orders[prev_orderIndx].assays[prev_assyIndx].perform_result_id
+              
+              ;stop the previous orders assays loop
+              set prev_assyIndx = num_prev_assays + 1
+            endif           ;check result_id's
+          endfor          ;prev_assyIndx        
+        endif           ;if (prev order_id = curr order_id)                      
+      endfor          ;prev_orderIndx      
+    endfor          ;curr_assyIndx
+      
+    Call LOG_MESSAGE (build("Found the num_pr_ids-->", num_pr_ids), LOG_LEVEL_DEBUG)
+    
+    ;retrieve the pn_recovery* id's that we need to delete
+    select into "nl:"
+      d1.seq,
+      pnrc.pn_recovery_child_id
+    from
+      (dummyt d1 with seq = num_pr_ids),
+      pn_recovery_child pnrc
+    plan d1
+    join pnrc
+      where pnrc.child_entity_name = "PERFORM_RESULT"
+        and pnrc.child_entity_id = perform_result_ids->qual[d1.seq].perform_result_id
+    order by pnrc.pn_recovery_id, pnrc.pn_recovery_child_id
+    head pnrc.pn_recovery_id
+      ;store pn_recovery_id's needed to delete
+      pnr_indx = pnr_indx + 1      
+      stat = alterlist(pn_recovery_ids->parents, pnr_indx)      
+      pn_recovery_ids->parents[pnr_indx].pn_recovery_id = pnrc.pn_recovery_id
+      
+    detail
+      ;store pn_recovery_child_id's needed to delete
+      pnrc_indx = pnrc_indx + 1
+      stat = alterlist(pn_recovery_ids->childs, pnrc_indx)      
+      pn_recovery_ids->childs[pnrc_indx].pn_recovery_child_id = pnrc.pn_recovery_child_id      
+    with nocounter
+    
+    if (ERROR_MESSAGE(0) = 1)
+      go to exit_script
+    endif
+
+    ;delete the rows from the pn_recovery_detail table for the pn_recovery_child_id's
+    delete 
+      from (dummyt d1 with seq = value(pnrc_indx)),
+           pn_recovery_detail prd
+    set prd.seq = 1 
+    plan d1
+    join prd
+      where prd.parent_entity_id = pn_recovery_ids->childs[d1.seq].pn_recovery_child_id
+        and prd.parent_entity_name = "PN_RECOVERY_CHILD"
+    with nocounter
+
+    if (ERROR_MESSAGE(0) = 1)
+      go to exit_script
+    endif
+
+    ;delete the rows from the pn_recovery_child table for the pn_recovery_child_id's
+    delete 
+      from (dummyt d1 with seq = value(pnrc_indx)),
+           pn_recovery_child prc
+    set prc.seq = 1 
+    plan d1
+    join prc
+      where prc.pn_recovery_child_id = pn_recovery_ids->childs[d1.seq].pn_recovery_child_id
+    with nocounter
+        
+    if (ERROR_MESSAGE(0) = 1)
+      go to exit_script
+    endif
+
+    ;loop through the pn_recovery_id's to see if any children exist
+    for (pnr_cnt = 1 to pnr_indx)
+
+      ;check the pn_recovery_child table for rows
+      select into "nl:"
+        pnrc.pn_recovery_id,
+        pnrc.pn_recovery_child_id
+      from 
+        pn_recovery_child pnrc
+      plan pnrc
+        where pnrc.pn_recovery_id = pn_recovery_ids->parents[pnr_cnt].pn_recovery_id
+      detail
+        row +0
+      with nocounter
+      
+      if (ERROR_MESSAGE(0) = 1)
+        go to exit_script
+      endif
+
+      ;if no rows were found, then delete pn_recovery_detail and pn_recovery rows
+      if (curqual = 0)
+        delete from pn_recovery_detail prd
+        plan prd
+          where prd.parent_entity_id = pn_recovery_ids->parents[pnr_cnt].pn_recovery_id
+            and prd.parent_entity_name = "PN_RECOVERY"
+        with nocounter
+
+        if (ERROR_MESSAGE(0) = 1)
+          go to exit_script
+        endif
+
+        delete from pn_recovery pnr
+        plan pnr
+          where pnr.pn_recovery_id = pn_recovery_ids->parents[pnr_cnt].pn_recovery_id
+        with nocounter
+        
+        if (ERROR_MESSAGE(0) = 1)
+          go to exit_script
+        endif
+      endif
+      
+    endfor    ;pnr_cnt
+
+    commit
+  else        ;reply->sb.severityCd != eSuccess
+  
+    Call LOG_MESSAGE ("Clinical event server returned NON-SUCCESS", LOG_LEVEL_DEBUG)
+
+    Call LOG_MESSAGE ("Update pn_recovery to be failed", LOG_LEVEL_DEBUG)
+
+    ;clinical event server call failed
+    set pn_results->orders[CurrOrderIndx].success_ind = 0
+    
+    ;retrieve the failure_cnt from pn_Recovery row.
+    select into "nl:"
+      pr.pn_recovery_id,
+      pr.failure_cnt
+    from pn_recovery pr
+    where pr.pn_recovery_id = pn_results->orders[CurrOrderIndx].pn_recovery_id
+    detail
+      pn_failure_cnt = pr.failure_cnt
+    with nocounter, forupdate(pr)
+    
+    if (ERROR_MESSAGE(0) = 1)
+      go to exit_script
+    endif
+
+    ;if row found, then update row.and set the pn_recovery in_process_flag 
+    ;to a zero and increment failure_cnt, updt_cnt, last_failure_dt_tm and updt_dt_tm
+    if (curqual > 0)
+
+      update into pn_recovery pr
+      set
+        pr.in_process_flag = 0,
+        pr.expire_dt_tm = cnvtdatetime(curdate, curtime3),
+        pr.failure_cnt = pn_failure_cnt + 1,
+        pr.first_failure_dt_tm = evaluate(pn_failure_cnt, 
+                                          0, cnvtdatetime(curdate, curtime3),
+                                          pr.first_failure_dt_tm),
+        pr.last_failure_dt_tm = cnvtdatetime(curdate, curtime3),
+        pr.updt_cnt = pr.updt_cnt + 1,
+        pr.updt_dt_tm = cnvtdatetime(curdate, curtime3),
+        pr.updt_id = reqinfo->updt_id,
+        pr.updt_applctx = reqinfo->updt_applctx,    
+        pr.updt_task = reqinfo->updt_task
+      plan pr
+        where pr.pn_recovery_id = pn_results->orders[CurrOrderIndx].pn_recovery_id
+      with nocounter 
+
+      commit
+
+      if (ERROR_MESSAGE(0) = 1)
+        go to exit_script
+      endif
+       
+    endif  ;if (curqual > 0)
+
+  endif        ;if (reply->sb.severityCd = eSuccess)
+
+  free set pn_recovery_ids
+  free set perform_result_ids
+  
+/***********************************************************************
+ *   exit_script                                                       *
+ ***********************************************************************/
+#exit_script
+
+Call LOG_MESSAGE ("Exit script", LOG_LEVEL_DEBUG)
+
+call uar_SysDestroyHandle(hSys)
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

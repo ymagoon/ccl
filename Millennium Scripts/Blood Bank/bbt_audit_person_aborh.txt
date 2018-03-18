@@ -1,0 +1,460 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBT_FOREIGN_SYSTEM_UPLOAD/bbt_audit_person_aborh.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-2001 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_audit_person_aborh.prg
+        Object name:            bbt_audit_person_aborh
+        Request #:              <none>
+
+        Product:                PathNet
+        Product Team:           Blood Bank Transfusion
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        This script will read the PERSON_ABORH table
+                                and inactivate person rows with multiple
+                                active ABO/Rh's.
+
+        Tables read:            PERSON_ABORH, PERSON
+
+        Tables updated:         PERSON_ABORH
+
+        Executing from:         CCL (backend)
+
+        Special Notes:          <none>
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 11/13/01 John Rieck           Initial Release                     *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+
+drop program bbt_audit_person_aborh:dba go
+create program bbt_audit_person_aborh:dba
+
+
+/***********************************************************************
+*   Internationalization                                               *
+***********************************************************************/
+
+%i cclsource:i18n_uar.inc
+
+
+/***********************************************************************
+*   Record definitions                                                 *
+***********************************************************************/
+
+RECORD ABORh_List
+(
+	1 ABORhs[*]
+	  2 person_aborh_id 		= f8
+	  2 person_id					= f8
+	  2 contributor_cd			= f8
+	  2 active_status_dt_tm	= dq8
+)
+
+RECORD error_status
+(
+  1 StatusList[*]
+    2 status = i4
+    2 module_name = c40
+    2 errnum = i4
+    2 errmsg = c132
+)
+
+RECORD captions
+(
+	1 rpt_title					= vc
+	1 aborh_id_header			= vc
+ 	1 name_header				= vc
+ 	1 aborh_dt_tm_header		= vc
+ 	1 contributor_header		= vc
+ 	1 inactivate_message_1	= vc
+ 	1 inactivate_message_2	= vc
+ 	1 none_message				= vc
+ 	1 update_error				= vc
+ 	1 lock_error				= vc
+ 	1 row_status_error		= vc
+)
+
+
+/***********************************************************************
+*   Variable declarations                                              *
+***********************************************************************/
+
+DECLARE pa_count						= i2		WITH noconstant(0)
+DECLARE count							= i2		WITH noconstant(0)
+DECLARE stat							= i2		WITH noconstant(0)
+DECLARE hold_person_aborh_id		= f8		WITH noconstant(0.0)
+DECLARE hold_person_id				= f8		WITH noconstant(0.0)
+DECLARE hold_contributor_cd		= f8		WITH noconstant(0.0)
+DECLARE hold_active_status_dt_tm	= q8		WITH noconstant(CNVTDATETIME(curdate,curtime3))
+DECLARE inactive_status_cd			= f8		WITH noconstant(0.0)
+DECLARE ROW_STATUS_CDF				= c12 	WITH noconstant(fillstring(12," "))
+DECLARE error_msg 					= c132 	WITH noconstant(FILLSTRING(132," "))
+DECLARE error_check 					= i2 		WITH noconstant(ERROR(error_msg,1))
+DECLARE i18nHandle					= i4		WITH noconstant(0)
+DECLARE success_count				= i4 		WITH noconstant(0)
+DECLARE index							= i2 		WITH noconstant(0)
+
+SET stat = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+
+
+/***********************************************************************
+*   Internationalize report items                                      *
+***********************************************************************/
+
+SET captions->rpt_title = uar_i18ngetmessage(i18nHandle,
+  "rpt_title", "Multiple Active PERSON_ABORH Rows")
+
+SET captions->aborh_id_header = uar_i18ngetmessage(i18nHandle,
+  "aborh_id_header", "Person ABO/Rh ID")
+
+SET captions->name_header = uar_i18ngetmessage(i18nHandle,
+  "name_header", "Person Name")
+
+SET captions->aborh_dt_tm_header = uar_i18ngetmessage(i18nHandle,
+  "aborh_dt_tm_header", "ABO/Rh Date/Time")
+
+SET captions->contributor_header = uar_i18ngetmessage(i18nHandle,
+  "contributor_header", "Contributor System")
+
+SET captions->inactivate_message_1 = uar_i18ngetmessage(i18nHandle,
+  "inactivate_message_1", "The following persons have multiple active ABO/Rh rows found on the")
+
+SET captions->inactivate_message_2 = uar_i18ngetmessage(i18nHandle,
+  "inactivate_message_2", "PERSON_ABORH table.  All rows displayed will be inactivated on the table.")
+
+SET captions->none_message = uar_i18ngetmessage(i18nHandle,
+  "none_message", "There were no multiple active person ABO/Rh's found.")
+
+SET captions->update_error = uar_i18ngetmessage(i18nHandle,
+  "update_error", "Update count doesn't match number of records updated.")
+
+SET captions->lock_error = uar_i18ngetmessage(i18nHandle,
+  "lock_error", "There was an error locking the rows for updating.")
+
+SET captions->row_status_error = uar_i18ngetmessage(i18nHandle,
+  "row_status_error", "There was an error retrieving the row status code value from code set 48.")
+
+
+/***********************************************************************
+*    Retrieve code value for inactivating a row                        *
+***********************************************************************/
+
+SET ROW_STATUS_CDF = "INACTIVE"
+SET stat = uar_get_meaning_by_codeset(48,ROW_STATUS_CDF,1,inactive_status_cd)
+
+; Error checking to ensure that a code value was correctly returned
+IF (stat = 1)
+	CALL CLEAR(1,1)
+	CALL ECHO(captions->row_status_error)
+	CALL ECHO("")
+	GO TO EXIT_SCRIPT
+ENDIF
+
+
+/***********************************************************************
+*   SELECT all multiple ABO/Rh rows from PERSON_ABORH                  *
+***********************************************************************/
+
+SELECT INTO "nl:"
+	pa.person_aborh_id
+	, pa.person_id
+	, pa.active_status_dt_tm
+	, pa.contributor_system_cd
+
+FROM
+	person_aborh pa
+
+WHERE
+	pa.active_ind = 1
+
+ORDER BY
+	pa.person_id
+
+HEAD REPORT
+	count = 0
+	stat = ALTERLIST(ABORh_List->ABORhs,10)
+
+HEAD pa.person_id
+	pa_count = 0
+	hold_person_aborh_id = 0.0
+	hold_person_id = 0.0
+
+DETAIL
+	pa_count = pa_count + 1
+
+	IF (pa_count > 1)
+		count = count + 1
+
+		IF (MOD(count,10) = 1 and count != 1)
+			stat = ALTERLIST(ABORh_List->ABORhs,count+9)
+		ENDIF
+
+		ABORh_List->ABORhs[count].person_aborh_id = pa.person_aborh_id
+		ABORh_List->ABORhs[count].person_id = pa.person_id
+		ABORh_List->ABORhs[count].contributor_cd = pa.contributor_system_cd
+		ABORh_List->ABORhs[count].active_status_dt_tm = pa.active_status_dt_tm
+	ELSE
+		; Hold the first value of the person ABO/Rh ID and person ID
+		hold_person_aborh_id = pa.person_aborh_id
+		hold_person_id = pa.person_id
+		hold_contributor_cd = pa.contributor_system_cd
+		hold_active_status_dt_tm = pa.active_status_dt_tm
+	ENDIF
+
+FOOT pa.person_id
+	IF (pa_count > 1)
+		count = count + 1
+
+		IF (MOD(count,10) = 1 AND count != 1)
+			stat = ALTERLIST(ABORh_List->ABORhs,count+9)
+		ENDIF
+
+		ABORh_List->ABORhs[count].person_aborh_id = hold_person_aborh_id
+		ABORh_List->ABORhs[count].person_id = hold_person_id
+		ABORh_List->ABORhs[count].contributor_cd = pa.contributor_system_cd
+		ABORh_List->ABORhs[count].active_status_dt_tm = pa.active_status_dt_tm
+	ENDIF
+
+FOOT REPORT
+	stat = ALTERLIST(ABORh_List->ABORhs,count)
+
+WITH
+	nocounter
+
+; Get the error message, if necessary
+SET error_check = ERROR(error_msg,0)
+
+IF (error_check != 0)
+	CALL CLEAR(1,1)
+	CALL ECHO(error_msg)
+	CALL ECHO("")
+	GO TO EXIT_SCRIPT
+ENDIF
+
+
+/***********************************************************************
+*   Only update the table if multiple rows were found                  *
+***********************************************************************/
+
+IF (count = 0)
+	; There were no multiple active person ABO/Rh rows found
+	; Display a message to the user and add some space below the message
+	CALL CLEAR(1,1)
+	CALL ECHO(captions->none_message)
+	CALL ECHO("")
+	CALL ECHO("")
+ELSE
+
+	/***********************************************************************
+	*   Lock PERSON_ABORH rows for update                                  *
+	***********************************************************************/
+
+	SELECT INTO "nl:"
+		pa.*
+
+	FROM
+		person_aborh pa
+		, (dummyt d1 WITH seq = value(size(ABORh_List->ABORhs, 5)))
+
+	PLAN d1
+
+	JOIN pa WHERE pa.person_aborh_id = ABORh_List->ABORhs[d1.seq].person_aborh_id
+	 			 AND pa.person_id = ABORh_List->ABORhs[d1.seq].person_id
+
+	WITH
+		nocounter
+		, forupdate(pa)
+
+	; Get the error message, if necessary
+	SET error_check = ERROR(error_msg,0)
+
+	IF (error_check = 0)
+		IF (count != CURQUAL)
+			CALL CLEAR(1,1)
+			CALL ECHO(captions->lock_error)
+			CALL ECHO("")
+			GO TO EXIT_SCRIPT
+	   ENDIF
+	ELSE
+		CALL CLEAR(1,1)
+		CALL ECHO(error_msg)
+		CALL ECHO("")
+		GO TO EXIT_SCRIPT
+	ENDIF
+
+
+
+	/***********************************************************************
+	*   UPDATE by inactivating PERSON_ABORH rows                           *
+	***********************************************************************/
+
+	; Initialize the error status record structure
+	SET stat = ALTERLIST(error_status->StatusList,0)
+	SET stat = ALTERLIST(error_status->StatusList,count)
+
+	UPDATE INTO
+		person_aborh pa
+		, (dummyt d WITH seq = value(size(ABORh_List->ABORhs, 5)))
+
+	SET
+		pa.active_ind = 0
+		, pa.updt_id = -1.0
+		, pa.updt_dt_tm = CNVTDATETIME(curdate, curtime3)
+		, pa.updt_cnt = pa.updt_cnt + 1
+		, pa.updt_applctx = 0
+		, pa.updt_task = 0
+		, pa.active_status_cd = inactive_status_cd
+		, pa.end_effective_dt_tm = CNVTDATETIME(curdate, curtime3)
+
+	PLAN d
+
+	JOIN pa WHERE pa.person_aborh_id = ABORh_List->ABORhs[d.seq].person_aborh_id
+	 			 AND pa.person_id = ABORh_List->ABORhs[d.seq].person_id
+
+	WITH
+		nocounter, STATUS(error_status->StatusList[d.seq].status)
+
+	; Get the error message, if necessary
+	SET error_check = ERROR(error_msg,0)
+
+	IF (error_check = 0)
+		; Process status
+		SET success_count = 0
+
+		FOR (index = 1 TO SIZE(error_status->StatusList,5))
+			IF (error_status->StatusList[index].status = 1)
+				SET success_count = success_count + 1
+			ENDIF
+		ENDFOR
+
+		IF (success_count != count)
+			CALL CLEAR(1,1)
+			CALL ECHO(captions->update_error)
+			CALL ECHO("")
+			ROLLBACK
+			GO TO EXIT_SCRIPT
+		ELSE
+			COMMIT
+		ENDIF
+
+	ELSE
+		CALL CLEAR(1,1)
+		CALL ECHO(error_msg)
+		CALL ECHO("")
+		ROLLBACK
+		GO TO EXIT_SCRIPT
+	ENDIF
+
+	SET stat = ALTERLIST(error_status->StatusList,0)
+
+
+	/***********************************************************************
+	*   SELECT information from PERSON and PERSON_ABORH for display        *
+	***********************************************************************/
+
+	SELECT
+		p.name_full_formatted
+		, person_aborh = ABORh_List->ABORhs[d1.seq].person_aborh_id
+		, active_dt_tm = ABORh_List->ABORhs[d1.seq].active_status_dt_tm "@MEDIUMDATETIME"
+		, contributor = uar_get_code_display(ABORh_List->ABORhs[d1.seq].contributor_cd)
+
+	FROM
+		person p
+		, (dummyt d1 WITH seq = value(size(ABORh_List->ABORhs, 5)))
+
+	PLAN d1
+
+	JOIN p WHERE p.person_id = ABORh_List->ABORhs[d1.seq].person_id
+
+	HEAD REPORT
+		CALL center(captions->rpt_title,1,132)
+		row + 2
+		col  0, captions->inactivate_message_1
+		row + 1
+		col  0, captions->inactivate_message_2
+
+	HEAD PAGE
+		row + 2
+		col  0, captions->aborh_id_header
+		col 18, captions->name_header
+		col 60, captions->aborh_dt_tm_header
+		col 80, captions->contributor_header
+
+		row + 1
+		col  0, "----------------"
+		col 18, "----------------------------------------"
+		col 60, "------------------"
+		col 80, "----------------------------------------"
+
+
+	DETAIL
+		row + 1
+		col  0, ABORh_List->ABORhs[d1.seq].person_aborh_id "################"
+		col 18, p.name_full_formatted "########################################"
+		col 60, active_dt_tm
+		col 80, contributor "########################################"
+
+	FOOT REPORT
+		row + 0
+
+	FOOT PAGE
+		row + 0
+
+	WITH
+		nocounter
+
+	; Get the error message, if necessary
+	SET error_check = ERROR(error_msg,0)
+
+	IF (error_check != 0)
+		CALL CLEAR(1,1)
+		CALL ECHO(error_msg)
+		CALL ECHO("")
+		GO TO EXIT_SCRIPT
+	ENDIF
+
+ENDIF
+
+
+/***********************************************************************
+*   Exit Script                                                        *
+***********************************************************************/
+
+#EXIT_SCRIPT
+
+FREE RECORD ABORh_List
+FREE RECORD error_status
+FREE RECORD captions
+
+END
+GO
+
+
+
+;Generated by GNU enscript 1.6.4.

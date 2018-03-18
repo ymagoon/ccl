@@ -1,0 +1,550 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_add_qc_rule/glb_add_qc_rule.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_ADD_QC_RULE.PRG
+        Object name:            GLB_ADD_QC_RULE
+        Request #:              257504
+
+        Product:                General Lab           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Insert a new qc rule into the database
+
+        Tables read:            n/a
+
+        Tables updated:         qc_rule_type
+                                qc_rule
+
+        Executing from:         General Lab Build/Maintain QC Reference tool
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 06/25/96 Chad Moats           Initial Release                     *
+;     001 12/18/03 jg7520               39496: Before updating rule table,  *
+;                                       attempt to lock rows with forupdate *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_ADD_QC_RULE:dba go    
+      create program GLB_ADD_QC_RULE:dba
+     
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request                                      
+      (                                       
+         1 rule_id                 = f8
+         1 short_description       = c20
+         1 description             = vc
+         1 rules[x]
+           2 sequence              = i2
+           2 rule_form_flag        = i2
+           2 error_flag            = i2
+           2 rule_definition       = vc
+           2 across_control_ind    = i2
+           2 across_run_ind        = i2
+           2 trig_ind              = i2
+           2 max_req_results       = i4
+           2 req_trouble_step_ind  = i2
+           2 req_comment_ind       = i2
+      ) 
+
+record reqinfo
+( 1 commit_ind  = i2
+  1 updt_id     = f8
+  1 position_cd = f8
+  1 updt_app    = i4
+  1 updt_task   = i4
+  1 updt_req    = i4
+  1 updt_applctx= i4
+)
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      ( 
+	 1 rule_id		   = f8
+	 1 old_rules[*]
+	   2 rule_id		   = f8
+         1 status_data
+           2 status                = c1
+           2 subeventstatus[1]
+             3 OperationName       = c15
+             3 OperationStatus     = c1
+             3 TargetObjectName    = c15
+             3 TargetObjectValue   = vc
+      )
+
+     #Script
+      set failed = "F"
+      set short_desc = request->short_description
+      set short_desc = cnvtupper(short_desc)
+      declare rule_id = f8 with protect, noconstant(0.0)
+      set tmpseq = 0
+      set rule_cnt = size(request->rules,5)
+      set reply->status_data->status = "F"
+      set start_string = 0
+      set temp_string = "     "
+      set found_rules = 0
+      set found_desc = 0
+      set r_cnt = 0
+
+/*******************************************************************/
+/* If the rule id is greater than zero, it will inactivate the     */
+/* existing rule (checks the short description).                    */
+/*******************************************************************/
+
+      SELECT
+         into "nl:"
+            qct.short_description,
+	    qc.rule_id,
+	    qct.rule_id,
+            qc_exists = decode(qc.seq, "Y","N"),
+	    d2.seq,
+	    d3.seq
+      FROM
+         qc_rule_type qct,
+	 qc_rule qc,
+	 assay_resource_lot arl,
+	 (dummyt d2 with seq = 1),
+	 (dummyt d3 with seq = 1)
+      PLAN qct
+	 where short_desc = cnvtupper(qct.short_description)
+      JOIN d2
+         where d2.seq = 1
+      JOIN qc
+         where qc.rule_id = qct.rule_id
+      JOIN d3
+         where d3.seq = 1
+      JOIN arl
+         where arl.rule_id = qct.rule_id
+	       and arl.active_ind = 1
+      ORDER BY qct.rule_id, arl.rule_id
+      HEAD qct.rule_id
+         active_ind = qct.active_ind
+         found_desc = 1
+      HEAD arl.rule_id
+	 if(arl.rule_id > 0)
+	   r_cnt = r_cnt + 1
+	   if(mod(r_cnt,5) = 1)
+	     stat = alterlist(reply->old_rules, r_cnt + 5)
+	   endif
+	   reply->old_rules[r_cnt].rule_id = arl.rule_id
+         endif
+      DETAIL
+         if (qc_exists = "Y")
+	   found_rules = 1
+         endif
+      WITH
+         nocounter,
+         outerjoin = d2,
+	 dontcare = qc,
+	 outerjoin = d3
+
+/* Check Assay_Resource_Lot for changed rule_ids */
+/*
+      SELECT into "nl:"
+	arl.rule_id
+      FROM 
+	assay_resource_lot arl,
+	(dummyt d1 with seq = value(size(old_rules->rule_ids))),
+	(dummyt d2 with seq = 1)
+      PLAN d1
+      JOIN d2 where d2.seq = 1
+      JOIN arl
+        where arl.rule_id = old_rules->rule_ids[d1.seq].rule_id and arl.active_ind = 1
+      ORDER BY arl.rule_id
+      HEAD arl.rule_id
+	 if(arl.rule_id > 0)
+	   r2_cnt = r2_cnt + 1
+	   if(mod(r2_cnt,5) = 1)
+	     stat = alterlist(reply->old_rules, r2_cnt + 5)
+	   endif
+	   reply->old_rules[r2_cnt].rule_id = arl.rule_id
+         endif
+      DETAIL
+         row + 0
+      WITH nocounter,
+           outerjoin = d2
+*/
+
+     if (found_desc = 1 and found_rules = 1)
+         SELECT into "nl:"
+             qct.rule_id
+            FROM qc_rule_type qct
+            PLAN qct where short_desc = cnvtupper(qct.short_description)
+            WITH nocounter, forupdate(qct)
+      
+         if (curqual = 0)
+            ; Couldn't get the lock on existing rows
+            go to rule_select_failed
+         endif 
+      
+         UPDATE
+            into qc_rule_type qct
+         SET
+            qct.active_ind       = 0,
+            qct.updt_dt_tm       = cnvtdatetime(curdate,curtime3),
+            qct.updt_id          = reqinfo->updt_id,
+            qct.updt_applctx     = reqinfo->updt_applctx,
+            qct.updt_cnt         = qct.updt_cnt + 1
+         WHERE
+            short_desc = cnvtupper(qct.short_description)
+         if (curqual = 0)
+            go to rule_update_failed
+         endif      
+      endif
+
+      if ((found_desc = 0) or (found_desc = 1 and found_rules = 1))
+
+    /*******************************************************************/
+    /* Get new rule_id.                                                */
+    /*******************************************************************/
+      SELECT 
+         into "nl:"
+            y = seq(reference_seq,nextval) "##################;rp0"
+      FROM 
+         dual
+      DETAIL
+         rule_id = y
+         reply->rule_id = rule_id
+      WITH
+         format, counter
+      if (curqual = 0)
+         go to seq_failed
+      endif
+      set request->rule_id = rule_id
+
+     /*******************************************************************/
+     /* Insert row into qc_rule_type table.                             */
+     /*******************************************************************/
+      INSERT
+         into qc_rule_type qct
+      SET
+         qct.rule_id                = rule_id,
+         qct.short_description      = request->short_description,
+         qct.short_desc_key         = cnvtalphanum(request->short_description),
+         qct.description            = request->description,
+         qct.beg_effective_dt_tm    = cnvtdatetime(curdate,curtime3),
+         qct.end_effective_dt_tm    = cnvtdatetime("31 DEC 2100 00:00"),
+         qct.active_ind             = 1,
+         qct.active_status_dt_tm    = cnvtdatetime(curdate,curtime3),
+         qct.active_status_cd       = 0,
+         qct.active_status_prsnl_id = reqinfo->updt_id,
+         qct.updt_dt_tm             = cnvtdatetime(curdate,curtime3),
+         qct.updt_cnt               = 0,
+         qct.updt_task              = reqinfo->updt_task,
+         qct.updt_id                = reqinfo->updt_id,
+         qct.updt_applctx           = reqinfo->updt_applctx
+      WITH
+         nocounter
+     
+      if (curqual = 0)
+         go to qct_insert_failed
+      endif     
+    else ;if no rules were found but a rule_type was found then update
+
+     /*******************************************************************/
+     /* Update row into QC_Rule_type					*/
+     /*******************************************************************/
+      
+      set rule_id = request->rule_id
+
+      SELECT into "nl:"
+             qct.rule_id
+            FROM qc_rule_type qct
+            PLAN qct where qct.rule_id = request->rule_id
+            WITH nocounter, forupdate(qct)
+      
+      if (curqual = 0)
+          ; Couldn't get the lock on existing rows
+          go to rule_select_failed
+      endif
+         
+      UPDATE
+         into qc_rule_type qct
+      SET
+         qct.description            = request->description,
+         qct.active_ind             = 1,
+         qct.updt_dt_tm             = cnvtdatetime(curdate,curtime3),
+         qct.updt_cnt               = 0,
+         qct.updt_task              = reqinfo->updt_task,
+         qct.updt_id                = reqinfo->updt_id,
+         qct.updt_applctx           = reqinfo->updt_applctx
+      WHERE qct.rule_id = request->rule_id
+      WITH
+         nocounter
+     
+      if (curqual = 0)
+         go to qct_update_failed
+      endif     
+
+    endif
+
+
+      for (cnt=1 to rule_cnt)
+call echo(cnt, 1)
+      case (request->rules[cnt].rule_form_flag)
+           of 1:
+             set start_string = 1
+             set temp_string = ""
+             for (i = 1 to size(request->rules[cnt].rule_definition))
+;               if (i = 1)		 ;(substring(i, 1, request->rules[cnt].rule_definition) = "-")
+;                 set start_string = 1
+               if (substring(i, 1, request->rules[cnt].rule_definition) = "-")
+                 set start_string = 0
+               else
+                 if (start_string = 1)
+                    set temp_string = concat(trim(temp_string), substring(i, 1, request->rules[cnt].rule_definition))
+call echo(temp_string, 1)
+                 endif
+               endif
+             endfor
+             set request->rules[cnt]->max_req_results = cnvtint(trim(temp_string))
+           of 2:
+             set start_string = 0
+             set temp_string = ""
+             for (i = 1 to size(request->rules[cnt].rule_definition))
+               if (substring(i, 1, request->rules[cnt].rule_definition) = "f")
+                 set start_string = 1
+               elseif (substring(i, 1, request->rules[cnt].rule_definition) = ")")
+                 set start_string = 0
+               else
+                 if (start_string = 1)
+                    set temp_string = concat(trim(temp_string), substring(i, 1, request->rules[cnt].rule_definition))
+                 endif
+               endif
+             endfor
+             set request->rules[cnt]->max_req_results = cnvtint(trim(temp_string))
+           of 3:
+/*             set start_string = 0
+             set temp_string = ""
+             for (i = 1 to size(request->rules[cnt].rule_definition))
+               if (substring(i, 1, request->rules[cnt].rule_definition) = "-")
+                 set start_string = 1
+               elseif (substring(i, 1, request->rules[cnt].rule_definition) = "s")
+                 set start_string = 0
+               else
+                 if (start_string = 1)
+                    set temp_string = concat(trim(temp_string), substring(i, 1, request->rules[cnt].rule_definition))
+                 endif
+               endif
+             endfor
+             set request->rules[cnt]->max_req_results = cnvtint(trim(temp_string))
+*/
+             set request->rules[cnt]->max_req_results = 2
+
+           of 4:
+             set start_string = 1
+             set temp_string = ""
+             for (i = 1 to size(request->rules[cnt].rule_definition))
+               if (substring(i, 1, request->rules[cnt].rule_definition) = "x")
+                 set start_string = 0
+               else
+                 if (start_string = 1)
+                    set temp_string = concat(trim(temp_string), substring(i, 1, request->rules[cnt].rule_definition))
+                 endif
+               endif
+             endfor
+             set request->rules[cnt]->max_req_results = cnvtint(trim(temp_string))
+           of 5:
+             set start_string = 0
+             set temp_string = ""
+             for (i = 1 to size(request->rules[cnt].rule_definition))
+               if (substring(i, 1, request->rules[cnt].rule_definition) = "(")
+                 set start_string = 1
+               elseif (substring(i, 1, request->rules[cnt].rule_definition) = ")")
+                 set start_string = 0
+               else
+                 if (start_string = 1)
+                    set temp_string = concat(trim(temp_string), substring(i, 1, request->rules[cnt].rule_definition))
+                 endif
+               endif
+             endfor
+             set request->rules[cnt]->max_req_results = cnvtint(trim(temp_string))
+          endcase
+        endfor
+
+/*******************************************************************/
+/* Insert rows into qc_rule table.                                 */
+/*******************************************************************/
+    if (rule_cnt > 0)
+      INSERT
+         into qc_rule qc,
+              (dummyt d1 with seq = value(rule_cnt))
+      SET         
+         tmpseq = tmpseq + 1,
+         qc.rule_id = rule_id,
+         qc.sequence = tmpseq,
+         qc.rule_form_flag = request->rules[d1.seq]->rule_form_flag,
+         qc.error_flag = request->rules[d1.seq]->error_flag,
+         qc.rule_definition = request->rules[d1.seq]->rule_definition,
+         qc.across_control_ind = request->rules[d1.seq]->across_control_ind,
+         qc.across_run_ind = request->rules[d1.seq]->across_run_ind,
+         qc.trig_ind = request->rules[d1.seq]->trig_ind,
+         qc.max_req_results = request->rules[d1.seq]->max_req_results,
+         qc.req_trouble_step_ind = request->rules[d1.seq]->req_trouble_step_ind,
+         qc.req_comment_ind = request->rules[d1.seq]->req_comment_ind,
+         qc.beg_effective_dt_tm = cnvtdatetime(curdate,curtime3),
+         qc.end_effective_dt_tm = cnvtdatetime("31 DEC 2100 00:00"),
+         qc.active_ind = 1,
+         qc.active_status_cd = 0,
+         qc.active_status_dt_tm = cnvtdatetime(curdate,curtime3),
+         qc.active_status_prsnl_id = reqinfo->updt_id,
+         qc.updt_id = reqinfo->updt_id,
+         qc.updt_task = reqinfo->updt_task,
+         qc.updt_applctx = reqinfo->updt_applctx,
+         qc.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+         qc.updt_cnt = 0
+      PLAN (d1
+      JOIN qc
+         where qc.rule_id = rule_id
+           and qc.sequence = d1.seq)
+      WITH
+         nocounter,
+         outerjoin = d1,
+         dontexist
+
+      if (curqual = 0)
+         go to qc_insert_failed
+      endif
+
+    endif
+
+    set stat = alterlist(reply->old_rules, r_cnt)
+    go to exit_script
+
+/********************************************************************/ 
+/* Executed if select on qc_rule_type table row to be updated fails */
+/********************************************************************/
+     #rule_select_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "get"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "qc_rule_type table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if qc_rule_type update fails                            */
+/********************************************************************/
+     #rule_update_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "qc_rule_type table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if sequence cannot be obtained.                         */
+/********************************************************************/
+     #seq_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "seq"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "rule_id"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if qc_rule_type table insert is unsuccessful.           */
+/********************************************************************/
+     #qct_insert_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "qc_rule_type table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if qc_rule_type table update is unsuccessful.           */
+/********************************************************************/
+     #qct_update_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "update"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "qc_rule_type table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if qc_rule table insert is unsuccessful.                */
+/********************************************************************/
+     #qc_insert_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "qc_rule table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+      if (failed = "F")
+         set reply->status_data->status = "S"
+         commit
+      else
+         rollback
+      endif
+END
+GO     
+
+;Generated by GNU enscript 1.6.4.

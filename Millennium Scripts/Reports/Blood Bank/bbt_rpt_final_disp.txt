@@ -1,0 +1,950 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_final_disp.prg Turn on black mode
+
+/*~BB~************************************************************************
+  *                                                                      *
+  *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+  *                              Technology, Inc.                        *
+  *       Revision      (c) 1984-2005 Cerner Corporation                 *
+  *                                                                      *
+  *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+  *  This material contains the valuable properties and trade secrets of *
+  *  Cerner Corporation of Kansas City, Missouri, United States of       *
+  *  America (Cerner), embodying substantial creative efforts and        *
+  *  confidential information, ideas and expressions, no part of which   *
+  *  may be reproduced or transmitted in any form or by any means, or    *
+  *  retained in any storage or retrieval system without the express     *
+  *  written permission of Cerner.                                       *
+  *                                                                      *
+  *  Cerner is a registered mark of Cerner Corporation.                  *
+  *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+
+        Source file name:       bbt_rpt_final_disp.prg
+        Object name:            bbt_rpt_final_disp
+        Request #:              225186
+
+        Product:                Blood Bank Transfusion
+        Product Team:           Pathnet
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Report blood products and derivatives that have
+                                been transfused or destroyed
+
+        Tables read:            code_value, product_event, prsnl, product,
+                                transfusion, person_alias, person, blood_product
+                                derivative, destruction, bbhist_product,
+                                bbhist_product_event
+
+        Tables updated:         none
+
+        Executing from:         VB
+
+        Special Notes:
+        Flow of script
+1) Declare record structure to store report data
+2) Load constants/captions
+3) Read data from activity tables and store into structure
+4) Read data from history tables and store into structure, flagging these products as from history
+5) Generate the report data
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     001 09/30/96 Brian Franke         Initial Release                     *
+;     002 06/12/97 Doug Saus            Modified to select owner and inventory
+;                                       areas
+;     003 10/28/98 Victoria Savariyar   Retrieve institution name           *
+;     004 12/07/98 Victoria Savariyar   Modified to retrieve encntr_alias   *
+;                                       instead of person_alias             *
+;     005 01/04/99 John Rieck           Added logic to print location name  *
+;                                       and address. Added the address_     *
+;                                       location_cd to request.  Added bbt_ *
+;                                       get_location_info.inc and bbt_print_*
+;                                       location_info.inc.                  *
+;     006 05/21/99 Jose Suarez          change cer_temp to cer_print        *
+;     007 08/16/99 Doug Saus            UAR Changes
+;     008 09/08/99 Badari Kopparapu     Modified to use bbt_ops_owninvloc.inc
+;                                       for processing owner area, inventory*
+;                                       area & location address from batch  *
+;                                       selection field in Ops Job Templates*
+;                                       Modified to use ops_date for computing
+;                                       the report date range.              *
+;     009 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       removed bbt_ops_owninvloc.inc and   *
+;                                       added bbt_ops_parm_passed.inc       *
+;     010 08/09/00 Lawrence Dsouza      internationalized date and time     *
+;     011 02/22/01 Chris Noe	        Internationalize text               *
+;     012 01/04/02 Ronda Zheng          Changed the script to select the    *
+;                                       report data into a structure first. *
+;                                       Read from live tables and fill out  *
+;                                       the structure, then read from       *
+;                                       history tables and fill out the structure*
+;     013 07/26/02 Jason Osborn			Unique RPT filename Project			*
+;     014 04/12/04 Jim Jensen           Increase size of ABORh display and  *
+;                                       add CNVTALIAS for mrn display.      *
+;     015 05/26/04 Jim Jensen           Resolve CAPEP00111002,CAPEP00116150.*
+;     016 06/25/04 Jim Jensen           Remove "Substring" when formatting  *
+;                                       ABO/Rh display.                     *
+;     017 06/22/04 David Fifer          Rearranged the report to handle a 25*
+;                                       character eurocode product number   *
+;                                       and set the maximum columns to 125. *
+;     018 09/29/04 Jim Jensen           Correct ABORH to display 14 char.   *
+;     019 05/05/05 Jason Osborn         Ensure that product type is 40 chars*
+;                                       to correct sorting issue.           *
+;     020 02/12/12 Sachin Yadav         fixed MRN not display for derivative*
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_rpt_final_disp:dba go
+create program bbt_rpt_final_disp:dba
+
+/****************************************************************************
+*       Request record                                                      *
+*****************************************************************************/
+/*
+record request
+(
+ 1  beg_dt_tm           = dq8
+ 1  end_dt_tm           = dq8
+ 1  cur_owner_area_cd   = f8
+ 1  cur_inv_area_cd     = f8
+ 1  ops_date            = dq8
+ 1  batch_selection     = c100
+ 1  output_dist         = c100
+ 1  address_location_cd = f8
+)
+*/
+
+/****************************************************************************
+*       Reply record                                                        *
+*****************************************************************************/
+        record reply
+        (
+          1 rpt_list[*]
+             2 rpt_filename  = vc
+%i cclsource:status_block.inc
+        )
+
+;Begin 011
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+ 
+/* Variable declaration*/
+;012
+declare rpt_cnt = i2                with noconstant(0)
+declare prod_cnt = i4               with noconstant(0)
+declare rpt_filename = c32          with noconstant(fillstring(32, " "))
+declare mrn_code = f8               with noconstant(0.0)
+declare cur_owner_area_disp = c40   with noconstant(fillstring(40, " "))
+declare cur_inv_area_disp = c40     with noconstant(fillstring(40, " "))
+declare line = vc                   with noconstant(fillstring(125, "_"))	;017
+declare stat = i4                   with noconstant(0)
+declare transfuse_code = f8         with noconstant(0.0)
+declare transfuse_disp = c40        with noconstant(fillstring(40, " "))
+declare destroyed_code = f8         with noconstant(0.0)
+declare destroyed_disp = c40        with noconstant(fillstring(40, " "))
+declare qual_cnt = i4               with noconstant(0)
+declare dispose_reasons_code_set = i4 with constant(1608)
+declare failed = c1                 with noconstant(fillstring(1, "F"))
+declare i18nHandle = i4             with noconstant(0)
+declare sErrorMsg = vc              with noconstant(fillstring(255, " "))
+declare nErrorStatus = i4           with noconstant(0)
+declare DERIVATIVE_CLASS_CD = F8
+
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+record captions
+(
+  1  final_disposition	 = vc
+  1  time                = vc
+  1  as_of_date          = vc
+  1  by_prod_type        = vc
+  1  bb_owner            = vc
+  1  inventory_area      = vc
+  1  beg_date            = vc
+  1  end_date            = vc
+  1  product_type        = vc
+  1  disposition         = vc
+  1  aborh               = vc
+  1  product_number      = vc
+  1  qty                 = vc
+  1  reason              = vc
+  1  name                = vc
+  1  mrn                 = vc
+  1  dt_tm               = vc
+  1  tech_id             = vc
+  1  total               = vc
+  1  rpt_total           = vc
+  1  report_id           = vc
+  1  page_no             = vc
+  1  printed             = vc
+  1  end_of_report       = vc
+  1  all                 = vc
+  1  hist_note           = vc
+  1  unknown_reason      = vc
+  1  not_on_file         = vc
+)
+ 
+set captions->final_disposition = uar_i18ngetmessage(i18nHandle,
+  "final_disposition",
+  "F I N A L   D I S P O S I T I O N   L O G")
+set captions->time = uar_i18ngetmessage(i18nHandle,
+  "time", "Time:")
+set captions->as_of_date = uar_i18ngetmessage(i18nHandle,
+  "as_of_date", "As of Date:")
+set captions->by_prod_type = uar_i18ngetmessage(i18nHandle,
+  "by_prod_type", "(by Product Type)")
+set captions->bb_owner = uar_i18ngetmessage(i18nHandle,
+  "bb_owner", "Blood Bank Owner: ")
+set captions->inventory_area = uar_i18ngetmessage(i18nHandle,
+  "inventory_area", "Inventory Area: ")
+set captions->beg_date = uar_i18ngetmessage(i18nHandle,
+  "beg_date", "Beginning Date:")
+set captions->end_date = uar_i18ngetmessage(i18nHandle,
+  "end_date", "Ending Date:")
+set captions->product_type = uar_i18ngetmessage(i18nHandle,
+  "product_type", "Product Type:")
+set captions->disposition = uar_i18ngetmessage(i18nHandle,
+  "disposition", "Disposition")
+set captions->aborh = uar_i18ngetmessage(i18nHandle,
+  "aborh", "ABO/Rh")
+set captions->product_number = uar_i18ngetmessage(i18nHandle,
+  "product_number", "Product Number")
+set captions->qty = uar_i18ngetmessage(i18nHandle,
+  "qty", "Qty")
+set captions->reason = uar_i18ngetmessage(i18nHandle,
+  "reason", "(Reason)")
+set captions->name = uar_i18ngetmessage(i18nHandle,
+  "name", "Name")
+set captions->mrn = uar_i18ngetmessage(i18nHandle,
+  "mrn", "MRN")
+set captions->dt_tm = uar_i18ngetmessage(i18nHandle,
+  "dt_tm", "Date/Time")
+set captions->tech_id = uar_i18ngetmessage(i18nHandle,
+  "tech_id", "Tech ID")
+set captions->total = uar_i18ngetmessage(i18nHandle,
+  "total", "Totals for Product Type:")
+set captions->rpt_total = uar_i18ngetmessage(i18nHandle,
+  "rpt_total", "Total")
+set captions->report_id = uar_i18ngetmessage(i18nHandle,
+  "report_id", "Report ID: BBT_RPT_FINAL_DISP")
+set captions->page_no = uar_i18ngetmessage(i18nHandle,
+  "page_no", "Page:")
+set captions->printed = uar_i18ngetmessage(i18nHandle,
+  "printed", "Printed:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+set captions->all = uar_i18ngetmessage(i18nHandle,
+  "all", "(All)")
+;End 011
+;012
+set captions->hist_note = uar_i18ngetmessage(i18nHandle,
+  "hist_note", "* - From product history upload.")
+set captions->unknown_reason = uar_i18ngetmessage(i18nHandle,
+  "unknown_reason", "Unknown Reason")
+set captions->not_on_file = uar_i18ngetmessage(i18nHandle,
+  "not_on_file", "<Not on File>")
+
+/***********************************************
+*       Script                                 *
+************************************************/
+ 
+/* Determine if printing out of Ops */
+;008
+if (trim(request->batch_selection) > " ")
+  set begday = request->ops_date
+  set endday = request->ops_date
+  set temp_string = cnvtupper(trim(request->batch_selection))
+  CALL CHECK_OPT_DATE_PASSED("bbt_rpt_final_disp")
+  if (reply->status_data->status != "F")
+        set request->beg_dt_tm = begday
+        set request->end_dt_tm = endday
+  endif
+
+  call CHECK_OWNER_CD ("bbt_rpt_final_disp")
+  call CHECK_INVENTORY_CD ("bbt_rpt_final_disp")
+  call CHECK_LOCATION_CD ("bbt_rpt_final_disp")
+
+endif
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+
+%i cclsource:bbt_get_location_info.inc
+;008
+ 
+/****************************************************************************
+*       Counters record                                                     *
+*****************************************************************************/
+ 
+record counters
+(
+ 1 qual[*]
+    2  found_ind                = i2    ; 003
+    2  reason_cd                = f8
+    2  reason_disp              = vc
+    2  count                    = i4
+)
+
+/* Set initial number of dispose reasons */
+set stat = alterlist(counters->qual, 10)
+
+select into "nl:"
+    cv.code_value
+
+from
+    code_value cv
+ 
+plan cv  where   cv.code_set = dispose_reasons_code_set
+
+head report
+    qual_cnt = 0
+ 
+detail
+    qual_cnt = qual_cnt + 1
+    if (mod(qual_cnt, 10) = 1 and qual_cnt != 1)
+        stat = alterlist(counters->qual, qual_cnt + 9)
+    endif
+
+    counters->qual[qual_cnt]->reason_cd         = cv.code_value
+    counters->qual[qual_cnt]->reason_disp       = cv.description
+    counters->qual[qual_cnt]->count             = 0
+    counters->qual[qual_cnt]->found_ind         = 0
+ 
+foot report
+    qual_cnt = qual_cnt + 1
+    if (mod(qual_cnt, 10) = 1 and qual_cnt != 1)
+        stat = alterlist(counters->qual, qual_cnt + 9)
+    endif
+
+    counters->qual[qual_cnt]->reason_cd         = 0
+    counters->qual[qual_cnt]->reason_disp       = captions->unknown_reason
+    counters->qual[qual_cnt]->count             = 0
+    counters->qual[qual_cnt]->found_ind         = 0
+    stat = alterlist(counters->qual, qual_cnt)
+
+with nocounter
+
+;012 Changed code_value selects to uar_get functions
+
+/* Retrieve display values for requested Owner Area and Inventory Area */
+if (request->cur_owner_area_cd = 0.0)
+   set cur_owner_area_disp = captions->all
+else
+   set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+endif
+if (request->cur_inv_area_cd = 0.0)
+   set cur_inv_area_disp = captions->all
+else
+   set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+endif
+
+set stat = uar_get_meaning_by_codeset(319, nullterm("MRN"), 1, mrn_code)
+
+set stat = uar_get_meaning_by_codeset(1610, nullterm("7"), 1, transfuse_code)
+set transfuse_disp = uar_get_code_display(transfuse_code)
+
+set stat = uar_get_meaning_by_codeset(1610, nullterm("14"), 1, destroyed_code)
+set destroyed_disp = uar_get_code_display(destroyed_code)
+
+set stat = uar_get_meaning_by_codeset( 1606, nullterm("DERIVATIVE"), 1, DERIVATIVE_CLASS_CD)
+
+if (mrn_code = 0.0 or transfuse_code = 0.0 or destroyed_code = 0.0)
+  set failed = "T"
+  go to exit_script
+endif
+;end 012
+
+set reply->status_data->status = "F"
+set nErrorStatus = ERROR(sErrorMsg,1)
+ 
+;begin 012
+
+/*********************************************
+* record structure to store report data      *
+*********************************************/
+Record final_disp_data
+(
+    1 products[*]                   ;ACTIVITY TABLE.FIELD               HISTORY TABLE.FIELD
+        2 history_ind = i2          ;0                                  1
+        2 product_id = f8
+        2 product_aborh = vc        ;blood_product.abo_cd /             bbhist_product.abo_cd/bbhist_product.rh_cd
+                                    ;blood_product.rh_cd
+        2 product_prefix = vc       ;product.supplier_prefix            bbhist_product.supplier_prefix
+        2 product_nbr = vc          ;product.product_nbr                bbhist_product.product_nbr
+        2 product_sub_nbr = c5      ;product.product_sub_nbr            bbhist_product.product_sub_nbr
+        2 product_type = c40         ;product.product_cd                 bbhist_product.product_cd
+        2 qty = i4                  ;transfusion.cur_transfuse_qty      bbhist_product_event.qty
+                                    ; or
+                                    ;destruction.destroyed_qty
+        2 disposition = vc          ;product_event.event_type_cd        bbhist_product_event.event_type_cd
+        2 disposition_cd =f8        ;disposition.reason_cd              bbhist_product_event.reason_cd
+        2 disposition_reason = vc   ;disposition.reason_cd              bbhist_product_event.reason_cd
+        2 disposition_dt_tm = dq8   ;product_event.event_dt_tm          bbhist_product_event.event_dt_tm
+        2 disposition_tech_id = vc  ;product_event.event_prsnl_id       bbhist_product_evnet.prsnl_id
+        2 person_id = f8
+        2 person_name = vc
+        2 person_alias = vc
+        2 person_alias_id = f8
+        2 derivative_ind = i2       ;product.product_class_cd           bbhist_product.product_class_cd
+)
+
+/********************************************/
+/* select to read data from the live tables
+This was broken into 2 selects for clarity.  One select will retrieve tranfusions,
+the other will retrieve destroys
+*/
+
+/********************************************/
+/* tranfusions */
+select into "nl:"
+     alias_exists = decode(d_ea.seq, "Y", "N")
+    ,ea.alias
+    ,pers_name    = per.name_full_formatted
+    ,pr.product_cd
+    ,pr.product_nbr
+    ,pr.product_sub_nbr
+    ,pe.event_dt_tm
+
+from
+     product_event pe
+    ,product pr
+    ,prsnl prs
+    ,transfusion tr
+    ,person per
+    ,(dummyt d_ea with seq = 1)
+    ,encntr_alias ea
+    ,(dummyt d_bp_de with seq = 1)
+    ,blood_product bp
+    ,derivative de
+ 
+plan  pe
+    where pe.event_type_cd = transfuse_code
+      and pe.active_ind = 1
+      and (pe.event_dt_tm between cnvtdatetime(request->beg_dt_tm)
+                              and cnvtdatetime(request->end_dt_tm))
+      and (pe.event_status_flag = 0)
+join  pr
+    where pe.product_id = pr.product_id
+      and ((request->cur_owner_area_cd > 0.0
+          and request->cur_owner_area_cd = pr.cur_owner_area_cd)
+          or (request->cur_owner_area_cd = 0.0))
+      and ((request->cur_inv_area_cd > 0.0
+          and request->cur_inv_area_cd = pr.cur_inv_area_cd)
+          or (request->cur_inv_area_cd = 0.0))
+join prs
+    where pe.event_prsnl_id = prs.person_id
+join tr
+    where pe.product_event_id = tr.product_event_id
+      and tr.active_ind       = 1
+join per
+    where pe.person_id = per.person_id
+join (d_ea
+    where d_ea.seq = 1
+    join ea
+        where ea.encntr_id              = pe.encntr_id
+          and ea.encntr_alias_type_cd   = mrn_code
+          and ea.active_ind             = 1
+          and ea.beg_effective_dt_tm    <= cnvtdatetime(curdate,curtime3)
+          and ea.end_effective_dt_tm    >= cnvtdatetime(curdate,curtime3))
+join (d_bp_de
+    where d_bp_de.seq = 1
+    join bp
+        where pe.product_id = bp.product_id
+    orjoin de
+        where pe.product_id = de.product_id)
+
+/* detail section left to developer.  Fill out the final_disp_data structure */
+
+head report
+  prod_cnt = 0
+  alias = fillstring(17, " ")
+  abo_display = fillstring(15, " ")
+  rh_display = fillstring(15, " ")
+ 
+detail
+  prod_cnt = prod_cnt + 1
+  if (mod(prod_cnt, 10) = 1)
+    stat = alterlist(final_disp_data->products, prod_cnt + 9)
+  endif
+  final_disp_data->products[prod_cnt].history_ind     = 0
+  final_disp_data->products[prod_cnt].product_id      = pr.product_id
+  abo_display = uar_get_code_display(bp.cur_abo_cd)
+  rh_display = uar_get_code_display(bp.cur_rh_cd)
+  final_disp_data->products[prod_cnt].product_aborh   = 
+         concat(trim(abo_display), " ", trim(rh_display))
+  final_disp_data->products[prod_cnt].product_prefix  = trim(bp.supplier_prefix)
+  final_disp_data->products[prod_cnt].product_nbr     = trim(pr.product_nbr)
+  final_disp_data->products[prod_cnt].product_sub_nbr = trim(pr.product_sub_nbr)
+  final_disp_data->products[prod_cnt].product_type    = uar_get_code_display(pr.product_cd)
+  final_disp_data->products[prod_cnt].qty             = tr.cur_transfused_qty
+  final_disp_data->products[prod_cnt].disposition     = uar_get_code_display(pe.event_type_cd)
+  final_disp_data->products[prod_cnt].disposition_cd  = 0
+  final_disp_data->products[prod_cnt].disposition_reason = ""
+  final_disp_data->products[prod_cnt].disposition_dt_tm = pe.event_dt_tm
+  final_disp_data->products[prod_cnt].disposition_tech_id = prs.username
+  final_disp_data->products[prod_cnt].person_id       = per.person_id
+  final_disp_data->products[prod_cnt].person_name     = substring(1, 30, pers_name)
+
+  if ((alias_exists = "Y") and (ea.encntr_alias_id > 0.0))
+      alias = cnvtalias(ea.alias, ea.alias_pool_cd)
+      final_disp_data->products[prod_cnt].person_alias    = alias
+      final_disp_data->products[prod_cnt].person_alias_id = ea.encntr_alias_id
+  else
+      final_disp_data->products[prod_cnt].person_alias    = captions->not_on_file
+  endif
+  if (pr.product_class_cd = DERIVATIVE_CLASS_CD)
+    final_disp_data->products[prod_cnt].derivative_ind = 1
+  endif
+
+foot report
+  stat = alterlist(final_disp_data->products, prod_cnt)
+
+with nocounter, dontcare = ea
+    ,outerjoin(d_ea)
+ 
+/* destroys */
+select into "nl:"
+     pr.product_cd
+    ,pr.product_nbr
+    ,pr.product_sub_nbr
+    ,pe.event_dt_tm
+from
+     product_event pe
+    ,product pr
+    ,prsnl prs
+    ,destruction ds
+    ,disposition dis
+    ,(dummyt d_bp_de with seq = 1)
+    ,blood_product bp2
+    ,derivative de2
+
+plan  pe
+    where pe.event_type_cd = destroyed_code
+      and pe.active_ind = 1
+      and (pe.event_dt_tm between cnvtdatetime(request->beg_dt_tm)
+                              and cnvtdatetime(request->end_dt_tm))
+      and (pe.event_status_flag = 0)
+join  pr
+    where pe.product_id = pr.product_id
+      and ((request->cur_owner_area_cd > 0.0
+          and request->cur_owner_area_cd = pr.cur_owner_area_cd)
+          or (request->cur_owner_area_cd = 0.0))
+      and ((request->cur_inv_area_cd > 0.0
+          and request->cur_inv_area_cd = pr.cur_inv_area_cd)
+          or (request->cur_inv_area_cd = 0.0))
+join prs
+    where pe.event_prsnl_id = prs.person_id
+join ds
+    where pe.product_id        = ds.product_id
+      and pe.product_event_id  = ds.product_event_id
+      and ds.active_ind        = 1
+      and pe.event_status_flag = 0
+join dis
+    where dis.product_event_id = pe.related_product_event_id
+
+join  (d_bp_de
+    where d_bp_de.seq = 1
+    join bp2
+        where pe.product_id = bp2.product_id
+    orjoin de2
+        where pe.product_id = de2.product_id)
+
+/* detail section left to developer.  Fill out the final_disp_data structure */
+head report
+  stat = alterlist(final_disp_data->products, prod_cnt + 10)
+  abo_display = fillstring(15, " ")
+  rh_display = fillstring(15, " ")
+  
+detail
+  prod_cnt = prod_cnt + 1
+  if (mod(prod_cnt, 10) = 1)
+    stat = alterlist(final_disp_data->products, prod_cnt + 9)
+  endif
+  final_disp_data->products[prod_cnt].history_ind     = 0
+  final_disp_data->products[prod_cnt].product_id      = pr.product_id
+  abo_display = uar_get_code_display(bp2.cur_abo_cd)
+  rh_display = uar_get_code_display(bp2.cur_rh_cd)
+  final_disp_data->products[prod_cnt].product_aborh   =
+         concat(trim(abo_display), " ", trim(rh_display))
+  final_disp_data->products[prod_cnt].product_prefix  = trim(bp2.supplier_prefix)
+  final_disp_data->products[prod_cnt].product_nbr     = trim(pr.product_nbr)
+  final_disp_data->products[prod_cnt].product_sub_nbr = trim(pr.product_sub_nbr)
+  final_disp_data->products[prod_cnt].product_type    = uar_get_code_display(pr.product_cd)
+  final_disp_data->products[prod_cnt].qty             = ds.destroyed_qty
+  final_disp_data->products[prod_cnt].disposition     = uar_get_code_display(pe.event_type_cd)
+  final_disp_data->products[prod_cnt].disposition_cd  = dis.reason_cd
+  final_disp_data->products[prod_cnt].disposition_reason = uar_get_code_display(dis.reason_cd)
+  final_disp_data->products[prod_cnt].disposition_dt_tm = pe.event_dt_tm
+  final_disp_data->products[prod_cnt].disposition_tech_id = prs.username
+  final_disp_data->products[prod_cnt].person_id       = 0
+  final_disp_data->products[prod_cnt].person_name     = ""
+  final_disp_data->products[prod_cnt].person_alias    = ""
+  final_disp_data->products[prod_cnt].person_alias_id = 0
+  if (pr.product_class_cd = DERIVATIVE_CLASS_CD)
+    final_disp_data->products[prod_cnt].derivative_ind = 1
+  endif
+foot report
+  stat = alterlist(final_disp_data->products, prod_cnt)
+
+with nocounter
+
+/**************************************/
+/* select to read from history tables */
+/**************************************/
+
+select into "nl:"
+    pers_name = per.name_full_formatted
+    ,bbhp.product_cd
+    ,bbhp.product_nbr
+    ,bbhp.product_sub_nbr
+    ,bbhpe.event_dt_tm
+
+from
+     bbhist_product_event bbhpe
+    ,bbhist_product bbhp
+    ,person per
+    ,prsnl prs
+    ,encntr_alias ea
+
+plan bbhpe
+    where bbhpe.event_type_cd in (transfuse_code, destroyed_code)
+      and (bbhpe.event_dt_tm between cnvtdatetime(request->beg_dt_tm)
+                                 and cnvtdatetime(request->end_dt_tm))
+      and bbhpe.active_ind = 1
+join bbhp
+    where bbhp.product_id = bbhpe.product_id
+      and ((   request->cur_owner_area_cd > 0.0
+           and request->cur_owner_area_cd = bbhp.owner_area_cd)
+          or (request->cur_owner_area_cd = 0.0))
+      and ((request->cur_inv_area_cd > 0.0
+           and request->cur_inv_area_cd = bbhp.inv_area_cd)
+          or (request->cur_inv_area_cd = 0.0))
+join prs
+    where bbhpe.prsnl_id = prs.person_id
+join per
+    where bbhpe.person_id = per.person_id
+
+join ea
+    where ea.encntr_id              = outerjoin(bbhpe.encntr_id)
+      and ea.encntr_alias_type_cd   = outerjoin(mrn_code)
+      and ea.active_ind             = outerjoin(1)
+      and ea.beg_effective_dt_tm    <= outerjoin(cnvtdatetime(curdate,curtime3))
+      and ea.end_effective_dt_tm    >= outerjoin(cnvtdatetime(curdate,curtime3))
+
+/* detail section left for developer
+   fill out final_disp_data structure */
+ 
+head report
+  stat = alterlist(final_disp_data->products, prod_cnt + 10)
+  alias = fillstring(17, " ")
+  abo_display = fillstring(15, " ")
+  rh_display = fillstring(15, " ")
+  
+detail
+  prod_cnt = prod_cnt + 1
+  if (mod(prod_cnt, 10) = 1)
+    stat = alterlist(final_disp_data->products, prod_cnt + 9)
+  endif
+  final_disp_data->products[prod_cnt].history_ind     = 1
+  final_disp_data->products[prod_cnt].product_id      = bbhp.product_id
+  abo_display = uar_get_code_display(bbhp.abo_cd)
+  rh_display = uar_get_code_display(bbhp.rh_cd)
+  final_disp_data->products[prod_cnt].product_aborh   =
+         concat(trim(abo_display), " ", trim(rh_display))
+  final_disp_data->products[prod_cnt].product_prefix  = trim(bbhp.supplier_prefix)
+  final_disp_data->products[prod_cnt].product_nbr     = trim(bbhp.product_nbr)
+  final_disp_data->products[prod_cnt].product_sub_nbr = trim(bbhp.product_sub_nbr)
+  final_disp_data->products[prod_cnt].product_type    = uar_get_code_display(bbhp.product_cd)
+  final_disp_data->products[prod_cnt].qty             = bbhpe.qty
+  final_disp_data->products[prod_cnt].disposition     = uar_get_code_display(bbhpe.event_type_cd)
+  final_disp_data->products[prod_cnt].disposition_cd  = bbhpe.reason_cd
+  final_disp_data->products[prod_cnt].disposition_reason = uar_get_code_display(bbhpe.reason_cd)
+  final_disp_data->products[prod_cnt].disposition_dt_tm = bbhpe.event_dt_tm
+  final_disp_data->products[prod_cnt].disposition_tech_id = prs.username
+  final_disp_data->products[prod_cnt].person_id       = per.person_id
+  final_disp_data->products[prod_cnt].person_name     = substring(1, 30, pers_name)
+  final_disp_data->products[prod_cnt].person_alias_id = ea.encntr_alias_id
+  if (final_disp_data->products[prod_cnt].person_alias_id = 0.0)
+    final_disp_data->products[prod_cnt].person_alias = captions->not_on_file
+  else
+    alias = cnvtalias(ea.alias, ea.alias_pool_cd)
+    final_disp_data->products[prod_cnt].person_alias = alias
+  endif
+ 
+  if (bbhp.product_class_cd = DERIVATIVE_CLASS_CD)
+    final_disp_data->products[prod_cnt].derivative_ind = 1
+  endif
+ 
+foot report
+  stat = alterlist(final_disp_data->products, prod_cnt)
+ 
+with nocounter
+
+/**************************************/
+/* select to print report             */
+/**************************************/
+/*
+print the * to the left of the product number.  And print a footer for each page that
+contains a product from history.
+*/
+
+set LINE = FILLSTRING(125, "_")	;017
+ 
+execute cpm_create_file_name_logical "bbt_final_disp", "txt", "x"
+ 
+select into cpm_cfn_info->file_name_logical
+     d.seq
+    ,product_type = final_disp_data->products[d.seq].product_type "########################################"
+    ,sort_prod_aborh = cnvtupper(substring(1,15,final_disp_data->products[d.seq].product_aborh))
+    ,sort_prod_nbr = substring(1,20,final_disp_data->products[d.seq].product_nbr)
+    ,sort_prod_sub_nbr = substring(1,5,final_disp_data->products[d.seq].product_sub_nbr)
+from
+    (dummyt d with seq = value(size(final_disp_data->products, 5)))
+ 
+plan d
+
+order by
+   product_type
+  ,sort_prod_aborh
+  ,sort_prod_nbr
+  ,sort_prod_sub_nbr
+
+head report
+      line          = fillstring(125,"_")	;017
+      first_time    = "Y"
+      transfuse_cnt = 0
+      destroy_cnt   = 0
+      reason_cnt = 0
+      ;the product type in foot summary doesn't match to the one on head page when there
+      ;is break in foot. It seems that jump to next d.seq, so need to use cur_prod_type
+      ;variable to hold the product type.
+      cur_prod_type = product_type
+ 
+head page
+    /* put page header data here */
+      call center(captions->final_disposition,1,125)	;017
+      col 104, captions->time,
+      col 118, CURTIME "@TIMENOSECONDS;;M",
+      row + 1
+      col 104, captions->as_of_date,
+      col 118, CURDATE "@DATECONDENSED;;d",
+%i cclsource:bbt_print_location_info.inc
+      SAVE_ROW = row
+      row 1
+      call center(captions->by_prod_type,1,125)			;017
+      row SAVE_ROW
+      row + 1
+      col 1, captions->bb_owner,
+      col 19, cur_owner_area_disp,
+      row + 1
+      col 1, captions->inventory_area,
+      col 17, cur_inv_area_disp
+      row + 2
+      col  34, captions->beg_date
+      col  50, request->beg_dt_tm "@DATETIMECONDENSED;;d"
+      col  73, captions->end_date
+      col  86, request->end_dt_tm "@DATETIMECONDENSED;;d"
+      row + 3
+      col   1, captions->product_type
+      col  15, final_disp_data->products[d.seq].product_type
+      row + 1
+      call center(captions->disposition, 48, 62)
+      row + 1
+      call center(captions->aborh, 1, 14)			;017
+      call center(captions->product_number, 16, 41)	;017
+      col  43, captions->qty						;017
+      call center(captions->reason, 48, 62)			;017
+      call center(captions->name, 64, 86)			;017
+      call center(captions->mrn, 88, 102)			;017
+      call center(captions->dt_tm, 104, 115)		;017
+      call center(captions->tech_id, 117, 125)		;017
+      row + 1
+      col   1, "--------------"				;017
+      col  16, "--------------------------"	;017 Product # has to be 26 in case history ind = 1
+      col  43, "----"						;017
+      col  48, "---------------"			;017
+      col  64, "-----------------------"	;017
+      col  88, "---------------"			;017
+      col 104, "------------"				;017
+      col 117, "---------"					;017
+      row + 1
+      hist_found = false
+
+;012
+head  product_type
+      cur_prod_type = product_type
+      if (first_time = "Y")
+        first_time = "N"
+      else
+        break
+      endif
+ 
+detail
+      col   1, final_disp_data->products[d.seq].product_aborh "##############"
+      if (final_disp_data->products[d.seq].history_ind = 0)
+        col   16, call print(concat(final_disp_data->products[d.seq].product_prefix,		;017
+                                    final_disp_data->products[d.seq].product_nbr, " ",
+                                    final_disp_data->products[d.seq].product_sub_nbr))
+      else
+        col   16, call print(concat("*", final_disp_data->products[d.seq].product_prefix,	;017
+                                    final_disp_data->products[d.seq].product_nbr, " ",
+                                    final_disp_data->products[d.seq].product_sub_nbr))
+        hist_found = true
+      endif
+
+      if (final_disp_data->products[d.seq].qty > 0)
+        col  43, final_disp_data->products[d.seq].qty "####;p "								;017
+      else
+        col  43 "    "																		;017
+      endif
+      col  48, final_disp_data->products[d.seq].disposition									;017
+      col  64, final_disp_data->products[d.seq].person_name "#######################"		;017
+      col  88, final_disp_data->products[d.seq].person_alias "###############"				;017
+      col 104, final_disp_data->products[d.seq].disposition_dt_tm "@DATETIMECONDENSED;;d"	;017
+      col 117, final_disp_data->products[d.seq].disposition_tech_id "#########"				;017
+      if (final_disp_data->products[d.seq].disposition = destroyed_disp)
+          row + 1
+          if (row > 56)
+            break
+          endif
+          col 48 call print
+            (concat("(", trim(final_disp_data->products[d.seq].disposition_reason), ")") )
+      endif
+      row + 2
+      if (row > 56)
+        break
+      endif
+      if (final_disp_data->products[d.seq].derivative_ind = 1)  ;derivative product
+        if (final_disp_data->products[d.seq].disposition = transfuse_disp)
+          transfuse_cnt = transfuse_cnt + final_disp_data->products[d.seq].qty
+        elseif (final_disp_data->products[d.seq].disposition = destroyed_disp)
+          destroy_cnt   = destroy_cnt + final_disp_data->products[d.seq].qty
+          for (idx = 1 to qual_cnt)
+            if (counters->qual[idx].reason_cd =
+                final_disp_data->products[d.seq].disposition_cd)
+              counters->qual[idx].count = counters->qual[idx].count + 1
+              if (counters->qual[idx].found_ind != 1)
+                  reason_cnt = reason_cnt + 1
+                  counters->qual[idx].found_ind = 1
+              endif
+          endif
+         endfor
+        endif
+      else
+        if (final_disp_data->products[d.seq].disposition = transfuse_disp)
+          transfuse_cnt = transfuse_cnt + 1
+        elseif (final_disp_data->products[d.seq].disposition = destroyed_disp)
+          destroy_cnt   = destroy_cnt + 1
+          for (idx = 1 to qual_cnt)
+          if (counters->qual[idx].reason_cd =
+                final_disp_data->products[d.seq].disposition_cd)
+              counters->qual[idx].count = counters->qual[idx].count + 1
+              if (counters->qual[idx].found_ind != 1)
+                  reason_cnt = reason_cnt + 1
+                  counters->qual[idx].found_ind = 1
+              endif
+          endif
+         endfor
+        endif
+      endif
+ 
+foot product_type
+      if (row > 50 - reason_cnt)        ; 003 > 52 - qual_cnt)
+        break
+ ;       row + 3
+      endif
+      col   1, captions->total
+      col  26, cur_prod_type
+      row + 2
+      col   4, call print (concat(trim(transfuse_disp), ":"))
+      col  21, transfuse_cnt "####;p "
+      row + 2
+      col   4, call print (concat(trim(destroyed_disp), ":"))
+      if (destroy_cnt = 0)
+        col  21, destroy_cnt "####;p "
+        row + 1
+      else
+        row + 1
+        for (idx = 1 to qual_cnt)
+          if (counters->qual[idx].count > 0)
+                col 10, counters->qual[idx].reason_disp
+                col 40, counters->qual[idx].count "####"
+                row + 1
+          endif
+        endfor
+        col 40, "____"
+        row + 1
+        col 10, captions->rpt_total
+        col 40, destroy_cnt "####;p "
+      endif
+ 
+      transfuse_cnt = 0
+      destroy_cnt   = 0
+
+      reason_cnt = 0
+      for (idx = 1 to qual_cnt)
+        counters->qual[idx].found_ind = 0
+        counters->qual[idx].count = 0
+      endfor
+ 
+foot page
+    /* if a historical product was printed on this page, need to print a footer with a note indicating
+       what the * means.  See TDD for message. */
+      row  57
+      col   1, line,
+      row + 1
+      col   1, captions->report_id,
+      col  58, captions->page_no,
+      col  64, curpage "###",
+      col 100, captions->printed,
+      col 110, curdate "@DATECONDENSED;;d"
+      col 120, curtime "@TIMENOSECONDS;;M"
+      if (hist_found)
+        row + 1
+        col   1, captions->hist_note
+      endif
+
+foot report
+      row  60
+      col  51, captions->end_of_report
+
+with nocounter
+    ,nullreport
+    ,maxrow = 61
+    ,maxcol = 132
+    ,compress
+ 
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path	;013
+IF (trim(request->batch_selection) > " ")
+    SET spool value(reply->rpt_list[rpt_cnt].rpt_filename) value(request->output_dist)
+ENDIF
+ 
+#exit_script
+  set nErrorStatus = ERROR(sErrorMsg, 0)
+  if (nErrorStatus != 0)
+      set reply->status_data->status = "F"
+   else
+     if (failed = "T")
+       set reply->status_data->status = "F"
+     else
+       set reply->status_data->status = "S"
+     endif
+   endif
+   ;call echorecord(final_disp_data)
+   free record captions
+   free record counters
+   free record final_disp_data
+end go
+
+;Generated by GNU enscript 1.6.4.

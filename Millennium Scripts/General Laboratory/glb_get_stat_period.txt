@@ -1,0 +1,494 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_stat_period/glb_get_stat_period.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_STAT_PERIOD.PRG
+        Object name:            GLB_GET_STAT_PERIOD
+        Request #:              257534
+
+        Product:                General Lab - Quality Control           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Retrieve a statistical period into the database
+
+        Tables read:            n/a
+
+        Tables updated:         qc_stat_period
+
+        Executing from:         General Lab QC Inquiry
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 10/08/96 Chad Moats           Initial Release                     *
+;     001 06/01/98 Chad Moats           Use data_map plus one for calcs     *
+;     002 08/17/98 Chad Moats           Add Patient Data Logic              *
+;     003 07/22/05 Scott Sundahl        Analytical series enhancement       *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_STAT_PERIOD:dba go    
+      create program GLB_GET_STAT_PERIOD:dba
+     
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request                                      
+      (                                       
+         1 control_id              = f8
+         1 service_resource_cd     = f8
+         1 task_assay_cd           = f8
+         1 beg_dt_tm               = dq8
+         1 end_dt_tm               = dq8
+         1 qc_result_type_flag     = i2		;0=qc, 1=patient	;002
+         1 service_resources[*]
+           2 service_resource_cd   = f8
+         1 assays[*]
+           2 task_assay_cd         = f8
+         
+      ) 
+
+record reqinfo
+( 1 commit_ind  = i2
+  1 updt_id     = f8
+  1 position_cd = f8
+  1 updt_app    = i4
+  1 updt_task   = i4
+  1 updt_req    = i4
+  1 updt_applctx= i4
+)
+*/
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      ( 
+         1 stats[*]
+           2 qc_stat_id             = f8
+           2 qc_stat_type_cd        = f8
+	         2 pdm_param_id	          = f8			;002
+	         2 pdm_range_id	          = f8			;002
+           2 control_id             = f8
+           2 lot_id                 = f8
+           2 lot_number             = c200
+           2 service_resource_cd    = f8
+           2 service_resource_disp  = vc
+           2 task_assay_cd          = f8
+           2 task_assay_disp        = vc                                 
+           2 beg_dt_tm              = dq8
+           2 end_dt_tm              = dq8
+           2 sum_of_results         = f8
+           2 sum_of_squares         = f8
+           2 abs_low                = f8
+           2 abs_high               = f8
+           2 count                  = i4
+           2 mean                   = vc                
+           2 std_dev                = vc                  
+           2 co_var                 = vc                 
+           2 f_val                  = vc                   
+           2 z_stat                 = vc                   
+           2 arg_max_digits         = i2                 
+           2 arg_min_digits         = i2                  
+           2 arg_min_dec_places     = i2                 
+           2 alpha_flag             = i2
+           2 normal_cnt             = i4
+           2 abnormal_cnt           = i4
+           2 review_cnt             = i4
+           2 results_inc_flag       = i2
+           2 service_resource_group_ind = i2
+           2 expected_mean          = f8
+           2 expected_std_dev       = f8
+           2 arl_id                 = f8
+           2 control_name           = vc
+           2 series_interval_nbr    = i4
+           2 series_sequence_nbr    = i4
+         1 status_data
+           2 status                 = c1
+           2 subeventstatus[1]
+             3 OperationName        = c15
+             3 OperationStatus      = c1
+             3 TargetObjectName     = c15
+             3 TargetObjectValue    = vc
+      )
+
+
+     #Script
+      set reply->status_data->status = "F"
+      set s_cnt = 0
+      declare ALPHA_CD = f8
+      set data_map_level = 0                                       
+      set SERV_RES_TYPE_CODESET       = 223                           
+      set SERV_RES_SUBSECTION_CDF     = "SUBSECTION"                 
+      declare serv_res_subsection_cd  = f8                          
+      set arg_max_digits = 0                                         
+      set arg_min_digits = 0                                         
+      set arg_min_dec_places = 0                                   
+      declare uar_fmt_result (min, max, dec, flag, result) = c50 with protect, noconstant("")
+
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+declare nStatCnt                             = i2 with protect, noconstant(0)
+declare lTestSiteslist                       = i4 with protect, constant(size(request->service_resources,5))
+declare lProcedureslist                      = i4 with protect, constant(size(request->assays,5))
+declare sTestsite_Parser                     = vc with protect, noconstant("")
+declare sProcedure_Parser                    = vc with protect, noconstant("")
+declare nTestsiteCnt                         = i4 with protect, noconstant(0)
+declare nProcedureCnt                        = i4 with protect, noconstant(0)
+declare sProcedures                          = vc with protect, noconstant("")
+declare sTestsites                           = vc with protect, noconstant("")
+declare GetTestsiteParser(sTable)            = vc
+declare GetProcedureParser(sTable)           = vc
+declare nFound                               = i2 with protect, noconstant(0)
+
+/************************************************************************
+*build parsers (2)                                                      *
+************************************************************************/
+
+subroutine GetTestsiteParser(sTable)
+  if (lTestSiteslist > 0)
+    if (sTable =  "qsp")
+      set sTestsite_Parser = build("expand(nTestsiteCnt,1,lTestSiteslist,qsp.service_resource_cd,",
+          "request->service_resources[nTestsiteCnt].service_resource_cd)")
+    endif
+  elseif (request->service_resource_cd > 0)
+    if (sTable =  "qsp") 	
+  	  set sTestsite_Parser = "qsp.service_resource_cd = request->service_resource_cd"
+    endif
+  else
+	 	set sTestsite_Parser = "1 = 1"
+	endif
+ return(sTestsite_Parser) 
+end
+
+subroutine GetProcedureParser(sTable)
+  if (lProcedureslist > 0)
+	  if (sTable = "qsp")
+		  set sProcedure_Parser = build("expand(nProcedureCnt, 1, lProcedureslist,",
+		      "qsp.task_assay_cd, request->assays[nProcedureCnt].task_assay_cd)")
+		endif
+	elseif (request->task_assay_cd > 0)
+ 		if (sTable = "qsp")
+ 		 	set sProcedure_Parser = "qsp.task_assay_cd = request->task_assay_cd"
+	  endif
+	else
+		set sProcedure_Parser = "1 = 1"
+	endif  
+ return(sProcedure_Parser)
+end
+
+
+
+      if (request->qc_result_type_flag = NULL)
+        set request->qc_result_type_flag = 0
+      endif 
+
+   /***********************************************************************
+   * Load code values                                                     *
+   ***********************************************************************/
+      select into "nl:"                                              
+         cv.code_set,                                                 
+         cv.code_value                                              
+      from                                                         
+         code_value cv                                             
+      where cv.code_set = SERV_RES_TYPE_CODESET                      
+        and cv.cdf_meaning = SERV_RES_SUBSECTION_CDF               
+        and cv.active_ind = 1                                         
+        and cv.begin_effective_dt_tm <=                              
+                               cnvtdatetime(curdate, curtime3)       
+        and cv.end_effective_dt_tm >=                                
+                               cnvtdatetime(curdate, curtime3)     
+      detail                                                         
+         if (cv.code_set = SERV_RES_TYPE_CODESET)                    
+            case (cv.cdf_meaning)                                    
+              of SERV_RES_SUBSECTION_CDF:                            
+                 serv_res_subsection_cd = cv.code_value          
+            endcase                                                  
+         endif                                                    
+      with nocounter                                                 
+
+ /***********************************************************************
+ * Load code values                                                     *
+ ***********************************************************************/
+
+      SELECT 
+       into "nl:"
+         c.code_value
+      FROM
+         code_value c
+      WHERE 
+          c.code_set = 289 and
+          c.cdf_meaning = "2"
+      DETAIL
+          ALPHA_CD = c.code_value 
+      WITH
+          nocounter
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+ /***********************************************************************
+ * Get statistical periods                                              *
+ ***********************************************************************/
+
+      SELECT 
+       into "nl:"
+         qsp.qc_stat_id,
+         cl.lot_id,
+         apr.default_result_type_cd,
+         arl.task_assay_cd,
+	       r.pdm_range_id,					     
+         cl_exists = decode(cl.seq, "Y", "N"),                     
+         arl_exists = decode(arl.seq, "Y", "N"),                     
+         r_exists = decode(r.seq, "Y", "N"),	                    
+         data_map_exists = decode(dm.seq, "Y", "N"),                
+         dm.task_assay_cd,                                         
+         d_rg.seq,                                                   
+         rg_exists = decode(rg.seq, "Y", "N"),                       
+         rg.parent_service_resource_cd,                               
+         rg.child_service_resource_cd,                             
+         rg.resource_group_type_cd,                                  
+         rg.root_service_resource_cd                                 
+      FROM
+         qc_stat_period qsp,
+         control_lot cl,
+         assay_processing_r apr,
+         assay_resource_lot arl,
+	       pdm_ranges r,
+         data_map dm,                                                 
+         (dummyt d_rg with seq = 1),                                   
+         (dummyt d1 with seq = 1),                                   
+         (dummyt d2 with seq = 1),                                   
+         (dummyt d3 with seq = 1),                                   
+         (dummyt d4 with seq = 1),                                   
+         resource_group rg,
+         control_material cm                                             
+      PLAN qsp
+         where qsp.control_id = request->control_id and
+	       (qsp.qc_result_type_flag = request->qc_result_type_flag) and					
+         parser(GetTestSiteParser("qsp")) and
+         parser(GetProcedureParser("qsp")) and
+         ((qsp.beg_dt_tm between cnvtdate(request->beg_dt_tm) and cnvtdate(request->end_dt_tm)) or
+         (qsp.end_dt_tm between cnvtdate(request->beg_dt_tm) and cnvtdate(request->end_dt_tm))) 
+      JOIN apr
+         where apr.task_assay_cd = qsp.task_assay_cd and
+               apr.service_resource_cd = qsp.service_resource_cd
+      JOIN d1 where d1.seq = 1
+      JOIN cl
+         where cl.lot_id = qsp.lot_id
+      JOIN d2 where d2.seq = 1
+      JOIN arl
+             where arl.arl_id = qsp.arl_id
+      JOIN cm
+             where cm.control_id = qsp.control_id
+      JOIN d3 where d3.seq = 1
+      JOIN r
+         where r.pdm_range_id = qsp.pdm_range_id
+      JOIN d4 where d4.seq = 1
+      JOIN dm                                                         
+         where dm.task_assay_cd = qsp.task_assay_cd                    
+           and dm.data_map_type_flag in (0, 1)                         
+           and dm.active_ind = 1                                       
+      JOIN d_rg                                                       
+         where d_rg.seq = 1                                            
+      JOIN rg                                                        
+         where rg.parent_service_resource_cd = dm.service_resource_cd  
+           and rg.child_service_resource_cd = qsp.service_resource_cd  
+           and rg.resource_group_type_cd = serv_res_subsection_cd      
+           and rg.root_service_resource_cd = 0.0                       
+      ORDER BY qsp.qc_stat_id
+      HEAD qsp.qc_stat_id 
+         s_cnt = s_cnt + 1
+         if (mod(s_cnt,5) = 1)
+            stat =  alterlist(reply->stats,s_cnt + 5)
+         endif        
+         reply->stats[s_cnt]->arg_max_digits = 8        
+         reply->stats[s_cnt]->arg_min_digits = 1        
+         reply->stats[s_cnt]->arg_min_dec_places = 2             
+         data_map_level = 0
+      DETAIL
+         if (data_map_exists = "Y")                                    
+            ;* Check for exact match on QC data map                   
+            if (data_map_level <= 3                                   
+            and dm.data_map_type_flag = 1                              
+            and dm.service_resource_cd > 0.0                           
+            and dm.service_resource_cd = qsp.service_resource_cd)        
+               data_map_level = 4                                      
+               reply->stats[s_cnt]->arg_max_digits = dm.max_digits        
+               reply->stats[s_cnt]->arg_min_digits = dm.min_digits        
+               reply->stats[s_cnt]->arg_min_dec_places =              
+                 dm.min_decimal_places                                 
+            endif                                                      
+            ;* Check for exact match on data map                       
+            if (data_map_level <= 2                                    
+            and dm.data_map_type_flag = 0                              
+            and dm.service_resource_cd > 0.0                           
+            and dm.service_resource_cd = qsp.service_resource_cd)        
+               data_map_level = 3                                     
+               reply->stats[s_cnt]->arg_max_digits = dm.max_digits       
+               reply->stats[s_cnt]->arg_min_digits = dm.min_digits        
+               reply->stats[s_cnt]->arg_min_dec_places =              
+                 dm.min_decimal_places                                 
+            endif                                                     
+            ;* Check for subsection level data map                    
+            if (data_map_level <= 1                                    
+            and dm.data_map_type_flag = 0                              
+            and dm.service_resource_cd > 0.0                           
+            and rg_exists = "Y"                                        
+            and rg.parent_service_resource_cd = dm.service_resource_cd 
+            and rg.child_service_resource_cd = qsp.service_resource_cd) 
+               data_map_level = 2                                      
+               reply->stats[s_cnt]->arg_max_digits = dm.max_digits       
+               reply->stats[s_cnt]->arg_min_digits = dm.min_digits       
+               reply->stats[s_cnt]->arg_min_dec_places =              
+                 dm.min_decimal_places                                
+            endif                                                      
+            ;* Check for default all resources level data map          
+            if (data_map_level = 0                                     
+            and dm.data_map_type_flag = 0                             
+            and dm.service_resource_cd = 0.0)                         
+               data_map_level = 1                                      
+               reply->stats[s_cnt]->arg_max_digits = dm.max_digits       
+               reply->stats[s_cnt]->arg_min_digits = dm.min_digits        
+               reply->stats[s_cnt]->arg_min_dec_places =             
+                 dm.min_decimal_places                                 
+            endif                                                      
+         endif
+      FOOT qsp.qc_stat_id 
+         arg_max_digits = reply->stats[s_cnt]->arg_max_digits        
+         arg_min_digits = reply->stats[s_cnt]->arg_min_digits        
+         arg_min_dec_places = reply->stats[s_cnt]->arg_min_dec_places   
+         reply->stats[s_cnt]->qc_stat_id        = qsp.qc_stat_id,
+         reply->stats[s_cnt]->qc_stat_type_cd   = qsp.qc_stat_type_cd,	
+         reply->stats[s_cnt]->pdm_param_id      = qsp.pdm_param_id,		
+         reply->stats[s_cnt]->pdm_range_id      = qsp.pdm_range_id,			
+         reply->stats[s_cnt]->control_id        = qsp.control_id,
+         reply->stats[s_cnt]->lot_id            = qsp.lot_id,
+         reply->stats[s_cnt]->series_interval_nbr = qsp.series_interval_nbr,
+         reply->stats[s_cnt]->series_sequence_nbr = qsp.series_sequence_nbr, 
+	 if (cl_exists = "Y")
+           reply->stats[s_cnt]->lot_number        = cl.lot_number
+	 endif
+         reply->stats[s_cnt]->service_resource_cd = qsp.service_resource_cd,
+         reply->stats[s_cnt]->task_assay_cd     = qsp.task_assay_cd,
+         reply->stats[s_cnt]->beg_dt_tm         = cnvtdatetime(qsp.beg_dt_tm),
+         reply->stats[s_cnt]->end_dt_tm         = cnvtdatetime(qsp.end_dt_tm),
+	 if (arl_exists = "Y")
+           reply->stats[s_cnt]->abs_low           = arl.abs_low
+           reply->stats[s_cnt]->abs_high          = arl.abs_high
+           reply->stats[s_cnt]->expected_mean     = arl.mean
+           reply->stats[s_cnt]->expected_std_dev  = arl.statistical_std_dev
+           reply->stats[s_cnt]->arl_id            = arl.arl_id
+           reply->stats[s_cnt]->control_name      = cm.short_description
+           
+	 elseif (r_exists = "Y")
+	   reply->stats[s_cnt]->abs_low		  = r.result_low
+	   reply->stats[s_cnt]->abs_high	  = r.result_high
+         endif
+	 reply->stats[s_cnt]->sum_of_results    = qsp.sum_of_results,
+         reply->stats[s_cnt]->sum_of_squares    = qsp.sum_of_squares,
+         reply->stats[s_cnt]->count             = qsp.result_cnt,
+         rslt = uar_fmt_result(arg_min_digits, arg_max_digits, arg_min_dec_places + 1, 0, qsp.mean),    
+         reply->stats[s_cnt]->mean              = rslt,
+         rslt = uar_fmt_result(arg_min_digits, arg_max_digits, arg_min_dec_places + 1, 0, qsp.std_dev), 
+         reply->stats[s_cnt]->std_dev           = rslt,
+         rslt = uar_fmt_result(arg_min_digits, arg_max_digits, arg_min_dec_places + 1, 0, qsp.co_var),  
+         reply->stats[s_cnt]->co_var            = rslt,
+         rslt = uar_fmt_result(arg_min_digits, arg_max_digits, arg_min_dec_places + 1, 0, qsp.f_val),   
+         reply->stats[s_cnt]->f_val             = rslt,
+         rslt = uar_fmt_result(arg_min_digits, arg_max_digits, arg_min_dec_places + 1, 0, qsp.z_stat),  
+         reply->stats[s_cnt]->z_stat            = rslt,
+         if (apr.default_result_type_cd = ALPHA_CD)
+           reply->stats[s_cnt]->alpha_flag      = 1
+         else
+           reply->stats[s_cnt]->alpha_flag      = 0
+         endif
+         reply->stats[s_cnt]->normal_cnt        = qsp.normal_cnt,
+         reply->stats[s_cnt]->abnormal_cnt      = qsp.abnormal_cnt,
+         reply->stats[s_cnt]->review_cnt        = qsp.review_cnt,
+         reply->stats[s_cnt]->results_inc_flag  = qsp.results_inc_flag,
+         reply->stats[s_cnt]->service_resource_group_ind = qsp.service_resource_group_ind
+      WITH
+	 outerjoin = d1,					        
+         dontcare = cl,							
+	 outerjoin = d2,					
+	 dontcare = arl,					
+	 outerjoin = d3,						
+	 dontcare = r,						
+	 outerjoin = d4,						
+         dontcare = dm,                                                
+         outerjoin = d_rg,                                            
+         dontcare = rg,                                               
+         nocounter
+
+      set stat = alterlist(reply->stats,s_cnt)
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+      if (curqual = 0)
+         go to qsp_none_selected
+      else
+        set reply->status_data->status = "S"
+      endif
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if qc_stat_period table select is unsuccessful.         */
+/********************************************************************/
+     #qsp_none_selected
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "select"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "Z"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "qc_stat_period table"
+      set reply->status_data->status = "Z"
+      go to exit_script
+
+/********************************************************************/ 
+/* Script exit.                                                     */
+/********************************************************************/
+
+     #exit_script
+
+END GO     
+      
+
+;Generated by GNU enscript 1.6.4.

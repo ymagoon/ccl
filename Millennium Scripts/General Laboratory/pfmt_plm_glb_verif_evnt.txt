@@ -1,0 +1,205 @@
+ ;;Solution_Test/script/PathNet -- Lab Management/pfmt_plm_glb_verif_evnt/pfmt_plm_glb_verif_evnt.prg Turn on black mode
+
+;;
+;; File: plm_glb_verif_event_rec.prg
+;; Description: Derives the necessary information to insert order 
+;;              level row into lab management tables.
+;;
+;; Request Nbr: n/a
+;;
+;; Notes: 
+;; 
+;; *** The calling script must define the variable recOrderId.
+;;
+;;-----------------------------------------------------------------------------
+;; Date                  Feature    Description
+;; -------- -----------  ---------- -------------------------------------------
+;; 07/19/99 CD4140             6259 File creation.
+;;
+
+drop program pfmt_plm_glb_verif_evnt:dba go
+create program pfmt_plm_glb_verif_evnt:dba
+
+%I CCLSOURCE:PLM_VERIF_EVENT.INC
+%I CCLSOURCE:PLM_GET_LEVEL.INC     
+
+set VERIF_STATUS_CD = 0.0
+set AUTO_VERIF_STATUS_CD = 0.0
+
+set hSys = 0
+set SysStat = 0
+call uar_SysCreateHandle (hSys, SysStat)
+
+set failures = 0
+set reqinfo->commit_ind = 0
+
+set stat = UAR_GET_MEANING_BY_CODESET(1901, "VERIFIED", 1, VERIF_STATUS_CD )
+set stat = UAR_GET_MEANING_BY_CODESET(1901, "AUTOVERIFIED", 1, AUTO_VERIF_STATUS_CD )
+
+set i = 0
+set j = 0
+set max_assays = 0
+set order_cnt = 0
+set assay_cnt = 0
+set last_activity_type = fillstring(15, " ")
+set last_order_idx = 0
+set perform_result_ind = 0       
+set nbr_orders = size(requestin->request->orders, 5)
+
+for (i = 1 to nbr_orders)
+  ;* if the activity type of this order is the same as the activity type of the last order
+  ;* don't call GetDataLevel
+  if (last_activity_type != requestin->request->orders[i].activity_type_mean)
+    set levelIn->activity_type_mean = requestin->request->orders[i].activity_type_mean
+    call GetDataLevel(0)
+    set last_activity_type = requestin->request->orders[i].activity_type_mean
+  endif
+  if (levelOut->um_data_level = 2 or levelOut->smr_data_level = 2 or levelOut->sm_data_level = 2)
+    set nbr_assays = size(requestin->request->orders[i]->assays, 5)
+    for (j = 1 to nbr_assays) 
+      ;* if status is not verified or autoverified we don't care about this assay
+      if (requestin->reply->orders[i]->assays[j].result_status_cd in (VERIF_STATUS_CD, AUTO_VERIF_STATUS_CD))    
+        if (order_cnt = 0)
+          ;* start arrays
+          set order_cnt = 1
+          set stat = alterlist (verifIn->orders, order_cnt + 10)
+          set assay_cnt = 1
+          set stat = alterlist (verifIn->orders[order_cnt]->assays, assay_cnt + 10)
+          ;* add order level info
+          set verifIn->orders[order_cnt].order_id = requestIn->request->orders[i].order_id
+          set verifIn->orders[i].sm_flag = levelOut->sm_data_level
+          set verifIn->orders[i].um_flag = levelOut->um_data_level
+          set verifIn->orders[i].smr_flag = levelOut->smr_data_level
+          if (levelOut->sm_data_level = 2)
+            set verifIn->sm_flag = levelOut->sm_data_level
+          endif   
+          if (levelOut->um_data_level = 2)
+            set verifIn->um_flag = levelOut->um_data_level
+          endif   
+          if (levelOut->smr_data_level = 2)
+            set verifIn->smr_flag = levelOut->smr_data_level
+          endif   
+
+        ;* i has changed since the last valid assay
+        elseif (i != last_order_idx) 
+          ;* add order to array
+          set order_cnt = order_cnt + 1
+          if (order_cnt >= size(verifIn->orders, 5))
+            set stat = alterlist (verifIn->orders, order_cnt + 10)
+          endif
+          set assay_cnt = 1
+          set stat = alterlist (verifIn->orders[order_cnt]->assays, assay_cnt + 10)
+          ;* add order level info
+          set verifIn->orders[order_cnt].order_id = requestIn->request->orders[i].order_id
+          set verifIn->orders[i].sm_flag = levelOut->sm_data_level
+          set verifIn->orders[i].um_flag = levelOut->um_data_level
+          set verifIn->orders[i].smr_flag = levelOut->smr_data_level
+          if (levelOut->sm_data_level = 2)
+            set verifIn->sm_flag = levelOut->sm_data_level
+          endif   
+          if (levelOut->um_data_level = 2)
+            set verifIn->um_flag = levelOut->um_data_level
+          endif   
+          if (levelOut->smr_data_level = 2)
+            set verifIn->smr_flag = levelOut->smr_data_level
+          endif   
+
+        else ;* same order just add new assay
+          set assay_cnt = assay_cnt + 1
+          if (assay_cnt >= size(verifIn->orders[order_cnt]->assays, 5))
+            set stat = alterlist (verifIn->orders[order_cnt]->assays, assay_cnt + 10)
+          endif
+        endif                       
+        set verifIn->orders[order_cnt]->assays[assay_cnt].result_id 
+          = requestIn->reply->orders[i]->assays[j].result_id
+        set verifIn->orders[order_cnt]->assays[assay_cnt].task_assay_cd
+          = requestIn->request->orders[i]->assays[j].task_assay_cd
+        set verifIn->orders[order_cnt]->assays[assay_cnt].perform_result_id 
+            = requestIn->request->orders[i]->assays[j].perform_result_id
+        if (requestIn->request->orders[i]->assays[j].perform_ind = 1)
+          set verifIn->orders[order_cnt]->assays[assay_cnt].perf_personnel_id
+            = requestIn->request->orders[i]->assays[j].perform_personnel_id
+          set verifIn->orders[order_cnt]->assays[assay_cnt].perf_dt_tm
+            = requestIn->request->orders[i]->assays[j].perform_dt_tm
+        else
+          ;at least one assay must hit perform_result table
+          set perform_result_ind = 1              
+        endif
+        set verifIn->orders[order_cnt]->assays[assay_cnt].service_resource_cd
+          = requestIn->request->orders[i]->assays[j].service_resource_cd
+        set verifIn->orders[order_cnt]->assays[assay_cnt].result_status_cd
+          = requestIn->reply->orders[i]->assays[j].result_status_cd
+        set verifIn->orders[order_cnt]->assays[assay_cnt].verif_dt_tm = requestin->request->event_dt_tm
+        set verifIn->orders[order_cnt]->assays[assay_cnt].verif_personnel_id 
+          = requestin->request->event_personnel_id
+        set verifIn->orders[i]->assays[j].sm_flag = levelOut->sm_data_level
+        set verifIn->orders[i]->assays[j].um_flag = levelOut->um_data_level
+        set verifIn->orders[i]->assays[j].smr_flag = levelOut->smr_data_level
+        set last_order_idx = i
+      endif
+    endfor
+
+    if (last_order_idx = i) ;* if order i had eligible assays
+      set stat = alterlist (verifIn->orders[order_cnt]->assays, assay_cnt)
+      set verifIn->orders[order_cnt].assay_cnt = assay_cnt
+      if (assay_cnt > max_assays)
+        set max_assays = assay_cnt
+      endif
+    endif
+    set assay_cnt = 0
+  endif
+endfor       
+
+if (order_cnt > 0)
+  set stat = alterlist (verifIn->orders, order_cnt)
+  set verifIn->order_cnt = order_cnt               
+
+  ;* 7.8 and earlier sites need this, passed to us in 7.9
+  if (perform_result_ind = 1)
+    ;look up perform results              
+    select into "nl:"
+      pr.perform_dt_tm
+    from    (dummyt d1 with seq = value(order_cnt)),
+      (dummyt d2 with seq = value(max_assays)),
+      perform_result pr
+    plan d1
+    join d2
+      where d2.seq <= verifIn->orders[d1.seq].assay_cnt
+    join pr 
+      where pr.perform_result_id = verifIn->orders[d1.seq]->assays[d2.seq].perform_result_id
+      and pr.perform_result_id > 0
+    order by pr.perform_dt_tm
+    detail
+      verifIn->orders[d1.seq]->assays[d2.seq].perf_personnel_id = pr.perform_personnel_id
+      verifIn->orders[d1.seq]->assays[d2.seq].perf_dt_tm = pr.perform_dt_tm
+    with nocounter
+
+    if (curqual = 0)
+      set failures = 1
+      call uar_SysEvent (hSys, 3, "PFMT_PLM_GLB_VERIF_EVNT", NULLTERM ("Perform_Result select failed."))
+      set text = "                                   "
+      set text = build("order_id  ", verifIn->orders[1].order_id)
+      call uar_SysEvent (hSys, 3, "PFMT_PLM_GLB_VERIF_EVNT", NULLTERM (text))
+    endif
+  endif
+
+  if (VerifEventUpdate(0) = 0)
+    set failures = 1
+    call uar_SysEvent (hSys, 3, "PFMT_PLM_GLB_VERIF_EVNT", NULLTERM (verifOut->error_str))
+  endif
+endif
+
+#EXIT_SCRIPT
+call uar_SysDestroyHandle (hSys)
+
+if (failures > 0)
+  set reqinfo->commit_ind = 0
+  rollback
+else 
+  set reqinfo->commit_ind = 1
+  commit
+endif
+
+end go        
+
+;Generated by GNU enscript 1.6.4.

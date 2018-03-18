@@ -1,0 +1,404 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Reportselection/bbt_rpt_pend_unk_pat.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2005 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbt_rpt_pend_unk_pat.prg
+        Object name:            bbt_rpt_pend_unk_pat
+        Request #:              225301
+
+        Product:                PathNet Transfusion
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Report emergency dispenses not yet associated with a patient
+
+        Tables read:            patient_dispense, product, product_event
+        Tables updated:         none
+        Executing from:         variety
+
+        Special Notes:          ?
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 01/30/97 Jon Weekes           Initial Release                     *
+;     001 06/12/97 Doug Saus            Modified to select owner and inventory
+;                                       areas                               *
+;     002 03/23/98 David Hall           Modified to retrieve the Institution*
+;                                       name from preferences               *
+;     003 12/21/98 Jose Suarez          Added logic to print the location name
+;                                       and address. Added address_location_cd
+;                                       to request. Added bbt_get_location_info.inc
+;                                       Added bbt_print_location_info.inc   *
+;     004 05/21/99 Jose Suarez          change cer_temp to cer_print        *
+;     005 09/01/99 Badari Kopparapu     Attempted to send the correct filename
+;                                       to the printer when the report is   *
+;                                       printed out of operations, but it was
+;                                       obviated by changes made for cer_print
+;     006 09/08/99 Badari Kopparapu     Modified to use bbt_ops_owninvloc.inc
+;                                       for processing owner area, inventory*
+;                                       area & location address from batch  *
+;                                       selection field in Ops Job Templates*
+;     007 11/10/99 Jose Suarez          Enhancement when running from ops   *
+;                                       removed bbt_ops_owninvloc.inc and   *
+;                                       added bbt_ops_parm_passed.inc       *
+;     008 08/09/00 Lawrence Dsouza      Internationalized date and time     *
+;     009 02/23/01 Chris Noe            Internationalize text               *
+;     010 09/17/01 John Rieck           Removed full table scan on the      *
+;                                       Patient_Dispense table.             *
+;     011 07/26/02 Jason Osborn			Unique RPT filename project			*
+;     012 04/12/04 Jim Jensen           Remove "Select" for own/inv info and*
+;                                       use UAR, instead.                   *
+;     013 06/23/04 David Fifer          Rearranged the report to handle a 25*
+;                                       character eurocode product number   *
+;                                       and set the maximum columns to 125. *
+;     014 10/15/04 Jim Jensen           Fix line2 display past page 1.      *
+;     015 10/11/05 Jason Coy            Updated report to display the       *
+;                                       front end username.                 *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbt_rpt_pend_unk_pat:dba go
+create program bbt_rpt_pend_unk_pat:dba
+
+/*
+record request
+(
+ 1  batch_selection     = c100
+ 1  output_dist = c100
+ 1  cur_owner_area_cd  = f8
+ 1  cur_inv_area_cd    = f8
+ 1  address_location_cd = f8
+)
+*/
+
+record reply
+(
+    1 rpt_list[*]
+       2 rpt_filename  = vc
+%i cclsource:status_block.inc
+)
+
+%i cclsource:bbt_get_username.inc
+
+declare reportByUsername = vc with protect, noconstant("")
+set reportByUsername = GET_USERNAME(reqinfo->updt_id)
+
+/*****************************************************************************
+* Internationalization                                                       *
+*****************************************************************************/
+%i cclsource:i18n_uar.inc
+ 
+set i18nHandle = 0
+set h = uar_i18nlocalizationinit(i18nHandle, curprog, "", curcclrev)
+ 
+record captions
+(
+  1  products_dispensed  = vc
+  1  as_of_date          = vc
+  1  time                = vc
+  1  page_no             = vc
+  1  bb_owner            = vc
+  1  inventory_area      = vc
+  1  dispense            = vc
+  1  unknown_patient_txt = vc
+  1  product_no          = vc
+  1  type                = vc
+  1  expiration          = vc
+  1  dt_tm               = vc
+  1  report_id           = vc
+  1  rpt_page            = vc
+  1  printed             = vc
+  1  rpt_by              = vc
+  1  end_of_report       = vc
+  1  all                 = vc
+)
+ 
+set captions->products_dispensed = uar_i18ngetmessage(i18nHandle,
+  "products_dispensed", "PRODUCTS DISPENSED TO UNKNOWN PATIENTS")
+set captions->as_of_date = uar_i18ngetmessage(i18nHandle,
+  "as_of_date", "AS OF DATE:     ")
+set captions->time = uar_i18ngetmessage(i18nHandle,
+  "time", "TIME:   ")
+set captions->page_no = uar_i18ngetmessage(i18nHandle,
+  "page_no", "PAGE NO: ")
+set captions->bb_owner = uar_i18ngetmessage(i18nHandle,
+  "bb_owner", "Blood Bank Owner: ")
+set captions->inventory_area = uar_i18ngetmessage(i18nHandle,
+  "inventory_area", "Inventory Area: ")
+set captions->dispense = uar_i18ngetmessage(i18nHandle,
+  "dispense", "DISPENSE")
+set captions->unknown_patient_txt = uar_i18ngetmessage(i18nHandle,
+  "unknown_patient_txt", "UNKNOWN PATIENT TEXT")
+set captions->product_no = uar_i18ngetmessage(i18nHandle,
+  "product_no", "PRODUCT NUMBER")
+set captions->type = uar_i18ngetmessage(i18nHandle,
+  "type", "TYPE")
+set captions->expiration = uar_i18ngetmessage(i18nHandle,
+  "expiration", "EXPIRATION")
+set captions->dt_tm = uar_i18ngetmessage(i18nHandle,
+  "dt_tm", "DATE/TIME")
+set captions->report_id = uar_i18ngetmessage(i18nHandle,
+  "report_id", "Report ID: BBT_RPT_PEND_UNK_PAT.PRG")
+set captions->rpt_page = uar_i18ngetmessage(i18nHandle,
+  "rpt_page", "Page:")
+set captions->printed = uar_i18ngetmessage(i18nHandle,
+  "printed", "Printed:")
+set captions->rpt_by = uar_i18ngetmessage(i18nHandle,
+  "rpt_by", "By:")
+set captions->end_of_report = uar_i18ngetmessage(i18nHandle,
+  "end_of_report", "* * * End of Report * * *")
+set captions->all = uar_i18ngetmessage(i18nHandle,
+  "all", "(All)")
+ 
+/* Determine if printing from Operations */
+if (trim(request->batch_selection) > " ")
+        set temp_string = cnvtupper(trim(request->batch_selection))
+        call CHECK_OWNER_CD ("bbt_rpt_pend_unk_pat")
+        call CHECK_INVENTORY_CD ("bbt_rpt_pend_unk_pat")
+        call CHECK_LOCATION_CD ("bbt_rpt_pend_unk_pat")
+endif
+
+;Process values in the request->batch_selection field when running from operations
+%i cclsource:bbt_ops_parm_passed.inc
+
+%i cclsource:bbt_get_location_info.inc
+
+set cur_owner_area_disp = fillstring(40," ")
+set cur_inv_area_disp = fillstring(40, " ")
+
+/* Retrieve display values for requested Owner Area and Inventory Area */
+if (request->cur_owner_area_cd = 0.0)
+   set cur_owner_area_disp = captions->all
+else
+   set cur_owner_area_disp = uar_get_code_display(request->cur_owner_area_cd)
+endif
+
+if (request->cur_inv_area_cd = 0.0)
+   set cur_inv_area_disp = captions->all
+else
+   set cur_inv_area_disp = uar_get_code_display(request->cur_inv_area_cd)
+endif
+
+record person
+(
+ 1  name_full_formatted         = c45
+ 1  ssn_alias                   = c20
+ 1  birth_dt_tm                 = dq8
+ 1  productlist[*]
+     2  product_id              = f8
+     2  product_cd              = f8
+     2  product_disp            = c40
+     2  product_nbr             = c26
+     2  cur_expire_dt_tm        = dq8
+     2  expected_usage_dt_tm    = dq8
+)
+
+/*
+ * Set Global Variables
+ */
+    set reply->status_data->status = "F"
+    set count1 = 0
+
+set select_ok_ind = 0
+set rpt_cnt = 0
+
+execute cpm_create_file_name_logical "bbt_pend_unk_pat", "txt", "x"
+
+select into cpm_cfn_info->file_name_logical
+    pd.person_id
+    , pd.product_id
+    , pd.person_id
+    , pd.unknown_patient_text
+    , p.product_id
+    , p.product_id
+    , p.cur_expire_dt_tm
+    , p.product_nbr
+    , p.product_sub_nbr
+    , cv_p.display
+    , pe.event_dt_tm
+FROM
+    patient_dispense pd
+    , product p
+    , (dummyt d_bp with seq = 1)                      
+    , blood_product bp                              
+    , code_value cv_p
+    , product_event pe
+
+PLAN  pd where pd.unknown_patient_ind    = 1
+           and pd.person_id       = 0
+           and pd.active_ind      = 1
+JOIN  p  where p.product_id       = pd.product_id
+           and ((request->cur_owner_area_cd > 0.0
+           and request->cur_owner_area_cd = p.cur_owner_area_cd)
+            or  (request->cur_owner_area_cd = 0.0))
+           and ((request->cur_inv_area_cd > 0.0
+           and request->cur_inv_area_cd = p.cur_inv_area_cd)
+            or  (request->cur_inv_area_cd = 0.0))
+JOIN    d_bp    where d_bp.seq = 1                     
+JOIN    bp      where bp.product_id = p.product_id    
+JOIN    cv_p    where cv_p.code_value         = p.product_cd
+                  and cv_p.active_ind  = 1
+                  and cv_p.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+                  and cv_p.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+JOIN    pe      where pe.product_event_id     = pd.product_event_id
+
+ORDER BY
+    pd.unknown_patient_text
+
+HEAD REPORT
+    product_cnt = 0
+    select_ok_ind = 0
+
+HEAD PAGE
+   new_page = "Y"
+   CALL CENTER(captions->products_dispensed, 1, 125)								
+   COL  104, captions->as_of_date,												
+   COL  118, curdate "@DATECONDENSED;;d",
+   row + 1
+   COL  104, captions->time,												
+   COL  118, curtime "@TIMENOSECONDS;;M",
+   row + 1
+   COL  104, captions->page_no,					
+   COL  118, curpage "##",
+
+%i cclsource:bbt_print_location_info.inc
+
+   row + 1
+   col 1, captions->bb_owner,			
+   col 19, cur_owner_area_disp,
+   row + 1
+   col 1, captions->inventory_area,		
+   col 17, cur_inv_area_disp
+   line = fillstring (125, "-")	
+   LINE2 = FILLSTRING (125, "-")	
+   row + 2
+   COL 114, captions->dispense		
+   ROW + 1
+   COL 001, captions->unknown_patient_txt			
+   COL 045, captions->product_no,				
+   COL 071, captions->type,				
+   COL 095, captions->expiration,			
+   COL 114, captions->dt_tm					
+   ROW + 1,
+   LINE2
+
+DETAIL
+    IF (ROW + product_cnt + 1 > 57)
+        break
+    ENDIF
+    ROW + 1
+    IF (new_page = "Y")
+        new_page = "N"
+    ELSE
+        ROW + 1
+    ENDIF
+
+    if (trim(pd.unknown_patient_text) > "")
+        COL 001,        pd.unknown_patient_text
+    else
+        COL 001,        "<blank>"
+    endif
+    prod_nbr_display = concat(trim(bp.supplier_prefix),trim(p.product_nbr)," ",trim(p.product_sub_nbr))
+    COL 045,    prod_nbr_display          
+    COL 071,    cv_p.display													
+    COL 094,    p.cur_expire_dt_tm "@DATETIMECONDENSED;;d"
+    COL 112,    pe.event_dt_tm "@DATETIMECONDENSED;;d"
+
+foot page
+    row 58,     col 001,    line
+    row + 1,    col 001,    captions->report_id		
+                col 060,    captions->rpt_page			
+                col 067,    curpage "###"
+                col 100,    captions->printed		
+                col 110,    curdate "@DATECONDENSED;;d"
+                col 120,    curtime "@TIMENOSECONDS;;M"
+    row + 1,    col 100,    captions->rpt_by		
+                col 110,    reportByUsername "################" 
+
+foot report
+    col 053, captions->end_of_report			
+    report_complete_ind = "Y"
+    select_ok_ind = 1
+
+WITH    nocounter, nullreport, outerjoin(d_pa),
+        outerjoin(d_bp), maxrow = 61,
+        compress, nolandscape 
+
+go to EXIT_SCRIPT
+
+declare GET_CODE_VALUE(sub_code_set, sub_cdf_meaning) = f8
+
+subroutine GET_CODE_VALUE(sub_code_set, sub_cdf_meaning)
+    /*
+     * Retrieve code_value using passed code_set and meaning
+     */
+    set gsub_code_value = 0.0
+
+    select into "nl:"
+        cv.code_value
+    from    code_value cv
+    where   cv.code_set             = sub_code_set
+              and cv.cdf_meaning    = sub_cdf_meaning
+              and cv.active_ind     = 1
+              and cv.begin_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+              and cv.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+    detail
+         gsub_code_value        = cv.code_value
+    with    nocounter
+
+    RETURN(gsub_code_value)
+END     ; end subroutine GET_CODE_VALUE
+
+#EXIT_SCRIPT
+for (x = 1 to count1)
+    call echo(reply->status_data->status)
+    call echo(reply->status_data->subeventstatus[1]->OperationName)
+    call echo(reply->status_data->subeventstatus[1]->OperationStatus)
+    call echo(reply->status_data->subeventstatus[1]->TargetObjectName)
+    call echo(reply->status_data->subeventstatus[1]->TargetObjectValue)
+endfor
+
+set reply->status_data->status = "S"
+
+set rpt_cnt = rpt_cnt +1
+set stat = alterlist(reply->rpt_list, rpt_cnt)
+set reply->rpt_list[rpt_cnt].rpt_filename = cpm_cfn_info->file_name_path
+ 
+if (trim(request->batch_selection) > "")
+    set spool value(reply->rpt_list[rpt_cnt].rpt_filename) value(request->output_dist)
+endif
+ 
+if (select_ok_ind = 1)
+    set reply->status_data->status = "S"
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

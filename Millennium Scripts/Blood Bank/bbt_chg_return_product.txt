@@ -1,0 +1,1155 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/SCRIPTCORRECTINVENTORY/BBT_CHG_RETURN_PRODUCT.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       BBT_CHG_RETURN_PRODUCT.PRG
+        Object name:            BBT_CHG_RETURN_PRODUCT.PRG
+        Request #:              225247  
+
+        Product:                Pathnet                              
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:         
+        Tables read:            none
+                               
+        Tables updated:         dispose, destruction, product_event, corrected_product
+        Executing from:         Product Corrections  
+        Special Notes:          none
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *001 12/20/96 Mike Goings          Initial Release                     *
+;    *002 04/28/03 John Rieck           Updated to store the time zone on   *
+;    *                                  the PRODUCT_EVENT table for UTC     *
+;    *                                  compliance.                         *
+;    *003 07/07/05 Jeff Wain            Long sequence fixes on seqn variable*
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program BBT_CHG_RETURN_PRODUCT:dba go
+create program BBT_CHG_RETURN_PRODUCT:dba
+
+/*
+record request
+(
+  1 avail_quar_ind = c1      ; "A" for available state and "Q" for quarantine state
+  2 product_id = f8
+  2 product_updt_cnt = i2
+  2 quar_reason_cd = f8 
+  2 correction_mode = c5 ; "DEMOG" "STATE" "EMERG" OR "UNLOK"
+  2 corr_reason_cd = f8
+  2 corr_note = vc255
+  2 dispose_product_event_id = f8
+  2 dispose_pe_updt_cnt = i4       ; update count for the product event table
+  2 dispose_pe_active_ind = i2     ; active ind for the product event table
+  2 dispose_d_updt_cnt = i4        ; update count for the disposition table
+  2 dispose_d_active_ind = i2      ; active ind for the disposition table
+  2 disp_orig_updt_cnt =i4
+  2 disp_orig_updt_dt_tm = dq8
+  2 disp_orig_updt_id = f8
+  2 disp_orig_updt_task = i4
+  2 disp_orig_updt_applctx = i4
+  2 disposed_event_dt_tm = dq8
+  2 disposed_event_prsnl_id = f8
+  2 destruction_product_event_id = f8
+  2 destruction_pe_updt_cnt = i4       ; update count for the product event table
+  2 destruction_pe_active_ind = i2     ; active ind for the product event table
+  2 destruction_d_updt_cnt = i4        ; update count for the destruction table
+  2 destruction_d_active_ind = i2      ; active ind for the destruction table
+  2 dest_orig_updt_cnt =i4
+  2 dest_orig_updt_dt_tm = dq8
+  2 dest_orig_updt_id = f8
+  2 dest_orig_updt_task = i4
+  2 dest_orig_updt_applctx = i4
+  2 destruction_event_dt_tm = dq8
+  2 destruction_event_prsnl_id = f8
+  2 disp_reason_cd = f8
+  2 orig_quar_qty = i4
+  2 cur_quar_qty = i4
+  2 derivative_qty = i4
+  2 derivative_intl_units = i4
+  2 orig_derivative_qty = i4
+  2 derivative_ind = i2
+  2 derivative_updt_cnt = i4
+  2 remaining_qty = i4      
+  2 dest_method_cd = f8
+  2 box_nbr = vc
+  2 manifest_nbr = vc
+  2 autoclave_ind = i2
+  2 destruction_org_id = f8  
+)
+ */
+
+record reply
+( 
+1  status_data
+      2  status                    = c1
+      2  subeventstatus[1]
+          3  SourceObjectName       = c15
+          3  SourceObjectQual       = i4
+          3  SourceObjectValue      = c50
+          3  OperationName          = c8
+          3  OperationStatus        = c1
+          3  TargetObjectName       = c15
+          3  TargetObjectValue      = c50
+          3  Sub_Event_dt_tm        = di8
+ )
+
+/* Initialize Variables */
+declare available_type_cd 		= f8 with protect, noconstant(0.0)
+declare quarantine_type_cd 		= f8 with protect, noconstant(0.0)
+declare destroyed_type_cd  		= f8 with protect, noconstant(0.0)
+declare disposed_type_cd  		= f8 with protect, noconstant(0.0)
+declare sub_product_event_id  	= f8 with protect, noconstant(0.0)
+declare disp_product_event_id  	= f8 with protect, noconstant(0.0)
+declare dest_product_event_id  	= f8 with protect, noconstant(0.0)
+declare count1 					= i4 with protect, noconstant(0)
+declare y 						= i4 with protect, noconstant(0)
+declare next_code 				= f8 with protect, noconstant(0.0)
+declare corr_id 				= f8 with protect, noconstant(0.0)
+set reply->status_data->status 	= "F"
+declare failed 					= c1 with protect, noconstant("F")
+%i cclsource:bbt_inc_corr_prod_mean.inc
+
+/********************************/
+/*   get avail and quar codes   */
+/********************************/
+select into "nl:" 
+  c.*
+from code_value c
+where c.code_set = 1610 and
+      c.active_ind = 1 and
+      (c.cdf_meaning = "12" or
+      c.cdf_meaning = "2" or
+      c.cdf_meaning = "14" or
+      c.cdf_meaning = "5" )
+
+detail
+ if (c.cdf_meaning = "12")
+   available_type_cd = c.code_value
+ elseif (c.cdf_meaning = "2")
+   quarantine_type_cd = c.code_value
+ elseif (c.cdf_meaning = "14")
+   destroyed_type_cd = c.code_value
+ elseif (c.cdf_meaning = "5")
+   disposed_type_cd = c.code_value
+ endif
+with nocounter
+   
+/*****************************************/
+/*   lock the product table for update   */
+/*****************************************/ 
+select into "nl:"
+      p.*
+from
+      product p
+where
+      p.product_id = request->product_id and
+      p.updt_cnt = request->product_updt_cnt and
+      p.active_ind = 1
+with counter, forupdate(p)
+
+if (curqual = 0)
+  set failed = "T",
+  set reply->status_data->subeventstatus[1]->SourceObjectName
+             = "script",
+  set reply->status_data->subeventstatus[1]->SourceObjectValue
+             = "bbt_chg_final_dispose",
+  set reply->status_data->subeventstatus[1]->OperationName
+             = "Lock",
+  set reply->status_data->subeventstatus[1]->OperationStatus
+             = "F",
+  set reply->status_data->subeventstatus[1]->TargetObjectName
+             = "product",
+  set reply->status_data->subeventstatus[1]->TargetObjectValue 
+             = "Product table Lock",
+  set reply->status_data->subeventstatus[1]->SourceObjectQual
+             = 1,
+  set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+             = cnvtdatetime(curdate,curtime),
+  go to exit_script
+endif
+
+/***********************************/
+/*        update product           */
+/***********************************/ 
+update into product p set
+    p.locked_ind = 0,
+    p.updt_cnt = p.updt_cnt + 1,
+    p.corrected_ind = 1,
+    p.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+    p.updt_id = reqinfo->updt_id,
+    p.updt_task = reqinfo->updt_task,
+    p.updt_applctx = reqinfo->updt_applctx
+   
+where
+      p.product_id = request->product_id and
+      p.updt_cnt = request->product_updt_cnt and
+      p.active_ind = 1
+with nocounter
+  
+if (curqual = 0)
+  set failed = "T",
+  set reply->status_data->subeventstatus[1]->SourceObjectName
+           = "script",
+  set reply->status_data->subeventstatus[1]->SourceObjectValue
+           = "bbt_chg_final_dispose",
+  set reply->status_data->subeventstatus[1]->OperationName
+           = "update",
+  set reply->status_data->subeventstatus[1]->OperationStatus
+           = "F",
+  set reply->status_data->subeventstatus[1]->TargetObjectName
+           = "product",
+  set reply->status_data->subeventstatus[1]->TargetObjectValue 
+           = "Product Table Update"
+  set reply->status_data->subeventstatus[1]->SourceObjectQual
+           = 1,
+  set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+           = cnvtdatetime(curdate,curtime),
+  go to exit_script
+endif
+/********************************/
+/*  disposition inactivate      */
+/********************************/
+    /*****************************************/
+    /*  lock the disposition product event   */
+    /*****************************************/ 
+    select into "nl:"
+        p.*
+    from
+        product_event p
+    where
+       p.product_id = request->product_id and
+       p.product_event_id = request->dispose_product_event_id and
+       p.updt_cnt = request->dispose_pe_updt_cnt and
+       p.active_ind = request->dispose_pe_active_ind
+    with counter, forupdate(p)
+
+    if (curqual = 0)
+      set failed = "T",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+                 = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+                 = "bbt_chg_final_dispose",
+      set reply->status_data->subeventstatus[1]->OperationName
+                 = "Lock",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+                 = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+                 = "product_event",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                 = "Disposition Product event",
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+                 = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+                 = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    endif  
+    /********************************************/
+    /*   inactivate disposition product event   */
+    /********************************************/ 
+    update into product_event p set
+        p.active_ind = 0,
+        p.updt_cnt = p.updt_cnt + 1,
+        p.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        p.updt_id = reqinfo->updt_id,
+        p.updt_task = reqinfo->updt_task,
+        p.updt_applctx = reqinfo->updt_applctx      
+       
+    where
+       p.product_id = request->product_id and
+       p.product_event_id = request->dispose_product_event_id and
+       p.updt_cnt = request->dispose_pe_updt_cnt and
+       p.active_ind = request->dispose_pe_active_ind
+    with nocounter
+  
+    if (curqual = 0)
+      set failed = "T",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_final_dispose",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "update",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "product",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = "Inactivate Disp Product Event",
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    endif
+
+    /***************************************/
+    /*   lock the disposition for update   */
+    /***************************************/ 
+    select into "nl:"
+          d.*
+    from
+          disposition d
+    where
+         d.product_id = request->product_id and
+         d.product_event_id = request->dispose_product_event_id and
+         d.updt_cnt = request->dispose_d_updt_cnt
+    with counter, forupdate(d)
+
+    if (curqual = 0)
+      set failed = "T",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+                 = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+                 = "bbt_chg_final_dispose",
+      set reply->status_data->subeventstatus[1]->OperationName
+                 = "Lock",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+                 = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+                 = "disposition",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                 = "Lock Disposition to Inactivate",
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+                 = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+                 = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    endif
+
+    /***********************************/
+    /* inactivate disposition           */
+    /***********************************/ 
+    update into disposition d set
+        d.active_ind = 0,
+        d.updt_cnt = d.updt_cnt + 1,
+        d.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        d.updt_id = reqinfo->updt_id,
+        d.updt_task = reqinfo->updt_task,
+        d.updt_applctx = reqinfo->updt_applctx
+       
+    where
+         d.product_id = request->product_id and
+         d.product_event_id = request->dispose_product_event_id and
+         d.updt_cnt = request->dispose_d_updt_cnt
+    with nocounter
+    
+    if (curqual = 0)
+      set failed = "T",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_final_dispose",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "update",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "disposition",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = "Inactivate Disposition",
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    endif
+
+  /******************************************/
+  /* update corrected product disposistion  */
+  /******************************************/ 
+    set new_pathnet_seq = 0.0
+    select into "nl:"
+        seqn        = seq(pathnet_seq,nextval)
+    from
+        dual
+    detail
+         new_pathnet_seq        = seqn
+    with
+        format, nocounter
+  set corr_id = new_pathnet_seq
+  insert into corrected_product cp set
+     cp.correction_id = corr_id,
+     cp.product_id = request->product_id,
+     cp.correction_type_cd = if (request->correction_mode = "DEMOG")
+                        chg_demogr_cd
+                     elseif (request->correction_mode = "ERDIS")
+                        emerg_dispense_cd
+                     elseif (request->correction_mode = "STATE")
+                        chg_state_cd
+                     else
+                        unlock_prod_cd
+                     endif,
+     cp.correction_reason_cd = request->corr_reason_cd,
+     cp.product_nbr =  null,
+     cp.product_sub_nbr = null,
+     cp.alternate_nbr = null,
+     cp.product_cd = 0,
+     cp.product_class_cd = 0,
+     cp.product_cat_cd = 0,
+     cp.supplier_id = 0,
+     cp.recv_dt_tm = null,
+     cp.volume = null,
+     cp.unit_meas_cd = 0,
+     cp.expire_dt_tm = null,
+     cp.abo_cd = 0,
+     cp.rh_cd = 0,
+     cp.segment_nbr = null,
+     cp.orig_updt_cnt =request->disp_orig_updt_cnt,
+     cp.orig_updt_dt_tm = cnvtdatetime(request->disp_orig_updt_dt_tm),
+     cp.orig_updt_id = request->disp_orig_updt_id,
+     cp.orig_updt_task = request->disp_orig_updt_task,
+     cp.orig_updt_applctx = request->disp_orig_updt_applctx,
+     cp.correction_note = if (request->corr_note = "-1")
+                        null
+                     else
+                        request->corr_note
+                     endif,
+     cp.unknown_patient_text = null,
+     cp.event_dt_tm = if (request->disposed_event_dt_tm = -1)
+                        null
+                      else
+                        cnvtdatetime(request->disposed_event_dt_tm)
+                      endif,
+     cp.reason_cd = 0,
+     cp.autoclave_ind = null,
+     cp.destruction_method_cd = 0,
+     cp.destruction_org_id = 0,
+     cp.manifest_nbr = null,
+     cp.product_event_id = request->dispose_product_event_id,
+     cp.updt_cnt =  0,
+     cp.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+     cp.updt_id =  reqinfo->updt_id,
+     cp.updt_task =  reqinfo->updt_task,
+     cp.updt_applctx =  reqinfo->updt_applctx
+  with nocounter
+
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+           = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+           = "bbt_chg_final_dispose",
+    set reply->status_data->subeventstatus[1]->OperationName
+           = "update1",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+           = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+           = "corrected product",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+           = "Disposition Corrected Product",
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+           = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+           = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  endif
+    /****************************************/
+    /*   lock destruction product event     */
+    /****************************************/ 
+    select into "nl:"
+        p.*
+    from
+        product_event p
+    where
+       p.product_id = request->product_id and
+       p.product_event_id = request->destruction_product_event_id and
+       p.updt_cnt = request->destruction_pe_updt_cnt and
+       p.active_ind = request->destruction_pe_active_ind
+    with counter, forupdate(p)
+
+    if (curqual = 0)
+      set failed = "T",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+                 = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+                 = "bbt_chg_final_dispose",
+      set reply->status_data->subeventstatus[1]->OperationName
+                 = "Lock",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+                 = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+                 = "product_event",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                 = "Lock Dest Product Event",
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+                 = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+                 = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    endif  
+
+    /****************************************/
+    /* inactivate destruction product event */
+    /****************************************/ 
+    update into product_event p set
+        p.active_ind = 0,
+        p.updt_cnt = p.updt_cnt + 1,
+        p.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        p.updt_id = reqinfo->updt_id,
+        p.updt_task = reqinfo->updt_task,
+        p.updt_applctx = reqinfo->updt_applctx       
+       
+    where
+       p.product_id = request->product_id and
+       p.product_event_id = request->destruction_product_event_id and
+       p.updt_cnt = request->destruction_pe_updt_cnt and
+       p.active_ind = request->destruction_pe_active_ind
+    with nocounter
+  
+    if (curqual = 0)
+      set failed = "T",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_final_dispose",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "update",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "product event2",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = "Inactivate Dest Product Event",
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    endif
+
+    /***************************************/
+    /*   lock the disposition for update   */
+    /***************************************/ 
+    select into "nl:"
+          d.*
+    from
+         destruction d
+    where
+         d.product_id = request->product_id and
+         d.product_event_id = request->destruction_product_event_id and
+         d.updt_cnt = request->destruction_d_updt_cnt
+    with counter, forupdate(d)
+    
+    if (curqual = 0)
+      set failed = "T",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_final_dispose",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "lock",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "destruction",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = "Lock Inactivate Destruction",
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    endif
+
+    /****************************/
+    /*  inactivate destruction  */
+    /****************************/ 
+    update into destruction d set
+        d.active_ind = 0,
+        d.updt_cnt = d.updt_cnt + 1,
+        d.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        d.updt_id = reqinfo->updt_id,
+        d.updt_task = reqinfo->updt_task,
+        d.updt_applctx = reqinfo->updt_applctx
+       
+    where
+         d.product_id = request->product_id and
+         d.product_event_id = request->destruction_product_event_id and
+         d.updt_cnt = request->destruction_d_updt_cnt
+    with nocounter
+    
+    if (curqual = 0)
+      set failed = "T",
+      set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+      set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_final_dispose",
+      set reply->status_data->subeventstatus[1]->OperationName
+               = "update",
+      set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+      set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "destruction",
+      set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = "Inactivate Destruction",
+      set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+      set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+      go to exit_script
+    endif
+  /***********************************/
+  /*    update corrected product     */
+  /***********************************/ 
+    set new_pathnet_seq = 0.0
+    select into "nl:"
+        seqn        = seq(pathnet_seq,nextval)
+    from
+        dual
+    detail
+         new_pathnet_seq        = seqn
+    with
+        format, nocounter
+  set corr_id = new_pathnet_seq
+  insert into corrected_product cp set
+     cp.correction_id = corr_id,
+     cp.product_id = request->product_id,
+     cp.correction_type_cd = if (request->correction_mode = "DEMOG")
+                        chg_demogr_cd
+                     elseif (request->correction_mode = "ERDIS")
+                        emerg_dispense_cd
+                     elseif (request->correction_mode = "STATE")
+                        chg_state_cd
+                     else
+                        unlock_prod_cd
+                     endif,
+     cp.correction_reason_cd = request->corr_reason_cd,
+     cp.product_nbr =  null,
+     cp.product_sub_nbr = null,
+     cp.alternate_nbr = null,
+     cp.product_cd = 0,
+     cp.product_class_cd = 0,
+     cp.product_cat_cd = 0,
+     cp.supplier_id = 0,
+     cp.recv_dt_tm = null,
+     cp.volume = null,
+     cp.unit_meas_cd = 0,
+     cp.expire_dt_tm = null,
+     cp.abo_cd = 0,
+     cp.rh_cd = 0,
+     cp.segment_nbr = null,
+     cp.orig_updt_cnt =request->dest_orig_updt_cnt,
+     cp.orig_updt_dt_tm = cnvtdatetime(request->dest_orig_updt_dt_tm),
+     cp.orig_updt_id = request->dest_orig_updt_id,
+     cp.orig_updt_task = request->dest_orig_updt_task,
+     cp.orig_updt_applctx = request->dest_orig_updt_applctx,
+     cp.correction_note = if (request->corr_note = "-1")
+                        null
+                     else
+                        request->corr_note
+                     endif,
+     cp.unknown_patient_text = null,
+     cp.event_dt_tm = if (request->destruction_event_dt_tm = -1)
+                        null
+                      else
+                         cnvtdatetime(request->destruction_event_dt_tm)
+                      endif,
+     cp.reason_cd = 0,
+     cp.autoclave_ind = null,
+     cp.destruction_method_cd = 0,
+     cp.destruction_org_id = 0,
+     cp.manifest_nbr = null,
+     cp.product_event_id = request->destruction_product_event_id,
+     cp.updt_cnt =  0,
+     cp.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+     cp.updt_id =  reqinfo->updt_id,
+     cp.updt_task =  reqinfo->updt_task,
+     cp.updt_applctx =  reqinfo->updt_applctx
+  with nocounter
+
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+           = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+           = "bbt_chg_final_dispose",
+    set reply->status_data->subeventstatus[1]->OperationName
+           = "update2",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+           = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+           = "corrected product",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+           = "Destruction Corrected Product",
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+           = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+           = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  endif
+
+%i cclsource:bbt_get_pathnet_seq.inc
+set sub_product_event_id = new_pathnet_seq
+if (request->avail_quar_ind = "A")
+ if (request->orig_derivative_qty = 0)
+  /***********************************/
+  /*    insert available product     */
+  /***********************************/
+  insert into product_event p set
+        p.product_event_id = sub_product_event_id,
+        p.product_id = request->product_id,
+        p.order_id = 0,
+        p.bb_result_id = 0,
+        p.event_type_cd = available_type_cd,
+        p.event_dt_tm = cnvtdatetime(curdate,curtime3),
+        p.event_prsnl_id = reqinfo->updt_id,
+        p.updt_cnt = 0,
+        p.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        p.updt_id =  reqinfo->updt_id,
+        p.updt_task =  reqinfo->updt_task,
+        p.updt_applctx =  reqinfo->updt_applctx,
+        p.active_ind = 1,
+        p.active_status_cd = reqdata->active_status_cd,
+        p.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+        p.active_status_prsnl_id = reqinfo->updt_id,
+        p.event_status_flag = 0,
+        p.person_id = 0,
+        p.encntr_id = 0,
+        p.override_ind = 0,
+        p.override_reason_cd = 0,
+        p.related_product_event_id = 0,
+        p.event_tz = if (CurUTC = 1)
+                        CurTimeZoneApp
+                     else
+                        0
+                     endif         
+  with nocounter
+
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+           = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+           = "bbt_chg_final_dispose",
+    set reply->status_data->subeventstatus[1]->OperationName
+           = "insert",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+           = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+           = "product event",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+           = "Available Product Event",
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+           = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+           = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  endif
+ endif
+endif
+
+if (request->avail_quar_ind = "Q")
+  /***********************************/
+  /* insert quarantine product event */
+  /***********************************/ 
+  insert into product_event p set
+        p.product_event_id = sub_product_event_id,
+        p.product_id = request->product_id,
+        p.order_id = 0,
+        p.bb_result_id = 0,
+        p.event_type_cd = quarantine_type_cd,
+        p.event_dt_tm = cnvtdatetime(curdate,curtime3),
+        p.event_prsnl_id = reqinfo->updt_id,
+        p.updt_cnt = 0,
+        p.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        p.updt_id =  reqinfo->updt_id,
+        p.updt_task =  reqinfo->updt_task,
+        p.updt_applctx =  reqinfo->updt_applctx,
+        p.active_ind = 1,
+        p.active_status_cd = reqdata->active_status_cd,
+        p.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+        p.active_status_prsnl_id = reqinfo->updt_id,
+        p.event_status_flag = 0,
+        p.person_id = 0,
+        p.encntr_id = 0,
+        p.override_ind = 0,
+        p.override_reason_cd = 0,
+        p.related_product_event_id = 0,
+        p.event_tz = if (CurUTC = 1)
+                        CurTimeZoneApp
+                     else
+                        0
+                     endif         
+  with nocounter
+
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+           = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+           = "bbt_chg_final_dispose",
+    set reply->status_data->subeventstatus[1]->OperationName
+           = "insert",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+           = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+           = "product event",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+           = "Quarantine Product Event",
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+           = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+           = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  endif
+
+  /****************************/
+  /* insert quarantine table  */
+  /****************************/ 
+  insert into quarantine q set
+        q.product_event_id = sub_product_event_id,
+        q.product_id = request->product_id,
+        q.quar_reason_cd = request->quar_reason_cd,
+        q.updt_cnt = 0,
+        q.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        q.updt_id =  reqinfo->updt_id,
+        q.updt_task =  reqinfo->updt_task,
+        q.updt_applctx =  reqinfo->updt_applctx,
+        q.active_ind = 1,
+        q.active_status_cd = reqdata->active_status_cd,
+        q.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+        q.active_status_prsnl_id = reqinfo->updt_id,
+        q.orig_quar_qty = request->orig_quar_qty,
+        q.cur_quar_qty = request->cur_quar_qty
+  with nocounter
+
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+           = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+           = "bbt_chg_final_dispose",
+    set reply->status_data->subeventstatus[1]->OperationName
+           = "insert",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+           = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+           = "quarantine",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+           = "New Quarantine",
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+           = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+           = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  endif
+endif
+
+if (request->avail_quar_ind = "A")
+ if (request->derivative_ind = 1)
+  /****************************************/
+  /*   lock derivative table for update   */
+  /****************************************/ 
+  select into "nl:"
+        d.*
+  from
+        derivative d
+  where
+        d.product_id = request->product_id and
+        d.updt_cnt = request->derivative_updt_cnt
+  with counter, forupdate(d)
+
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+               = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+               = "bbt_chg_final_dispose",
+    set reply->status_data->subeventstatus[1]->OperationName
+               = "Lock",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+               = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+               = "derivative",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+               = "derivative",
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+               = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+               = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  endif
+
+  /***********************************/
+  /*        update derivative        */
+  /***********************************/ 
+  update into derivative d set
+      d.cur_avail_qty = d.cur_avail_qty + request->derivative_qty,
+;      d.cur_intl_units = d.cur_intl_units + request->derivative_intl_units,
+      d.updt_cnt = d.updt_cnt + 1,
+      d.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+      d.updt_id = reqinfo->updt_id,
+      d.updt_task = reqinfo->updt_task,
+      d.updt_applctx = reqinfo->updt_applctx
+     
+  where
+        d.product_id = request->product_id and
+        d.updt_cnt = request->derivative_updt_cnt
+  with nocounter
+  
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+             = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+             = "bbt_chg_final_dispose",
+    set reply->status_data->subeventstatus[1]->OperationName
+             = "update",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+             = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+             = "derivative",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+             = "derivative"
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+             = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+             = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  endif
+ endif
+endif
+
+%i cclsource:bbt_get_pathnet_seq.inc
+set disp_product_event_id = new_pathnet_seq
+
+%i cclsource:bbt_get_pathnet_seq.inc
+set dest_product_event_id = new_pathnet_seq
+
+if (request->remaining_qty > 0)
+  /********************************/
+  /* insert dispose product event */
+  /********************************/ 
+  insert into product_event p set
+        p.product_event_id = disp_product_event_id,
+        p.product_id = request->product_id,
+        p.order_id = 0,
+        p.bb_result_id = 0,
+        p.event_type_cd = disposed_type_cd,
+        p.event_dt_tm = cnvtdatetime(request->disposed_event_dt_tm),
+        p.event_prsnl_id = request->disposed_event_prsnl_id,
+        p.updt_cnt = 0,
+        p.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        p.updt_id =  reqinfo->updt_id,
+        p.updt_task =  reqinfo->updt_task,
+        p.updt_applctx =  reqinfo->updt_applctx,
+        p.active_ind = request->new_disp_active_ind,
+        p.active_status_cd = reqdata->active_status_cd,
+        p.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+        p.active_status_prsnl_id = reqinfo->updt_id,
+        p.event_status_flag = 0,
+        p.person_id = 0,
+        p.encntr_id = 0,
+        p.override_ind = 0,
+        p.override_reason_cd = 0,
+        p.related_product_event_id = 0,
+        p.event_tz = if (CurUTC = 1)
+                        CurTimeZoneApp
+                     else
+                        0
+                     endif         
+  with nocounter
+
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+           = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+           = "bbt_chg_final_dispose",
+    set reply->status_data->subeventstatus[1]->OperationName
+           = "insert",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+           = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+           = "product event",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+           = "Product Event Disposed Remaining",
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+           = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+           = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  endif
+
+  /*****************************/
+  /* insert disposition table  */
+  /*****************************/ 
+  insert into disposition d set
+        d.product_event_id = disp_product_event_id,
+        d.product_id = request->product_id,
+        d.reason_cd = request->disp_reason_cd,
+        d.disposed_qty = request->remaining_qty,
+        d.updt_cnt = 0,
+        d.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        d.updt_id =  reqinfo->updt_id,
+        d.updt_task =  reqinfo->updt_task,
+        d.updt_applctx =  reqinfo->updt_applctx,
+        d.active_ind = 1,
+        d.active_status_cd = reqdata->active_status_cd,
+        d.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+        d.active_status_prsnl_id = reqinfo->updt_id
+  with nocounter
+
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+           = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+           = "bbt_chg_final_dispose",
+    set reply->status_data->subeventstatus[1]->OperationName
+           = "insert",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+           = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+           = "diposition",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+           = "Dispostion Remaining New",
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+           = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+           = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  endif
+  /************************************/
+  /* insert destruction product event */
+  /************************************/ 
+  insert into product_event p set
+        p.product_event_id = dest_product_event_id,
+        p.product_id = request->product_id,
+        p.order_id = 0,
+        p.bb_result_id = 0,
+        p.event_type_cd = destroyed_type_cd,
+        p.event_dt_tm = cnvtdatetime(request->destruction_event_dt_tm),
+        p.event_prsnl_id = request->destruction_event_prsnl_id,
+        p.updt_cnt = 0,
+        p.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        p.updt_id =  reqinfo->updt_id,
+        p.updt_task =  reqinfo->updt_task,
+        p.updt_applctx =  reqinfo->updt_applctx,
+        p.active_ind = request->new_dest_active_ind,
+        p.active_status_cd = reqdata->active_status_cd,
+        p.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+        p.active_status_prsnl_id = reqinfo->updt_id,
+        p.event_status_flag = request->new_dest_event_status_flag,
+        p.person_id = 0,
+        p.encntr_id = 0,
+        p.override_ind = 0,
+        p.override_reason_cd = 0,
+        p.related_product_event_id = disp_product_event_id,
+        p.event_tz = if (CurUTC = 1)
+                        CurTimeZoneApp
+                     else
+                        0
+                     endif         
+  with nocounter
+
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+           = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+           = "bbt_chg_final_dispose",
+    set reply->status_data->subeventstatus[1]->OperationName
+           = "insert",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+           = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+           = "product event",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+           = "Product Event Remaining Destruction",
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+           = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+           = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  endif
+
+  /*****************************/
+  /* insert destruction table  */
+  /*****************************/ 
+  insert into destruction d set
+        d.product_event_id = dest_product_event_id,
+        d.product_id = request->product_id,
+        d.method_cd = request->dest_method_cd,
+        d.box_nbr = request->box_nbr,
+        d.manifest_nbr = request->manifest_nbr,
+        d.destroyed_qty = request->remaining_qty,
+        d.autoclave_ind = request->autoclave_ind,
+        d.destruction_org_id = request->destruction_org_id,
+        d.updt_cnt = 0,
+        d.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+        d.updt_id =  reqinfo->updt_id,
+        d.updt_task =  reqinfo->updt_task,
+        d.updt_applctx =  reqinfo->updt_applctx,
+        d.active_ind = 1,
+        d.active_status_cd = reqdata->active_status_cd,
+        d.active_status_dt_tm = cnvtdatetime(curdate, curtime3),
+        d.active_status_prsnl_id = reqinfo->updt_id
+  with nocounter
+
+  if (curqual = 0)
+    set failed = "T",
+    set reply->status_data->subeventstatus[1]->SourceObjectName
+           = "script",
+    set reply->status_data->subeventstatus[1]->SourceObjectValue
+           = "bbt_chg_final_dispose",
+    set reply->status_data->subeventstatus[1]->OperationName
+           = "insert",
+    set reply->status_data->subeventstatus[1]->OperationStatus
+           = "F",
+    set reply->status_data->subeventstatus[1]->TargetObjectName
+           = "destruction",
+    set reply->status_data->subeventstatus[1]->TargetObjectValue 
+           = "Destruction Remaining",
+    set reply->status_data->subeventstatus[1]->SourceObjectQual
+           = 1,
+    set reply->status_data->subeventstatus[1]->Sub_Event_Dt_Tm
+           = cnvtdatetime(curdate,curtime),
+    go to exit_script
+  endif
+endif
+
+#exit_script
+
+if (failed = "T")
+   rollback,
+   set reply->status_data->status = "F" 
+else
+   commit,
+   set reply->status_data->status = "T"
+endif
+
+end go
+
+;Generated by GNU enscript 1.6.4.

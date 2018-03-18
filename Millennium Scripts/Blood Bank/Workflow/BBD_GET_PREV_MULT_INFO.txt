@@ -1,0 +1,415 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/BBDMultiFacility/BBD_GET_PREV_MULT_INFO.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+        Source file name:       bbd_get_prev_mult_info.prg
+        Object name:            bbd_get_prev_mult_info.prg
+        Request #:              225602
+        Product:                Pathnet                        
+        Product Team:           Blood Bank
+        HNA Version:            Millenium
+        CCL Version:            5.0
+        Program purpose:        Retrieve previous location information for the user
+        Tables read:            location, location_group, prsnl, 
+                                prsnl_current_loc, prsnl_reltn
+        Tables updated:         
+        Executing from:         VB Applications
+        Special Notes:          
+******************************************************************************/
+;~DB~************************************************************************
+;    *                 GENERATED MODIFICATION CONTROL LOG                   *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *001 01/07/99 Shellie Ninemire     Initial Release                     *
+;    *002 02/01/07 Tom Brecht           Updated to conform to requirements  *
+;    *003 01/31/08 Matt Cummings        Update to also retrieve the default *
+;    *                                  location before attempting to       *
+;    *                                  retrieve the prev/current location  *
+;    *004 08/02/11 Gayatri Samala       converted username present in the   *
+;                                       request structure to uppercase to   *
+;                                       prevent LDAP authentication issue   *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program bbd_get_prev_mult_info:dba go
+create program bbd_get_prev_mult_info:dba
+/*
+Record Request
+(
+1 user_name  = vc
+1 cerner_product_mean = c12
+1 debug_ind = i2
+1 use_prev_loc_ind = i2
+1 use_own_inv_filter_ind = i2
+)
+*/
+
+Record Reply
+(
+1 location_cd = f8
+1 location_display = c60
+
+1 location_type_cd = f8
+1 location_type_display = c40
+1 location_type_mean = c12
+
+1 root_loc_cd = f8
+1 root_loc_display = c60
+1 root_loc_mean = c12
+
+1 person_id = f8
+1 cerner_cd = f8
+
+1 return_default_location_ind = i2
+%i cclsource:bbd_status_data.inc
+)
+
+if (request->use_own_inv_filter_ind = 1)
+%i cclsource:scs_script_common.inc
+endif
+
+declare GetRestrictInd (OrgId = f8 ) = i2
+
+declare DefaultLocationCnt           = i4    with protect, noconstant(0)
+declare ReplyStatus                  = c1    with protect, noconstant("Z")
+declare nCheckSecurityFlag           = i2    with protect, noconstant(0)
+declare DefaultLocationCd            = f8    with protect, noconstant(0.0)
+declare DefaultLocationTypeCd        = f8    with protect, noconstant(0.0)
+declare AccessInd                    = i2    with protect, noconstant(0)
+declare InvAreaAccessCnt             = i4    with protect, noconstant(0)
+declare LOC_TYPE_BBINVAREA_CD        = f8    with protect, noconstant(0.0)
+declare LOC_TYPE_BBINVAREA_MEAN      = vc    with protect, constant("BBINVAREA")
+declare LOC_TYPE_BBOWNERROOT_CD      = f8    with protect, noconstant(0.0)
+declare LOC_TYPE_BBOWNERROOT_MEAN    = vc    with protect, constant("BBOWNERROOT")
+
+if (request->use_own_inv_filter_ind = 1)
+   /* Check Security if needed   */
+   call ScsCheckOrgSecAndConfid(NULL)
+   if (encntr_org_sec_ind = 1 or confid_sec_ind = 1)
+%i cclsource:sacrtl_org.inc
+      set nCheckSecurityFlag = 1
+   endif
+endif
+
+/* Get BBINVAREA location_group_type_cd */
+set stat =  uar_get_meaning_by_codeset(222,nullterm(LOC_TYPE_BBINVAREA_MEAN),1,LOC_TYPE_BBINVAREA_CD)
+if (LOC_TYPE_BBINVAREA_CD = 0.0)
+   set reply->status_data.status = "F"
+   set reply->status_data.subeventstatus[1].TargetObjectValue = "Code lookup for BBINVAREA in codeset 222 failed"
+   go to exitscript
+endif
+
+/* Get BBOWNERROOT location_group_type_cd */
+set stat =  uar_get_meaning_by_codeset(222,nullterm(LOC_TYPE_BBOWNERROOT_MEAN),1,LOC_TYPE_BBOWNERROOT_CD)
+if (LOC_TYPE_BBOWNERROOT_CD = 0.0)
+   set reply->status_data.status = "F"
+   set reply->status_data.subeventstatus[1].TargetObjectValue = "Code lookup for BBOWNERROOT in codeset 222 failed"
+   go to exitscript
+endif
+
+/*****************************************************************/
+/*  Retrieve person_id from the prsnl table using the user_name  */
+/*  If person_id is not found then fail script                   */
+/*****************************************************************/
+set person_id = 0.0
+select into "nl:" p.person_id
+from prsnl p
+where p.username = CNVTUPPER(request->user_name) and p.active_ind = 1
+detail
+        person_id = p.person_id
+with nocounter
+if (curqual = 0)
+        set ReplyStatus = "F",
+        set reply->status_data->subeventstatus[1]->SourceObjectName
+                      = "bbd_get_multifacility_info.prg",
+        set reply->status_data->subeventstatus[1]->OperationName
+                      = "SELECT",
+        set reply->status_data->subeventstatus[1]->TargetObjectName
+                      = "prsnl",
+        set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                      = "Unable to retrieve a person_id for the user.",
+        set reply->status_data->subeventstatus[1]->SourceObjectQual
+                      = 1,
+        go to exitscript
+endif
+set reply->person_id = person_id
+/*****************************************************************
+ *  Retrieve the cerner_product_cd                               *
+ *****************************************************************/
+set cdf_meaning = fillstring(12, " ")
+set code_cnt = 1
+set cerner_cd = 0.0
+set cdf_meaning = request->cerner_product_mean
+set stat = uar_get_meaning_by_codeset(20369, cdf_meaning, code_cnt, cerner_cd)
+if (cerner_cd = 0.0)
+        set ReplyStatus = "F",
+        set reply->status_data->subeventstatus[1]->SourceObjectName
+                      = "bbd_get_multifacility_info.prg",
+        set reply->status_data->subeventstatus[1]->OperationName
+                      = "UAR_GET_MEANING_BY_CODESET",
+        set reply->status_data->subeventstatus[1]->TargetObjectName
+                      = "code_value",
+        set reply->status_data->subeventstatus[1]->TargetObjectValue 
+                      = "Unable to retrieve a cerner_product_cd.",
+        set reply->status_data->subeventstatus[1]->SourceObjectQual
+                      = 1,
+        go to exitscript        
+endif
+set reply->cerner_cd = cerner_cd
+/*****************************************************************
+ *  Retrieve number of locations the user is associated to.      *
+ *****************************************************************/
+
+select into "nl:"
+    p.parent_entity_id,
+    loc.location_cd,
+    loc.location_type_cd
+    
+from prsnl_reltn p,
+     location loc
+plan p       where p.person_id = person_id and
+                   p.parent_entity_name = "LOCATION" and
+                   p.active_ind = 1
+join loc     where loc.location_cd = p.parent_entity_id and
+                   (loc.location_type_cd = LOC_TYPE_BBOWNERROOT_CD or
+                    loc.location_type_cd = LOC_TYPE_BBINVAREA_CD)
+detail
+    DefaultLocationCnt = DefaultLocationCnt + 1
+    DefaultLocationCd = loc.location_cd
+    DefaultLocationTypeCd = loc.location_type_cd
+with nocounter
+
+/*****************************************************************
+ *  Retrieve default location if it exists. If the user has      *
+ *  access to one inventory area, or access to a single inventory*
+ *  area within a single owner area then that will be the        *
+ *  default.                                                     *
+ *****************************************************************/
+
+if (DefaultLocationCnt = 1)
+   select loc.location_cd,
+          location_disp        = uar_get_code_display(loc.location_cd),
+          loc.location_type_cd,
+          location_type_disp   = uar_get_code_display(loc.location_type_cd),
+          location_type_mean   = uar_get_code_meaning(loc.location_type_cd),
+          lg.root_loc_cd,
+          root_loc_disp        = uar_get_code_display(lg.root_loc_cd),
+          root_loc_mean        = uar_get_code_meaning(lg.root_loc_cd)
+   from location_group lg,location loc
+   plan lg  where (lg.child_loc_cd = DefaultLocationCd and
+                   DefaultLocationTypeCd = LOC_TYPE_BBINVAREA_CD) or
+                  (lg.parent_loc_cd = DefaultLocationCd and
+                   DefaultLocationTypeCd = LOC_TYPE_BBOWNERROOT_CD)
+   ;Get the child location of the group since it corresponds to both the default
+   ;if there is one inventory area or all the children if there is one owner
+   ;area.
+   join loc where loc.location_cd = lg.child_loc_cd
+   
+   detail
+            
+      if( request->use_own_inv_filter_ind = 1 and nCheckSecurityFlag = 1)
+         if (GetRestrictInd(loc.organization_id) = 0)
+            AccessInd = 1
+         else
+            AccessInd = 0
+         endif
+      else
+         ;No filtering, access is implicitly granted to this org.
+         AccessInd = 1
+      endif
+      
+      if (DefaultLocationTypeCd = LOC_TYPE_BBINVAREA_CD)
+      
+         if (AccessInd = 1)
+        ;Found default inventory area
+            reply->location_cd = loc.location_cd
+            reply->location_display = location_disp
+            reply->location_type_cd = loc.location_type_cd
+            reply->location_type_display = location_type_disp
+            reply->location_type_mean = location_type_mean
+            reply->root_loc_cd = lg.root_loc_cd
+            reply->root_loc_display = root_loc_disp
+            reply->root_loc_mean = root_loc_mean
+            reply->return_default_location_ind = 1
+            ReplyStatus = "S"
+         endif
+         
+      else ;DefaultLocationTypeCd = LOC_TYPE_BBOWNERROOT_CD
+            
+         if (AccessInd = 1)
+            InvAreaAccessCnt = InvAreaAccessCnt + 1
+            if (InvAreaAccessCnt = 1)
+               ;This is currently the default unless another inventory
+               ;area is found in this owner area.
+               reply->location_cd = loc.location_cd
+               reply->location_display = location_disp
+               reply->location_type_cd = loc.location_type_cd
+               reply->location_type_display = location_type_disp
+               reply->location_type_mean = location_type_mean
+               reply->root_loc_cd = lg.root_loc_cd
+               reply->root_loc_display = root_loc_disp
+               reply->root_loc_mean = root_loc_mean
+               reply->return_default_location_ind = 1
+               ReplyStatus = "S"
+            else ;InvAreaAccessCnt > 1
+               ;There is no default inventory area in this owner area. Clear
+               ;out values inserted from the first inv area found and allow the
+               ;previous location logic fill this out.
+               reply->location_cd = 0.0
+               reply->location_display = ""
+               reply->location_type_cd = 0.0
+               reply->location_type_display = ""
+               reply->location_type_mean = ""
+               reply->root_loc_cd = 0.0
+               reply->root_loc_display = ""
+               reply->root_loc_mean = ""
+               reply->return_default_location_ind = 0
+               ReplyStatus = "Z"
+            endif
+         endif
+         
+      endif
+      
+   with nocounter
+
+   if (reply->return_default_location_ind = 1)
+      go to exitscript
+   endif
+endif
+
+/*****************************************************************
+ *  Retrieve previous location information if it exists.         *
+ *****************************************************************/
+set InvAreaAccessCnt = 0
+select into "nl:" 
+        p.location_cd,
+        location_display = uar_get_code_description(p.location_cd),
+        p.location_type_cd,
+        location_type_display = uar_get_code_display(p.location_type_cd),
+        location_type_mean = uar_get_code_meaning(p.location_type_cd),
+        p.root_loc_cd,
+        root_display = uar_get_code_description(p.root_loc_cd),
+        root_meaning = uar_get_code_meaning(p.root_loc_cd),
+        child_location_display = uar_get_code_display(loc.location_cd),
+        child_location_type_display = uar_get_code_display(loc.location_type_cd),
+        child_location_type_mean = uar_get_code_meaning(loc.location_type_cd)
+
+from prsnl_current_loc p, location_group lg, location loc
+
+plan p   where p.person_id = person_id and
+               p.cerner_product_cd = cerner_cd and
+               p.active_ind = 1
+join lg  where (lg.child_loc_cd = p.location_cd and
+                p.location_type_cd = LOC_TYPE_BBINVAREA_CD) or
+               (lg.parent_loc_cd = p.location_cd and
+                p.location_type_cd = LOC_TYPE_BBOWNERROOT_CD)
+;Get the child location of the group since it corresponds to both the default
+;if this is an inventory area or all the children if this is an owne area.
+join loc where loc.location_cd = lg.child_loc_cd
+
+detail
+
+    if (request->debug_ind = 1)
+        call echo(build("location_cd....", p.location_cd))
+    endif
+    if( request->use_own_inv_filter_ind = 1 and nCheckSecurityFlag = 1)
+       if (GetRestrictInd(loc.organization_id) = 0)
+          AccessInd = 1
+       else
+          AccessInd = 0
+       endif
+    else
+       ;No filtering, access is implicitly granted.
+       AccessInd = 1
+    endif
+    
+    if (p.location_type_cd = LOC_TYPE_BBINVAREA_CD)
+    
+       if(AccessInd = 1)
+          reply->location_cd = p.location_cd
+          reply->location_display = location_display
+          reply->location_type_cd = p.location_type_cd
+          reply->location_type_display = location_type_display
+          reply->location_type_mean = location_type_mean
+          reply->root_loc_cd = p.root_loc_cd
+          reply->root_loc_display = root_display
+          reply->root_loc_mean = root_meaning
+          ReplyStatus = "S"
+       else
+          ReplyStatus = "Z"
+       endif
+       
+    else ;loc.location_type_cd = LOC_TYPE_BBOWNERROOT_CD
+       
+       if (AccessInd = 1)
+          InvAreaAccessCnt = InvAreaAccessCnt + 1
+          if (InvAreaAccessCnt = 1)
+             ;This access to at least one inv area for this owner, set this
+             ;owner as the previous location.
+             reply->location_cd = p.location_cd
+             reply->location_display = location_display
+             reply->location_type_cd = p.location_type_cd
+             reply->location_type_display = location_type_display
+             reply->location_type_mean = location_type_mean
+             reply->root_loc_cd = p.root_loc_cd
+             reply->root_loc_display = root_display
+             reply->root_loc_mean = root_meaning
+             ReplyStatus = "S"
+          endif
+       endif
+       
+    endif
+
+with nocounter
+
+IF (request->debug_ind = 1)
+        call echo(BUILD("REPLY->STATUS = ", ReplyStatus))
+ENDIF
+#exitscript
+if(ReplyStatus = "Z")
+        set reply->status_data.status = "Z"
+elseif(ReplyStatus = "F")
+        set reply->status_data.status = "F"
+else
+        set reply->status_data.status = "S"
+endif
+
+subroutine GetRestrictInd(dOrgId)
+  declare lIdx           = i4   with protect, noconstant(0)
+  declare lCnt           = i4   with protect, noconstant(0)
+  
+  set lCnt = size(sac_org->organizations, 5)
+  for (lIdx = 1 to lCnt)
+    if (dOrgId = sac_org->organizations[lIdx].organization_id)
+        return (0)
+    endif
+  endfor
+  
+  return (1)
+end
+
+end
+go
+
+;Generated by GNU enscript 1.6.4.

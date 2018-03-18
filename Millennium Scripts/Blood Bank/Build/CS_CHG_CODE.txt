@@ -1,0 +1,400 @@
+ ;;Solution_Test/script/Database Architecture -- Foundations/Crmcode/CS_CHG_CODE.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+
+/*****************************************************************************
+
+	Source file name:       cs_chg_code.prg
+	Object name:            cs_chg_code
+	Request #:		12027
+
+	Product:		CPM                           
+	Product Team:		Tablerock
+	HNA Version:            500
+	CCL Version:            4.0	
+	Program purpose:        Change code value information
+
+	Tables read:            code_value
+				code_value_extension
+	Tables updated:		code_value
+				code_value_extension
+	Executing from:         Code Maintenance
+
+	Special Notes:		none
+
+******************************************************************************/
+
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer		Comment 			    *
+;    *--- -------- --------------------	----------------------------------- *
+;     001 99/99/99 Unknown		Initial Release			    *
+;     002 11/16/95 Stephanie Adam	Updated to match current standards  *
+;     003 12/01/95 Stephanie Adam	Added update of code_value_extension*
+;     004 02/14/96 Stephanie Adam	Added insert of code_value_extension*
+;					when no extension is found.         *
+;     005 03/19/96 David Price          Allow a code value to be inserted   *
+;                                       with a blank cdfMeaning if no       *
+;                                       meanings have been built.           *
+;     006 07/16/96 David Price          update active_type_cd               *
+;     007 10/20/96 Doug Powell		Reflect database changes.           *
+;     008 07/27/04 Shuhong Li       Fix the for loop 
+;~DE~************************************************************************
+
+
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+drop program cs_chg_code:dba go
+create program cs_chg_code:dba
+
+/****************************/
+/*      request record      */
+/****************************/
+/*
+record request
+( 1 code_set = i4
+  1 qual[x]
+    2 code_value = f8
+    2 cdf_meaning = c12
+    2 display = c40
+    2 display_key = c40
+    2 description = vc
+    2 definition = vc
+    2 collation_seq = i4
+    2 active_type_cd = f8
+    2 active_ind = i2
+    2 authentic_ind = i2
+    2 updt_cnt = i4
+    2 extension_cnt = i4
+    2 extension_data[x]
+      3 field_name = c32
+      3 field_type = i4
+      3 field_value = vc
+      3 updt_cnt = i4
+ )
+*/
+
+/****************************/
+/*    reply record          */
+/****************************/
+record reply
+( 
+
+  1 qual [1]
+    2 code_value = f8
+    2 disp_key  = c40
+    2 recstatus = c1
+  1 status_data
+    2 status = c1
+    2 subeventstatus[1]
+      3 OperationName = c15
+      3 OperationStatus = c1
+
+      3 TargetObjectName = c15
+      3 TargetObjectValue = c100
+)
+
+/****************************/
+/*  Initialize variables    */
+/****************************/
+set reply->status_data->status = "F"
+set number_to_change = size(request->qual,5)
+set number_of_ext = 0
+set failed = "F"
+set failures = 0
+set cur_updt_cnt = 0
+set ext_updt_cnt = 0
+set dup = 0
+set dupes = 0
+set x = 1
+set cnt = 1
+set authentic_cd = 0.00
+set unauthentic_cd = 0.00
+set authcnt = 0
+set display_key_dup_ind=0
+set cdf_meaning_dup_ind=0
+set active_ind_dup_ind=0
+set display_dup_ind = 0
+set chg_access_ind = 0
+/*******delete after reqdata update for authentic *****/
+select into 'nl:'
+    c.code_value,
+    c.cdf_meaning
+from code_value c
+where c.code_set = 8
+  and c.cdf_meaning in ("AUTH","UNAUTH")
+order c.cdf_meaning
+detail
+if (authcnt = 0)
+   authentic_cd = c.code_value
+   authcnt = 1
+else
+   unauthentic_cd = c.code_value
+endif
+with nocounter
+
+
+set failed = "F"
+
+ /*  Start Code Value Exist check */
+select into 'nl:'
+                cvs.display_key_dup_ind,
+                cvs.cdf_meaning_dup_ind,
+                cvs.active_ind_dup_ind,
+		cvs.display_dup_ind,
+		cvs.chg_access_ind
+   from code_value_set cvs
+  where cvs.code_set = request->code_set 
+detail
+                display_key_dup_ind=cvs.display_key_dup_ind
+                cdf_meaning_dup_ind=cvs.cdf_meaning_dup_ind
+                active_ind_dup_ind=cvs.active_ind_dup_ind
+		display_dup_ind = cvs.display_dup_ind
+		chg_access_ind = cvs.chg_access_ind
+with nocounter
+
+#start_loop
+;008 for (x = 1 to number_to_change)
+for (x = x to number_to_change)                    ;008
+set dup = 0
+set request_array = 1
+
+%i cclsource:code_value_exist.inc
+
+If (curqual > 0)
+  set dupes = dupes + 1
+  If (dupes > failures)
+     set stat = alter (reply->qual, dupes)
+  else
+     set dupes = failures + 1
+     set stat = alter (reply->qual, dupes)
+  endif
+  set dup = 1
+
+  if (new_code_value != request->qual[x]->code_value)
+  	;008set reply->qual[x]->code_value = request->qual[x]->code_value
+	;008set reply->qual[x]->disp_key   = request->qual[x]->display_key
+ 	;008set reply->qual[x]->recstatus = "X"
+ 	;008...
+ 	set reply->qual[dupes]->code_value = request->qual[x]->code_value
+	set reply->qual[dupes]->disp_key   = request->qual[x]->display_key
+ 	set reply->qual[dupes]->recstatus = "X"
+ 	;...008
+	go to next_code
+  endif
+endif
+
+
+  /****************************/
+  /*     Lock row to update   */
+  /****************************/
+  select into "nl:"
+    c.*
+  from code_value c 
+  where c.code_value = request->qual[x]->code_value
+    and c.code_set   = request->code_set
+  detail
+    cur_updt_cnt = c.updt_cnt    
+  with nocounter, forupdate(c)
+
+  if (curqual = 0)
+    go to next_code
+  endif
+
+  if (cur_updt_cnt != request->qual[x]->updt_cnt)
+     set failed = "T"
+     go to next_code
+  endif
+
+  /****************************/
+  /*     Update record        */
+  /****************************/
+  update into code_value c set
+    c.cdf_meaning = if (request->qual[x]->cdf_meaning > " ")
+                       request->qual[x]->cdf_meaning
+                    else
+                       NULL
+                    endif,
+    c.display = request->qual[x]->display,
+;007    c.display_key = trim(cnvtupper(request->qual[x]->display)),
+    c.display_key = 							;007
+	trim(cnvtupper(cnvtalphanum(request->qual[x]->display))),       ;007
+    c.description = request->qual[x]->description,
+    c.definition = request->qual[x]->definition,
+    c.collation_seq = request->qual[x]->collation_seq,
+    c.active_ind = request->qual[x]->active_ind,
+    c.active_type_cd = if (request->qual[x]->active_ind = 1)
+                          reqdata->active_status_cd
+                       else
+                          reqdata->inactive_status_cd
+                       endif,
+    c.data_status_cd = if (request->qual[x]->authentic_ind = 1)
+			  authentic_cd
+		       else
+	  		  unauthentic_cd
+		       endif,
+    c.updt_id = reqinfo->updt_id,
+    c.updt_applctx = reqinfo->updt_applctx,
+    c.updt_cnt = c.updt_cnt + 1,
+    c.updt_task = reqinfo->updt_task,
+    c.active_dt_tm = if (request->qual[x]->active_ind = 1)
+                       cnvtdatetime(curdate, curtime3)
+                     else
+                       c.active_dt_tm
+                     endif,
+    c.updt_dt_tm = cnvtdatetime(curdate,curtime3),
+    c.begin_effective_dt_tm = cnvtdatetime(curdate,curtime3),	;007
+    c.end_effective_dt_tm = cnvtdatetime("31-dec-2100 00:00:00.00"), ;007
+    c.inactive_dt_tm = if (request->qual[x]->active_ind = 0)
+                         cnvtdatetime(curdate, curtime3)
+                       else
+                         c.inactive_dt_tm
+                       endif
+
+  where 
+    c.code_value = request->qual[x]->code_value and
+    c.code_set = request->code_set
+
+  if (curqual = 0)
+    go to next_code
+  endif
+
+  set number_of_ext = request->qual[x]->extension_cnt
+  set failed = "F"
+
+  for (y = 1 to number_of_ext)
+
+    /****************************/
+    /*     Lock row to update   */
+    /****************************/
+    select into "nl:"
+      cve.*
+    from code_value_extension cve
+    where cve.code_set = request->code_set
+      and cve.code_value = request->qual[x]->code_value
+      and cve.field_name = request->qual[x]->extension_data[y]->field_name   
+    detail
+      ext_updt_cnt = cve.updt_cnt
+    with nocounter, forupdate(cve)
+
+    if (curqual = 0)
+
+      /****************************/
+      /*      Insert record       */
+      /****************************/
+         /* 2/16/96 updt_cnt is set to 1 to facilitate client app
+            functionality.  In the future, an indicator will be added 
+            to the reply to indicate whether the extension was added or
+            changed.  At the present time, the server destroys and 
+            redefines the reply strucure when any error occurs, so the
+            indicator may never reach the client. */
+
+      insert into code_value_extension cve set
+        cve.code_set = request->code_set,
+        cve.code_value = request->qual[x]->code_value,
+        cve.field_name = request->qual[x]->extension_data[y]->field_name,
+        cve.field_type = request->qual[x]->extension_data[y]->field_type,
+        cve.field_value = request->qual[x]->extension_data[y]->field_value,
+        cve.updt_id = reqinfo->updt_id,
+        cve.updt_task = reqinfo->updt_task,
+        cve.updt_applctx = reqinfo->updt_applctx,
+        cve.updt_cnt = 1,
+        cve.updt_dt_tm = cnvtdatetime(curdate, curtime3)
+      with nocounter
+
+      if (curqual = 0)
+        go to next_code
+      endif
+
+    else
+
+      if (ext_updt_cnt != request->qual[x]->extension_data[y]->updt_cnt)
+        set failed = "T"
+        go to next_code
+      endif
+
+      /****************************/
+      /*     Update record        */
+      /****************************/
+      update into code_value_extension cve set
+        cve.field_type = request->qual[x]->extension_data[y]->field_type,
+        cve.field_value = request->qual[x]->extension_data[y]->field_value,
+        cve.updt_id = reqinfo->updt_id,
+        cve.updt_task = reqinfo->updt_task,
+        cve.updt_applctx = reqinfo->updt_applctx,
+        cve.updt_cnt = ext_updt_cnt + 1,
+        cve.updt_dt_tm = cnvtdatetime(curdate, curtime3)
+      where cve.code_set = request->code_set
+        and cve.code_value = request->qual[x]->code_value
+        and cve.field_name = request->qual[x]->extension_data[y]->field_name
+      with nocounter
+
+      if (curqual = 0)
+        go to next_code
+      endif
+
+    endif
+
+  endfor
+
+  commit
+
+endfor
+go to exit_script
+
+/****************************/
+/*      next_code           */
+/****************************/
+#next_code
+if (dup != 1)
+  set failures = failures + 1
+  if (failures > dupes)
+    set stat = alter(reply->status_data->subeventstatus,failures)
+  else
+    set failures = dupes + 1
+    set stat = alter(reply->status_data->subeventstatus,failures)
+  endif
+  if (failed = "F")
+    set reply->status_data->subeventstatus[failures]->operationstatus = "F"
+  else
+    set reply->status_data->subeventstatus[failures]->operationstatus = "C"
+  endif
+  set reply->status_data->subeventstatus[failures]->targetobjectvalue = 
+				cnvtstring(request->qual[x]->code_value)  
+  rollback
+endif
+  set x = x + 1
+  go to start_loop
+
+/****************************/
+/*     exit_script          */
+/****************************/
+#exit_script
+if (failures = 0)
+  set reply->status_data->status = "S"
+endif
+
+end go
+
+
+;Generated by GNU enscript 1.6.4.

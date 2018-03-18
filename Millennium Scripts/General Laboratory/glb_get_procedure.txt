@@ -1,0 +1,254 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_procedure/glb_get_procedure.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_PROCEDURE.PRG
+        Object name:            GLB_GET_PROCEDURE
+        Request #:              250069
+
+        Product:                General Lab           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Given either a task_assay_cd or a
+                                mnemonic and, optionally, a 
+                                service_resource_cd, validate
+                                procedure type and return relevant
+                                information.
+                                
+        Tables read:            discrete_task_assay
+                                assay_processing_r
+
+        Tables updated:         n/a
+
+        Executing from:         General Lab build/maintain equation tool
+                                General Lab build/maintain differential tool
+                                General Lab build/maintain qc reference tool
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 03/19/96 Dennis Boyer         Initial Release                     *
+;     001 06/18/98 Chad Moats           Change read from discrete_task_assay*
+;                                       to code_value table                 *
+;     002 11/16/98 Chad Moats           Change to use cnvtalphanum instead  *
+;                                       of cnvtupper                        *
+;     002a12/02/98 Chris Heil           Use both cnvtalphanum and cnvtupper *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_PROCEDURE:dba go    
+      create program GLB_GET_PROCEDURE:dba
+     
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request                                      
+      (                               
+         1 task_assay_cd             = f8        
+         1 mnemonic                  = vc
+         1 service_resource_cd       = f8
+         1 result_type_cdf           = vc
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+         1 task_assay_cd             = f8
+         1 task_assay_disp           = vc
+         1 status_data
+           2 status                  = c1
+           2 subeventstatus[1]
+             3 OperationName         = c15
+             3 OperationStatus       = c1
+             3 TargetObjectName      = c15
+             3 TargetObjectValue     = vc
+      )
+
+     #Script
+      set calc_type_cd = 0.0
+      set failed = "F"
+      set reply->status_data->status = "F"
+      set result_type_cdf = request->result_type_cdf
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+      if (request->task_assay_cd = 0)
+         set uproc = cnvtupper(request->mnemonic)
+         set kproc = cnvtupper(cnvtalphanum(request->mnemonic))     ;002a
+      else
+         set uproc = ""
+         set kproc = ""
+      endif
+/*******************************************************************/
+/* Get code_value for calculation type. (For Equation Tool)        */
+/*******************************************************************/
+      if (result_type_cdf  =  "8")
+         SELECT into "nl:"
+            c.code_value
+         FROM
+            code_value c
+         WHERE
+            c.code_set = 289 and
+            c.cdf_meaning = "8"
+         DETAIL
+            calc_type_cd = c.code_value
+         WITH
+            nocounter
+      endif
+
+     set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        set failed = "T"
+        go to exit_script
+      endif
+
+/*******************************************************************/
+/* Get task_assay_cd for requested procedure.  Validate against    */
+/* the assay_processing_r to prove that the requested procedure    */
+/* is a calculation type procedure.                                */
+/*******************************************************************/
+      SELECT 
+         if ((request->task_assay_cd > 0) and (request->service_resource_cd > 0) and (result_type_cdf = "8"))
+;001            PLAN d
+;001               where request->task_assay_cd = d.task_assay_cd
+            PLAN c                                                              ;001
+                where request->task_assay_cd = c.code_value                     ;001
+            JOIN a
+;001               where d.task_assay_cd = a.task_assay_cd
+               where c.code_value = a.task_assay_cd                             ;001
+                     and request->service_resource_cd = a.service_resource_cd
+                     and calc_type_cd = a.default_result_type_cd           
+         elseif ((request->service_resource_cd > 0) and (result_type_cdf = "8"))
+ ;001           PLAN d
+ ;001              where uproc = d.mnemonic_key_cap
+           PLAN c                                                               ;001
+               where c.code_set = 14003 and
+;002a                        uproc = c.display_key                  ;001
+                       (uproc = c.display_key or kproc = c.display_key) ;002a
+           JOIN a
+;001               where d.task_assay_cd = a.task_assay_cd
+               where c.code_value = a.task_assay_cd                             ;001
+                     and request->service_resource_cd = a.service_resource_cd
+                     and calc_type_cd = a.default_result_type_cd           
+         elseif ((request->task_assay_cd > 0) and (result_type_cdf = "8"))
+;001            PLAN d
+;001               where request->task_assay_cd = d.task_assay_cd
+            PLAN c                                                              ;001
+                where request->task_assay_cd = c.code_value                     ;001
+            JOIN a
+;001               where d.task_assay_cd = a.task_assay_cd
+               where c.code_value = a.task_assay_cd                             ;001
+                     and calc_type_cd = a.default_result_type_cd           
+         elseif (result_type_cdf = "8")
+;001            PLAN d
+;001               where uproc = d.mnemonic_key_cap
+            PLAN c                                                              ;001
+               where c.code_set = 14003 and                                     ;001
+;002a                        uproc = c.display_key                                   ;001
+                       (uproc = c.display_key or kproc = c.display_key) ;002a
+            JOIN a
+;001               where d.task_assay_cd = a.task_assay_cd
+               where c.code_value = a.task_assay_cd                             ;001
+                     and calc_type_cd = a.default_result_type_cd                
+         endif
+      into "nl:"
+;001         d.task_assay_cd,
+;001         d.mnemonic,
+         c.code_value,                                                          ;001
+         a.default_result_type_cd
+      FROM
+;001         discrete_task_assay d,
+         code_value c,                                                          ;001
+         assay_processing_r a
+;001      PLAN D
+;001         where uproc = d.mnemonic_key_cap
+      PLAN c                                                                    ;001
+         where c.code_set = 14003 and                                           ;001
+;002a                uproc = c.display_key                                           ;001
+                       (uproc = c.display_key or kproc = c.display_key) ;002a
+      JOIN a
+;001         where d.task_assay_cd = a.task_assay_cd
+         where c.code_value = a.task_assay_cd                                   ;001
+      DETAIL
+;001         reply->task_assay_cd = d.task_assay_cd
+         reply->task_assay_cd = c.code_value                                    ;001
+      WITH
+         nocounter
+
+     set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        set failed = "T"
+        go to exit_script
+      endif
+
+      if (curqual = 0)
+         go to invalid_procedure
+      endif
+
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if requested procedure is not found.                    */
+/********************************************************************/
+     #invalid_procedure
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "get"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "Z"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "code_value table"
+      set failed = "Z"
+
+      go to exit_script
+
+/********************************************************************/ 
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+      if (failed = "F")
+         set reply->status_data->status = "S"
+      elseif (failed = "Z")
+         set reply->status_data->status = "Z"
+      else
+         set reply->status_data->status = "F"
+      endif
+
+END
+GO     
+
+;Generated by GNU enscript 1.6.4.

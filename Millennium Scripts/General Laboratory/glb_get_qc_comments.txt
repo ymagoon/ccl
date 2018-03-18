@@ -1,0 +1,220 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_qc_comments/glb_get_qc_comments.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_QC_COMMENTS.PRG
+        Object name:            GLB_GET_QC_COMMENTS
+        Request #:              257551
+
+        Product:                General Lab/Quality Control
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+
+        Program purpose:        Retrieve QC Comment info from the database
+
+        Tables read:            qc_result
+                                qc_comment
+
+        Tables updated:         n/a
+
+        Executing from:         General Lab QC Inquiry
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 05/08/97 Chad Moats           Initial Release                     *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_QC_COMMENTS:dba go
+      create program GLB_GET_QC_COMMENTS:dba
+
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request
+      (
+         1 qc_result_id			= f8
+      )
+*/
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      (
+         1 qc_result_id               = f8
+         1 comments[*]
+            2 comment_type_cd              = f8
+            2 action_sequence              = i4
+            2 perform_prsnl_id             = f8
+            2 comment_text                 = vc
+            2 comment_prsnl_name           = vc
+            2 comment_dt_tm                = dq8
+            2 review_comment_ind           = i2
+         1 tsteps[*]
+             3 step                   = vc
+         1 status_data
+           2 status                  = c1
+           2 subeventstatus[1]
+             3 OperationName         = c15
+             3 OperationStatus       = c1
+             3 TargetObjectName      = c15
+             3 TargetObjectValue     = vc
+      )
+
+
+     #Script
+      set FOOTNOTE_CODESET            = 14
+      set FOOTNOTE_CDF = "QC FTNT"
+      declare sQC_REVIEW_NOTE = c12 with protect, constant("QC RVNT")
+      set reply->status_data->status = "F"
+      set t_cnt = 0
+      set qcc_cnt = 0
+      declare FOOTNOTE_CD = f8
+      set x = 0
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty
+
+/********************************************************************/
+/* Select QC Trouble from the database                              */
+/********************************************************************/
+      SELECT
+       into "nl:"
+         qcrt.qc_result_id,
+         qcrt.trouble_id,
+         qt.trouble_id
+      FROM
+         qc_result_trouble_r qcrt,
+         qc_trouble_step qt
+      PLAN qcrt
+         where qcrt.qc_result_id = request->qc_result_id
+         and qcrt.active_ind > 0
+      JOIN qt
+         where qt.trouble_id = qcrt.trouble_id
+      DETAIL
+            t_cnt = t_cnt + 1
+            if (mod(t_cnt,5) = 1)
+               stat =  alterlist(reply->tsteps,t_cnt + 5)
+            endif
+            reply->tsteps[t_cnt]->step = qt.step
+      WITH
+        nocounter
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+/********************************************************************/
+/*  QC Comments							    */
+/********************************************************************/
+      SELECT
+       into "nl:"
+         qcc.qc_result_id,
+         qcc.action_sequence,
+	 qcc.comment_type_cd,
+	 cv.code_value,
+         p.name_full_formatted,
+         l.long_text_id
+      FROM
+         qc_comment qcc,
+	 code_value cv,
+         prsnl p,
+         long_text l
+      PLAN cv
+        where cv.code_set = FOOTNOTE_CODESET
+        and cv.cdf_meaning in (sQC_REVIEW_NOTE, FOOTNOTE_CDF)
+      JOIN qcc
+         where qcc.qc_result_id = request->qc_result_id
+         and qcc.comment_type_cd = cv.code_value
+      JOIN l
+         where qcc.long_text_id = l.long_text_id
+      JOIN p
+        where p.person_id = qcc.perform_prsnl_id
+      ORDER BY qcc.comment_type_cd,
+               qcc.action_sequence desc
+      HEAD qcc.comment_type_cd
+        ROW +0
+      HEAD qcc.action_sequence
+            qcc_cnt = qcc_cnt + 1
+            if (mod(qcc_cnt,5) = 1)
+               stat =  alterlist(reply->comments,qcc_cnt + 5)
+            endif
+           reply->comments[qcc_cnt].comment_type_cd = qcc.comment_type_cd,
+           if (l.long_text_id > 0)
+             reply->comments[qcc_cnt].comment_text = l.long_text
+call echo("comment_text  = ",0)
+call echo( reply->comments[qcc_cnt].comment_text, 1)
+           endif
+           reply->comments[qcc_cnt].perform_prsnl_id = qcc.perform_prsnl_id,
+           reply->comments[qcc_cnt].comment_prsnl_name = p.name_full_formatted,
+           reply->comments[qcc_cnt].comment_dt_tm = qcc.comment_dt_tm,
+           reply->comments[qcc_cnt].action_sequence = qcc.action_sequence
+call echo("action seq = ",0)
+call echo(reply->comments[qcc_cnt].action_sequence, 1)
+           if (uar_get_code_meaning(qcc.comment_type_cd) = sQC_REVIEW_NOTE)
+             reply->comments[qcc_cnt]->review_comment_ind = 1
+           else
+             reply->comments[qcc_cnt]->review_comment_ind = 0
+           endif
+
+      DETAIL
+         x = 0
+      WITH
+        nocounter
+
+      set stat =  alterlist(reply->tsteps,t_cnt)
+      set stat =  alterlist(reply->comments,qcc_cnt)
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message
+      if (error_check != 0)
+        set reply->status_data->status = "F"
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg
+        go to exit_script
+      endif
+
+      if (t_cnt = 0 and qcc_cnt = 0)
+        set reply->status_data->status = "Z"
+      else
+        set reply->status_data->status = "S"
+      endif
+
+      go to exit_script
+
+/********************************************************************/
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+
+END GO
+
+
+;Generated by GNU enscript 1.6.4.

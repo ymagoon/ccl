@@ -1,0 +1,955 @@
+/* 	*******************************************************************************
+ 
+	Script Name:	pfi_protocol_creation.prg
+	Description:	Automate the creation of a protocol/organization from the DB
+					Organization Tool, including org and pool aliasing, pool
+					association, and security group creation
+ 
+	Date Written:	February 23, 2023
+	Written By:		Yitzhak Magoon
+					Pfizer
+ 
+	Executed from:	Explorer Menu
+ 
+	*******************************************************************************
+								REVISION INFORMATION
+	*******************************************************************************
+	Rev	Date		By			Comment
+	---	-----------	-----------	---------------------------------------------------
+ 	1.0 3/26/2015 Magoon, Yitzhak Updated org alias section for the new Pristima
+ 									alias pools and AWMS number.
+ 								  Issue with updating ORG_SET_PRSNL_R table
+ 	002 11/30/16  Magoon, Yitzhak Discovery studies not being created correctly,
+ 								  updated protocol creation report to accurately
+ 								  reflect security group for protocol, fixed date
+ 								  format in report output, added roll-over logic for
+ 								  LJ & MA studies
+ 	003 12/8/16	  Magoon, Yitzhak Update logic so it will work with Pristima interface
+	******************************************************************************* */
+ 
+drop program pfi_protocol_creation_v3 go
+create program pfi_protocol_creation_v3
+ 
+prompt
+	"Output to File/Printer/MINE" = "MINE"                                                         ;* Enter or select the printer
+	, "Protocol Name" = ""
+	, "Protocol Type  NOTE: Unique ID’s are system  generated for Non-Standard protocols.." = ""
+	, "site" = ""
+ 
+with OUTDEV, oName, pType, site
+ 
+record requestin
+(
+   1 organization[1]
+     2 organization_id              =     f8
+     2 active_ind                   =     i2
+     2 active_status_cd             =     f8
+     2 active_status_dt_tm          =     dq8
+     2 active_status_prsnl_id       =     f8
+     2 beg_effective_dt_tm          =     dq8
+     2 end_effective_dt_tm          =     dq8
+     2 data_status_cd               =     f8
+     2 data_status_dt_tm            =     dq8
+     2 data_status_prsnl_id         =     f8
+     2 contributor_system_cd        =     f8
+     2 org_name                     =     c100
+     2 org_name_key                 =     c100
+     2 federal_tax_id_nbr           =     c100
+     2 org_status_cd                =     f8
+     2 ft_entity_id                 =     f8
+     2 ft_entity_name               =     c32
+     2 org_class_cd                 =     f8
+   1 org_type_reltn[1]
+   	 2 org_type_cd					= 	  f8
+   1 alias_pool[7] ;1.0 change from 4 to 7
+     2 alias_pool_cd				= 	  f8
+     2 alias_entity_name			=	  c32
+     2 alias_entity_alias_type_cd	= 	  f8
+   1 organization_alias[1]
+     2 organization_alias_id		=	  f8
+     2 org_alias_sub_type_cd		= 	  f8
+     2 check_digit					=	  i4
+     2 check_digit_method_cd		=	  f8
+   1 org_set[1]
+   	 2 org_set_org_r_id				=	  f8
+   	 2 org_set_id					=	  f8
+   	 2 org_set_spillover_id			=	  f8
+   	 2 org_set_name					=     vc
+   1 prsnl_org_reltn[*]
+     2 prsnl_org_reltn_id			=	  f8
+     2 person_id					=	  f8
+   1 add_org_ind					=	  i2
+   1 add_org_alias_ind				=	  i2
+   1 add_alias_pool_ind				=	  i2
+   1 add_org_alias_pool_reltn_ind	=	  i2
+   1 add_org_type_reltn_ind			=	  i2
+   1 add_org_set_org_r_ind			=	  i2
+   1 site							=	  c2		;002
+)
+ 
+ ;used to store existing org_sets
+record org_sets (
+	1 qual[*]
+	  2 org_set_id					=	  f8
+	  2 org_set_name				=	  vc
+	  2 org_set_cnt					=	  i4
+)
+ 
+declare org_class_cd 				= 	  f8
+declare active_status_cd 			= 	  f8
+declare data_status_cd 				= 	  f8
+declare org_type_cd 				= 	  f8
+ 
+declare subject_pool_cd 			= 	  f8
+declare encntr_match_pool_cd 		= 	  f8
+declare client_code_pool_cd 		= 	  f8
+declare tatoo_pool_cd 				= 	  f8
+declare discovery_pool_cd 			= 	  f8
+ 
+declare fin_alias_cd 				= 	  f8
+declare visit_alias_cd 				= 	  f8
+declare client_code_alias_cd 		= 	  f8
+declare mrn_alias_cd 				= 	  f8
+ 
+declare err_cnt  					= 	  i4 with noconstant(0), public
+declare prsnl_cnt					=     i4 with noconstant(0), public
+declare match_ind 					= 	  i4
+declare org_set_cnt					=	  i4
+declare org_set_name				=	  vc
+declare org_set_id					=	  f8
+declare org_set_spillover_id		=	  f8
+declare num							= 	  i4 with noconstant(0), public
+declare pos							= 	  i4 with noconstant(0), public
+declare start 						= 	  i4 with noconstant(1), public
+ 
+declare osCnt						=	  i4
+declare temp_osCnt					= 	  i4
+ 
+;alias pool codes from code set 263
+set subject_pool_cd = uar_get_code_by("DISPLAYKEY",263,"SUBJECTIDPOOL")
+set encntr_match_pool_cd = uar_get_code_by("DISPLAYKEY",263,"ENCOUNTERMATCHPOOL")
+set client_code_pool_cd = uar_get_code_by("DISPLAYKEY",263,"CLIENTCODE")
+set tatoo_pool_cd = uar_get_code_by("DISPLAYKEY",263,"VOLUNTEERTATTOOPOOL")
+set discovery_pool_cd = uar_get_code_by("DISPLAYKEY",263,"DISCOVERYMRNPOOL")
+set pristima_order_cd = uar_get_code_by("DISPLAYKEY",263,"PRISTIMAORDERID") ;1.0
+set pfizer_id_cd = uar_get_code_by("DISPLAYKEY",263,"PFIZERIDPOOL") ;1.0
+set external_pool_cd = uar_get_code_by("DISPLAYKEY",263,"EXTERNALID") ;1.0
+ 
+;alias_entity_alias_type_cd's from variables codesets
+set fin_alias_cd = uar_get_code_by("MEANING",319,"FIN NBR")
+set visit_alias_cd = uar_get_code_by("MEANING",319,"VISITID")
+set client_code_alias_cd = uar_get_code_by("MEANING",334,"CLIENT")
+set mrn_alias_cd = uar_get_code_by("MEANING",4,"MRN")
+set order_alias_cd = uar_get_code_by("MEANING",754, "PLACERORDID") ;1.0
+set referring_mrn_cd = uar_get_code_by("MEANING",4,"REF_MRN") ;1.0
+set external_id_cd = uar_get_code_by("MEANING",320,"EXTERNALID") ;1.0
+ 
+set org_class_cd = uar_get_code_by("MEANING",396,"ORG")
+set active_status_cd = uar_get_code_by("MEANING",48, "ACTIVE")
+set data_status_cd = uar_get_code_by("MEANING",8,"AUTH")
+set org_type_cd = uar_get_code_by("MEANING",278,"CLIENT")
+ 
+/*
+validation in prompt highlights field red if duplicate organization/protocol already exisits. However, it does not prevent user
+from executing. Therefore, we must ensure it does not if protocol already exists
+*/
+select into "nl:"
+from
+	organization o
+where cnvtupper(o.org_name) = trim($oName)
+detail
+	err_cnt = err_cnt + 1
+with nocounter
+ 
+if (err_cnt > 0)
+	go to END_PROGRAM
+endif
+ 
+if (trim($oName) = '""')
+	go to END_PROGRAM
+endif
+ 
+;determine organization_id and populate record structure
+select into "nl:"
+   nextseqnum = seq(ORGANIZATION_SEQ, nextval)
+from dual
+detail
+	requestin->organization[1].organization_id = cnvtreal(nextseqnum)
+with nocounter
+ 
+if (requestin->organization[1].organization_id < 1)
+    go to END_PROGRAM
+endif
+ 
+;begin 003
+if (reqinfo->updt_id < 1)
+  set reqinfo->updt_id = 854477 ;Pristima
+endif
+;end 003
+ 
+;populate global (applies to all tables) record structure
+set requestin->organization[1].active_ind = 1
+set requestin->organization[1].active_status_cd = active_status_cd
+set requestin->organization[1].active_status_dt_tm = cnvtdatetime(curdate,curtime3)
+set requestin->organization[1].active_status_prsnl_id = reqinfo->updt_id
+set requestin->organization[1].beg_effective_dt_tm  = cnvtdatetime(curdate,curtime3)
+set requestin->organization[1].end_effective_dt_tm = cnvtdatetime("31-DEC-2100 00:00:00.00")
+set requestin->organization[1].data_status_cd = data_status_cd
+set requestin->organization[1].data_status_dt_tm = cnvtdatetime(curdate,curtime3)
+set requestin->organization[1].data_status_prsnl_id = reqinfo->updt_id
+set requestin->organization[1].contributor_system_cd = 0
+set requestin->organization[1].org_name = $oName
+set requestin->organization[1].org_name_key = cnvtupper($oName)
+set requestin->organization[1].federal_tax_id_nbr = ""
+set requestin->organization[1].org_status_cd = 0.0
+set requestin->organization[1].ft_entity_id = 0.0
+set requestin->organization[1].ft_entity_name = ""
+set requestin->organization[1].org_class_cd = org_class_cd
+ 
+;call echorecord(requestin)
+ 
+/*   ***************************************************************************  ***/
+/***    Begin code for updating ORGANIZATION table DB Organization Tool Page 1    ***/
+/*   ***************************************************************************  ***/
+ 
+insert from organization o
+    set
+    o.organization_id             = requestin->organization[1]->organization_id,
+    o.contributor_system_cd       = requestin->organization[1]->contributor_system_cd,
+    o.org_name                    = if (requestin->organization[1]->org_name = '""')
+                                      null
+                                    else
+                                      requestin->organization[1]->org_name
+                                    endif,
+    o.org_name_key                = cnvtupper(cnvtalphanum(requestin->organization[1]->org_name_key)),
+    o.federal_tax_id_nbr          = if (requestin->organization[1]->federal_tax_id_nbr = '""')
+                                      null
+                                    else
+                                      requestin->organization[1]->federal_tax_id_nbr
+                                    endif,
+    o.org_status_cd               = requestin->organization[1]->org_status_cd,
+    o.ft_entity_id                = requestin->organization[1]->ft_entity_id,
+    o.ft_entity_name              = if (requestin->organization[1]->ft_entity_name = '""')
+                                      null
+                                    else
+                                      requestin->organization[1]->ft_entity_name
+                                    endif,
+    o.org_class_cd                = if (requestin->organization[1]->org_class_cd <= 0)
+                                       0
+                                    else
+                                       requestin->organization[1]->org_class_cd
+                                    endif,
+    o.data_status_cd              = requestin->organization[1]->data_status_cd,
+    o.data_status_dt_tm           = cnvtdatetime(curdate,curtime3),
+    o.data_status_prsnl_id        = reqinfo->updt_id,
+    o.beg_effective_dt_tm         = if (requestin->organization[1]->beg_effective_dt_tm <= 0)
+                                       cnvtdatetime(curdate,curtime3)
+                                    else
+                                       cnvtdatetime(requestin->organization[1]->beg_effective_dt_tm)
+                                    endif,
+    o.end_effective_dt_tm         = if (requestin->organization[1]->end_effective_dt_tm <= 0)
+                                       cnvtdatetime("31-dec-2100 00:00:00.00")
+                                    else
+                                       cnvtdatetime(requestin->organization[1]->end_effective_dt_tm)
+                                    endif,
+    o.active_ind                  = requestin->organization[1]->active_ind,
+    o.active_status_cd            = requestin->organization[1]->active_status_cd,
+    o.active_status_prsnl_id      = reqinfo->updt_id,
+    o.active_status_dt_tm         = cnvtdatetime(curdate,curtime3),
+    o.updt_cnt                    = 0,
+    o.updt_dt_tm                  = cnvtdatetime(curdate, curtime3),
+    o.updt_id                     = reqinfo->updt_id,
+    o.updt_applctx                = reqinfo->updt_applctx,
+    o.updt_task                   = reqinfo->updt_task
+ 
+with nocounter
+ 
+commit
+ 
+;validate row is written to organization table before proceeding to write remaining rows
+select into "nl:"
+	o.organization_id
+from
+	organization o
+where o.organization_id = requestin->organization[1].organization_id
+	and o.org_name = requestin->organization[1].org_name
+	and o.org_name_key = requestin->organization[1].org_name_key
+	and o.active_ind = 1
+detail
+	match_ind = match_ind + 1
+	if(match_ind > 0)
+		requestin->add_org_ind = 1
+	endif
+with nocounter
+ 
+if(requestin->add_org_ind < 1)
+	go to END_PROGRAM
+endif
+ 
+/*   ***************************************************************************  ***/
+/***   Begin code for updating ORG_TYPE_RELTN table DB Organization Tool Page 2   ***/
+/*   ***************************************************************************  ***/
+ 
+set requestin->org_type_reltn[1].org_type_cd = org_type_cd
+ 
+insert from org_type_reltn o
+    set
+    o.organization_id             = requestin->organization[1]->organization_id,
+    o.org_type_cd                 = requestin->org_type_reltn[1].org_type_cd,
+    o.beg_effective_dt_tm         = if (requestin->organization[1]->beg_effective_dt_tm <= 0)
+                                       cnvtdatetime(curdate,curtime3)
+                                    else
+                                       cnvtdatetime(requestin->organization[1]->beg_effective_dt_tm)
+                                    endif,
+    o.end_effective_dt_tm         = if (requestin->organization[1]->end_effective_dt_tm <= 0)
+                                       cnvtdatetime("31-dec-2100 00:00:00.00")
+                                    else
+                                       cnvtdatetime(requestin->organization[1]->end_effective_dt_tm)
+                                    endif,
+    o.active_ind                  = requestin->organization[1]->active_ind,
+    o.active_status_cd            = requestin->organization[1]->active_status_cd,
+    o.active_status_prsnl_id      = if (requestin->organization[1]->active_status_prsnl_id = 0)
+                                       reqinfo->updt_id
+                                    else
+                                       requestin->organization[1]->active_status_prsnl_id
+                                    endif,
+    o.active_status_dt_tm         = if (requestin->organization[1]->active_status_dt_tm <= 0)
+                                       cnvtdatetime(curdate,curtime3)
+                                    else
+                                       cnvtdatetime(requestin->organization[1]->active_status_dt_tm)
+                                    endif,
+    o.updt_cnt                    = 0,
+    o.updt_dt_tm                  = cnvtdatetime(curdate, curtime3),
+    o.updt_id                     = reqinfo->updt_id,
+    o.updt_applctx                = reqinfo->updt_applctx,
+	o.updt_task                   = reqinfo->updt_task
+with nocounter
+ 
+commit
+ 
+;validate row is written to org_type_reltn table before proceeding to write remaining rows
+select into "nl:"
+	otr.organization_id
+from
+	org_type_reltn otr
+where otr.organization_id = requestin->organization[1].organization_id
+	and otr.active_ind = 1
+detail
+	match_ind = match_ind + 1
+	if(match_ind > 0)
+		requestin->add_org_type_reltn_ind = 1
+	endif
+with nocounter
+ 
+if (requestin->add_org_type_reltn_ind < 1)
+	go to END_PROGRAM
+endif
+ 
+/*   *********************************************************************************  ***/
+/***   Begin code for updating ORG_ALIAS_POOL_RELTN table DB Organization Tool Page 6   ***/
+/*   *********************************************************************************  ***/
+ 
+;seven pools need to be associated, so populate record with appropriate data for each table
+ 
+for (idx = 1 to 7) ;1.0 change from 4 to 7
+	if (idx = 1) ;Subject ID
+		set requestin->alias_pool[1].alias_entity_alias_type_cd = fin_alias_cd
+		set requestin->alias_pool[1].alias_entity_name = "ENCNTR_ALIAS"
+		set requestin->alias_pool[1].alias_pool_cd = subject_pool_cd
+	elseif (idx = 2) ;Encntr Match
+		set requestin->alias_pool[2].alias_entity_alias_type_cd = visit_alias_cd
+		set requestin->alias_pool[2].alias_entity_name = "ENCNTR_ALIAS"
+		set requestin->alias_pool[2].alias_pool_cd = encntr_match_pool_cd
+	elseif (idx = 3) ;1.0 Pristima Order ID
+		set requestin->alias_pool[3].alias_entity_alias_type_cd = order_alias_cd
+		set requestin->alias_pool[3].alias_entity_name = "ORDER_ALIAS"
+		set requestin->alias_pool[3].alias_pool_cd = pristima_order_cd
+	elseif (idx = 4) ;Client Code
+		set requestin->alias_pool[4].alias_entity_alias_type_cd = client_code_alias_cd
+		set requestin->alias_pool[4].alias_entity_name = "ORGANIZATION_ALIAS"
+		set requestin->alias_pool[4].alias_pool_cd = client_code_pool_cd
+	elseif (idx = 5) ;1.0 Pfizer ID
+		set requestin->alias_pool[5].alias_entity_alias_type_cd = mrn_alias_cd
+		set requestin->alias_pool[5].alias_entity_name = "PERSON_ALIAS"
+ 
+		if($pType = "STANDARD")
+			set requestin->alias_pool[5].alias_pool_cd = pfizer_id_cd
+		else
+			;set requestin->alias_pool[1].alias_pool_cd = discovery_pool_cd				;002
+			set requestin->alias_pool[5].alias_pool_cd = discovery_pool_cd				;002
+		endif
+	elseif (idx = 6) ;tattoo pool
+		set requestin->alias_pool[6].alias_entity_alias_type_cd = referring_mrn_cd ;1.0
+		set requestin->alias_pool[6].alias_entity_name = "PERSON_ALIAS"
+		set requestin->alias_pool[6].alias_pool_cd = tatoo_pool_cd
+	elseif (idx = 7);1.0 External ID
+		set requestin->alias_pool[7].alias_entity_alias_type_cd = external_id_cd
+		set requestin->alias_pool[7].alias_entity_name = "PRSNL_ALIAS"
+		set requestin->alias_pool[7].alias_pool_cd = external_pool_cd
+	endif
+ 
+endfor
+ 
+  insert from org_alias_pool_reltn a
+    , (dummyt d with seq = value(size(requestin->alias_pool,5)))
+  set
+    a.alias_pool_cd               = requestin->alias_pool[d.seq]->alias_pool_cd,
+    a.organization_id             = requestin->organization[1]->organization_id,
+    a.alias_entity_name           = requestin->alias_pool[d.seq]->alias_entity_name,
+    a.alias_entity_alias_type_cd  = requestin->alias_pool[d.seq]->alias_entity_alias_type_cd,
+    a.beg_effective_dt_tm         = if (requestin->organization[1]->beg_effective_dt_tm <= 0)
+                                       cnvtdatetime(curdate,curtime3)
+                                    else
+                                       cnvtdatetime(requestin->organization[1]->beg_effective_dt_tm)
+                                    endif,
+    a.end_effective_dt_tm         = if (requestin->organization[1]->end_effective_dt_tm <= 0)
+                                       cnvtdatetime("31-dec-2100 00:00:00.00")
+                                    else
+                                       cnvtdatetime(requestin->organization[1]->end_effective_dt_tm)
+                                    endif,
+    a.active_ind                  = requestin->organization[1]->active_ind,
+    a.active_status_cd            = requestin->organization[1]->active_status_cd,
+    a.active_status_prsnl_id      = if (requestin->organization[1]->active_status_prsnl_id = 0)
+                                       reqinfo->updt_id
+                                    else
+                                       requestin->organization[1]->active_status_prsnl_id
+                                    endif,
+    a.active_status_dt_tm         = if (requestin->organization[1]->active_status_dt_tm <= 0)
+                                       cnvtdatetime(curdate,curtime3)
+                                    else
+                                       cnvtdatetime(requestin->organization[1]->active_status_dt_tm)
+                                    endif,
+    a.updt_cnt                    = 0,
+    a.updt_dt_tm                  = cnvtdatetime(curdate, curtime3),
+    a.updt_id                     = reqinfo->updt_id,
+    a.updt_applctx                = reqinfo->updt_applctx,
+    a.updt_task                   = reqinfo->updt_task
+plan d
+join a
+with nocounter
+ 
+commit
+ 
+ 
+;validate row is written to org_alias_pool_reltn table before proceeding to write remaining rows
+select into "nl:"
+	oapr.organization_id
+from
+	org_alias_pool_reltn oapr
+where oapr.organization_id = requestin->organization[1].organization_id
+	and oapr.alias_entity_name in ("PERSON_ALIAS", "ENCNTR_ALIAS", "ORGANIZATION_ALIAS")
+	and oapr.alias_entity_alias_type_cd in (mrn_alias_cd, fin_alias_cd, visit_alias_cd, client_code_alias_cd)
+	and oapr.alias_pool_cd in (tatoo_pool_cd, discovery_pool_cd, subject_pool_cd, encntr_match_pool_cd, client_code_pool_cd)
+	and oapr.active_ind = 1
+detail
+	match_ind = match_ind + 1
+	if(match_ind = 4)
+		requestin->add_org_alias_pool_reltn_ind = 1
+	endif
+with nocounter
+ 
+/*   *******************************************************************************  ***/
+/***   Begin code for updating ORGANIZATION_ALIAS table DB Organization Tool Page 7   ***/
+/*   *******************************************************************************  ***/
+ 
+select into "nl:"
+   nextseqnum = seq(ORGANIZATION_SEQ, nextval)
+from dual
+detail
+	requestin->organization_alias[1].organization_alias_id = cnvtreal(nextseqnum)
+with nocounter
+ 
+if (requestin->organization_alias[1].organization_alias_id < 1)
+    go to END_PROGRAM
+endif
+ 
+set requestin->organization_alias[1].check_digit 			= 	0
+set requestin->organization_alias[1].check_digit_method_cd 	= 	0
+set requestin->organization_alias[1].org_alias_sub_type_cd 	= 	0
+ 
+ 
+insert from organization_alias o
+  set
+	o.organization_alias_id       = requestin->organization_alias[1]->organization_alias_id,
+	o.organization_id             = requestin->organization[1]->organization_id,
+ 
+	o.alias_pool_cd               = requestin->alias_pool[4].alias_pool_cd,
+	o.org_alias_type_cd           = requestin->alias_pool[4].alias_entity_alias_type_cd,
+ 
+	o.alias                       = requestin->organization[1].org_name,
+ 
+	o.org_alias_sub_type_cd       = requestin->organization_alias[1]->org_alias_sub_type_cd,
+	o.check_digit                 = requestin->organization_alias[1]->check_digit,
+	o.check_digit_method_cd       = requestin->organization_alias[1]->check_digit_method_cd,
+ 
+	o.contributor_system_cd       = requestin->organization[1]->contributor_system_cd,
+	o.data_status_cd              = requestin->organization[1]->data_status_cd,
+ 
+	o.data_status_dt_tm           = cnvtdatetime(curdate,curtime3),
+	o.data_status_prsnl_id        = reqinfo->updt_id,
+	o.beg_effective_dt_tm         = if (requestin->organization[1]->beg_effective_dt_tm <= 0)
+	                                    cnvtdatetime(curdate,curtime3)
+	                                else
+	                                    cnvtdatetime(requestin->organization[1]->beg_effective_dt_tm)
+	                                endif,
+	o.end_effective_dt_tm         = if (requestin->organization[1]->end_effective_dt_tm <= 0)
+	                                    cnvtdatetime("31-dec-2100 00:00:00.00")
+	                                else
+	                                    cnvtdatetime(requestin->organization[1]->end_effective_dt_tm)
+	                                endif,
+	o.active_ind                  = requestin->organization[1]->active_ind,
+	o.active_status_cd            = requestin->organization[1]->active_status_cd,
+	o.active_status_prsnl_id      = reqinfo->updt_id,
+	o.active_status_dt_tm         = cnvtdatetime(curdate,curtime3),
+	o.updt_cnt                    = 0,
+	o.updt_dt_tm                  = cnvtdatetime(curdate, curtime3),
+	o.updt_id                     = reqinfo->updt_id,
+	o.updt_applctx                = reqinfo->updt_applctx,
+	o.updt_task                   = reqinfo->updt_task,
+	o.alias_key                   = requestin->organization[1].org_name_key
+with nocounter
+ 
+commit
+ 
+;validate row is written to organization_alias table before proceeding to write remaining rows
+select into "nl:"
+	oa.organization_id
+from
+	organization_alias oa
+where oa.organization_id = requestin->organization[1].organization_id
+	and oa.organization_alias_id = requestin->organization_alias[1].organization_alias_id
+	and oa.alias = requestin->organization[1].org_name
+	and oa.alias_key = requestin->organization[1].org_name_key
+	and oa.alias_pool_cd = requestin->alias_pool[4].alias_pool_cd
+	and oa.org_alias_type_cd = requestin->alias_pool[4].alias_entity_alias_type_cd
+detail
+	match_ind = match_ind + 1
+	if(match_ind > 0)
+		requestin->add_org_alias_ind = 1
+	endif
+with nocounter
+ 
+if (requestin->add_org_alias_ind < 0)
+	go to END_PROGRAM
+endif
+ 
+/*   *********************************************************************************  ***/
+/***      Begin code for updating ORG_SET_ORG_R table DB Organization Tool Page 11      ***/
+/*   *********************************************************************************  ***/
+ 
+select into "nl:"
+   nextseqnum = seq(ORGANIZATION_SEQ, nextval)
+from dual
+detail
+	requestin->org_set[1].org_set_org_r_id = cnvtreal(nextseqnum)
+with nocounter
+ 
+if (requestin->org_set[1].org_set_org_r_id < 1)
+    go to END_PROGRAM
+endif
+ 
+;finds org_set_id for user executing program from code_set 101001
+select into "nl:"
+	os.org_set_id
+from
+	org_set os
+	, prsnl p
+	, code_value cv
+plan p where p.person_id = reqinfo->updt_id
+join cv where cv.code_set = 101001
+	and cv.display_key = cnvtupper(p.username)
+join os where cnvtupper(os.name) = cv.cdf_meaning
+	and os.active_ind = 1
+detail
+	requestin->org_set[1].org_set_id = os.org_set_id
+	requestin->org_set[1].org_set_name = trim(os.name)
+	requestin->site = substring(9,2,trim(os.name))			;002
+with nocounter
+ 
+;begin 003
+;if program being executed by interface, the site and org_set_id will be incorrect
+;replace hard coded org_set with code on codeset 101001 once users can be created
+if ($site = "GR")
+    set requestin->site = "GR"
+    set requestin->org_set[1].org_set_id = 648713
+    set requestin->org_set_name = "Org Set GR 1"
+elseif ($site = "LJ")
+  set requestin->site = "LJ"
+  set requestin->org_set[1].org_set_id = 648711
+  set requestin->org_set_name = "Org Set LJ 1"
+elseif ($site = "MA")
+  set requestin->site = "MA"
+  set requestin->org_set[1].org_set_id = 648717
+  set requestin->org_set_name = "Org Set MA 1"
+endif
+;end 003
+ 
+/*
+	Since sites can have numerous studies running at once, logic to ensure that the new protocol is not assigned to an org_set
+	with > 80 active studies is necessary. The logic below determines the number of active protocols in the org_set of the user
+	running the program. If that number is > 80 then all org_sets are gathered into a record structure (ordered by name) and the
+	next org set is evaluated to see if there are <80. If there are, that org set is used. If not, the program cycles to the next
+	org set.
+*/
+ 
+;determine count
+select into "nl:"
+	count = count(*)
+from
+	org_set_org_r osr
+where osr.org_set_id = requestin->org_set[1].org_set_id
+	and osr.active_ind = 1
+detail
+	if (count >= 50)
+		org_set_cnt = count
+	endif
+with nocounter
+ 
+;call echo(build2("org_set_id=", requestin->org_set[1].org_set_id))
+;call echo(build2("count=",org_set_cnt))
+ 
+ 
+;writes all org sets depending on the site to org_sets record structure
+if (org_set_cnt >= 50)
+;begin 002
+	select if (requestin->site  ="GR")
+	  where os.name = "*GR*"
+		and os.active_ind = 1
+	elseif (requestin->site = "MA")
+	  where os.name = "*MA*"
+		and os.active_ind = 1
+	elseif (requestin->site = "LJ")
+	  where os.name = "*LJ*"
+		and os.active_ind = 1
+	endif
+	  into "nl:"
+		os_id = os.org_set_id ;change
+		, name = os.name
+	from
+		org_set os
+	order by
+		name
+	detail
+		osCnt = osCnt + 1
+		if (osCnt > size(org_sets->qual,5))
+			stat = alterlist(org_sets->qual, osCnt + 1)
+		endif
+ 
+		org_sets->qual[osCnt].org_set_id = os_id ;change
+		org_sets->qual[osCnt].org_set_name = name
+	with nocounter
+/*	select into "nl:"
+		os_id = os.org_set_id
+		, name = os.name
+	from
+		org_set os
+	where os.name = "*GR*"
+		and os.active_ind = 1
+	order by
+		name
+	detail
+		osCnt = osCnt + 1
+		if (osCnt > size(org_sets->qual,5))
+			stat = alterlist(org_sets->qual, osCnt + 1)
+		endif
+ 
+		org_sets->qual[osCnt].org_set_id = os_id
+		org_sets->qual[osCnt].org_set_name = name
+	with nocounter
+*/
+;end 002
+ 
+;begin 002
+;populate # of studies for each org set
+	select into "nl:"
+	  osr.org_set_id
+	  , count = count(*)
+	from
+	   org_set_org_r osr
+    plan osr
+	  where expand(num,1,size(org_sets->qual,5), osr.org_set_id, org_sets->qual[num].org_set_id)
+	    and osr.active_ind = 1
+	group by
+	  osr.org_set_id
+    detail
+      call echo(build2("count=",count))
+ 
+      pos = locateval(num,1,size(org_sets->qual,5),osr.org_set_id, org_sets->qual[num].org_set_id)
+      org_sets->qual[pos].org_set_cnt = count
+    with nocounter
+/*
+	select into "nl:"
+		count = count(*)
+	from
+		org_set_org_r osr
+	where osr.active_ind = 1
+		and osr.org_set_id = org_sets->qual[1].org_set_id
+	detail
+		org_sets->qual[1].org_set_cnt = count
+	with nocounter
+ 
+	select into "nl:"
+		count = count(*)
+	from
+		org_set_org_r osr
+	where osr.active_ind = 1
+		and osr.org_set_id = org_sets->qual[2].org_set_id
+	detail
+		org_sets->qual[2].org_set_cnt = count
+	with nocounter
+ 
+	select into "nl:"
+		count = count(*)
+	from
+		org_set_org_r osr
+	where osr.active_ind = 1
+		and osr.org_set_id = org_sets->qual[3].org_set_id
+	detail
+		org_sets->qual[3].org_set_cnt = count
+	with nocounter
+ 
+	select into "nl:"
+		count = count(*)
+	from
+		org_set_org_r osr
+	where osr.active_ind = 1
+		and osr.org_set_id = org_sets->qual[4].org_set_id
+	detail
+		org_sets->qual[4].org_set_cnt = count
+	with nocounter
+ 
+	select into "nl:"
+		count = count(*)
+	from
+		org_set_org_r osr
+	where osr.active_ind = 1
+		and osr.org_set_id = org_sets->qual[5].org_set_id
+	detail
+		org_sets->qual[5].org_set_cnt = count
+	with nocounter
+ 
+	select into "nl:"
+		count = count(*)
+	from
+		org_set_org_r osr
+	where osr.active_ind = 1
+		and osr.org_set_id = org_sets->qual[6].org_set_id
+	detail
+		org_sets->qual[6].org_set_cnt = count
+	with nocounter
+*/
+;end 002
+	;locate position 1-6 of org set assigned to user
+	set pos = locateval(num, start, size(org_sets->qual,5),requestin->org_set[1].org_set_id, org_sets->qual[num].org_set_id)
+ 
+ ;cycle from 1-6
+	while (org_set_cnt >= 50)
+;		if (pos >= 6) ;if pos is greater than 6 it needs to restart at 1		;002
+		if (pos >= size(org_sets->qual,5))										;002
+			set pos = 1
+		else
+			set pos = pos + 1
+		endif
+ 
+		set org_set_cnt = org_sets->qual[pos].org_set_cnt
+ 		set org_set_spillover_id = org_sets->qual[pos].org_set_id
+ 		set org_set_name = org_sets->qual[pos].org_set_name
+	endwhile
+ 
+	set requestin->org_set[1].org_set_name = org_set_name
+	set requestin->org_set[1].org_set_spillover_id = org_set_spillover_id
+ 
+endif
+ 
+;remove
+;call echo(build2("org_set_cnt now=", org_set_cnt))
+;call echo(build2("spillover_id=",org_set_spillover_id))
+;call echo(build2("org_set_name=",org_set_name))
+ 
+insert into org_set_org_r osr
+  set
+	osr.org_set_org_r_id             = requestin->org_set[1].org_set_org_r_id,
+	osr.org_set_id                   = if (requestin->org_set[1].org_set_spillover_id > 0)
+									      requestin->org_set[1].org_set_spillover_id
+									   else
+									   	  requestin->org_set[1].org_set_id
+									   endif,
+	osr.organization_id              = requestin->organization[1].organization_id,
+	osr.active_ind                   = 1,
+	osr.active_status_cd             = requestin->organization[1].active_status_cd,
+	osr.active_status_dt_tm          = cnvtdatetime(curdate,curtime3),
+	osr.active_status_prsnl_id       = reqinfo->updt_id,
+	osr.beg_effective_dt_tm          = cnvtdatetime(curdate, curtime3),
+	osr.end_effective_dt_tm          = cnvtdatetime("31-DEC-2100 00:00:00.00"),
+	osr.updt_dt_tm                   = cnvtdatetime(curdate, curtime3),
+	osr.updt_applctx                 = reqinfo->updt_applctx,
+	osr.updt_id                      = reqinfo->updt_id,
+	osr.updt_cnt                     = 0,
+	osr.updt_task                    = reqinfo->updt_task
+ 
+with nocounter
+ 
+commit
+ 
+select into "nl:"
+	osor.organization_id
+from
+	org_set_org_r osor
+where osor.org_set_id = requestin->org_set[1].org_set_id
+	or osor.org_set_id = requestin->org_set[1].org_set_spillover_id
+	and osor.org_set_org_r_id = requestin->org_set[1].org_set_org_r_id
+	and osor.organization_id = requestin->organization[1].organization_id
+detail
+	match_ind = match_ind + 1
+	if(match_ind > 0)
+		requestin->add_org_set_org_r_ind = 1
+	endif
+with nocounter
+ 
+if (requestin->add_org_set_org_r_ind < 0)
+	go to END_PROGRAM
+endif
+ 
+/*   *******************************************************  ***/
+/***      Begin code for updating PRSNL_ORG_RELTN table       ***/
+/*   *******************************************************  ***/
+ 
+;find correct org_set_id
+/* 002
+if (requestin->org_set[1].org_set_id > 0)
+	set org_set_id = requestin->org_set[1].org_set_id
+else
+	set org_set_id = requestin->org_set[1].org_set_spillover_id
+endif
+*/
+if (requestin->org_set[1].org_set_spillover_id > 0)
+  set org_set_id = requestin->org_set[1].org_set_spillover_id
+else
+ set org_set_id = requestin->org_set[1].org_set_id
+endif
+ 
+;find all users associated to that org_set and load record structure
+select
+	person_id = ospr.prsnl_id
+from
+	org_set_prsnl_r ospr
+plan ospr where ospr.org_set_id = org_set_id
+	and ospr.active_ind = 1
+head report
+	prsnl_cnt = 0
+detail
+	prsnl_cnt = prsnl_cnt + 1
+ 
+	if (prsnl_cnt > size(requestin->prsnl_org_reltn,5))
+		stat = alterlist(requestin->prsnl_org_reltn, prsnl_cnt + 10)
+	endif
+ 
+	requestin->prsnl_org_reltn[prsnl_cnt].person_id = person_id
+foot report
+	stat = alterlist(requestin->prsnl_org_reltn,prsnl_cnt)
+with nocounter
+ 
+insert into
+	prsnl_org_reltn por
+	, (dummyt d with seq = value(size(requestin->prsnl_org_reltn,5)))
+  set por.prsnl_org_reltn_id 	 = seq(prsnl_seq, nextval)
+	, por.person_id 			 = requestin->prsnl_org_reltn[d.seq].person_id
+	, por.organization_id 		 = requestin->organization[1].organization_id
+	, por.updt_cnt 				 = 0
+	, por.updt_dt_tm 			 = cnvtdatetime(curdate,curtime3)
+	, por.updt_id 				 = reqinfo->updt_id
+	, por.updt_task 			 = reqinfo->updt_task
+	, por.updt_applctx 			 = reqinfo->updt_applctx
+	, por.active_ind 			 = 1
+	, por.active_status_cd 		 = requestin->organization[1].active_status_cd
+	, por.active_status_dt_tm 	 = cnvtdatetime(curdate,curtime3)
+	, por.active_status_prsnl_id = reqinfo->updt_id
+	, por.beg_effective_dt_tm 	 = cnvtdatetime(curdate, curtime3)
+	, por.end_effective_dt_tm 	 = cnvtdatetime("31-DEC-2100 00:00:00.00")
+	, por.confid_level_cd 		 = 0
+plan d
+join por
+with nocounter
+ 
+commit
+ 
+ 
+/* for pristima interface testing*
+SET MODIFY FILESTREAM
+select into "ym_interface_testing.txt"
+  updt_id = reqinfo->updt_id
+  , updt_task = reqinfo->updt_task
+  , updt_applctx = reqinfo->updt_applctx
+from
+  (dummyt d with seq = 1)
+WITH PCFORMAT ("^", "|")
+*/
+ 
+#END_PROGRAM
+;output
+execute reportrtl
+%i cust_script:pfi_protocol_creation_v3.dvl
+;%i must be in the first two columns of the source code file.
+;Assuming you changed the program name in your file to
+;1_your_initials_add_layt_to_prg.
+;set a variable to initializereport(0)
+set d0 = InitializeReport(0)
+ 
+;values for report
+set cPrintDate = format(cnvtdatetime(curdate,curtime3),"MM/DD/YYYYHH:MM;;Q")
+ 
+set cUser = fillstring(50," ")
+select into "nl:"
+	user = p.name_full_formatted
+from
+	prsnl p
+plan p where p.person_id = reqinfo->updt_id
+detail
+	cUser = user
+with counter
+ 
+;begin 002
+set cOrgSet = fillstring(20," ")
+ 
+if (requestin->org_set[1].org_set_spillover_id > 0)
+  set org_set_id = requestin->org_set[1].org_set_spillover_id
+else
+ set org_set_id = requestin->org_set[1].org_set_id
+endif
+ 
+select into "nl:"
+  org_set = os.name
+from
+  org_set os
+plan os where os.org_set_id = org_set_id
+detail
+  cOrgSet = org_set
+with nocounter
+ 
+set cOrgSet = trim(cOrgSet)
+;end 002
+ 
+set cUser = trim(cUser)
+set _fEndDetail = RptReport->m_pageWidth - RptReport->m_marginBottom
+ 
+select into "nl:"
+ 
+from
+	dummyt d where seq=size(requestin->organization,5)
+head report
+	d0 = PageHeader(Rpt_Render)
+ 
+	if (requestin->add_org_ind = 1 and requestin->add_org_type_reltn_ind = 1 and requestin->add_org_alias_pool_reltn_ind
+	and requestin->add_org_alias_ind = 1 and requestin->add_org_set_org_r_ind = 1)
+		d0 = Body(Rpt_Render)
+	else
+		d0 = Body2(Rpt_Render)
+	endif
+ 
+with maxrec = 5,nocounter,separator=" ", FORMAT
+ 
+set d0 = FinalizeReport($OutDev)
+ 
+end
+go
+ 

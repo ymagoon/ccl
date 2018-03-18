@@ -1,0 +1,365 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_add_lot/glb_add_lot.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_ADD_LOT.PRG
+        Object name:            GLB_ADD_LOT
+        Request #:              257512
+
+        Product:                General Lab - Quality Control           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        Insert a control lot into the database
+
+        Tables read:            n/a
+
+        Tables updated:         CONTROL_LOT
+
+        Executing from:         General Lab Build/Maintain QC Material Build
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 07/03/96 Kevin Brunner        Initial Release                     *
+;     001 03/26/98 Chad Moats           If more than 5 testsite, then a CCL *
+;                                       error occurs; Added error handling  *
+;     002 03/23/99 Gary Runde           If a row already exists with this   *
+;                                       control_id and lot_flag then exit   *
+;                                       because that means there is already *
+;                                       a active/preactive lot              *
+;     003 04/27/00 Gary Runde           Update lot_flag for expired lots    *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_ADD_LOT:dba go    
+      create program GLB_ADD_LOT:dba
+     
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request                                      
+      (                                       
+         1 control_id              = f8
+         1 lot_id                  = f8
+         1 short_description       = c20
+         1 lot_number              = vc
+         1 receive_dt_tm           = dq8
+         1 expiration_dt_tm        = dq8
+         1 lot_flag                = i2
+      ) 
+*/
+
+record reqinfo
+( 1 commit_ind  = i2
+  1 updt_id     = f8
+  1 position_cd = f8
+  1 updt_app    = i4
+  1 updt_task   = i4
+  1 updt_req    = i4
+  1 updt_applctx= i4
+)
+
+/********************************************************************/
+/*  Reply Record                                                    */
+/********************************************************************/
+
+      record reply
+      ( 
+         1 lot_id                  = f8        
+         1 status_data
+           2 status                = c1
+           2 subeventstatus[1]
+             3 OperationName       = c15
+             3 OperationStatus     = c1
+             3 TargetObjectName    = c15
+             3 TargetObjectValue   = vc
+      )
+
+/********************************************************************/
+/*  Reply Service_Resource                                          */
+/********************************************************************/
+
+      record ts
+      ( 
+;         1 testsites[5]									/*001*/
+         1 testsites[*]										/*001*/
+           2 service_resource_cd    = f8     
+           2 defined_inactive_dt_tm = dq8
+      )
+
+
+     #Script
+      set failed = "F"
+      declare lot_id            = f8 with protect, noconstant(0.0)
+      set reply->status_data->status = "F"
+      set prev_lot_id = request->lot_id
+      set ts_cnt = 0
+      set lot_cnt = 0
+      set x = 0
+      set sErrorMsg = FILLSTRING(255," ")    ;string containing error message			/*001*/
+      set error_check = ERROR(sErrorMsg,1)   ;reset error queue to empty			/*001*/
+
+/*******************************************************************/  ;002
+/* Check to make sure that preactive/active lot does not exist     */  ;002
+/*******************************************************************/  ;002
+
+	select into "nl:"                                              ;002
+	from                                                           ;002
+		control_lot cl                                         ;002
+	where cl.control_id = request->control_id                      ;002
+	and   cl.lot_flag = request->lot_flag                          ;002
+	and   cl.expiration_dt_tm > cnvtdatetime(curdate, curtime)     ;002
+	head report                                                    ;002
+		lot_cnt = 0                                            ;002
+	detail                                                         ;002
+		lot_cnt = lot_cnt + 1                                  ;002
+	with nocounter                                                 ;002
+                                                                       ;002
+	if (lot_cnt > 0)                                               ;002
+	      set reply->status_data->subeventstatus[1]->operationname =  ;002
+        	 "Check"                                                  ;002
+	      set reply->status_data->subeventstatus[1]->operationstatus =;002 
+        	 "P"                                                      ;002
+	      set reply->status_data->subeventstatus[1]->targetobjectname = ;002
+        	 "table"                                                    ;002
+	      set reply->status_data->subeventstatus[1]->targetObjectValue = ;002
+        	 "A active or preactive lot already exists"                 ;002
+	      set failed = "T"                                              ;002
+	      set reply->status_data->status = "P"                          ;002
+	      go to exit_script                                            ;002
+        endif                                                              ;002
+                                                                           ;002
+/*******************************************************************/
+/* Get new lot_id.                                                 */
+/*******************************************************************/
+      SELECT 
+         into "nl:"
+            y = seq(reference_seq,nextval)
+      FROM 
+         dual
+      DETAIL
+         lot_id = y
+         reply->lot_id = lot_id
+      WITH
+         format, counter
+
+      if (curqual = 0)
+         go to seq_failed
+      endif
+
+/*******************************************************************/
+/* Insert row into control_lot table.                              */
+/*******************************************************************/
+
+      INSERT
+         into control_lot cl
+      SET
+         cl.lot_id              = lot_id,
+         cl.control_id          = request->control_id,
+         cl.short_description   = request->short_description,
+         cl.lot_number          = request->lot_number,
+         cl.receive_dt_tm       = cnvtdatetime(request->receive_dt_tm),
+         cl.expiration_dt_tm    = cnvtdatetime(request->expiration_dt_tm),
+         cl.prev_lot_id         = prev_lot_id,
+         cl.lot_flag            = request->lot_flag,
+         cl.updt_dt_tm          = cnvtdatetime(curdate,curtime),
+         cl.updt_cnt            = 0,
+         cl.updt_task           = reqinfo->updt_task,
+         cl.updt_id             = reqinfo->updt_id,
+         cl.updt_applctx        = reqinfo->updt_applctx
+      WITH
+         nocounter
+     
+      if (curqual = 0)
+         go to cl_insert_failed
+      endif     
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message					/*001*/
+      if (error_check != 0)									/*001*/	
+        set reply->status_data->status = "F"							/*001*/
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg		/*001*/	
+        go to exit_script									/*001*/
+      endif											/*001*/
+
+/*******************************************************************/
+/* Update resource_lot_r table.                                    */
+/*******************************************************************/
+
+      if (prev_lot_id > 0)
+      SELECT into "nl:"
+         r.lot_id
+      FROM
+         resource_lot_r r
+      WHERE 
+         r.lot_id = prev_lot_id
+      DETAIL
+         ts_cnt = ts_cnt + 1
+         IF (mod(ts_cnt, 5) = 1)
+           stat = alterlist(ts->testsites, ts_cnt + 5)
+         ENDIF
+         ts->testsites[ts_cnt].service_resource_cd = r.service_resource_cd
+         ts->testsites[ts_cnt].defined_inactive_dt_tm = r.defined_inactive_dt_tm
+      WITH
+         nocounter         
+      endif
+         
+      set error_check = ERROR(sErrorMsg,0)   ;get error message					/*001*/
+      if (error_check != 0)									/*001*/	
+        set reply->status_data->status = "F"							/*001*/
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg		/*001*/	
+        go to exit_script									/*001*/
+      endif											/*001*/
+
+      set stat = alterlist(ts->testsites, ts_cnt)						/*001*/
+
+/*******************************************************************/
+/* Insert row into resource_lot_r table.                           */
+/*******************************************************************/
+
+      for (x = 1 to ts_cnt)
+        if (cnvtdatetime(request->receive_dt_tm) < cnvtdatetime(ts->testsites[x].defined_inactive_dt_tm))
+          set active_dt_tm = cnvtdatetime(ts->testsites[x].defined_inactive_dt_tm)
+        else
+          set active_dt_tm = cnvtdatetime(request->receive_dt_tm)
+        endif
+
+      INSERT
+         into resource_lot_r r
+      SET
+         r.lot_id = lot_id, 
+         r.service_resource_cd    = ts->testsites[x].service_resource_cd,
+;         r.defined_active_dt_tm   = cnvtdatetime(request->receive_dt_tm),
+         r.defined_active_dt_tm   = cnvtdatetime(active_dt_tm),
+         r.defined_inactive_dt_tm = cnvtdatetime(request->expiration_dt_tm),
+         r.updt_dt_tm             = cnvtdatetime(curdate,curtime),
+         r.updt_cnt               = 0,
+         r.updt_task              = reqinfo->updt_task,
+         r.updt_id                = reqinfo->updt_id,
+         r.updt_applctx           = reqinfo->updt_applctx
+      WITH
+         nocounter
+      endfor
+
+      set error_check = ERROR(sErrorMsg,0)   ;get error message					/*001*/
+      if (error_check != 0)									/*001*/
+        set reply->status_data->status = "F"							/*001*/
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg		/*001*/
+        go to exit_script									/*001*/
+      endif											/*001*/
+
+/*******************************************************************/                  ;003
+/* Update the lot_flag for lots that lot_flag > 0 and are expired  */                  ;003
+/*******************************************************************/                  ;003
+                                                                                       ;003
+      UPDATE                                                                           ;003
+         into control_lot cl                                                           ;003
+      SET                                                                              ;003
+         cl.lot_flag               = 0,                                                ;003
+         cl.updt_dt_tm             = cnvtdatetime(curdate,curtime),                    ;003
+         cl.updt_id                = reqinfo->updt_id,                                 ;003
+         cl.updt_task              = reqinfo->updt_task,                               ;003
+         cl.updt_cnt               = cl.updt_cnt + 1,                                  ;003
+         cl.updt_applctx           = reqinfo->updt_applctx                             ;003
+      PLAN cl                                                                          ;003
+         where  cl.expiration_dt_tm < cnvtdatetime(curdate, curtime3)                  ;003
+           and  cl.receive_dt_tm < cnvtdatetime(curdate, curtime3)                     ;003
+           and  cl.control_id = request->control_id                                    ;003
+           and  cl.lot_flag > 0                                                        ;003
+      WITH                                                                             ;003
+         nocounter                                                                     ;003
+                                                                                       ;003
+      set error_check = ERROR(sErrorMsg,0)                                             ;003
+      if (error_check != 0)                                                            ;003
+        set reply->status_data->status = "F"                                           ;003
+        set reply->status_data->subeventstatus[1]->TargetObjectValue = sErrorMsg       ;003
+        go to exit_script                                                              ;003
+      endif                                                                            ;003
+                                                                                       ;003
+      go to exit_script                                                                ;003
+
+/********************************************************************/ 
+/* Executed if sequence cannot be obtained.                         */
+/********************************************************************/
+     #seq_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "seq"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "lot_id"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if control_lot table update is unsuccessful.            */
+/********************************************************************/
+     #cl_update_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "update"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "control_lot table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Executed if control_lot table insert is unsuccessful.            */
+/********************************************************************/
+     #cl_insert_failed
+      set reply->status_data->subeventstatus[1]->operationname = 
+         "insert"
+      set reply->status_data->subeventstatus[1]->operationstatus = 
+         "F"
+      set reply->status_data->subeventstatus[1]->targetobjectname = 
+         "table"
+      set reply->status_data->subeventstatus[1]->targetObjectValue = 
+         "control_lot table"
+      set failed = "T"
+      go to exit_script
+
+/********************************************************************/ 
+/* Script exit.                                                     */
+/********************************************************************/
+     #exit_script
+      if (failed = "F")
+         set reply->status_data->status = "S"
+         commit
+      else
+         rollback
+      endif
+
+END
+GO     
+      
+
+;Generated by GNU enscript 1.6.4.

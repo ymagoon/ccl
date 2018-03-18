@@ -1,0 +1,771 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/Bbt_Quarantineproducts/BBT_CHG_QUARANTINE.PRG Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       bbt_chg_quarantine.prg
+        Object name:            bbt_chg_quarantine
+        Request #:                      225005
+ 
+        Product:                PathNet
+        Product Team:               Blood Bank
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Release quarantine(s)
+ 
+        Tables read:            quarantine, product_event, product, code_value
+        Tables updated:             quarantine, product_event, product
+        Executing from:         Quarantine Blood Bank Products
+ 
+        Special Notes:          ?
+ 
+******************************************************************************/
+ 
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer                     Comment                     *
+;    *--- -------- -------------------- ----------------------------------- *
+;     000 04/08/96 Jon Weekes           Initial Release                     *
+;     001 01/17/02 Sasi Gandham         Add order by for Head               *
+;     002 02/07/03 John Rieck           Updated to prevent adding an avail  *
+;                                       state to a product that already has *
+;                                       a drawn, tested, or available.      *
+;     003 12/22/03 jg7520             39495: Reworked SELECT with forupdate *
+;                                     to do individual table locking when   *
+;                                     appropriate.                          *
+;     004 08/12/05 Jeff Wain            Changed logic in derivative update  *
+;                                       to set cur_avail_qty and cur_intl_units
+;    *005 04/27/06 David Fifer          Added check for in-transit event cd *
+;     006 07/27/06 Alex Thompson        changed the derivative update to    *
+;					accurately modify the IUs	    *
+;~DE~************************************************************************
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program bbt_chg_quarantine:dba go
+create program bbt_chg_quarantine:dba
+ 
+/*
+record request
+(
+ 1  event_prsnl_id                  = f8
+ 1  event_dt_tm                     = dq8
+ 1  productlist[prod]
+     2  product_id                  = f8
+     2  cur_inv_locn_cd             = f8
+     2  p_updt_cnt                  = i4
+     2  drv_updt_cnt                = i4
+     2  quarlist[quar]
+         3  product_event_id        = f8
+         3  release_reason_cd       = f8
+         3  release_qty             = i4
+         3  qu_updt_cnt             = i4
+         3  pe_updt_cnt             = i4
+)
+*/
+ 
+record reply
+(
+ 1  product_status[5]
+     2  product_id                  = f8
+     2  status                      = c1
+     2  err_process                 = vc
+     2  err_message                 = vc
+     2  quar_status[1]
+         3  release_reason_cd       = f8
+         3  product_event_id        = f8
+         3  product_event_status    = c2
+         3  status                  = c1
+         3  err_process             = vc
+         3  err_message             = vc
+%i cclsource:status_block.inc
+)
+ 
+record internal
+(
+ 1  gsub_event_dt_tm                = f8
+)
+ 
+/*
+ * Initialize subroutine global variables
+ */
+    set gsub_code_value = 0.0
+    set gsub_dummy = ""
+    set gsub_product_event_status = "  "
+ 
+/*
+ * Initialize Global Variables
+ */
+    set reply->status_data->status = "F"
+    set reqinfo->commit_ind = 0
+    set quar_cnt = 0
+    set max_quar_cnt = 0
+    set tot_quar_cnt = 0
+    set success_cnt = 0
+    set tot_success_cnt = 0
+    set count1 = 0
+    set product_event_id = 0.0
+    set new_pathnet_seq = 0.0
+    set cur_quar_qty = 0
+    set new_quar_qty = 0
+    set quar_active_status_cd = 0.0
+    set quar_active_ind = 0
+    set derivative_ind = " "
+    set new_drv_updt_cnt = 0
+    set add_available_ind = " "
+    set new_avail_qty = 0
+    declare lUsPerVial = i4 WITH NOCONSTANT(0)
+ 
+%i cclsource:bbt_get_event_type_cds_init.inc
+ 
+%i cclsource:bbt_get_event_type_cds_sub.inc
+ 
+#BEGIN_MAIN
+    /* Determine number of products to be processed */
+    set product_cnt = cnvtint(size(request->productlist,5))
+    /* set size(reqply->product_status) = size(request->productlist) */
+    set stat = alter(reply->product_status,product_cnt)
+ 
+    /* Get event_type code_values */
+    set get_event_type_cds_status = GET_EVENT_TYPE_CDS(gsub_dummy)
+ 
+    if (get_event_type_cds_status = "F"
+    or 0.0 in (assigned_event_type_cd, quarantined_event_type_cd, crossmatched_event_type_cd,
+                issued_event_type_cd, transferred_event_type_cd, transfused_event_type_cd,
+                unconfirmed_event_type_cd, autologous_event_type_cd, directed_event_type_cd,
+                shipped_event_type_cd, in_progress_event_type_cd, available_event_type_cd,
+                in_transit_event_type_cd))
+        set reply->status_data->status = "F"
+        set count1 = count1 + 1
+        if (count1 > 1)
+            set stat = alter(reply->status_data->subeventstatus, count1+1)
+        endif
+        set reply->status_data->subeventstatus[count1]->OperationName = "get event_type code_values"
+        set reply->status_data->subeventstatus[count1]->OperationStatus = "F"
+        set reply->status_data->subeventstatus[count1]->TargetObjectName = "code_value"
+        if (get_event_type_cds_status = "F")
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get event_type code_values, select failed"
+        elseif (assigned_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get assigned event_type_cd"
+        elseif (quarantined_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get quarantined event_type_cd"
+        elseif (crossmatched_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get crossmatched event_type_cd"
+        elseif (issuted_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get issuted event_type_cd"
+        elseif (transferred_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get transferred event_type_cd"
+        elseif (transfused_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get transfused event_type_cd"
+        elseif (unconfirmed_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get unconfirmed event_type_cd"
+        elseif (autologous_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get autologous event_type_cd"
+        elseif (directed_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get directed event_type_cd"
+        elseif (available_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get available event_type_cd"
+        elseif (shipped_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get shipped event_type_cd"
+        elseif (in_progress_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get in_progress event_type_cd"
+        elseif (in_transit_event_type_cd = 0.0)
+            set reply->status_data->subeventstatus[count1]->TargetObjectValue
+                = "could not get in_transit_event_type_cd"
+        endif
+        go to EXIT_SCRIPT
+    else
+        /* Set reply->status_data->status to I */
+        set reply->status_data->status = "I"  ; Incomplete
+        /* The following "set request->event_dt_tm = cnvtdatetime(curdate, curtime3)" is TEMPORARY
+         * and should be deleted when the accept prsnl id, date, time dll is complete/implemented */
+               set request->event_dt_tm = cnvtdatetime(curdate, curtime3)
+               set request->event_prsnl_id = reqinfo->updt_id
+        /* END TEMPORARY */
+    endif
+ 
+    /* Process productlist */
+    for (prod = 1 to product_cnt)
+        ;call echo(build("prod =",prod))
+        /* init product_status->status = reply->status_data->status */
+        set reply->product_status[prod]->status = reply->status_data->status
+        set reply->product_status[prod]->product_id = request->productlist[prod]->product_id
+        set success_cnt = 0
+        set quar_cnt = 0
+        /* Determine number of quarantines to be processed for product */
+        set quar_cnt = cnvtint(size(request->productlist[prod]->quarlist,5))
+        set tot_quar_cnt = tot_quar_cnt + quar_cnt
+        if (quar_cnt > max_quar_cnt)
+            /* Alter size quar_status to largest quaraintine/product occurrance */
+            set max_quar_cnt = quar_cnt
+            set stat = alter(reply->product_status->quar_status,max_quar_cnt)
+        endif
+        ;call echo(build("prod / quar_cnt = ", prod, " / ", quar_cnt))
+ 
+        call PROCESS_QUARANTINES(gsub_dummy)
+            /*
+             * NOTE:  PROCESS_QUARANTINES is processed regardless of the value of reply->product_status[prod]->status
+             *        (i.e. "F").  If status = "F", this status is propagated to quar_status[quar]->status as well as err_process
+             *        and err_message for error processing purposes upon returning to client app.
+             * ALSO:  All successful quarantines are committed in PROCESS_QUARANTINES
+             */
+        set tot_success_cnt = tot_success_cnt + success_cnt
+ 
+        /*
+         * Update product row
+         */
+        update into product p
+            set p.locked_ind        = 0,
+                ;p.cur_inv_locn_cd  = request->productlist[prod]->cur_inv_locn_cd,
+                p.updt_cnt          = p.updt_cnt + 1,
+                p.updt_dt_tm        = cnvtdatetime(curdate, curtime3),
+                p.updt_task         = reqinfo->updt_task,
+                p.updt_id           = reqinfo->updt_id,
+                p.updt_applctx      = reqinfo->updt_applctx
+        plan p
+            where p.product_id      = request->productlist[prod]->product_id
+              and p.updt_cnt        = request->productlist[prod]->p_updt_cnt
+        with counter
+ 
+        if (curqual = 0)
+            if (reply->product_status[prod]->status != "F")
+                set reply->product_status[prod]->status = "F"
+                set reply->product_status[prod]->err_process = "update product"
+                set reply->product_status[prod]->err_message
+                    = "product row could not be updated--Quarantines added but product still locked"
+            endif
+       else
+            set sSuccess_cnt = cnvtstring(success_cnt)
+            set sQuar_cnt = cnvtstring(quar_cnt)
+            set sMsg = concat(trim(sSuccess_cnt), " of ", trim(sQuar_cnt), " quarantines released for product.")
+            set reply->product_status[prod]->err_message = sMsg
+            if (success_cnt > 0)
+                if (success_cnt = quar_cnt)
+                    set reply->product_status[prod]->status = "S"  ; Success
+                    set reply->product_status[prod]->err_process = "Success"
+                else
+                    set reply->product_status[prod]->status = "P"  ; Partial
+                    set reply->product_status[prod]->err_process = "Partial Success"
+                endif
+            else
+                set reply->product_status[prod]->status = "Z"  ; Zero
+                set reply->product_status[prod]->err_process = "Zero Success"
+            endif
+        endif
+ 
+         if (reply->product_status[prod]->status != "F")
+             commit
+         else
+             rollback
+         endif
+    endfor
+go to EXIT_SCRIPT
+#END_MAIN
+ 
+subroutine PROCESS_QUARANTINES(sub_dummy)
+    /*
+    * NOTE:  This routine is is performed for all requested quarantines, regardless of the value of product_status->status.
+    *            If product_status->status = "F"
+    *                product_status->status/err_process/err_message is then this status is propogated to each quarantine instance
+    *            else
+    *                product, product_event and quarantine rows are locked forupdate
+    *            if lock forupdate successful, quarantine product_event row is inactivated
+    *            if product_event inactivate is successful, quarantine row is released/inactivated
+    *            if lock forupdate, product_event, product_event inactiveate and quarantne release/inactivate all successful
+    *                all chages are committed
+    *            else
+    *                all changes are rolled back
+    */
+        /* set new_drv_updt_cnt for first quarantine for new product_id */
+        set new_drv_updt_cnt = request->productlist[prod]->drv_updt_cnt
+ 
+		set lUsPerVial = 0
+ 
+        for (quar = 1 to quar_cnt)
+            ;call echo(build("quar =",quar))
+            ;call echo(build("release_reason_cd =",request->productlist[prod]->quarlist[quar]->release_reason_cd))
+            ;call echo(build("product_event_id =", request->productlist[prod]->quarlist[quar]->product_event_id))
+ 
+            /* set reply values = to request values */
+            set reply->product_status[prod]->quar_status[quar]->release_reason_cd
+                = request->productlist[prod]->quarlist[quar]->release_reason_cd
+            set reply->product_status[prod]->quar_status[quar]->product_event_id
+                = request->productlist[prod]->quarlist[quar]->product_event_id
+            /* Initialize reply->product_status[prod]->quar_status[quar]->status to "X"--instance not used by current product */
+            set reply->product_status[prod]->quar_status[quar]->status = "X"
+            if (request->productlist[prod]->quarlist[quar]->product_event_id > 0)     ; instance used by this product
+                set reply->product_status[prod]->quar_status[quar]->status = "I"    ; Incomplete
+                if (reply->product_status[prod]->status != "F")
+                    /*
+                     * Lock product, product_event, quarantine and derivative(if derivative product) forupdate
+                     */
+                    /* Initialize derivative_ind, add_available_ind */
+                    set derivative_ind = " "
+                    set add_available_ind = " "
+                    select into "nl:"
+                          p.product_id
+                        from product p
+                        plan p where p.product_id = request->productlist[prod]->product_id
+                                 and p.updt_cnt = request->productlist[prod]->p_updt_cnt
+                        with nocounter, forupdate(p)
+                    if (curqual = 0)
+                        set reply->product_status[prod]->status = "F"
+                        set reply->product_status[prod]->err_process
+                            = "lock product rows forupdate"
+                        set reply->product_status[prod]->err_message
+                            = "product rows could not be locked forupdate"
+ 
+                    else
+                      select into "nl:"
+                        p.product_id,
+                        pe.product_event_id,
+                        pe.event_type_cd,
+                        qu.cur_quar_qty,
+                        bp.seq,
+                        bp.product_id,
+                        drv.seq,
+                        drv.product_id
+ 
+                       from
+                        product p,
+                        product_event pe,
+                        quarantine qu,
+                        (dummyt d_drv_bp with seq = 1),
+                        derivative drv,
+                        blood_product bp
+ 
+                       plan    p   where p.product_id        = request->productlist[prod]->product_id
+                                     and p.updt_cnt          = request->productlist[prod]->p_updt_cnt
+                       join    pe  where pe.product_id       = p.product_id
+                                     and ((pe.product_event_id
+                                                    = request->productlist[prod]->quarlist[quar]->product_event_id
+                                           and pe.updt_cnt
+                                                    = request->productlist[prod]->quarlist[quar]->pe_updt_cnt)
+                                           or (pe.active_ind = 1
+                                                ; and pe.active_status_cd = reqdata->active_status_cd
+                                                and pe.product_event_id
+                                                    != request->productlist[prod]->quarlist[quar]->product_event_id
+                                                and pe.event_type_cd
+                                                        in (assigned_event_type_cd, quarantined_event_type_cd,
+                                                            crossmatched_event_type_cd, issued_event_type_cd,
+                                                            transferred_event_type_cd, transfused_event_type_cd,
+                                                            unconfirmed_event_type_cd, autologous_event_type_cd,
+                                                            directed_event_type_cd, shipped_event_type_cd,
+                                                            in_progress_event_type_cd, available_event_type_cd,
+                                                            drawn_event_type_cd, tested_event_type_cd,
+                                                            in_transit_event_type_cd)))
+                       join    qu  where qu.product_event_id
+                                        = request->productlist[prod]->quarlist[quar]->product_event_id
+                                     and qu.updt_cnt
+                                        = request->productlist[prod]->quarlist[quar]->qu_updt_cnt
+                       join    (d_drv_bp where d_drv_bp.seq = 1
+                        join    (drv    where   drv.product_id      = p.product_id
+                                                  and drv.updt_cnt  = new_drv_updt_cnt)
+                        orjoin  (bp     where   bp.product_id       = p.product_id))
+ 
+ 
+										order by p.product_id, pe.product_event_id
+                       head p.product_id
+                        ; Initialize add_available_ind to "Y"; reset below if conflicting state found
+                        add_available_ind = "Y"
+                        if (drv.seq > 0)
+                            derivative_ind = "Y"
+                            cur_quar_qty = qu.cur_quar_qty
+                            lUsPerVial = drv.units_per_vial
+                        elseif (bp.seq > 0)
+                            derivative_ind = "N"
+                        endif
+ 
+ 
+                       head pe.product_event_id
+                        if (derivative_ind = "Y"
+                        and pe.event_type_cd = available_event_type_cd)
+                            add_available_ind = "N"
+                        elseif (derivative_ind != "Y"
+                        and pe.event_type_cd in (assigned_event_type_cd, quarantined_event_type_cd,
+                                crossmatched_event_type_cd, issued_event_type_cd, transferred_event_type_cd,
+                                transfused_event_type_cd, unconfirmed_event_type_cd, autologous_event_type_cd,
+                                directed_event_type_cd, shipped_event_type_cd, in_progress_event_type_cd,
+                                available_event_type_cd, drawn_event_type_cd, tested_event_type_cd,
+                                in_transit_event_type_cd)
+                        and pe.product_event_id != request->productlist[prod]->quarlist[quar]->product_event_id)
+                            add_available_ind = "N"
+                        endif
+ 
+                       with        nocounter
+ 
+                      if (curqual = 0)
+                        set reply->product_status[prod]->status = "F"
+                        set reply->product_status[prod]->err_process = "update product_event/quarantine/derivative"
+                        set reply->product_status[prod]->err_message
+                            = "could not lock product/product_event/quarantine/derivative row for update"
+                      else
+                        if (request->productlist[prod]->quarlist[quar]->release_qty > cur_quar_qty)
+                            set reply->product_status[prod]->status = "F"
+                            set reply->product_status[prod]->err_process
+                                = "update product_event/quarantine/derivative"
+                            set reply->product_status[prod]->err_message
+                                = "release_qty > cur_quar_qty--cannot release quarantine"
+                        endif           ; endif release_qty > cur_quar_qty
+                      endif                   ; endif curqual = 0 p,pe,q forupdate
+                    endif             ; endif outer curqual = 0
+                endif               ; endif product_status->status != "F"
+            endif                   ; endif product_event_id > 0
+ 
+ 
+            /*
+             * In the following lines, product_status->status/err_process/err_message is propagated to the current quarantine
+             * instance, which includes values resulting from previous scipt failures (get quarantined_event_type_cd and
+             * lock forupdate.
+             */
+            if (reply->product_status[prod]->quar_status[quar]->status != "X")          ; X = instance not used by this product
+                set reply->product_status[prod]->quar_status[quar]->status = reply->product_status[prod]->status
+                set reply->product_status[prod]->quar_status[quar]->err_process = reply->product_status[prod]->err_process
+                set reply->product_status[prod]->quar_status[quar]->err_message = reply->product_status[prod]->err_message
+            endif
+ 
+ 
+ 
+            if (reply->product_status[prod]->quar_status[quar]->status != "F"       ; script or locked forupdate Failed
+            and reply->product_status[prod]->quar_status[quar]->status != "X")      ; quarlist instance not used for this product
+ 
+                /* set cur_quar_qty, quar_active_ind/status_cd */
+                if (derivative_ind = "Y"
+                and (cur_quar_qty - request->productlist[prod]->quarlist[quar]->release_qty) > 0)
+                    set quar_active_status_cd = reqdata->active_status_cd
+                    set quar_active_ind = 1
+                else
+                    set quar_active_status_cd = reqdata->inactive_status_cd
+                    set quar_active_ind = 0
+                endif
+ 
+                /*
+                 * Inactivate quarantine product_event row
+                 */
+                select into "nl:"
+                      pe.product_id
+                    from product_event pe
+                    plan pe  where pe.product_id = request->productlist[prod]->product_id
+                               and pe.product_event_id
+                                               = request->productlist[prod]->quarlist[quar]->product_event_id
+                               and pe.updt_cnt = request->productlist[prod]->quarlist[quar]->pe_updt_cnt
+                    with nocounter, forupdate(pe)
+                if (curqual = 0)
+                        set reply->product_status[prod]->status = "F"
+                        set reply->product_status[prod]->err_process
+                            = "lock product_event rows forupdate"
+                        set reply->product_status[prod]->err_message
+                            = "product_event rows could not be locked forupdate"
+                else
+                  call CHG_PRODUCT_EVENT
+                    (
+                     /* product_event_id       */ request->productlist[prod]->quarlist[quar]->product_event_id,
+                     /* event_dt_tm            */ cnvtdatetime(curdate, curtime3),
+                     /* event_prsnl_id         */ 0,
+                     /* event_status_flag      */ 0,
+                     /* active_ind             */ quar_active_ind,
+                     /* active_status_cd       */ quar_active_status_cd,
+                     /* active_status_dt_tm    */ cnvtdatetime(curdate, curtime3),
+                     /* active_status_prsnl_id */ reqinfo->updt_id,
+                     /* updt_cnt               */ request->productlist[prod]->quarlist[quar]->pe_updt_cnt,
+                     /* lock_forupdate_ind     */ 0, ; 0 = do not lock forupdate--locked above
+                     /* update_dt_tm_prsnl_ind */ 0  ; 0 = do not update event_dt_tm/prsnl_id
+                    )
+                  set reply->product_status[prod]->quar_status[quar]->product_event_status = gsub_product_event_status
+ 
+                  if (gsub_product_event_status = "FU")           ; product_event update failed
+                    set reply->product_status[prod]->quar_status[quar]->status = "F"
+                    set reply->product_status[prod]->quar_status[quar]->err_process = "update product_event"
+                    set reply->product_status[prod]->quar_status[quar]->err_message
+                        = "quarantine product_event row could not be inactivated"
+                  elseif (gsub_product_event_status = "OK")       ; product_event update successful
+ 
+                    /*
+                     * Release/inactivate quarantine row
+                     */
+                    if (derivative_ind = "Y")
+                        set new_quar_qty = (cur_quar_qty - request->productlist[prod]->quarlist[quar]->release_qty)
+                    else
+                        set new_quar_qty = NULL
+                    endif
+ 
+                    select into "nl:"
+                          qu.product_id
+                        from quarantine qu
+                        plan qu  where qu.product_id = request->productlist[prod]->product_id
+                                   and qu.product_event_id
+                                                        = request->productlist[prod]->quarlist[quar]->product_event_id
+                                   and qu.updt_cnt
+                                                        = request->productlist[prod]->quarlist[quar]->qu_updt_cnt
+                        with nocounter, forupdate(qu)
+                    if (curqual = 0)
+                        set reply->product_status[prod]->status = "F"
+                        set reply->product_status[prod]->err_process
+                            = "lock quarantine rows forupdate"
+                        set reply->product_status[prod]->err_message
+                            = "quarantine rows could not be locked forupdate"
+                    else
+                      update into quarantine qu
+                        set qu.cur_quar_qty            = new_quar_qty,
+                           qu.updt_cnt                 = qu.updt_cnt + 1,
+                           qu.updt_dt_tm               = cnvtdatetime(curdate, curtime3),
+                           qu.updt_task                = reqinfo->updt_task,
+                           qu.updt_id                  = reqinfo->updt_id,
+                           qu.updt_applctx             = reqinfo->updt_applctx,
+                           qu.active_ind               = quar_active_ind,
+                           qu.active_status_cd         = quar_active_status_cd,
+                           qu.active_status_dt_tm      = cnvtdatetime(curdate, curtime3),
+                           qu.active_status_prsnl_id   = reqinfo->updt_id,
+                           qu.cur_quar_intl_units	   = new_quar_qty * lUsPerVial
+                        where   qu.product_event_id         = request->productlist[prod]->quarlist[quar]->product_event_id
+                          and qu.updt_cnt           = request->productlist[prod]->quarlist[quar]->qu_updt_cnt
+ 
+                      if (curqual = 0)
+                        set reply->product_status[prod]->quar_status[quar]->status = "F"
+                        set reply->product_status[prod]->quar_status[quar]->err_process = "update quarantine"
+                        set reply->product_status[prod]->quar_status[quar]->err_message
+                            = "quarantine row could not be released/inactivated"
+                      else
+                        /*
+                         * Retrieve new sequence number for quar_relase_id
+                         */
+%i cclsource:bbt_get_pathnet_seq.inc
+                        /* Create quarantine_release record */
+                        insert into quarantine_release qr
+                            set qr.quar_release_id   = new_pathnet_seq,
+                                qr.product_event_id  = request->productlist[prod]->quarlist[quar]->product_event_id,
+                                qr.product_id        = request->productlist[prod]->product_id,
+                                qr.release_dt_tm     = cnvtdatetime(request->event_dt_tm),
+                                qr.release_prsnl_id  = request->event_prsnl_id,
+                                qr.release_qty
+                                    =  if (derivative_ind = "Y")
+                                          request->productlist[prod]->quarlist[quar]->release_qty
+                                       else
+                                           NULL
+                                       endif,
+                                qr.release_reason_cd = request->productlist[prod]->quarlist[quar]->release_reason_cd,
+                                qr.updt_cnt                 = 0,
+                                qr.updt_dt_tm               = cnvtdatetime(curdate, curtime3),
+                                qr.updt_task                = reqinfo->updt_task,
+                                qr.updt_id                  = reqinfo->updt_id,
+                                qr.updt_applctx             = reqinfo->updt_applctx,
+                                qr.active_ind               = 1,
+                                qr.active_status_cd         = reqdata->active_status_cd,
+                                qr.active_status_dt_tm      = cnvtdatetime(curdate, curtime3),
+                                qr.active_status_prsnl_id   = reqinfo->updt_id,
+                                qr.release_intl_units		= request->productlist[prod]->quarlist[quar]->release_qty *
+															  lUsPerVial
+ 
+                        if (curqual = 0)
+                            set reply->product_status[prod]->quar_status[quar]->status = "F"
+                            set reply->product_status[prod]->quar_status[quar]->err_process
+                                = "add quarantine_release row"
+                            set reply->product_status[prod]->quar_status[quar]->err_message
+                                = "quarantine_release row could not be added"
+                        else
+                            if (add_available_ind = "Y")
+                                /*
+                                 * Insert row into product_event for available event
+                                 */
+                                call ADD_PRODUCT_EVENT
+                                    (
+                                     /* product_id               */ request->productlist[prod]->product_id,
+                                     /* person_id                */ 0,
+                                     /* encntr_id                */ 0,
+                                     /* order_id                 */ 0,
+                                     /* bb_result_id             */ 0,
+                                     /* event_type_cd            */ available_event_type_cd,
+                                     /* event_dt_tm              */ cnvtdatetime(request->event_dt_tm),
+                                     /* event_prsnl_id           */ request->event_prsnl_id,
+                                     /* event_status_flag        */ 0,
+                                     /* override_ind             */ 0,
+                                     /* override_reason_cd       */ 0,
+                                     /* related_product_event_id */ 0,
+                                     /* active_ind               */ 1,
+                                     /* active_status_cd         */ reqdata->active_status_cd,
+                                     /* active_status_dt_tm      */ cnvtdatetime(curdate, curtime3),
+                                     /* active_status_prsnl_id   */ reqinfo->updt_id
+                                    )
+                                set reply->product_status[prod]->quar_status[quar]->product_event_status
+                                    = gsub_product_event_status
+ 
+                                if (gsub_product_event_status = "FS")       ; get_product_event_id (seq) failed
+                                    set reply->product_status[prod]->quar_status[quar]->status = "F"
+                                    set reply->product_status[prod]->quar_status[quar]->err_process
+                                        = "add product_event"
+                                    set reply->product_status[prod]->quar_status[quar]->err_message
+                                        = "get new product_event_id failed (seq) "
+                                elseif (gsub_product_event_status = "FA")   ; add product_event failed
+                                    set reply->product_status[prod]->quar_status[quar]->status = "F"
+                                   set reply->product_status[prod]->quar_status[quar]->err_process
+                                        = "add product_event"
+                                    set reply->product_status[prod]->quar_status[quar]->err_message
+                                        = "available product_event row could not be added"
+                                endif                   ; gsub_product_event_status = ....
+                            endif                   ; endif add_available_ind = "Y"
+ 
+                            if (derivative_ind = "Y"
+                            and reply->product_status[prod]->quar_status[quar]->status != "F") ; add available OK
+                                /* Update cur_qty on derivative table if product is a derivative */
+                                select into "nl:"
+                                   drv.product_id
+                                from derivative drv
+                                plan drv where drv.product_id = request->productlist[prod]->product_id
+                                    and drv.updt_cnt = new_drv_updt_cnt
+                                detail
+                                	new_avail_qty = drv.cur_avail_qty + request->productlist[prod]->quarlist[quar]->release_qty
+                                with nocounter, forupdate(drv)
+                                if (curqual = 0)
+                                    set reply->product_status[prod]->status = "F"
+                                    set reply->product_status[prod]->err_process
+                                        = "lock derivative rows forupdate"
+                                    set reply->product_status[prod]->err_message
+                                        = "derivative rows could not be locked forupdate"
+                                endif
+ 
+                                update into derivative drv
+                                    set drv.cur_avail_qty            = new_avail_qty,
+                                        drv.cur_intl_units           = new_avail_qty * drv.units_per_vial,
+                                        drv.updt_cnt                 = drv.updt_cnt + 1,
+                                        drv.updt_dt_tm               = cnvtdatetime(curdate, curtime3),
+                                        drv.updt_task                = reqinfo->updt_task,
+                                        drv.updt_id                  = reqinfo->updt_id,
+                                        drv.updt_applctx             = reqinfo->updt_applctx
+                                where   drv.product_id = request->productlist[prod]->product_id
+                                          and drv.updt_cnt = new_drv_updt_cnt
+ 
+                                if (curqual = 0)
+                                    set reply->product_status[prod]->quar_status[quar]->status = "F"
+                                    set reply->product_status[prod]->quar_status[quar]->err_process
+                                        = "update derivative row"
+                                    set reply->product_status[prod]->quar_status[quar]->err_message
+                                        = build("derivative   row could not be added")
+                                else
+                                    /* increment new_drv_updt_cnt for product_id for other releases for same product_id */
+                                    set new_drv_updt_cnt = new_drv_updt_cnt + 1
+                                endif           ; endif curqual derivative
+                            endif               ; endif derivative_ind = "Y"
+                        endif           ; endif curqual = 0 quarantine_release
+                      endif           ; endif curqual = 0 quarantine
+                    endif             ; outer curqual = 0
+                  else
+                    set reply->product_status[prod]->quar_status[quar]->status = "F"
+                    set reply->product_status[prod]->quar_status[quar]->err_process = "add product_event"
+                    set reply->product_status[prod]->quar_status[quar]->err_message
+                        = build("Script error!  Invalid product_event_status--", gsub_product_event_status)
+                  endif        ; endif gsub_product_event_status = "FU"
+                endif        ; curqual = 0
+            endif            ; endif quar_status->status <> "F"/"X"
+ 
+            if (reply->product_status[prod]->quar_status[quar]->status != "X")
+                if (reply->product_status[prod]->quar_status[quar]->status = "F")
+                    rollback
+                else
+                    commit
+                    ;call echo(build("quarantine OK:  curqual =", curqual))
+                    set success_cnt = success_cnt + 1
+                    set reply->product_status[prod]->quar_status[quar]->status = "S"
+                    set reply->product_status[prod]->quar_status[quar]->err_process = "COMPLETE"
+                    set reply->product_status[prod]->quar_status[quar]->err_message
+                        = "quarantine released--all rows updated/inactivated"
+                endif               ; endif quar_status->status = "F"
+            endif               ; endif quar_status->status != "X"
+        endfor               ; endfor quar = 1 to quar_cnt
+END                 ; end subroutine PROCESS_QUARANTINES
+ 
+ 
+ 
+%i cclsource:bbt_chg_product_event.inc
+END             ; end subroutine CHG_PRODUCT_EVENT
+ 
+%i cclsource:bbt_add_product_event.inc
+END             ; end subroutine ADD_PRODUCT_EVENT
+ 
+#EXIT_SCRIPT
+if (reply->status_data->status != "F")
+    set count1 = count1 + 1
+    if (count1 > 1)
+        set stat = alter(reply->status_data->subeventstatus, count1+1)
+    endif
+    set reply->status_data->subeventstatus[count1]->OperationName = "bbt_add_quarantine"
+    set reply->status_data->subeventstatus[count1]->OperationStatus = "S"
+    set reply->status_data->subeventstatus[count1]->TargetObjectName = "Success"
+    set reply->status_data->subeventstatus[count1]->TargetObjectValue = "script completed successfully"
+    if (tot_success_cnt > 0)
+        set reqinfo->commit_ind = 1
+        if (tot_success_cnt = tot_quar_cnt)
+            set reply->status_data->status = "S"
+        else
+            set reply->status_data->status = "P"
+        endif
+    else
+        set reply->status_data->status = "Z"
+    endif
+endif
+ 
+;call echo(build("success_cnt = ", success_cnt))
+;call echo(build("product_cnt    = ", product_cnt))
+;call echo(build("request->event_dt_tm =", request->event_dt_tm))
+;call echo(build("reply->status_data->status = ",reply->status_data->status))
+;for (prod = 1 to product_cnt)
+;    call echo(build("     "))
+;    call echo(build("product_event_id =", product_event_id))
+;    call echo(build("product_status->product_id  = ", reply->product_status[prod]->product_id))
+;    call echo(build("product_status->status      = ", reply->product_status[prod]->status))
+;    call echo(build("product_status->err_process = ", reply->product_status[prod]->err_process))
+;    call echo(build("product_status->err_message = ", reply->product_status[prod]->err_message))
+;    for (quar = 1 to cnvtint(size(request->productlist[prod]->quarlist,5)))
+;        call echo(build("     "))
+;        call echo(build("    request->...release_reason_cd =", request->productlist[prod]->quarlist[quar]->release_reason_cd))
+;        call echo(build("    request->...release_qty  =", request->productlist[prod]->quarlist[quar]->release_qty))
+;        call echo(build("    request->.....qu_updt_cnt =", request->productlist[prod]->quarlist[quar]->qu_updt_cnt))
+;        call echo(build("     "))
+;call echo(build("    quar_status->release_reason_cd  = ", reply->product_status[prod]->quar_status[quar]->release_reason_cd))
+;        call echo(build("   quar_status->product_event_id =", reply->product_status[prod]->quar_status[quar]->product_event_id))
+;call echo(build("quar_status->product_event_status =", reply->product_status[prod]->quar_status[quar]->product_event_status))
+;        call echo(build("    quar_status->status      = ", reply->product_status[prod]->quar_status[quar]->status))
+;        call echo(build("    quar_status->err_process = ", reply->product_status[prod]->quar_status[quar]->err_process))
+;        call echo(build("    quar_status->err_message = ", reply->product_status[prod]->quar_status[quar]->err_message))
+;    endfor
+;endfor
+end go
+ 
+ 
+ 
+
+;Generated by GNU enscript 1.6.4.

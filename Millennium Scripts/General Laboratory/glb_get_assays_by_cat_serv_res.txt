@@ -1,0 +1,191 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_assays_by_cat_serv_res/glb_get_assays_by_cat_serv_res.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1998 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+ 
+/*****************************************************************************
+ 
+        Source file name:       glb_get_assays_by_cat_serv_res.prg
+        Object name:            glb_get_assays_by_cat_serv_res
+        Request #:              250073
+ 
+        Product:                General Laboratory
+        Product Team:           PathNet
+        HNA Version:            500
+        CCL Version:            4.0
+ 
+        Program purpose:        Retrieves a unique list of assays based on a
+                                list of order catalog items at a particular service resource.
+ 
+        Tables read:            order_catalog
+                                profile_task_r
+                                orc_resource_list
+                                discrete_task_assay
+                                assay_resource_list
+ 
+        Tables updated:         None
+        Executing from:         glb_rpt_worklist.prg
+                                AccessionResultEntry.exe
+ 
+        Special Notes:
+ 
+******************************************************************************/
+ 
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;    *000 10/19/09 Matt Schile          Initial Release                     *
+;~DE~*************************************************************************
+ 
+ 
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+ 
+drop program glb_get_assays_by_cat_serv_res:dba go
+create program glb_get_assays_by_cat_serv_res:dba
+ 
+/***********************************************************************
+* Request Record                                                       *
+***********************************************************************/
+/*
+record request
+(
+   1 service_resource_cd = f8
+   1 order_catalog[*]
+      2 catalog_cd = f8
+)
+*/
+ 
+/***********************************************************************
+* Reply Record                                                         *
+***********************************************************************/
+if (not validate(reply, 0))
+   record reply
+   (
+%i cclsource:glb_get_assays_by_cat_serv_res_reply.inc
+   )
+endif
+ 
+/**************************************************************
+; START OF SCRIPT
+**************************************************************/
+ 
+declare lStart = i4  with protect, noconstant(0)
+declare lLoopCnt = i4  with protect, noconstant(0)
+declare lTempCnt = i4  with protect, noconstant(0)
+declare lCnt = i4  with protect, noconstant(0)
+declare lCatalogIdx = i4  with protect, noconstant(0)
+declare lIdx = i4  with protect, noconstant(0)
+declare lExpandSize = i4  with protect, noconstant(0)
+ 
+;Default the status to failed
+set reply->status_data.status = "F"
+ 
+;Initialize variables used for breaking up the EXPAND calls to improve performance
+set lCnt = size(request->order_catalog, 5)
+ 
+if(lCnt > 20)
+   set lExpandSize = 20
+else
+   set lExpandSize = lCnt
+endif
+
+set lStart = 1
+set lLoopCnt = ceil(cnvtreal(lCnt)/lExpandSize)
+set lTempCnt = lLoopCnt * lExpandSize
+
+;Size the order_catalog so that it is equally divisible by EXPAND_SIZE
+set stat = alterlist(request->order_catalog, lTempCnt)
+
+;Pad the new items in the order_catalog list with the last order_catalog item so that the expand can be broken up
+for (lCatalogIdx = lCnt + 1 to lTempCnt)
+   set request->order_catalog[lCatalogIdx].catalog_cd = request->order_catalog[lCnt].catalog_cd
+endfor
+ 
+;Select to retrieve the list of assays associated to the order catalog items passed in
+;at the requested service resource.  The order_catalog table will provide the
+;resource route level which will be used to determine if we need to look at
+;the order catalog resource list table or the assay resource list table.
+;If the order catalog item is level one routed and a row exists on the order catalog
+;resource list table at the requested service resource, we will add all assays
+;associated to the order catalog item to the reply.  If the order catalog item is level two
+;routed, we will check the assay resource list table for each assay to verify
+;a row exists on the table for the requested service resource before adding the item to the reply.
+select distinct into "nl:"
+   arl_exists = evaluate(nullind(arl.task_assay_cd), 1, 0, 1)
+   ,orl_exists = evaluate(nullind(orl.catalog_cd), 1, 0, 1)
+from
+   (dummyt d1 with seq = lLoopCnt)
+   ,order_catalog oc
+   ,(left join orc_resource_list orl
+      on (orl.catalog_cd = oc.catalog_cd
+      and orl.service_resource_cd = request->service_resource_cd
+      and orl.active_ind = 1
+      and orl.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+      and orl.end_effective_dt_tm > cnvtdatetime(curdate,curtime3)))
+   ,profile_task_r ptr
+   ,discrete_task_assay dta
+   ,(left join assay_resource_list arl
+      on (arl.task_assay_cd = dta.task_assay_cd
+      and arl.service_resource_cd = request->service_resource_cd
+      and arl.active_ind = 1
+      and arl.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+      and arl.end_effective_dt_tm > cnvtdatetime(curdate,curtime3)))
+plan d1
+   where assign(lStart, evaluate(d1.seq, 1, 1, lStart + lExpandSize))
+join oc
+   where expand(lIdx, lStart, lStart + (lExpandSize - 1), oc.catalog_cd, request->order_catalog[lIdx].catalog_cd)
+join orl
+join ptr
+   where ptr.catalog_cd = oc.catalog_cd
+     and ptr.active_ind = 1
+     and ptr.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
+     and ptr.end_effective_dt_tm > cnvtdatetime(curdate,curtime3)
+join dta
+   where dta.task_assay_cd = ptr.task_assay_cd
+join arl
+order by
+   ptr.task_assay_cd, 0
+head report
+   a_cnt = 0
+detail
+   if((oc.resource_route_lvl = 2 and arl_exists = 1) or (oc.resource_route_lvl = 1 and orl_exists = 1))
+      a_cnt = a_cnt + 1
+      if(mod(a_cnt, 10) = 1)
+         stat = alterlist(reply->assays, a_cnt + 9)
+      endif
+      reply->assays[a_cnt].task_assay_cd = ptr.task_assay_cd
+      reply->assays[a_cnt].mnemonic = dta.mnemonic
+   endif
+foot report
+   stat = alterlist(reply->assays, a_cnt)
+with nocounter
+ 
+if(size(reply->assays, 5) > 0)
+   set reply->status_data.status = "S"
+else
+   set reply->status_data.status = "Z"
+endif
+ 
+end
+go
+
+;Generated by GNU enscript 1.6.4.

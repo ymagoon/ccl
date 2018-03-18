@@ -1,0 +1,281 @@
+ ;;Solution_Test/script/PathNet -- Gen Lab/glb_get_qc_diffdm/glb_get_qc_diffdm.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-1995 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+        Source file name:       GLB_GET_QC_DIFFDM.PRG
+        Object name:            GLB_GET_QC_DIFFDM
+        Request #:             
+
+        Product:                General Lab - Quality Control           
+        Product Team:           GLB
+        HNA Version:            500
+        CCL Version:            4.0
+        
+        Program purpose:        When copying procedures from one test site to
+                                another check to make sure data maps are the
+				same for both testsites, if not, inform user 
+				and ask user if they want to change data map
+
+        Tables read:            assay_resource_lot
+				data_map
+
+        Tables updated:         n/a                
+
+        Executing from:         General Lab Build/Maintain QC Material
+
+        Special Notes:          n/a
+******************************************************************************/
+;~DB~************************************************************************
+;    *                      GENERATED MODIFICATION CONTROL LOG              *
+;    ************************************************************************
+;    *                                                                      *
+;    *Mod Date     Engineer             Comment                             *
+;    *--- -------- -------------------- ----------------------------------- *
+;     ### 06/29/99 Gary Runde           Initial Release                     *
+;     001 01/03/02 Ahti Rovainen        Replace Head with Detail            *
+;~DE~************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
+
+      drop program GLB_GET_QC_DIFFDM:dba go  
+      create program GLB_GET_QC_DIFFDM:dba
+     
+/********************************************************************/
+/*  Request Record                                                  */
+/********************************************************************/
+/*
+      record request                                      
+      (                                       
+	 1 cur_lot_id  		      = f8	
+         1 to_service_resource_cd     = f8
+         1 from_service_resource_cd   = f8
+      ) 
+*/
+
+/***********************************************************************
+* Reply Record                                                         *
+***********************************************************************/
+     record reply
+     ( 
+         1 procs[*]
+           2 task_assay_cd              = f8
+           2 task_assay_disp            = vc
+           2 to_service_resource_cd     = f8
+           2 to_max_digits              = i4
+           2 to_min_digits              = i4
+           2 to_min_decimal_places      = i4
+           2 from_service_resource_cd   = f8
+           2 from_max_digits            = i4
+           2 from_min_digits            = i4
+           2 from_min_decimal_places    = i4
+           2 data_map_flag              = i2    ;0 = both exist and are equal
+						;1 = both exist and not equal
+						;2 = from exist but to doesn't
+						;3 = from does not exist
+%i cclsource:status_block.inc
+      )
+
+
+/********************************************************************/
+/*  Assay_Resource_Lot Record                                       */
+/********************************************************************/
+
+      record proc
+      (                                       
+         1 procs[*]
+           2 task_assay_cd         = f8
+      ) 
+
+      /***********************************************************************
+      * Script                                                               *
+      ***********************************************************************/
+     #Script
+      set reply->status_data->status = "F"
+
+      declare p_cnt                 = i4
+      declare cnt                   = i4
+      declare p2_cnt		    = i4
+
+      /***********************************************************************
+      * Get the assays that need to be compared from ARL table               *
+      ***********************************************************************/
+          select into "nl:"
+            arl.lot_id 
+          from
+            assay_resource_lot arl 
+          plan arl
+ 	          where arl.lot_id = request->cur_lot_id 
+        	    and arl.service_resource_cd = request->from_service_resource_cd
+	            and arl.active_ind = 1
+	  head report
+	    p_cnt = 0
+          detail
+            p_cnt = p_cnt + 1
+            if (mod(p_cnt,5) = 1)
+              stat = alterlist(proc->procs,p_cnt + 5)
+            endif   
+            proc->procs[p_cnt].task_assay_cd = arl.task_assay_cd  
+          with 
+            nocounter
+
+          if (curqual = 0)
+         	set reply->status_data->status = "Z"
+		go to exit_script          
+	  else
+	        set stat = alterlist(proc->procs, p_cnt)
+          endif
+
+      /***********************************************************************
+      * Loop through all of assays checking to see if DM are equal           *
+      ***********************************************************************/
+	  set p2_cnt = 0
+
+	  for (cnt = 1 to p_cnt)
+	  select into "nl:"
+		apr.task_assay_cd,
+		apr2.task_assay_cd,
+	  	dm.max_digits,
+		dm.min_digits,
+		dm.min_decimal_places,
+	  	dm2.max_digits,
+		dm2.min_digits,
+		dm2.min_decimal_places,
+		dm_exists = decode(dm.seq, "Y", "N"),		
+		dm2_exists = decode(dm2.seq, "Y", "N")	
+	  from 
+		assay_processing_r apr,
+		assay_processing_r apr2,
+		dummyt d1,
+		data_map dm,
+		dummyt d2,
+		data_map dm2
+	  plan apr where apr.task_assay_cd = proc->procs[cnt].task_assay_cd
+	       and apr.service_resource_cd = request->from_service_resource_cd
+	  join apr2 where apr2.task_assay_cd = proc->procs[cnt].task_assay_cd
+	       and apr2.service_resource_cd = request->to_service_resource_cd
+	  join d1
+	  join dm
+		where dm.task_assay_cd = apr.task_assay_cd
+		and dm.service_resource_cd = request->from_service_resource_cd
+		and dm.data_map_type_flag = 1 
+		and dm.active_ind = 1
+	  join d2
+	  join dm2
+		where dm2.task_assay_cd = apr2.task_assay_cd
+		and dm2.service_resource_cd = request->to_service_resource_cd
+		and dm2.data_map_type_flag = 1 
+		and dm2.active_ind = 1          
+
+          detail
+call echo(build("task_assay_cd = ", proc->procs[cnt].task_assay_cd)) 
+		if ((dm_exists = "Y") and (dm2_exists = "Y")  
+		  and ((dm.min_digits != dm2.min_digits) or
+	              (dm.max_digits != dm2.max_digits) or
+		      (dm.min_decimal_places != dm2.min_decimal_places)))
+		;qc data maps exist for this proc and both resources
+	         ;if the data maps are different set flag = 1
+		  p2_cnt = p2_cnt + 1
+		  if (mod(p2_cnt,5) = 1)
+			stat = alterlist(reply->procs, p2_cnt + 5)
+            	  endif   
+		  reply->procs[p2_cnt].data_map_flag = 1
+		  reply->procs[p2_cnt].task_assay_cd = 
+			 proc->procs[cnt].task_assay_cd
+		  reply->procs[p2_cnt].to_service_resource_cd = 
+			 dm2.service_resource_cd
+ 		  reply->procs[p2_cnt].to_min_digits = 
+			 dm2.min_digits   
+		  reply->procs[p2_cnt].to_max_digits = 
+			 dm2.max_digits    
+		  reply->procs[p2_cnt].to_min_decimal_places = 
+			 dm2.min_decimal_places
+		  reply->procs[p2_cnt].from_service_resource_cd = 
+		  	 dm.service_resource_cd
+		  reply->procs[p2_cnt].from_min_digits = 
+			 dm.min_digits   
+		  reply->procs[p2_cnt].from_max_digits = 
+		 	 dm.max_digits    
+		  reply->procs[p2_cnt].from_min_decimal_places = 
+			 dm.min_decimal_places
+		elseif ((dm_exists = "Y") and (dm2_exists = "N"))  
+	 		  ;if the from exists but the to does not      
+call echo("the from DM exists but the to DM does not")
+			  p2_cnt = p2_cnt + 1
+			  if (mod(p2_cnt,5) = 1)
+			      stat = alterlist(reply->procs, p2_cnt + 5)
+            		  endif   
+		          reply->procs[p2_cnt].data_map_flag = 2
+			  reply->procs[p2_cnt].task_assay_cd = 
+				 proc->procs[cnt].task_assay_cd
+			  reply->procs[p2_cnt].to_service_resource_cd = 
+			  	request->to_service_resource_cd
+			  reply->procs[p2_cnt].to_min_digits = 0
+			  reply->procs[p2_cnt].to_max_digits = 0
+			  reply->procs[p2_cnt].to_min_decimal_places = 0 
+			  reply->procs[p2_cnt].from_service_resource_cd = 
+				 dm.service_resource_cd
+			  reply->procs[p2_cnt].from_min_digits = 
+				 dm.min_digits   
+			  reply->procs[p2_cnt].from_max_digits = 
+				 dm.max_digits    
+			  reply->procs[p2_cnt].from_min_decimal_places = 
+				 dm.min_decimal_places
+		elseif (dm_exists = "N")
+call echo("the from DM does not exist")
+	 		  ;the from does not have a QC data map        
+			  p2_cnt = p2_cnt + 1
+			  if (mod(p2_cnt,5) = 1)
+			      stat = alterlist(reply->procs, p2_cnt + 5)
+            		  endif   
+		          reply->procs[p2_cnt].data_map_flag = 3
+			  reply->procs[p2_cnt].task_assay_cd = 
+				 proc->procs[cnt].task_assay_cd
+			  reply->procs[p2_cnt].to_service_resource_cd = 
+			  	request->to_service_resource_cd
+			  reply->procs[p2_cnt].to_min_digits = 0
+			  reply->procs[p2_cnt].to_max_digits = 0
+			  reply->procs[p2_cnt].to_min_decimal_places = 0 
+			  reply->procs[p2_cnt].from_service_resource_cd = 
+			  	request->from_service_resource_cd
+			  reply->procs[p2_cnt].from_min_digits = 0
+			  reply->procs[p2_cnt].from_max_digits = 0
+			  reply->procs[p2_cnt].from_min_decimal_places = 0
+		endif
+call echo(build("data map flag = ", reply->procs[p2_cnt].data_map_flag))
+	  with outerjoin = d1,
+ 	       outerjoin = d2,
+	       nocounter
+	
+	  endfor
+
+call echo(build("num procs: ", p2_cnt))
+	  set stat = alterlist(reply->procs, p2_cnt)
+	  
+/********************************************************************/ 
+/* Script exit.                                                     */
+/********************************************************************/
+
+         set reply->status_data->status = "S"
+#exit_script
+call echo(build("status: ", reply->status_data->status)) 
+END
+GO     
+      
+
+;Generated by GNU enscript 1.6.4.

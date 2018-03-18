@@ -1,0 +1,620 @@
+ ;;Solution_Test/script/Person Management/PMSearch/PM_SCH_GET_SETUP.PRG Turn on black mode
+
+  drop program PM_SCH_GET_SETUP:dba go
+create program PM_SCH_GET_SETUP:dba
+
+/****************************************************************************
+ *                                                                          *
+ *  Copyright Notice:  (c) 1983 Laboratory Information Systems &            *
+ *                              Technology, Inc.                            *
+ *       Revision      (c) 1984-1997 Cerner Corporation                     *
+ *                                                                          *
+ *  Cerner (R) Proprietary Rights Notice:  All rights reserved.             *
+ *  This material contains the valuable properties and trade secrets of     *
+ *  Cerner Corporation of Kansas City, Missouri, United States of           *
+ *  America (Cerner), embodying substantial creative efforts and            *
+ *  confidential information, ideas and expressions, no part of which       *
+ *  may be reproduced or transmitted in any form or by any means, or        *
+ *  retained in any storage or retrieval system without the express         *
+ *  written permission of Cerner.                                           *
+ *                                                                          *
+ *  Cerner is a registered mark of Cerner Corporation.                      *
+ *                                                                          *
+ *                                                                          *
+ ****************************************************************************
+
+          Date Written:       06/22/98
+          Source file name:   PM_SCH_GET_SETUP
+          Object name:        PM_SCH_GET_SETUP
+          Request #:          100045
+
+          Product:            Person Management
+          Product Team:       Person Management
+          HNA Version:        V500
+          CCL Version:
+
+          Program purpose:    Retrieves search setup options
+
+          Tables read:
+          Tables updated:
+          Executing from:
+          Special Notes:
+
+ ***********************************************************************
+ *                  GENERATED MODIFICATION CONTROL LOG                 *
+ ***********************************************************************
+ *                                                                     *
+ *Mod  Date      Engineer             Feature    Comment               *
+ *---  --------  -------------------  --------   ----------------------*
+  000  06/22/98  Darryl Shippy                   Initial release
+  001  12/21/00  Robert Farr                     Added limit encounter prefs
+VF002  07/22/03  Victor Frank         34757      Added exact_match, percent_top,
+                                                 and simple_percent for searching
+43814  11/17/04  Jennifer Song        43814      added logic to retrieve family limit rows
+53796  03/04/05  Chad Pugh                       1-323998875 - Script performance issues
+146488 01/14/08  Tom Zagorski         146488     External MPI Query
+344225 11/20/12 Charley Donnici       344225     CR 1-4972803967  
+                                                 CR 1-6345593461 - Search Quality Enhancement & DM Archive Removal
+382732 10/02/13 Charley Donnici       382732     CR 1-7468582601 - Search Quality Leading Zeros, EMPI on, Assumewildcard Override
+ ***********************************************************************/
+
+;VF002 start
+  ;if (validate(last_mod, "NOMOD") = "NOMOD")   ;43814
+  ;   declare last_mod = c5 with noconstant(" "), private
+  ;endif ;43814
+ 
+;set last_mod = "VF002  "
+;VF002 end
+;set last_mod = "43814"
+ set last_mod = "53796"
+ set last_mod = "146488"
+ set last_mod = "344225"
+
+/*
+record request
+(
+  1  application_number        = i4
+  1  person_id                 = f8
+  1  style                     = i2
+  1  task_number               = i4
+)
+*/
+
+free record reply  ;53796
+record reply
+(
+  1  limit_ind                 = i2 ;001
+  1  locked                    = i2
+  1  max                       = i4
+  1  max_encntr                = i4 ;001
+  1  opf                       = i2
+  1  options                   = vc
+  1  phonetic                  = i2
+  1  threshold                 = f8
+  1  title                     = vc
+  1  wildcard                  = i2
+  1  filter[*]
+     2  flag                   = i2
+     2  scenario               = i4
+     2  display                = vc
+     2  hidden                 = i2
+     2  meaning                = vc
+     2  options                = vc
+     2  required               = i2
+     2  value                  = vc
+  1  result[*]
+     2  flag                   = i2
+     2  scenario               = i4
+     2  display                = vc
+     2  format                 = vc
+     2  meaning                = vc
+     2  options                = vc
+     2  sort                   = i2
+  /*001*/
+  1  limit[*]
+     2  encntr_type_class_cd   = f8
+     2  date_option            = i2
+     2  num_days               = i2
+  /*001*/
+  1  exact_match               = f8 ;VF002
+  1  percent_top               = f8 ;VF002
+  1  simple_percent            = f8 ;VF002
+  1  cutoff_mode_flag          = i2 ;VF002
+  1  family_limit[*]                ;43814
+     2  family_reltn_limit     = vc ;43814
+  1  max_mpi                   = i4 ;146488
+%i cclsource:status_block.inc
+
+  1 common_first = vc               ;344225
+  1 common_last = vc                ;344225
+  1 common_combo = vc               ;344225
+  1 netrics_on = i2                 ;344225 
+)
+
+declare search_setup_id = f8 with noconstant(0.0)   ;43814
+
+;344225 ++
+%i cclsource:pm_get_logical_domain.inc
+
+;Grab the logical domain stuff.
+declare bLDStatus = i4 with noconstant(0)
+declare lExpandCnt = i4 with noconstant(0)
+declare lExpandSize = i4 with noconstant(0)
+declare tmpparser = vc with noconstant("")
+
+set tmpparser = " 1=1"
+
+set bLDStatus = get_logical_domains("PERSON")
+if(bLDStatus = LD_SUCCESS)
+   set lExpandSize = size(logical_domains->qual,5) 
+   if (lExpandSize > 0)
+      if(lExpandSize > 1)
+         set tmpparser = build("and expand(lExpandCnt, 1,", lExpandSize, 
+                               ",p.logical_domain_id, logical_domains->qual[lExpandCnt]->logical_domain_id)") 
+      else
+         set tmpparser = concat(tmpparser, " and p.logical_domain_id = ", build(logical_domains->qual[1].logical_domain_id))
+      endif
+   endif
+endif
+
+declare tmp_system_on = i2 with noconstant(0)
+declare tmp_host_on = i2 with noconstant(0)
+declare tmp_host = vc with noconstant("")
+
+;check the system on flag
+select into "nl:" 
+   ce.field_value,
+   ce.field_name
+from code_value c, code_value_extension ce
+where c.code_set = 17705
+and c.code_value = ce.code_value
+and c.cdf_meaning = "SYSTEM_ON"
+and ce.field_name = "OPTION"
+detail
+    tmp_system_on = cnvtreal(ce.field_value)
+with nocounter
+
+;now check the host, if the system is on
+if (tmp_system_on)
+   select into "nl:" 
+      ce.field_value,
+      ce.field_name
+   from code_value c, code_value_extension ce
+   where c.code_set = 17705
+   and c.code_value = ce.code_value
+   and c.cdf_meaning = "HOST"
+   and ce.field_name = "OPTION"
+   detail
+       tmp_host = trim(ce.field_value,3)
+   with nocounter
+
+   select into "nl:" 
+      ce.field_value,
+      ce.field_name
+   from code_value c, code_value_extension ce
+   where c.code_set = 17705
+   and c.code_value = ce.code_value
+   and c.cdf_meaning = "HOST"
+   and ce.field_name = "OPTION2"
+   detail
+       tmp_host_on = cnvtreal(ce.field_value)
+   with nocounter
+
+   if (tmp_system_on and tmp_host_on and textlen(tmp_host) > 0)
+      set reply->netrics_on = 1
+   endif
+endif
+
+;Check to ensure the table exists, if not then skip the common name logic.
+;Also if the logical domain actually fails, then skip the common names because
+;we don't know which set to load.
+if (CHECKDIC("PM_SCH_COMMON_NAMES", "T", 0) = 0)
+   Call echo("+")
+   Call echo("The PM_SCH_COMMON_NAMES table is missing.")
+   Call echo("+")
+else
+   call loadCommonNames(0)
+endif
+
+declare loadCommonNames(tmp = i2) = i2
+subroutine loadCommonNames(tmp) 
+
+   declare cmfirst_type_cd = f8 with noconstant(0.0)
+   declare cmlast_type_cd = f8 with noconstant(0.0)
+   declare cmcombo_type_cd = f8 with noconstant(0.0)
+
+   set cmfirst_type_cd = UAR_GET_CODE_BY ("MEANING" , 4002981 , "FIRSTNAME" )
+   set cmlast_type_cd = UAR_GET_CODE_BY ("MEANING" , 4002981 , "LASTNAME" )
+   set cmcombo_type_cd = UAR_GET_CODE_BY ("MEANING" , 4002981 , "FIRSTLAST" )
+   
+   call echo(build("tmpParser:",tmpparser))
+
+   select into "nl:"
+      p.name_key,
+       p.name_type_cd,
+   p.name_cnt
+   from pm_sch_common_names p
+   where parser(tmpparser)
+   order by p.name_type_cd,
+            ;382732p.name_cnt desc
+            p.name_key            ;382732
+   detail
+      case (p.name_type_cd)
+         of cmfirst_type_cd:
+            if (textlen(build(reply->common_first, p.name_key,",",p.name_cnt,"|")) < 32000)
+               reply->common_first = build(reply->common_first, p.name_key,",",p.name_cnt,"|")
+            endif
+         of cmlast_type_cd:
+            if (textlen(build(reply->common_last, p.name_key,",",p.name_cnt,"|")) < 32000)
+               reply->common_last = build(reply->common_last, p.name_key,",",p.name_cnt,"|")
+            endif
+         of cmcombo_type_cd:
+            if (textlen(build(reply->common_combo, p.name_key,",",p.name_cnt,"|")) < 32000)
+               reply->common_combo = build(reply->common_combo, p.name_key,",",p.name_cnt,"|")
+            endif
+      endcase
+   with nocounter
+end  ;loadCommonNames
+;344225 --
+
+
+;+53796
+/* 
+declare gp_column_exists(gpce_table, gpce_column) = i4
+subroutine gp_column_exists(gpce_table, gpce_column)
+	declare gpce_flag = i4
+	
+  set gpce_flag = 0
+  select into "nl:" l.attr_name
+    from dtableattr a, dtableattrl l
+   where a.table_name = gpce_table
+     and l.attr_name = gpce_column
+     and l.structtype = "F"
+     and btest(l.stat, 11) = 0
+  detail
+    gpce_flag = 1
+  with nocounter
+  return(gpce_flag)
+end
+*/
+;-53796
+
+execute from 1000_INITIALIZE to 1999_INITIALIZE_EXIT
+execute from 2000_READ to 2999_READ_EXIT
+go to 9999_EXIT_PROGRAM
+
+
+subroutine find_setup(find_application_number, find_person_id, find_position_cd, find_style, find_task_number)
+  set continue_search = 0
+  if (setup_id <= 0.0)
+    set continue_search = 1
+  else
+    if (power_user or unlocked)
+      set continue_search = 1
+    endif
+  endif
+
+  if (continue_search)
+    select into "nl:" 
+      ;+53796
+      ;s.setup_id,
+      ;exact_match = validate(s.exact_match, 0.0),  ;VF002
+      ;percent_top = validate(s.percent_top, 0.0),  ;VF002
+      ;simple_percent = validate(s.simple_percent, 0.0),  ;VF002
+      ;cutoff_mode_flag = validate(s.cutoff_mode_flag, 0)  ;VF002
+      s.setup_id,
+      max_mpi_results_nbr = validate(s.max_mpi_results_nbr,0) ;146488
+      ;-53796
+      from pm_sch_setup s
+     where s.application_number = find_application_number
+       and s.person_id = find_person_id
+       and s.position_cd = find_position_cd
+       and s.task_number = find_task_number
+       and s.style_flag = find_style
+    detail
+      setup_id = s.setup_id
+      reply->locked = s.locked_ind
+      reply->max = s.max
+      reply->opf = s.opf_ind
+      reply->options = s.options
+      reply->phonetic = s.phonetic_ind
+      reply->threshold = s.threshold
+      reply->title = s.title
+      reply->wildcard = s.wildcard_ind
+
+      if (find_person_id > 0.0 and s.person_id = find_person_id)
+        reply->locked = 0
+      endif
+
+      if (reply->locked)
+        unlocked = 0
+      endif
+
+      ;+53796
+      ;/*001*/
+      ;if( pm_sch_limit_exists )
+      ;  reply->limit_ind = validate(s.limit_ind,0)
+      ;  reply->max_encntr = validate(s.max_encntr,0)
+      ;endif
+      ;/*001*/
+      
+      reply->limit_ind = s.limit_ind
+      reply->max_encntr = s.max_encntr
+      ;-53796
+
+      /*VF002*/
+      ;only return column values if the columns pass exist validation above
+        ;+53796
+        ;reply->exact_match      = exact_match
+        ;reply->percent_top      = percent_top
+        ;reply->simple_percent   = simple_percent
+        ;reply->cutoff_mode_flag = cutoff_mode_flag
+        reply->exact_match      = s.exact_match
+        reply->percent_top      = s.percent_top
+        reply->simple_percent   = s.simple_percent
+        reply->cutoff_mode_flag = s.cutoff_mode_flag
+        ;-53796
+        
+      /*VF002*/
+
+      reply->max_mpi = max_mpi_results_nbr ;146488
+    with nocounter
+  endif
+end
+
+
+#1000_INITIALIZE
+;Initialize the reply structure
+  set reply->status_data->status = "F"
+
+/*001*/
+;Validate column existence
+  ;set pm_sch_limit_exists = 0  ;53796
+  
+  ;set pm_sch_limit_exists = gp_column_exists("PM_SCH_LIMIT","SETUP_ID")  ;53796
+/*001*/
+
+/*VF002*/
+;Validate column existence and request for exact_match,percent_top,simple_percent
+;only validate for one because if one exists, the client is using this version of the table
+;this makes the code passive in case a client doesn't have latest table structure
+  ;declare pm_sch_exact_match = i2 with noconstant(0)  ;53796
+     ;call the col exist subroutine to return the flag value whether the col exists or not
+  ;set pm_sch_exact_match = gp_column_exists("PM_SCH_SETUP","EXACT_MATCH")  ;53796
+/*VF002*/
+
+  declare family_limit_count = i4 with noconstant(0)  ;43814
+#1999_INITIALIZE_EXIT
+
+
+#2000_READ
+;Set variables according to information given in the request
+  set application_number = request->application_number
+  set person_id = request->person_id
+  set style = request->style
+  set task_number = request->task_number
+
+;Default reply values
+  set reply->max = 200
+  set reply->threshold = 75
+  set reply->wildcard = 1
+  set reply->exact_match = 20     ;VF002
+  set reply->percent_top = 50     ;VF002
+  set reply->simple_percent = 30  ;VF002
+  set reply->cutoff_mode_flag = 0      ;VF002
+
+;Get the user's position
+  ;set position_cd = 0.0  ;53796
+  set dPositionCd = 0.0  ;53796
+  
+  select into "nl:" 
+    p.position_cd
+   from prsnl p
+    where p.person_id = request->person_id ;43814 person_id
+   detail
+    ;position_cd = p.position_cd  ;53796
+    dPositionCd = p.position_cd  ;53796
+  with nocounter
+
+;Determine whether the user has setup privileges
+  set power_user = 0
+  
+  ;+53796
+  /* 
+  if (position_cd > 0.0) 
+    select into "nl:" t.task_number
+      from task_access t, application_group g
+      plan g
+     where g.position_cd = position_cd
+       and g.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+       and g.end_effective_dt_tm >= cnvtdatetime(curdate, curtime3)
+       and g.app_group_cd > 0.0
+      join t
+     where t.task_number = 100041
+       and t.app_group_cd = g.app_group_cd
+    detail
+      power_user = 1
+    with nocounter
+  endif
+  */
+  
+  if (dPositionCd > 0.0)   
+     select into "nl:" 
+       t.task_number
+      from application_group g, task_access t
+       plan g
+        where g.position_cd = dPositionCd
+          and g.app_group_cd > 0.0
+          and g.beg_effective_dt_tm <= cnvtdatetime(curdate, curtime3)
+          and g.end_effective_dt_tm > cnvtdatetime(curdate, curtime3) 
+       join t
+        where t.task_number = 100041
+          and t.app_group_cd = g.app_group_cd
+      detail
+        power_user = 1
+     with nocounter
+  endif
+  ;-53796
+  
+;Initialize search variables
+  set setup_id = 0.0
+  set unlocked = 1
+
+;Attempt to find setup information according to a logical hierarchy
+;of attempts - start from the most "generic" setup and work toward
+;the most user-defined setup
+  if (task_number > 0)
+    call find_setup(application_number, 0.0, 0.0, style, task_number)
+    ;call find_setup(application_number, 0.0, position_cd, style, task_number)  ;53796
+    call find_setup(application_number, 0.0, dPositionCd, style, task_number)   ;53796
+    call find_setup(application_number, person_id, 0.0, 0, task_number)
+    call find_setup(application_number, person_id, 0.0, style, task_number)
+  else
+    call find_setup(application_number, 0.0, 0.0, style, 0)
+    ;call find_setup(application_number, 0.0, position_cd, style, 0)  ;53796
+    call find_setup(application_number, 0.0, dPositionCd, style, 0)   ;53796
+    call find_setup(application_number, person_id, 0.0, 0, 0)
+    call find_setup(application_number, person_id, 0.0, style, 0)
+  endif
+
+  set search_setup_id = setup_id   ;43814
+  
+;Get filters for the setup
+  if (setup_id > 0.0)
+    set filter_count = 0
+    set family_limit_count = 0  ;43814
+    
+    select into "nl:" f.data_type_flag
+      from pm_sch_filter f
+     where f.setup_id = search_setup_id ;43814 setup_id
+     order by f.scenario, f.sequence
+    detail
+      if (cnvtupper(trim(f.meaning,3)) != "FAMILY_LIMIT")   ;43814
+         filter_count = filter_count + 1
+         
+         ;+53796
+         ;stat = alterlist(reply->filter, filter_count)
+         
+         if (mod(filter_count, 100) = 1)
+            stat = alterlist(reply->filter, filter_count + 99)
+         endif
+         ;-53796
+         
+         reply->filter[filter_count]->flag = f.data_type_flag
+         reply->filter[filter_count]->scenario = f.scenario
+         reply->filter[filter_count]->display = f.display
+         reply->filter[filter_count]->hidden = f.hidden_ind
+         reply->filter[filter_count]->meaning = f.meaning
+         reply->filter[filter_count]->options = f.options
+         reply->filter[filter_count]->required = f.required_ind
+         reply->filter[filter_count]->value = f.value
+      
+      ;43814++
+      else
+         family_limit_count = family_limit_count + 1
+         
+         ;+53796
+         ;if (mod(family_limit_count, 10) = 1)
+         ;   stat = alterlist(reply->family_limit, family_limit_count + 9)
+         ;endif
+         
+         if (mod(family_limit_count, 100) = 1)
+            stat = alterlist(reply->family_limit, family_limit_count + 99)
+         endif
+         ;-53796
+ 
+         reply->family_limit[family_limit_count].family_reltn_limit = trim(f.value, 3)
+      endif
+      ;43814--
+ 
+    with nocounter
+    
+    ;+53796
+    ;set stat = alterlist(reply->family_limit, family_limit_count)   ;43814
+    
+    if (filter_count > 0)
+       set stat = alterlist(reply->filter, filter_count)
+    endif
+    
+    if (family_limit_count > 0)
+       set stat = alterlist(reply->family_limit, family_limit_count)
+    endif
+    ;-53796
+  endif
+
+;Get results for the setup
+  if (setup_id > 0.0)
+    set result_count = 0
+    
+    select into "nl:" r.data_type_flag
+      from pm_sch_result r
+     where r.setup_id = search_setup_id ;43814 setup_id
+     order by r.scenario, r.sequence
+    detail
+      result_count = result_count + 1
+      
+      ;+53796
+      ;stat = alterlist(reply->result, result_count)
+      
+      if (mod(result_count, 100) = 1)
+         stat = alterlist(reply->result, result_count + 99)
+      endif
+      ;-53796
+      
+      reply->result[result_count]->flag = r.data_type_flag
+      reply->result[result_count]->scenario = r.scenario
+      reply->result[result_count]->display = r.display
+      reply->result[result_count]->format = r.format
+      reply->result[result_count]->meaning = r.meaning
+      reply->result[result_count]->options = r.options
+      reply->result[result_count]->sort = r.sort_flag
+    with nocounter
+    
+    ;+53796
+    if (result_count > 0)
+       set stat = alterlist(reply->result, result_count)
+    endif
+    ;-53796
+  endif
+
+/*001*/
+  ;if (pm_sch_limit_exists = 1 and setup_id > 0.0 )  ;53796
+  if (setup_id > 0.0)  ;53796
+    set limit_count = 0
+    
+    select into "nl:" l.encntr_type_class_cd
+      from pm_sch_limit l
+     where l.setup_id = search_setup_id ;43814 setup_id
+    detail
+      limit_count = limit_count + 1
+      
+      ;+53796
+      ;stat = alterlist(reply->limit, limit_count)
+      
+      if (mod(limit_count, 100) = 1)
+         stat = alterlist(reply->limit, limit_count + 99)
+      endif
+      ;-53796
+      
+      reply->limit[limit_count]->encntr_type_class_cd = l.encntr_type_class_cd
+      reply->limit[limit_count]->date_option = l.date_flag
+      reply->limit[limit_count]->num_days = l.num_days
+    with nocounter
+    
+    ;+53796
+    if (limit_count > 0)
+       set stat = alterlist(reply->limit, limit_count)
+    endif    
+    ;-53796
+  endif
+/*001*/
+
+;If we get here, return a good status
+  set reply->status_data->status = "S"
+
+#2999_READ_EXIT
+
+
+#9999_EXIT_PROGRAM
+  end
+  go
