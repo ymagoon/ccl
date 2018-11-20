@@ -1,0 +1,539 @@
+/*
+ *  ---------------------------------------------------------------------------------------------
+ *  Script Name:  route_out
+ *  Description:  Outbound routing script
+ *  Type:         route script
+ *  ---------------------------------------------------------------------------------------------
+ *  Author:         Chris Eakes
+ *  Library:        
+ *  Creation Date:  2003
+ *  ---------------------------------------------------------------------------------------------
+*  Refer to route_script_history for the history of the route script
+*/
+/**This script  looks at the alias_pool_disp value to determine the correct co
+mclient to send outbound**/
+
+DECLARE GET_PROC_ID(proc_name)=i4
+set type2=OENOBJ->CONTROL_GROUP[1]->MSH[1]->MESSAGE_TYPE->MESSG_TYPE
+set type2=trim(type2)
+set type3=OENOBJ->CONTROL_GROUP[1]->MSH[1]->MESSAGE_TYPE->MESSG_Trigger
+set type3=trim(type3)
+SET INTFILENM = GET_STRING_VALUE("interface file name")
+
+;CALL ECHO (BUILD("TYPE OF TRANS= ", type2))
+;EXECUTE OENCPM_MSGLOG(BUILD("Trans Type= ", type2))
+
+SET OENSTATUS->STATUS = 1
+
+CASE (type2)
+
+OF "DFT":
+
+    IF(INTFILENM = "/cerner/d_p30/chg/amb_p01.dat")
+	SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("DFT_TCPIP_BMG_OUT")
+
+    ELSEIF (INTFILENM = "/cerner/d_p30/chg/uc_p01.dat")
+	SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("DFT_TCPIP_UC_OUT")
+     ELSE
+	SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("DFT_TCPIP_SOARIAN_OUT")
+     ENDIF
+
+OF "MFN":
+	SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+  SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("MFN_TCPIP_PYXIS_OUT")
+
+OF "ORM":
+
+/****REF LAB ORDERS LOGIC****/
+
+   ;SUBROUTINE DECLARATIONS
+   DECLARE GET_STRING_VALUE(STRING_MEANING) = c15
+   DECLARE GET_DOUBLE_VALUE(STRING_MEANING) = F8
+
+  ;VARIABLE DECLARATIONS
+    DECLARE CQMTYPE = C15
+    DECLARE STAT = I4
+    DECLARE CQM_SUBTYPE = C20
+    DECLARE CQMCLASS = C20
+
+FREE SET MRN_TMP_HOLD
+FREE SET MRN_TEMP
+FREE SET CONT_HOLD
+FREE SET MRN_CONT_CD
+FREE SET MRN_CONT_DISPLAY
+
+SET MRN_TMP_HOLD = trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_id_ext->assign_auth->name_id)
+SET MRN_TEMP = findstring(",",MRN_TMP_HOLD, 1)
+SET CONT_HOLD = substring(MRN_TEMP+1, size(MRN_TMP_HOLD, 1), MRN_TMP_HOLD) 
+SET MRN_CONT_CD = cnvtreal(CONT_HOLD)
+SET MRN_CONT_DISPLAY = UAR_GET_CODE_DISPLAY(MRN_CONT_CD)
+;EXECUTE OENCPM_MSGLOG (build ("DISPLAY VALUE = " ,MRN_CONT_DISPLAY))
+
+   ;MUST LOOK AT CERNER AREA OF MESSAGE TO DISTINGUISH
+   ;REFLAB ORDERS FROM OTHER ORDERS
+  SET CQMTYPE = GET_STRING_VALUE("cqm_type") ;this is case sensitive
+  SET CQMCLASS = GET_STRING_VALUE("cqm_class") ;this is case sensitive
+   IF (CQMTYPE = "PKL")
+    ;execute oencpm_msglog(build("message type: " , type2 ))
+        IF (TYPE2 = "ORM")
+          SET LOCATION_CD = cnvtstring(GET_DOUBLE_VALUE("to_serv_resource"))
+          ; execute oencpm_msglog(build("location: " , LOCATION_CD))t
+            ; /* Mod2   Added SJN to outbound Spec ORMs*/ 
+           ; /* Mod52  Added WHH to outbound Spec ORMs*/ 
+            IF ((LOCATION_CD) IN ("650512", "880606", "880608", "880609", "1563372495", "195565233","2228583641",
+                                                           "2350560359", "242367220"))
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_SPEC_OUT")
+                     go to exit_point
+
+               ELSEIF ((LOCATION_CD) IN ("2032539951","2032542093","2032543631","2032544649",
+                       "2032545791","2032548745","2032549385"))
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_STATE_NEWBORN_OUT")
+                     go to exit_point             
+
+            ELSE
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("UNKNOWN_TRANS_DISK_OUT")
+                     go to exit_point
+            ENDIF
+        ENDIF
+      execute oencpm_msglog trim(build("REFLAB:  CQMCLASS =   ",CQMCLASS,"<-***"))
+
+  ELSEIF (trim(CQMCLASS) = "SCS_NET") 
+  execute oencpm_msglog build("Enter if for CQMCLASS = SCS_NET", char(0))
+
+  declare perf_loc = vc   
+  declare ord_id = f8
+  Set perf_loc = ""
+  Set order_id = get_double_value("order_id")
+
+  ;***Grab the performing location from the order detail table.
+  select od.OE_FIELD_DISPLAY_VALUE    
+  from order_detail od
+  where od.order_id = order_id
+    and od.OE_FIELD_MEANING =  "PERFORMLOC"
+  order od.action_sequence desc
+  detail
+    perf_loc = trim(od.OE_FIELD_DISPLAY_VALUE)             
+  with nocounter, maxrec = 1
+
+  execute oencpm_msglog(build("perf_loc:",perf_loc,char(0)))
+
+  if (trim(perf_loc) = "BMG Quest Lab")  ;Quest performing location.
+    SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+    SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_BMGQUEST_OUT")
+    ; Split Count to be used at comserver for custom grouping logic
+    ; Splitting by Order Group size ensures each order on an accession will go through interface individually.
+    SET OENROUTE->ROUTE_LIST[1]->SPLIT_CNT = SIZE(OENOBJ->ORDER_GROUP, 5)
+    go to exit_point
+    ;Execute oencpm_msglog build("In SCS_NET BMG Quest Lab Message", char(0))
+  elseif (trim(perf_loc) = "BMG LabCorp Lab")  ;LabCorp performing location.
+    SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+    SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_LABCORP_AMB_OUT")
+    ; Split Count to be used at comserver for custom grouping logic
+    ; Splitting by Order Group size ensures each order on an accession will go through interface individually.
+    SET OENROUTE->ROUTE_LIST[1]->SPLIT_CNT = SIZE(OENOBJ->ORDER_GROUP, 5)
+    go to exit_point
+  else
+    SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+    SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_BAYC_OUT")
+    go to exit_point
+  endif
+
+  ENDIF    
+/****END REF LAB ORDERS and Ambulatory Reference Lab tranasctions ( for Quest) ****/
+
+declare ACTIVITY_SUBTYPE_CDM = vc
+ declare order_id = f8
+  
+ Set order_id = get_double_value("order_id")
+ SET CQMSUBTYPE = GET_STRING_VALUE("cqm_subtype") ;this is case sensitive
+
+ SELECT into "nl:"
+	OC_ACTIVITY_SUBTYPE_CDF = UAR_GET_CODE_MEANING(OC.ACTIVITY_SUBTYPE_CD)
+	FROM
+	  ORDERS   O
+	, ORDER_CATALOG   OC
+ 
+    PLAN O where O.ORDER_ID = order_id
+    Join OC where O.CATALOG_CD = OC.CATALOG_CD
+    Detail
+      ACTIVITY_SUBTYPE_CDM = OC_ACTIVITY_SUBTYPE_CDF
+       WITH NOCOUNTER
+
+   SET CQMSUBTYPE = GET_STRING_VALUE("cqm_subtype") ;this is case sensitive
+   
+IF ((CQMSUBTYPE) IN ("MRIRADIOLOGY","RADIOLOGY"))
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 2)
+			 SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_IDX_OUT")
+	     SET OENROUTE->ROUTE_LIST[2]->R_PID = GET_PROC_ID("ORM_TCP_TELETRK_RAD_OUT")
+	     go to exit_point
+
+     ELSEIF (CQMSUBTYPE = "AUDIOLOGY")
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_AUDIOLOGY_OUT")
+                     go to exit_point
+
+
+     ELSEIF (CQMSUBTYPE="PHYSCONSULT")
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_CONSULT_OUT")
+                     go to exit_point
+
+     ELSEIF ((CQMSUBTYPE) IN ("ADMITTO", "BAYESOSUPRES", "COMMUNICATIO"))
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_TELETRK_OUT")
+                     go to exit_point
+
+     ELSEIF (CQMSUBTYPE="SURGERY")
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_PROVATION_OUT")
+                     go to exit_point
+
+     ELSEIF ((CQMSUBTYPE) IN("CARDIOLOGY"))
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_PHILIPS_OUT")
+                     go to exit_point
+
+     ELSEIF ((CQMSUBTYPE) IN("ECHO","PEDI ECHO"))
+	         SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 2)
+	         SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_PHILIPS_OUT")
+	         SET OENROUTE->ROUTE_LIST[2]->R_PID = GET_PROC_ID("ORM_TCP_IDX_OUT")
+	         go to exit_point
+
+    ELSEIF ((CQMSUBTYPE) IN ("EKG"))
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_MUSE_OUT")
+                     go to exit_point
+
+     ELSEIF (CQMSUBTYPE="CARDIOVASCUL")
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 2)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_MUSE_OUT")
+	     SET OENROUTE->ROUTE_LIST[2]->R_PID = GET_PROC_ID("ORM_TCP_IDX_OUT")
+	     go to exit_point
+
+     ELSEIF  ((CQMSUBTYPE) IN ("EDUTAINMENT", "OFCVIDEOS"))
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_GETWELL_OUT")
+                     go to exit_point
+
+    ELSEIF ((CQMSUBTYPE) IN ("TUBEFEEDING","DIETARY"))
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_DIET_OUT")
+                     If ( ( ACTIVITY_SUBTYPE_CDM = "BRIDGE" ) )
+                         SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 2)
+                         SET OENROUTE->ROUTE_LIST[2]->R_PID = GET_PROC_ID("ORM_TCP_BRIDGE_OUT")
+                     Endif
+                    go to exit_point
+               
+     ELSEIF ( ( ACTIVITY_SUBTYPE_CDM = "BRIDGE" ) )
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_BRIDGE_OUT")
+                    go to exit_point
+
+     ELSE
+	FREE SET ALIAS_SIZE_T
+	SET ALIAS_SIZE_T=oenobj->cerner->person_info->person [1]->alias_count
+	;EXECUTE OENCPM_MSGLOG(BUILD("ALIAS_SIZE-> ", ALIAS_SIZE))
+	If ((ALIAS_SIZE_T = 0) or (ALIAS_SIZE_T = 1))     ; "Unknown"
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("UNKNOWN_TRANS_DISK_OUT")
+
+	ELSE
+                     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORM_TCP_BAYC_OUT")
+
+      	ENDIF
+ENDIF
+
+OF "ORU":
+
+FREE SET FIN_TMP_HOLD
+FREE SET FIN_TEMP
+FREE SET CONT_HOLD
+FREE SET FIN_CONT_CD
+FREE SET FIN_CONT_DISPLAY
+
+SET FIN_TMP_HOLD = trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_auth->name_id) 
+SET FIN_TEMP = findstring(",",FIN_TMP_HOLD, 1)
+SET CONT_HOLD = substring(FIN_TEMP+1, size(FIN_TMP_HOLD, 1), FIN_TMP_HOLD) 
+SET FIN_CONT_CD = cnvtreal(CONT_HOLD)
+SET FIN_CONT_DISPLAY = UAR_GET_CODE_DISPLAY(FIN_CONT_CD)
+
+If (FIN_CONT_DISPLAY = "HI FIN") 
+    SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+    SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("UNKNOWN_TRANS_DISK_OUT")
+    go to exit_point
+endif
+
+/****QUEST REVERSE REFLAB****/
+
+FREE SET MRN_TMP_HOLD
+FREE SET MRN_TEMP
+FREE SET CONT_HOLD
+FREE SET MRN_CONT_CD
+FREE SET MRN_CONT_DISPLAY
+
+SET MRN_TMP_HOLD = trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_id_ext->assign_fac_id->name_id) 
+SET MRN_TEMP = findstring(",",MRN_TMP_HOLD, 1)
+SET CONT_HOLD = substring(MRN_TEMP+1, size(MRN_TMP_HOLD, 1), MRN_TMP_HOLD) 
+SET MRN_CONT_CD = cnvtreal(CONT_HOLD)
+SET MRN_CONT_DISPLAY = UAR_GET_CODE_DISPLAY(MRN_CONT_CD)
+;EXECUTE OENCPM_MSGLOG (build ("DISPLAY VALUE = " ,MRN_CONT_DISPLAY))
+
+If (MRN_CONT_DISPLAY = "QUESTAUTH")
+         SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+         SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORU_QUEST_TCP_OUT")
+    go to exit_point
+
+Elseif (MRN_CONT_DISPLAY = "quest")
+  If (substring(1,2,oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_id_ext->id)!="TM")
+         SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+         SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORU_QUEST_TCP_OUT")
+    go to exit_point         
+  Endif
+Endif
+
+/****END OF QUEST REVERSE REFLAB****/
+
+FREE SET MRN_TMP_HOLD
+FREE SET MRN_TEMP
+FREE SET CONT_HOLD
+FREE SET MRN_CONT_CD
+FREE SET MRN_CONT_DISPLAY
+
+SET MRN_TMP_HOLD = trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_id_ext->assign_auth->name_id)
+SET MRN_TEMP = findstring(",",MRN_TMP_HOLD, 1)
+SET CONT_HOLD = substring(MRN_TEMP+1, size(MRN_TMP_HOLD, 1), MRN_TMP_HOLD) 
+SET MRN_CONT_CD = cnvtreal(CONT_HOLD)
+SET MRN_CONT_DISPLAY = UAR_GET_CODE_DISPLAY(MRN_CONT_CD)
+;EXECUTE OENCPM_MSGLOG (build ("DISPLAY VALUE = " ,MRN_CONT_DISPLAY))
+
+
+/****PWX MDOC LOGIC****/
+
+FREE SET STRING_SIZE
+SET STRING_SIZE=size(oenobj->cerner->stringList,5)
+;EXECUTE OENCPM_MSGLOG(BUILD("STRING_SIZE-> ", STRING_SIZE))
+
+FREE SET n
+FREE SET strval_hold_1
+For(n = 1 to STRING_SIZE)
+  IF (oenobj->cerner->stringList [n]->strMeaning  = "cqm_type")
+                 Set strval_hold_1 = oenobj->cerner->stringList [n]->strVal
+                ;EXECUTE OENCPM_MSGLOG(BUILD("cqm_type -> ", strval_hold_1))
+       If(strval_hold_1 = "MDOC")
+         SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST,3)
+         SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORU_TCP_HIE_OUT")
+         SET OENROUTE->ROUTE_LIST[2]->R_PID = GET_PROC_ID("ORU_TCP_OPTUM_MDOC_OUT")
+         SET OENROUTE->ROUTE_LIST[3]->R_PID = GET_PROC_ID("ORU_TCP_HEALTHGRID_D_OUT")
+    go to exit_point         
+
+       elseif(strval_hold_1 = "DOC")
+         SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST,3)
+         SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORU_TCP_HIE_OUT")
+         SET OENROUTE->ROUTE_LIST[2]->R_PID = GET_PROC_ID("ORU_TCP_OPTUM_DOC_OUT")
+         SET OENROUTE->ROUTE_LIST[3]->R_PID = GET_PROC_ID("ORU_TCP_HEALTHGRID_D_OUT")
+    go to exit_point         
+       
+     Endif
+  Endif
+Endfor
+
+/****END PWX MDOC LOGIC****/
+
+	FREE SET ALIAS_SIZE
+	SET ALIAS_SIZE=oenobj->cerner->person_info->person [1]->alias_count
+	;EXECUTE OENCPM_MSGLOG(BUILD("ALIAS_SIZE-> ", ALIAS_SIZE))
+	If ((ALIAS_SIZE = 0) or (ALIAS_SIZE = 1))     ; "Unknown"
+   	     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("UNKNOWN_TRANS_DISK_OUT")
+	ELSE
+     	     SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST,3)
+	     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ORU_TCP_BAYC_OUT")
+	     SET OENROUTE->ROUTE_LIST[2]->R_PID = GET_PROC_ID("ORU_TCP_OPTUM_LAB_OUT")
+                     SET OENROUTE->ROUTE_LIST[3]->R_PID = GET_PROC_ID("ORU_TCP_BRIDGE_OUT")
+                ENDIF
+
+
+OF "ADT":
+declare cqmclass = vc
+declare act_cs = vc
+SET cqmclass = GET_STRING_VALUE("cqm_class") ;this is case sensitive
+SET act_cs = GET_STRING_VALUE("action_contributor_system_cd") ;this is case sensitive 
+
+FREE SET FIN_TMP_HOLD
+FREE SET FIN_TEMP
+FREE SET CONT_HOLD
+FREE SET FIN_CONT_CD
+FREE SET FIN_CONT_DISPLAY
+
+SET FIN_TMP_HOLD = trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_auth->name_id) 
+SET FIN_TEMP = findstring(",",FIN_TMP_HOLD, 1)
+SET CONT_HOLD = substring(FIN_TEMP+1, size(FIN_TMP_HOLD, 1), FIN_TMP_HOLD) 
+SET FIN_CONT_CD = cnvtreal(CONT_HOLD)
+SET FIN_CONT_DISPLAY = UAR_GET_CODE_DISPLAY(FIN_CONT_CD)
+
+    if (trim(cqmclass) = "PM_ALLERGY" and act_cs = "1478944279")  ;ignore HXCLIN Allergy pass-thru
+       SET stat = alterlist(oenRoute->route_list,0)
+ 
+  ElseIf (type3="A28")
+     SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+     SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ADT_TCPIP_HI_OUT")
+
+  ElseIf (FIN_CONT_DISPLAY = "HI FIN") 
+                SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("UNKNOWN_TRANS_DISK_OUT")
+
+    Else
+              SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 3)
+                SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("ADT_TCPIP_SOARIAN_OUT")
+                SET OENROUTE->ROUTE_LIST[2]->R_PID = GET_PROC_ID("RESONANCE_PIX_ADT_OUT_01")
+                SET OENROUTE->ROUTE_LIST[3]->R_PID = GET_PROC_ID("RESONANCE_UTILITY_OUT_01")
+ 
+    endif
+
+OF "BAR":
+
+FREE SET FIN_TMP_HOLD
+FREE SET FIN_TEMP
+FREE SET CONT_HOLD
+FREE SET FIN_CONT_CD
+FREE SET FIN_CONT_DISPLAY
+
+SET FIN_TMP_HOLD = trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_auth->name_id) 
+SET FIN_TEMP = findstring(",",FIN_TMP_HOLD, 1)
+SET CONT_HOLD = substring(FIN_TEMP+1, size(FIN_TMP_HOLD, 1), FIN_TMP_HOLD) 
+SET FIN_CONT_CD = cnvtreal(CONT_HOLD)
+SET FIN_CONT_DISPLAY = UAR_GET_CODE_DISPLAY(FIN_CONT_CD)
+
+If (FIN_CONT_DISPLAY = "BayCare FIN") 
+
+                SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("BAR_TCPIP_SOARIAN_OUT")
+
+Else 
+                SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+                SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("UNKNOWN_TRANS_DISK_OUT")
+Endif
+
+OF "RDE":
+	SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 3)
+                SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("SI_PYXIS_OUTBOUND")
+                SET OENROUTE->ROUTE_LIST[2]->R_PID = GET_PROC_ID("RDE_TCP_THERADOC_OUT")
+                SET OENROUTE->ROUTE_LIST[3]->R_PID = GET_PROC_ID("RDE_TCP_OUT")
+
+OF "RDS":
+      	SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 2)
+        SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("RDS_TCPIP_PHARMO_OUT")
+        SET OENROUTE->ROUTE_LIST[2]->R_PID = GET_PROC_ID("RDE_TCP_OUT")
+
+OF "SIU":
+	SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+  SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("SIU_TCPIP_SURGINET_OUT")
+
+OF "VXU":
+         SET STAT = ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+         SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("VXU_TCP_HUB_OUT")
+
+
+ELSE
+  SET STAT=ALTERLIST(OENROUTE->ROUTE_LIST, 1)
+  SET OENROUTE->ROUTE_LIST[1]->R_PID = GET_PROC_ID("UNKNOWN_TRANS_DISK_OUT")
+
+ENDCASE
+
+ /***********************************************
+ GET_STRING_VALUE SUBROUTINE
+ ***********************************************/
+
+SUBROUTINE GET_STRING_VALUE(STRING_MEANING)
+
+   DECLARE ESO_IDX = i4
+   DECLARE LIST_SIZE = i4
+   DECLARE STATVAR = c20
+
+   SET ESO_IDX = 0
+   SET LIST_SIZE = 0
+
+   SET STATVAR = (VALIDATE(OENOBJ->CERNER, "NOCERNERAREA"))
+   IF (STATVAR = "NOCERNERAREA")
+        RETURN ("-1")
+   ELSE
+        SET ESO_IDX = 0
+        SET LIST_SIZE = 0
+        SET LIST_SIZE = SIZE(OENOBJ->CERNER->STRINGLIST,5)
+             IF (LIST_SIZE > 0)
+                   SET ESO_X = 1
+                   FOR (ESO_X = ESO_X  TO LIST_SIZE)
+                       IF (OENOBJ->CERNER->STRINGLIST[ESO_X]->STRMEANING = STRING_MEANING)
+                           SET ESO_IDX = ESO_X
+                       ENDIF
+                   ENDFOR
+             ENDIF
+        IF (ESO_IDX > 0)
+            RETURN (TRIM(OENOBJ->CERNER->STRINGLIST[ESO_IDX]->STRVAL))
+        ELSE
+            RETURN ("0")
+        ENDIF
+   ENDIF
+   END   ;GET_STRING_VALUE
+
+ /*****************************************
+ GET_DOUBLE_VALUE subroutine
+ *****************************************/
+subroutine get_double_value(double_meaning)
+     declare eso_idx = i4
+     declare list_size = i4
+     declare charstat = c100
+
+     set charstat = (validate(oenobj->cerner, "0"))
+     if (charstat = "0")
+       return(-1)
+     else
+       set eso_idx = 0
+       set list_size = 0
+       set list_size = size(oenobj->cerner->doubleList,5)
+       if( list_size > 0 )
+         set eso_x = 1
+         for ( eso_x = eso_x to list_size )
+            if(oenobj->cerner->doubleList[eso_x]->strMeaning = double_meaning)
+             set eso_idx = eso_x
+           endif
+         endfor
+       endif
+       if( eso_idx > 0 )
+         return(oenobj->cerner->doubleList[eso_idx]->dval)
+       else
+         return(0)
+       endif
+     endif
+   end  ;get_double_value
+
+ /*************************************
+ GET_PROC_ID SUBROUTINE
+ *************************************/
+
+SUBROUTINE GET_PROC_ID(proc_name)
+    declare out_pid=i4
+      select into "nl:"
+          p.interfaceid
+      from 
+          oen_procinfo p
+      where 
+         cnvtupper(p.proc_name) = cnvtupper(proc_name)
+     detail
+         out_pid = p.interfaceid
+     with nocounter
+     if(curqual != 0)
+       return(out_pid)
+     else
+       return (0)
+    endif
+END ;GET_PROC_ID Subroutine
+
+#exit_point
