@@ -1,0 +1,330 @@
+/*
+ *  ---------------------------------------------------------------------------------------------
+ *  Script Name:  oru_optum_lab_out
+ *  Description:  Optum Script for Lab results outbound
+ *  Type:         Modify Object Script
+ *  ---------------------------------------------------------------------------------------------
+ *  Author:         Tony McArtor
+ *  Library:        OEOCF23ORUORU
+ *  Creation Date:  09/18/13 
+ *  ---------------------------------------------------------------------------------------------
+ *  Mod#  Date    Author       Description & Requestor Information
+ *
+ * 1.  09/18/13  T. McArtor   Copy of oru_bayc_outv7 script with modifications and added Outreach Block Lab 
+ * 2.  01/24/14  H. Kaczmarczyk Added a block for all Lab results except AP
+ * 3.  01/30/14  H Kaczmarczyk Adding Coding to remove DONOTSEND w LOINC values, renumber OBX segments
+ *                                                        and ignore messages when all OBX segments have been removed.
+ *  ---------------------------------------------------------------------------------------------
+*/
+
+
+If(oen_reply->cerner->oe_info->message_version_cd = 89803074)
+go to exit_25
+endif
+
+/*********************Add the PCPE to PD1:4 H Kaczmarczyk 5/13/13*******************************************/
+
+declare pt_enctr_id = f8
+declare phys_NPInbr = vc
+declare phys_name_first = vc
+declare phys_name_last = vc
+
+Set pt_enctr_id = oen_reply->cerner->encntr_prsnl_info->encntr [1]->encntr_id
+Set phys_reltn = uar_get_code_by ("MEANING",333,"PCPE")
+Set phys_number = uar_get_code_by ("DISPLAY",263,"NPI Number")
+
+select into "nl:" 
+  P.ALIAS, PR.NAME_LAST, PR.NAME_FIRST
+  from ENCNTR_PRSNL_RELTN   E, PRSNL_ALIAS   P, PRSNL   PR
+  plan e
+    WHERE E.ENCNTR_ID = pt_enctr_id  and E.ENCNTR_PRSNL_R_CD = phys_reltn  and E.MANUAL_CREATE_IND= 0 
+  join p
+  where E.PRSNL_PERSON_ID = P.PERSON_ID   and P.ALIAS_POOL_CD = phys_number
+   join pr
+  WHERE P.PERSON_ID = PR.PERSON_ID
+  detail
+  phys_NPInbr = P.ALIAS
+  phys_name_first = PR.NAME_FIRST
+  phys_name_last = PR.NAME_LAST  
+ WITH NOCOUNTER
+
+; Clear old life time PCP data
+  Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_fac [1]->id_nbr = ""
+  Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_fac [1]->first_name = ""
+  Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_fac [1]->last_name = ""
+  Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_provider [1]->id_nbr =""
+  Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_provider [1]->last_name =  ""
+  Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_provider [1]->first_name = ""
+
+ If (phys_NPInbr != "" or NULL or " ")
+   Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_provider [1]->id_nbr =  phys_NPInbr
+   Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_provider [1]->last_name =  phys_name_last
+   Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_provider [1]->first_name = phys_name_first
+ 
+Endif
+
+
+
+/***  12/23/10 R Quack - I had to go back and pull this information out of the Placer Filler Mod Object v4 script
+used on the lab orders interface out becuase this result out script was calling that script to do this cleanup.
+When we did the script cleanup and standardization efforst we modified the name of the lab mod object script
+to orm_lab_outv# and so I don't know how this result mod object script was even calling that old Placer Filler Mod
+Object script in Prod but it was somehow and the MSH segment was still being fixed for the Cloverleaf facility ID
+and everything.  I only pulled the result section and pasted here for the ORC/OBR;3 order id since this interface
+only processes results and we don't need the other portions that were in the lab script specific to orders only. I
+also pulled in the logic to call the MSH_FAC_MODOBJ_OUT script and the clean up code for portions of PID/PV1.
+***/
+
+;;; 12/23/10 R Quack - This code was already in the previous version of this script so I left it in here.
+if(oen_reply->RES_ORU_GROUP [1]->OBR [1]->diag_serv_sec_id = "Pharmacy")
+Set OenStatus->Ignore=1
+endif
+
+;;; 12/23/10 R Quack - This code was pulled in from OB lab script as desribed above
+/***1/9/2009 - adding logic to put facility code in MSH for cloverleaf routing - FSI redesign***/
+execute op_MSH_FAC_MODOBJ_OUT
+
+
+/**********************Remove PID;5.7 field  R. Quack 4/29/10*****************************************************/
+Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_name [1]->name_type_cd = ""
+
+/**********************Null SSN Person Reconcile fix   T. Dillon    11/5/07****************************************/
+execute OENCPM_MSGLOG (oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->ssn_nbr)
+
+if(oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->ssn_nbr ="999999999")
+  set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->ssn_nbr =""
+endif
+
+/**********************Outreach Blockl Lab  T. McArtor    09/18/13****************************************/
+
+IF (oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->patient_type IN (
+ "MPOUTREACH","JHOUTREACH"))
+Set OenStatus->Ignore=1
+go to end_of_script
+endif
+
+/**********************Block all Lab except AP  H. Kaczmarczyk    01/24/14****************************************/
+
+IF (oen_reply->RES_ORU_GROUP [1]->OBR [1]->diag_serv_sec_id != "AP")
+Set OenStatus->Ignore=1
+go to end_of_script
+endif
+
+/*****************Remove PV1;19 sub fields  R. Quack 4/29/10*****************************/
+Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->visit_nbr [1]->check_digit = ""
+Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->visit_nbr [1]->check_digit_scheme = ""
+Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->visit_nbr [1]->assign_auth->name_id = ""
+Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->visit_nbr [1]->assign_auth->univ_id = ""
+Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->visit_nbr [1]->assign_auth->univ_id_type = ""
+Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->visit_nbr [1]->type_cd = ""
+Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->visit_nbr [1]->assign_fac_id->name_id = ""
+Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->visit_nbr [1]->assign_fac_id->univ_id = ""
+Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->visit_nbr [1]->assign_fac_id->univ_id_type = ""
+
+;;; 12/23/10 R Quack - This code was pulled in from OB lab script as desribed above
+/**
+Script to keep Cerner's order_id in ORC 3 (filler order #)
+**/
+
+/**
+
+MOD                DATE                   NAME                               DESC
+001                   5/9/02                    Chris Eakes                    Create
+
+**/
+
+   free set obr_temp
+   set obr_temp = size(oen_reply->RES_ORU_GROUP,5)
+   execute oencpm_msglog(build("ORC size -> ", obr_temp))
+
+   ;/**ORC**/
+
+   free set c
+   set c = 0
+
+   free set res_fill_entity
+   free set res_fill_name
+   free set res_fill_univ
+   free set res_fill_type
+
+   free set res_plac_entity
+   free set res_plac_name
+   free set res_plac_univ
+   free set res_plac_type
+
+   set res_fill_entity = trim(oen_reply->RES_ORU_GROUP [1]->ORC [1]->filler_ord_nbr [1]->entity_id)
+   set res_fill_name = trim(oen_reply->RES_ORU_GROUP [1]->ORC [1]->filler_ord_nbr [1]->name_id)
+   set res_fill_univ = trim(oen_reply->RES_ORU_GROUP [1]->ORC [1]->filler_ord_nbr [1]->univ_id)
+   set res_fill_type = trim(oen_reply->RES_ORU_GROUP [1]->ORC [1]->filler_ord_nbr [1]->univ_id_type)
+
+   set res_plac_entity = trim(oen_reply->RES_ORU_GROUP [1]->ORC [1]->placer_ord_nbr [1]->entity_id)
+   set res_plac_name = trim(oen_reply->RES_ORU_GROUP [1]->ORC [1]->placer_ord_nbr [1]->name_id)
+   set res_plac_univ = trim(oen_reply->RES_ORU_GROUP [1]->ORC [1]->placer_ord_nbr [1]->univ_id)
+   set res_plac_type = trim(oen_reply->RES_ORU_GROUP [1]->ORC [1]->placer_ord_nbr [1]->univ_id_type)
+
+   Set oen_reply->RES_ORU_GROUP [1]->ORC [1]->placer_ord_nbr [1]->entity_id =   res_fill_entity
+   Set oen_reply->RES_ORU_GROUP [1]->ORC [1]->placer_ord_nbr [1]->name_id = res_fill_name
+   Set oen_reply->RES_ORU_GROUP [1]->ORC [1]->placer_ord_nbr [1]->univ_id = res_fill_univ
+   Set oen_reply->RES_ORU_GROUP [1]->ORC [1]->placer_ord_nbr [1]->univ_id_type = res_fill_type
+
+   Set oen_reply->RES_ORU_GROUP [1]->ORC [1]->filler_ord_nbr [1]->entity_id = res_plac_entity
+   Set oen_reply->RES_ORU_GROUP [1]->ORC [1]->filler_ord_nbr [1]->name_id = res_plac_name
+   Set oen_reply->RES_ORU_GROUP [1]->ORC [1]->filler_ord_nbr [1]->univ_id = res_plac_univ
+   Set oen_reply->RES_ORU_GROUP [1]->ORC [1]->filler_ord_nbr [1]->univ_id_type = res_plac_type
+
+   ;/**OBR**/
+
+   free set res_obr_fill_entity
+   free set res_obr_fill_name
+   free set res_obr_fill_univ
+   free set res_obr_fill_type
+
+   free set res_obr_plac_entity
+   free set res_obr_plac_name
+   free set res_obr_plac_univ
+   free set res_obr_plac_type
+
+   For (c = 1 to obr_temp)
+   set res_obr_fill_entity = trim(oen_reply->RES_ORU_GROUP [c]->OBR [1]->filler_ord_nbr [1]->entity_id)
+   set res_obr_fill_name = trim(oen_reply->RES_ORU_GROUP [c]->OBR [1]->filler_ord_nbr [1]->name_id)
+   set res_obr_fill_univ = trim(oen_reply->RES_ORU_GROUP [c]->OBR [1]->filler_ord_nbr [1]->univ_id)
+   set res_obr_fill_type = trim(oen_reply->RES_ORU_GROUP [c]->OBR [1]->filler_ord_nbr [1]->univ_id_type)
+
+   set res_obr_plac_entity = trim(oen_reply->RES_ORU_GROUP [c]->OBR [1]->placer_ord_nbr [1]->entity_id)
+   set res_obr_plac_name = trim(oen_reply->RES_ORU_GROUP [c]->OBR [1]->placer_ord_nbr [1]->name_id)
+   set res_obr_plac_univ = trim(oen_reply->RES_ORU_GROUP [c]->OBR [1]->placer_ord_nbr [1]->univ_id)
+   set res_obr_plac_type = trim(oen_reply->RES_ORU_GROUP [c]->OBR [1]->placer_ord_nbr [1]->univ_id_type)
+
+   Set oen_reply->RES_ORU_GROUP [c]->OBR [1]->filler_ord_nbr [1]->entity_id =    res_obr_plac_entity
+   Set oen_reply->RES_ORU_GROUP [c]->OBR [1]->filler_ord_nbr [1]->name_id =  res_obr_plac_name
+   Set oen_reply->RES_ORU_GROUP [c]->OBR [1]->filler_ord_nbr [1]->univ_id =  res_obr_plac_univ
+   Set oen_reply->RES_ORU_GROUP [c]->OBR [1]->filler_ord_nbr [1]->univ_id_type =   res_obr_plac_type
+
+   Set oen_reply->RES_ORU_GROUP [c]->OBR [1]->placer_ord_nbr [1]->entity_id =  res_obr_fill_entity
+   Set oen_reply->RES_ORU_GROUP [c]->OBR [1]->placer_ord_nbr [1]->name_id =  res_obr_fill_name
+   Set oen_reply->RES_ORU_GROUP [c]->OBR [1]->placer_ord_nbr [1]->univ_id = res_obr_fill_univ
+   Set oen_reply->RES_ORU_GROUP [c]->OBR [1]->placer_ord_nbr [1]->univ_id_type = res_obr_fill_type
+   Endfor
+
+
+  ;/**OBX**/
+
+ declare x = i4
+ declare index_to_remove = i4
+ set obx_size = size(oen_reply->RES_ORU_GROUP->OBX_GROUP, 5)
+ set x = 1
+
+; find the OBX segment to remove
+ while(x <=obx_size)
+ set oen_reply->RES_ORU_GROUP ->OBX_GROUP [x]->OBX->set_id = cnvtstring(x)
+ set index_to_remove = -1
+ if (oen_reply->RES_ORU_GROUP->OBX_GROUP [x]->OBX->observation_id->alt_identifier = "DONOTSEND")
+ set index_to_remove = x
+ endif
+; remove the unwanted OBX segment
+ execute oencpm_msglog(build("remove index is: ", index_to_remove))
+ if (index_to_remove > -1)
+ set stat = alterlist(oen_reply->RES_ORU_GROUP-> OBX_GROUP, obx_size -1, x -1)
+ set obx_size = obx_size -1
+ else
+ set x = x +1
+ endif
+ endwhile
+
+; relocate LOINC coding
+
+Set num_size = size(oen_reply->RES_ORU_GROUP->OBX_GROUP, 5)
+Set lc = 1
+
+For (lc = 1 to num_size)
+
+     free set LOINC_code
+     free set LOINC_desc  
+     free set LOINC_contrib_sys
+     free set Lcode
+     free set Lcode_desc
+     free set Lcode_contrib_sys 
+     free set Dup_Lcode
+     free set Dup_Lcode_desc
+
+       If (oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->coding_system != "LOINC")
+        Set Dup_Lcode=oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->identifier
+        Set Dup_Lcode_desc=oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->text
+        Set oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->alt_identifier=Dup_Lcode
+        Set oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->alt_text =Dup_Lcode_desc
+    Endif
+
+       If (oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->coding_system = "LOINC")
+        Set LOINC_code=oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->identifier
+        Set LOINC_desc=oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->text
+        Set LOINC_contrib_sys=oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->
+        coding_system 
+        Set Lcode=oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->alt_identifier 
+        Set Lcode_desc=oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->alt_text 
+        Set Lcode_contrib_sys=oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->
+        alt_coding_system 
+        Set oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->identifier=Lcode
+        Set oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->text=Lcode_desc
+        Set oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->coding_system=
+        Lcode_contrib_sys
+        Set oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->alt_identifier=LOINC_code
+        Set oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->alt_text =LOINC_desc
+        Set oen_reply->RES_ORU_GROUP ->OBX_GROUP [lc]->OBX->observation_id->alt_coding_system=
+        LOINC_contrib_sys
+    Endif
+Endfor
+
+If (size(oen_reply->RES_ORU_GROUP->OBX_GROUP, 5)=0)
+ Set OenStatus->Ignore=1
+Endif
+
+
+/***5/25/11 - adding logic to call child script to trim MSH;10 MsgCtrlID to 20 chars***/
+execute OP_MSGCTRL_TRIM_OUT
+
+/*** adding ccl to return the sender's order alias in OBR;19   PHopkins 4/30/13 *****/
+
+DECLARE listsize = i4
+DECLARE accessionid = vc
+DECLARE ordalias = vc
+DECLARE acttype = vc
+DECLARE accnfound = i4
+
+free set listsize
+set x = 1
+
+set listsize = size(oen_reply->RES_ORU_GROUP [1]->OBR [1]->filler_field1,5)
+
+execute oencpm_msglog(build("LISTSIZE = ",listsize))
+
+for (x = 1 to listsize)
+   if (oen_reply->RES_ORU_GROUP [1]->OBR [1]->filler_field1 [x]->field_type = "HNA_ACCNID")
+
+                 SET accessionid = oen_reply->RES_ORU_GROUP [1]->OBR [1]->filler_field1 [x]->value 
+	 SET acttype = oen_reply->RES_ORU_GROUP [1]->OBR [1]->diag_serv_sec_id  
+   endif
+endfor
+
+
+execute oencpm_msglog(build("Accession id = ",accessionid))
+execute oencpm_msglog(build("Activity Type = ",acttype))
+
+IF (acttype = "AP")
+
+   SELECT ao.order_id,o.alias
+     FROM accession_order_r ao, order_alias o
+      PLAN ao
+         WHERE ao.accession_id = cnvtint(accessionid)
+             JOIN o where o.order_id = ao.order_id and o.alias not in("",NULL," ")
+      DETAIL
+             ordalias = o.alias
+     WITH nocounter
+   
+execute oencpm_msglog(build("AP Order Alias = ",ordalias))
+
+;;;Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->placer_field2 = ordalias
+Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->placer_ord_nbr [1]->entity_id = ordalias
+
+ENDIF
+#exit_25
+#end_of_script
