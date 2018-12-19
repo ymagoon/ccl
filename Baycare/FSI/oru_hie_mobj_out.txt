@@ -1,0 +1,309 @@
+/*
+ *  ---------------------------------------------------------------------------------------------
+ *  Script Name:  oru_hie_mobj_out
+ *  Description:  HIE Documents Outbound Script
+ *  Type:         Modify Object Script
+ *  ---------------------------------------------------------------------------------------------
+ *  Author:         T McArtor
+ *  Library:        ORUORU
+ *  Creation Date:  08/04/2014
+ *  ---------------------------------------------------------------------------------------------
+ *  Mod# Date    Author   Description & Requestor Information
+* Outbound HIE Mod Obj
+* 01/20/15  Mod 7:  T McArtor   - Added Doc type OB Procedure Note  per Cheri K
+* 08/12/14  Mod 8:   T McArtor  MSH 9 R03 to R01 and hook for formatting in OBR 24
+* 04/01/15  Mod 9:   T McArtor   Adding RP blocking logic Optum Project  
+* 04/15/16  Mod 10: T McArtor   Adding ED ED Physician Notes logic 
+* 05/05/16  Mod 11: T McArtor   Adding BMG Filter for DYDOC logic 
+* 07/13/16  Mod 12: D Olszewski Adding in GI Endoscopy Reports doc logic
+* 07/13/16  Mod 13: D Olszewski Reorganzing script to skip not needed doucments first
+*10/27/16   Mod  14: H Kaczmarczyk   Added coding to blank out all life-time PCP physician identifiers in PD1
+*12/27/16   Mod 15: D Olszewski Adding in NPI to OBR 32 
+* 05/24/18  Mod 16: S Thies Adding code to rebound cardiology results out by Activity Type
+* 05/25/18  Mod 16: S Thies Added MUSE qualifer to rebounds moving order_id to OBR-2
+* 09/10/18  Mod 16:S Thies RFC # 14169 Hardcode MUSEEKG to OBR-4.1 for qualified result rebounds
+*  ---------------------------------------------------------------------------------------------
+*/
+
+;If not one of the following documents, do not send outbound
+If (oen_reply->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->text IN (
+ "History and Physicals",
+ "Discharge Summary",
+ "Consultation",
+ "Operative Reports",
+ "Cardiology Consultation",
+ "Wound Care Consultation",
+ "Oncology Consultation",
+ "Tele Neurology Consultation",
+ "OB Procedure Note",
+"ED Physician Notes",
+"GI Endoscopy Reports"
+))
+
+;;Mod 16
+  If (size(oen_reply->RES_ORU_GROUP [1]->OBX_GROUP,5)=0)
+    set oenstatus->ignore=1  ;ignore message
+    Go to Done
+  Else
+    set oenstatus->ignore=0 ;send message
+  Endif
+
+Else
+declare ACTIVITY_SUBTYPE_CD = f8  
+declare ACTIVITY_SUBTYPE_CD_DISP = vc
+  ;declare order_id = f8
+  declare activity_type_cd = f8
+  declare activity_type_cd_disp = vc
+  ;set order_id = get_double_value("order_id") 
+  ;execute oencpm_msglog(build("order_id = ",order_id,char(0)))
+  
+;;Code to get order id out of OBR-3 and into OBR-2 without MUSEEKG0 appened
+;;Added wildcard search for MUSE to execute this piece of code
+   IF (oen_reply->RES_ORU_GROUP [1]->OBR [1]->placer_ord_nbr [1]->entity_id = "")
+    if (oen_reply->RES_ORU_GROUP [1]->OBR [1]->filler_ord_nbr [1]->entity_id = "*MUSE*")
+    Declare ord_id = vc
+    Declare real_ord_id = vc
+    Set ord_id = oen_reply->RES_ORU_GROUP [1]->OBR [1]->filler_ord_nbr [1]->entity_id 
+    Set real_ord_id = piece(ord_id,"M",1, ord_id)
+    Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->placer_ord_nbr [1]->entity_id = real_ord_id
+    Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->identifier = "MUSEEKG"
+   ENDIF
+    endif
+
+  select into "nl:"
+  o.activity_type_cd
+  ,OC.ACTIVITY_SUBTYPE_CD
+  from orders o
+            , order_catalog oc
+  where o.order_id = cnvtreal(oen_reply->RES_ORU_GROUP [1]->OBR [1]->placer_ord_nbr [1]->entity_id )
+  AND O.CATALOG_CD = OC.CATALOG_CD
+
+  detail
+  activity_type_cd = o.activity_type_cd
+  ACTIVITY_SUBTYPE_CD = OC.ACTIVITY_SUBTYPE_CD
+  with nocounter
+  execute oencpm_msglog(build("activity_type_cd = ",activity_type_cd, char(0)))
+  execute oencpm_msglog(build("activity_subtype_cd = ",activity_subtype_cd, char(0)))
+  					 
+  set activity_type_cd_disp = UAR_GET_CODE_DISPLAY(activity_type_cd)
+  execute oencpm_msglog(build("activity_type_cd_disp = ",activity_type_cd_disp, char(0)))
+
+  set activity_subtype_cd_disp = UAR_GET_CODE_DISPLAY(activity_subtype_cd)
+  execute oencpm_msglog(build("activity_subtype_cd_disp = ",activity_subtype_cd_disp, char(0)))
+		
+  If ((ACTIVITY_SUBTYPE_CD_DISP) IN ("CardioNoHIE", "CardiologyNoHIE"))
+  set oenstatus->ignore=1  ;ignore message
+  go to Done
+  Endif
+
+  IF (activity_type_cd_disp in ("Cardiology Services", "Cardiac Cath Lab", "Cardiac Tx/Procedures", 
+        "Pedi Cardiology Services", "BOI Cardiology", "BOI Cardiovascular", "OP DX Card", "Ambulatory ECHO", 
+         "Cardiovascular", "Ambulatory Cardiovascular" ))
+    set oenstatus->ignore=0 ;send message
+    set oen_reply->CONTROL_GROUP [1]->MSH [1]->sending_facility->name_id = "CARDIOLOGY"
+    set oen_reply->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->coding_system = activity_type_cd_disp 
+  ELSE	    
+   set oenstatus->ignore=1
+    Go to Done
+  ENDIF
+ Endif
+
+/*** Mod 11  T McArtor - BMG Filter ***/
+
+IF (oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_auth->name_id  = "BMGFN")
+    set oenstatus->ignore=1
+go to Done
+Endif
+
+
+/*********************Start Mod 9 T. McArtor  04/01/15*******************************************/
+
+/*******Blocking Logic Reference Pointer ORU message********/
+
+IF (oen_reply->RES_ORU_GROUP [1]->OBX_GROUP [1]->OBX->observation_value [1]->value_2 = "OTG")
+    set oenstatus->ignore=1
+   Go to Done
+Endif
+
+/*********************End Mod 9 T. McArtor  04/01/15*******************************************/
+
+/*********************Start Add Mod 8 MSH 9 T. McArtor  08/12/14*******************************************/
+
+If (oen_reply->CONTROL_GROUP [1]->MSH [1]->message_type->messg_trigger = "R03") 
+   Set oen_reply->CONTROL_GROUP [1]->MSH [1]->message_type->messg_trigger = "R01"
+;   Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->diag_serv_sec_id = "DDOC"
+Endif
+
+/*********************End Mod 8 MSH 9 T. McArtor  08/12/14*******************************************/
+
+/*********************Start Add Mod 7 PID 11 e-mail block T McArtor  08/04/14*******************************************/
+
+declare pid_size = i4
+declare p = i4
+declare Sstreet = vc
+declare Stypes = vc
+declare Sother_desig = vc
+declare Scity = vc
+declare Sstate_prov = vc
+declare Scountry = vc
+declare Sother_geo_desig = vc
+declare Scensus = vc
+declare Szip_code = vc
+
+  set pid_size = size(oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address, 5)
+  set p = 1
+
+For (p = 1 to pid_size)
+
+  If (oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [p]->types = "e-mail")
+     Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [p]->street = ""
+     Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [p]->types = ""
+     Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [p]->other_desig = ""
+     Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [p]->city = ""
+     Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [p]->state_prov = ""
+     Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [p]->zip_code = ""
+     Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [p]->country = ""
+     Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [p]->other_geo_desig = ""
+     Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [p]->county = ""
+     Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [p]->census_tract = ""
+  Endif
+Endfor
+
+  If (pid_size>1)
+     If (oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->types = "Home")
+       Set Sstreet = oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->street 
+       Set Stypes = oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->types
+       Set Sother_desig = oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->other_desig
+       Set Scity = oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->city
+       Set Sstate_prov = oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->state_prov
+       Set Scountry = oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->country 
+       Set Sother_geo_desig = oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->other_geo_desig
+       Set Scensus = oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->census_tract 
+       Set Szip_code = oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->zip_code 
+ 
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [1]->street = Sstreet
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [1]->types = Stypes
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [1]->other_desig = Sother_desig
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [1]->city = Scity 
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [1]->state_prov = Sstate_prov
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [1]->zip_code = Szip_code
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [1]->country = Scountry
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [1]->other_geo_desig = Sother_geo_desig
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [1]->census_tract = Scensus
+
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->street = ""
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->types = ""
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->other_desig = ""
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->city = "" 
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->state_prov = ""
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->zip_code = ""
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->country = ""
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->other_geo_desig = ""
+       Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_address [2]->census_tract = ""
+    Endif
+ Endif
+
+/*********************End Mod7  PID 11 e-mail block   T McArtor  08/04/14*******************************************/
+
+/*********************Add the PCPE to PD1:4 H Kaczmarczyk 11/13/13*******************************************/
+
+declare pt_enctr_id = f8
+declare phys_NPInbr = vc
+declare phys_name_first = vc
+declare phys_name_last = vc
+
+Set pt_enctr_id = oen_reply->cerner->encntr_prsnl_info->encntr [1]->encntr_id
+Set phys_reltn = uar_get_code_by ("MEANING",333,"PCPE")
+Set phys_number = uar_get_code_by ("DISPLAY",263,"NPI Number")
+
+select into "nl:" 
+  P.ALIAS, PR.NAME_LAST, PR.NAME_FIRST
+  from ENCNTR_PRSNL_RELTN   E, PRSNL_ALIAS   P, PRSNL   PR
+  plan e
+    WHERE E.ENCNTR_ID = pt_enctr_id  and E.ENCNTR_PRSNL_R_CD = phys_reltn  and E.MANUAL_CREATE_IND= 0 
+  join p
+  where E.PRSNL_PERSON_ID = P.PERSON_ID   and P.ALIAS_POOL_CD = phys_number
+   join pr
+  WHERE P.PERSON_ID = PR.PERSON_ID
+  detail
+  phys_NPInbr = P.ALIAS
+  phys_name_first = PR.NAME_FIRST
+  phys_name_last = PR.NAME_LAST  
+ WITH NOCOUNTER
+
+/*********************10/27/16  Add Mod 14: PD1 Clear all old life time PCP identifiers Hope K.************************/
+
+ Set pd1_size = size(oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1, 5)
+
+ If (pd1_size>0)
+   Set stat = alterlist(oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1, 0)
+ Endif
+ 
+ If (phys_NPInbr not in( "", NULL, " "))
+   Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_provider [1]->id_nbr =  phys_NPInbr
+   Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_provider [1]->last_name =  phys_name_last
+   Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_provider [1]->first_name = phys_name_first
+   Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_provider [1]->assign_auth->name_id  = "NPI Number"
+   Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_provider [1]->name_type = "Personnel"
+   Set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PD1 [1]->pat_primary_provider [1]->id_type = "National Provider Identifier"
+ Endif
+
+/*** Mod 10 T Mcartor - Add logic to ltd OBR 25 to "F" ***/
+
+/*** Mod 10 T Mcartor - Start Add logic to ED Physician Notes ***/
+
+If (oen_reply->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->identifier = "EDPN")
+Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->identifier = ""
+Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->text = ""
+Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->identifier = "DIS"
+Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->text = "Discharge Summary"
+Endif
+
+/*** Mod 10 T Mcartor - End Add logic to ED Physician Notes ***/
+
+If (oen_reply->RES_ORU_GROUP [1]->OBR [1]->result_status IN (
+ "P","TR","INERROR"))
+  set oenstatus->ignore=1
+Endif
+
+/*** Mod 15 set OBR32 to NPI number***/
+
+declare alias_type_cd = i4
+set alias_type_cd = UAR_GET_CODE_BY("DISPLAYKEY", 320, "NATIONALPROVIDERIDENTIFIER") 
+
+  ;main result interpreter OBR;32
+  ;set OBR_32 = build("OBR_32_",1)
+  for(encntr_x = 1 to size(oen_reply->cerner->encntr_prsnl_info->encntr,5))
+   IF(oen_reply->cerner->encntr_prsnl_info->encntr [encntr_x]->reln_type_cdf = "OBR_32_1")
+    set prsnl_person_id_obr32 = oen_reply->cerner->encntr_prsnl_info->encntr [encntr_x]->prsnl_r [1]->prsnl_person_id
+    for(prsnl_x = 1 to size(oen_reply->cerner->prsnl_info->prsnl,5))
+     IF(oen_reply->cerner->prsnl_info->prsnl [prsnl_x]->person_id = prsnl_person_id_obr32)
+      for(alias_x = 1 to size(oen_reply->cerner->prsnl_info->prsnl [prsnl_x]->alias,5))       
+       IF(oen_reply->cerner->prsnl_info->prsnl [prsnl_x]->alias [alias_x]->alias_type_cd = alias_type_cd)
+;        for(1 = 1 to size(oen_reply->RES_ORU_GROUP [1]->OBR,5))
+         Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->prim_res_interp [1]->prsnl->alias = 
+         oen_reply->cerner->prsnl_info->prsnl [prsnl_x]->alias [alias_x]->alias
+         Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->prim_res_interp [1]->bed_status = ""	 
+         Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->prim_res_interp [1]->location_type= "NPI Number"
+         Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->prim_res_interp [1]->building = ""
+         Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->prim_res_interp [1]->floor = ""
+         Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->prim_res_interp [1]->prsnl->assign_univ_id_type = ""
+         Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->prim_res_interp [1]->prsnl->source = ""
+         Set oen_reply->RES_ORU_GROUP [1]->OBR [1]->prim_res_interp [1]->prsnl->assign_name_id = ""
+
+;       endfor
+       ENDIF
+      endfor
+     ENDIF
+    endfor
+  ENDIF
+ endfor
+
+
+
+/***Mod 1 - 09/05/2011 - Adding logic to blank out 999-99-9999  SSN values***/
+if(oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->ssn_nbr ="999999999")
+  set oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->ssn_nbr =""
+endif
+
+#Done
