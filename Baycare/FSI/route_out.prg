@@ -8,8 +8,10 @@
  *  Library:        
  *  Creation Date:  11/16/2018
  *  ---------------------------------------------------------------------------------------------
- *  Refer to route_script_history for the history of the route script. This script was updated and
- *  formatted in accordance with model. 
+ *  Mod# Date      Author                     Description & Requestor Information
+ *  
+ *  
+ *  ---------------------------------------------------------------------------------------------
 */
 
 ;load subroutines
@@ -23,9 +25,9 @@ declare message_trigger = c3
 
 set message_type = trim(OENOBJ->CONTROL_GROUP[1]->MSH[1]->MESSAGE_TYPE->MESSG_TYPE)
 set message_trigger = trim(OENOBJ->CONTROL_GROUP[1]->MSH[1]->MESSAGE_TYPE->MESSG_Trigger)
-set cqm_type = get_string_value("cqm_type") ;this is case sensitive
-set cqm_class = get_string_value("cqm_class") ;this is case sensitive
-set cqm_subtype = get_string_value("cqm_subtype") ;this is case sensitive
+set cqm_type = get_string_value("cqm_type")
+set cqm_class = get_string_value("cqm_class")
+set cqm_subtype = get_string_value("cqm_subtype")
 
 set oenstatus->status = 1
 set stat = alterlist(oenroute->route_list, 1) ;default to 1. This is changed to 2 or 3 later in the program if needed
@@ -71,16 +73,18 @@ case (message_type)
             execute oencpm_msglog build("Enter if for cqm_class = SCS_NET", char(0))
             declare perf_loc = vc   
             set perf_loc = ""
-            ;todo - let's see if we can map this to an obx        
-            select od.OE_FIELD_DISPLAY_VALUE    
+  
+            select 
+                od.oe_field_display_value
             from order_detail od
                 where od.order_id = order_id
-                 and od.OE_FIELD_MEANING =  "PERFORMLOC"
-               order od.action_sequence desc
-              detail
-                perf_loc = trim(od.OE_FIELD_DISPLAY_VALUE)             
-              with nocounter, maxrec = 1
-               execute oencpm_msglog(build("perf_loc:",perf_loc,char(0)))
+                     and od.oe_field_meaning=  "PERFORMLOC"
+            order od.action_sequence desc
+            detail
+                perf_loc = trim(od.oe_field_display_value)             
+            with nocounter, maxrec = 1
+
+            execute oencpm_msglog(build("perf_loc:",perf_loc,char(0)))
 
             /* Split count to be used at comserver for custom grouping logic for Cerner bundler table
                 Splitting by Order Group size ensures each order on an accession will go through interface individually. */
@@ -119,6 +123,9 @@ case (message_type)
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_IDX_OUT")
             set oenroute->route_list[2]->r_pid = get_proc_id("ORM_TCP_TELETRK_RAD_OUT")
             go to exit_point
+       ; elseif (cqm_subtype = "RULEORDERS") ;001 height and weight
+       ;     set oenroute->route_list[1]->r_pid = get_proc_id("ORM_HT_WT_OUT")
+       ;     go to exit_point
         elseif (cqm_subtype = "AUDIOLOGY")
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_AUDIOLOGY_OUT")
             go to exit_point
@@ -161,7 +168,7 @@ case (message_type)
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_BRIDGE_OUT")
             go to exit_point
         elseif (cqm_subtype in ("AP", "BB", "MICROBIOLOGY", "GLB")) ;Ignore initial lab order prior to accession number
-                set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
+            set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
         else
             set alias_size = oenobj->cerner->person_info->person [1]->alias_count        
             if (alias_size = 0 or alias_size = 1)   ;if patient identifiers are less than or equal to 1 then message is bogus
@@ -216,7 +223,7 @@ case (message_type)
 
             /* Model recommendation to reduce the amount of messages going to the bayc_out interface.
                 By filtering on the activity type of the result, we will reduce the number of outbound messages. */
-            if (cqm_type in ("AP", "MICRO", "GRP")) ;GRP is BB and GL results
+            if (cqm_type in ("AP", "MICRO", "GRP")) ;GRP is BB and GL, and other results
                 set stat = alterlist(oenroute->route_list,3)
                 set oenroute->route_list[1]->r_pid = get_proc_id("ORU_TCP_BAYC_OUT")
                 set oenroute->route_list[2]->r_pid = get_proc_id("ORU_TCP_OPTUM_LAB_OUT")
@@ -229,7 +236,7 @@ case (message_type)
     of "ADT":
         declare act_cs = vc
 
-        set act_cs = get_string_value("action_contributor_system_cd") ;this is case sensitive 
+        set act_cs = get_string_value("action_contributor_system_cd")
         set alias_pool_display = 
           get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_auth->name_id))
 
@@ -242,13 +249,6 @@ case (message_type)
             ;end allergy suppression
         elseif (message_trigger = "A28")
             set oenroute->route_list[1]->r_pid = get_proc_id("ADT_TCPIP_HI_OUT")
-            ;commenting out - not needed for PHS project
-        ;elseif (alias_pool_display = "HI FIN") 
-            ;if(message_trigger in ("A01", "A03", "A04", "A08"))
-                ;set oenroute->route_list[1]->r_pid = get_proc_id("ADT_TCP_CSSR_OUT")
-            ;else
-                ;set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
-            ;endif
         else
             set stat = alterlist(oenroute->route_list, 3)
             set oenroute->route_list[1]->r_pid = get_proc_id("ADT_TCPIP_SOARIAN_OUT")
@@ -275,16 +275,17 @@ case (message_type)
         endif
 
     of "RDE":
-        ;looking at consolidating
         set stat = alterlist(oenroute->route_list, 3)
         set oenroute->route_list[1]->r_pid = get_proc_id("SI_PYXIS_OUTBOUND")
         set oenroute->route_list[2]->r_pid = get_proc_id("RDE_TCP_THERADOC_OUT")
         set oenroute->route_list[3]->r_pid = get_proc_id("RDE_TCP_OUT")
+;        set oenroute->route_list[4]->r_pid = get_proc_id("RDE_RDS_PHARMACY_OUT")
 
     of "RDS":
         set stat = alterlist(oenroute->route_list, 2)
         set oenroute->route_list[1]->r_pid = get_proc_id("RDS_TCPIP_PHARMO_OUT")
         set oenroute->route_list[2]->r_pid = get_proc_id("RDE_TCP_OUT")
+;        set oenroute->route_list[3]->r_pid = get_proc_id("RDE_RDS_PHARMACY_OUT")
 
     of "SIU":
         set oenroute->route_list[1]->r_pid = get_proc_id("SIU_TCPIP_SURGINET_OUT")
