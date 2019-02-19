@@ -8,8 +8,8 @@
  *  Library:        
  *  Creation Date:  11/16/2018
  *  ---------------------------------------------------------------------------------------------
- *  Mod# Date      Author                     Description & Requestor Information
- *  
+ *  Mod#   Date          Author                        Description & Requestor Information
+ *  001       02/15/19   Magoon, Yitzhak    Make DFT filepath dynamic
  *  
  *  ---------------------------------------------------------------------------------------------
 */
@@ -35,10 +35,12 @@ set stat = alterlist(oenroute->route_list, 1) ;default to 1. This is changed to 
 case (message_type)
     of "DFT":
         set intfilenm = get_string_value("interface file name")
+        set amb = build("/cerner/d_",cnvtlower(curdomain),"/chg/amb_p01.dat") ;001
+        set uc = build("/cerner/d_",cnvtlower(curdomain),"/chg/uc_p01.dat") ;001
 	
-        if (intfilenm = "/cerner/d_m30/chg/amb_p01.dat")
+        if (intfilenm = amb)
             set oenroute->route_list[1]->r_pid = get_proc_id("DFT_TCPIP_BMG_OUT")
-        elseif (intfilenm = "/cerner/d_m30/chg/uc_p01.dat")
+        elseif (intfilenm = uc)
             set oenroute->route_list[1]->r_pid = get_proc_id("DFT_TCPIP_UC_OUT")
         else
             set oenroute->route_list[1]->r_pid = get_proc_id("DFT_TCPIP_SOARIAN_OUT")
