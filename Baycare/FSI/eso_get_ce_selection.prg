@@ -75,9 +75,7 @@
 ;     025 02/08/17 Dan Olszewski        Unsupressed Powerforms for           *
 ;                                       zzzFormbuilder (v9)                  *
 ;     032 08/28/17 Dan Olszewski	   	Supress Reviewed Lab Results (v10)   *
-;	  033 11/27/19 Yitzhak Magoon		Changes for modal and formatting	 *
-;	  035 12/19/19 Yitzhak Magoon		Suppress documents to Optum, HIE,    *
-;										and Healthgrid						 *
+;	  033 11/27/19 Yitzhak Magoon		Changes for model and formatting	 *
 ;~DE~*************************************************************************
 ;~END~ ******************  END OF ALL MODCONTROL BLOCKS  *********************
  
@@ -700,7 +698,7 @@ elseif (request->subtype = "AP_PHR")
         call echo("REJECT CE/AP_PHR MESSAGE")
 endif
 ;010 end
-
+ 
  
 /********************************************************************************************
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -721,9 +719,9 @@ values fetched in Section 6.
  
 ---------------------------------------------------------------------------------------------
 ********************************************************************************************/
-
+ 
 ;;****** Begin BayCare Scripting ******
-
+ 
 ;/* Suppress ORU events passed by the TELETRACKING contributor_system - */
 if (trim(contributor_system_disp) = "TELETRAK")
   set reply->status_data->status = "Z"
@@ -735,27 +733,22 @@ if (trim(contributor_system_disp) = "HXCLIN")
   set reply->status_data->status = "Z"
   call echo("HXCLIN ORU PASS THROUGH EVENTS SUPPRESSED")
 endif
-
+ 
 /* APReport endorse action event logic */
 if (request->class = "CE" and request->subtype = "MDOC" and request->stype = "AP")
   declare updttask = vc
-  declare verfieddttm = dq8
  
   select into "nl:"
     ce.event_id
   from
     clinical_event ce
-  where
-    ce.event_id = request->event_id
-    and
-    ce.valid_until_dt_tm = cnvtdatetime("31-DEC-2100 00:00:00.00" )
+  where ce.event_id = request->event_id
+    and ce.valid_until_dt_tm = cnvtdatetime("31-DEC-2100 00:00:00.00" )
   detail
     updttask = cnvtstring(ce.updt_task)
-    verfieddttm = ce.verified_dt_tm
   with nocounter
  
-  if (updttask = "600005" and (verfieddttm >= cnvtdatetime("09-NOV-2017 23:59:00") or
-    (verfieddttm <= cnvtdatetime("26-OCT-2017 00:00:00"))))
+  if (updttask = "600005")
     set reply->status_data->status = "Z"
     call echo("ESO_GET_CE_SELECTION Message suppressed - APreport endorse action")
   endif
@@ -781,129 +774,8 @@ if (request->class = "CE" and request->subtype = "MICRO")
   endif
 endif
  
-/* MDOC/DOC Suppression logic to Optum, HIE and Healthgrid */
-if (request->type = "DOC" or request->type = "MDOC")
-  set optum = uar_get_code_by("DISPLAYKEY",73,"OPTUM")
-  ;healthgrid
-  set ed_patient_summary = uar_get_code_by("DISPLAYKEY",72,"EDPATIENTSUMMARY")
-  set disc_summary_care = uar_get_code_by("DISPLAYKEY",72,"DISCHARGESUMMARYOFCARE")
-  ;hie
-  set history_and_physicals = uar_get_code_by("DISPLAYKEY",72,"HISTORYANDPHYSICALS")
-  set discharge_summary = uar_get_code_by("DISPLAYKEY",72,"DISCHARGESUMMARY")
-  set consultation = uar_get_code_by("DISPLAYKEY",72,"CONSULTATION")
-  set operative_reports = uar_get_code_by("DISPLAYKEY",72,"OPERATIVEREPORTS")
-  set cardiology_consult = uar_get_code_by("DISPLAYKEY",72,"CARDIOLOGYCONSULTATION")
-  set would_consult = uar_get_code_by("DISPLAYKEY",72,"WOUNDCARECONSULTATION")
-  set oncology_consult = uar_get_code_by("DISPLAYKEY",72,"ONCOLOGYCONSULTATION")
-  set tele_neuro_consult = uar_get_code_by("DISPLAYKEY",72,"TELENEUROLOGYCONSULTATION")
-  set ob_procedure_note = uar_get_code_by("DISPLAYKEY",72,"OBPROCEDURENOTE")
-  set ed_physician_note = uar_get_code_by("DISPLAYKEY",72,"EDPHYSICIANNOTES")
-  set gi_endo_report = uar_get_code_by("DISPLAYKEY",72,"GIENDOSCOPYREPORTS")
-  
-  set reply->status_data->status = "Z"
-  /*
-    The default status is being changed from "S" to "Z" to allow us to immediately send the message outbound when a successful
-	condition is met. 
-	
-	The condition for Healthgrid happens first because there is no database hit, thus it is the most performant to list first. 
-	If the condition is met we send the message outbound regardless of the Optum and HIE conditions and filter where the message
-	should go down the line. If the condition is not met, then the script jumps to the Optum condition and then the HIE condition
-	if it needs to. 
-  */
-  
-  ;Healthgrid
-  if (request->event_cd in (ed_patient_summary, disc_summary_care))
-    set reply->status_data->status = "S"
-    go to exit_script ;we are sending to at least Healthgrid
-  end
-  
-  ;Optum
-  select 
-    cvo.alias
-  from
-    code_value_outbound cvo
-  where cvo.code_value = request->event_cd
-    and cvo.code_set = 72
-    and cvo.contributor_source_cd = optum
-	and cvo.alias != "DONOTSEND"
-  with nocounter
-  
-  if (curqual > 0)
-    set reply->status_data->status = "S" ;we are sending to at least Optum
-	go to exit_script
-  end
+call echo(concat("ESO_GET_CE_SELECTION STATUS = ",reply->status_data->status))          ;; 009
  
-  if (request->event_cd in (history_and_physicals ;activity type will determine whether we send to HIE
-							,discharge_summary
-							,consultation
-							,operative_reports
-							,cardiology_consult
-							,would_consult
-							,oncology_consult
-							,tele_neuro_consult
-							,ob_procedure_note
-							,ed_physician_note
-							,gi_endo_report))
-	  set reply->status_data->status = "S" ;we are sending to at least HIE
-	  go to exit_script
-  else
-    declare activity_type_cd = f8
-    declare activity_subtype_cd = f8
-    ;sub activity types
-    set nohie = uar_get_code_by("DISPLAYKEY",5801,"CARDIONOHIE")
-    set nohie2 = uar_get_code_by("DISPLAYKEY",5801,"CARDIOLOGYNOHIE")
-    ;activity types
-    set cardiology_services = uar_get_code_by("DISPLAYKEY",106,"CARDIOLOGYSERVICES")
-    set cardiac_cath_lab = uar_get_code_by("DISPLAYKEY",106,"CARDIACCATHLAB")
-    set cardiac_tx_procedures = uar_get_code_by("DISPLAYKEY",106,"CARDIACTXPROCEDURES")
-    set pedi_cardiology_services = uar_get_code_by("DISPLAYKEY",106,"PEDICARDIOLOGYSERVICES")
-    set boi_cardiology = uar_get_code_by("DISPLAYKEY",106,"BOICARDIOLOGY")
-    set op_dx_card = uar_get_code_by("DISPLAYKEY",106,"OPDXCARD")
-    set ambulatory_echo = uar_get_code_by("DISPLAYKEY",106,"AMBULATORYECHO")
-    set cardio = uar_get_code_by("DISPLAYKEY",106,"CARDIOVASCULAR")
-    set ambulatory_cardio = uar_get_code_by("DISPLAYKEY",106,"AMBULATORYCARDIOVASCULAR")
-	  
-	select into "nl:"
-	  o.activity_type_cd
-	  , oc.activity_subtype_cd
-    from 
-	  clinical_event ce
-	  , orders o
-	  , order_catalog oc
-	plan ce
-	  where ce.event_id = request->event_id
-	join o
-	  where o.order_id = ce.order_id
-	join oc
-	  where oc.catalog_cd = o.catalog_cd
-	detail
-      activity_type_cd = o.activity_type_cd
-	  activity_subtype_cd = oc.activity_subtype_cd
-	with nocounter
-
-	if (activity_subtype_cd in (nohie, nohie2))
-	  set reply->status_data->status = "Z" ;here for clarity because value is already "Z"
-	  go to exit_script
-	end
-	
-	if (activity_type_cd in (cardiology_services
-							,cardiac_cath_lab
-							,cardiac_tx_procedures
-							,pedi_cardiology_services
-							,boi_cardiology
-							,op_dx_card
-							,ambulatory_echo
-							,cardio
-							,ambulatory_cardio
-							))
-	  set reply->status_data->status = "S"
-	  go to exit_script
-	end
-  end ;end HIE
-end ;end doc/mdoc
- 
-#exit_script
-
 end
 go
  
