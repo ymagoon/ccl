@@ -10,7 +10,16 @@
  *  ---------------------------------------------------------------------------------------------
  *  Mod#   Date          Author                        Description & Requestor Information
  *  001       02/15/19   Magoon, Yitzhak    Make DFT filepath dynamic
- *  
+ *  002       02/25/19   SParimi            RFC # 18493 Added coding for Resonance additional comservers
+ *  003       04/09/19   Magoon, Yitzhak    RFC # 19507 Send ZM1 messages to Unknown queue
+ *  004       04/10/19   H Kaczmarczyk      RFC # 19718 Adding PHYSCHG to ORM_TCP_CONSULT_OUT for attending physician change orders
+ *  005       04/15/19   S Parimi           RFC # 20020  to Add code to suppress Pharmacy docs from Doseme
+ *  006       06/10/19   H Kaczmarczyk      Model Changes Phase 1; ORU changes will be in Phase 2: Go-Live
+ *											Added Palliative orders to Consult feed
+ *                                          New routes: ORM_RADIOLOGY_OUT, ORM_HT_WT_OUT, RDE_RDS_PHARMACY_OUT
+ *                                          Non-RLN Lab orders from ORM_TCP_BAYC_OUT to UNKNOWN_TRANS_DISK_OUT
+ *  007       07/08/19   H Kaczmarcz        Model  Phase 2 ORU new routes: oru_documents_out, oru_documents_optum_out,
+ *                                          and oru_lab_results_out
  *  ---------------------------------------------------------------------------------------------
 */
 
@@ -33,7 +42,7 @@ set oenstatus->status = 1
 set stat = alterlist(oenroute->route_list, 1) ;default to 1. This is changed to 2 or 3 later in the program if needed
 
 case (message_type)
-    of "DFT":
+   of "DFT":
         set intfilenm = get_string_value("interface file name")
         set amb = build("/cerner/d_",cnvtlower(curdomain),"/chg/amb_p01.dat") ;001
         set uc = build("/cerner/d_",cnvtlower(curdomain),"/chg/uc_p01.dat") ;001
@@ -50,28 +59,33 @@ case (message_type)
         set oenroute->route_list[1]->r_pid = get_proc_id("MFN_TCPIP_PYXIS_OUT")
 	
     of "ORM":
-        /****REF LAB ORDERS LOGIC****/
         declare order_id = f8
         set order_id = get_double_value("order_id")
 
         set alias_pool_display = 
             get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_id_ext->assign_auth->name_id))
 
-        if (cqm_type = "PKL") ;orders on a lab packing list for the Ref Lab
+        /* PKL messages are triggered when lab orders are added to a packing list and spec tracking location set to transmit 
+           outbound for orders */
+        if (cqm_type = "PKL") 
             set location_display = uar_get_code_display(cnvtreal(get_double_value("to_serv_resource")))
 
             if (location_display = "*Specialty*")
                 set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_SPEC_OUT")
                 go to exit_point
+            ;007
+            elseif (location_display = "*CHANT*")
+                set oenroute->route_list[1]->r_pid = get_proc_id("ORM_QUEST_INPT_OUT")
+                go to exit_point
             elseif (location_display = "*NMSP*")
                 set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_STATE_NEWBORN_OUT")
                 go to exit_point             
-            else
+            else ;if lab orders are transferred internally within Baycare, they will route here
                 set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
                 go to exit_point
             endif ;end 
 
-        elseif (trim(cqm_class) = "SCS_NET") ;When Cerner accession number is assigned, order status is ordered (dispatched)
+        elseif (trim(cqm_class) = "SCS_NET") ;SCS_NET messages trigger when accession # assigned. Does not go through suppression.
             execute oencpm_msglog build("Enter if for cqm_class = SCS_NET", char(0))
             declare perf_loc = vc   
             set perf_loc = ""
@@ -88,8 +102,9 @@ case (message_type)
 
             execute oencpm_msglog(build("perf_loc:",perf_loc,char(0)))
 
-            /* Split count to be used at comserver for custom grouping logic for Cerner bundler table
-                Splitting by Order Group size ensures each order on an accession will go through interface individually. */
+/* When the specimen is sent to a reference lab it is sent with a requisition. The order message must match the req. 
+   The split_cnt is used at the comserver level for custom grouping logic with the bundler table to ensure this happens. */ 
+
             if (trim(perf_loc) = "BMG Quest Lab")  ;Quest performing location.
                 set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_BMGQUEST_OUT")
                 set oenroute->route_list[1]->split_cnt = size(oenobj->order_group, 5)
@@ -99,11 +114,10 @@ case (message_type)
                 set oenroute->route_list[1]->split_cnt = size(oenobj->order_group, 5)
                 go to exit_point
             else
-                set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_BAYC_OUT")
+                set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
                 go to exit_point
             endif
         endif ;end SCS_NET   
-        /****END REF LAB ORDERS and Ambulatory Reference Lab tranasctions ( for Quest) ****/
 	
         declare activity_subtype = vc 
 
@@ -121,17 +135,18 @@ case (message_type)
         with nocounter
 
         if (cqm_subtype in ("MRIRADIOLOGY","RADIOLOGY"))
-            set stat = alterlist(oenroute->route_list, 2)
+            set stat = alterlist(oenroute->route_list, 3)
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_IDX_OUT")
             set oenroute->route_list[2]->r_pid = get_proc_id("ORM_TCP_TELETRK_RAD_OUT")
+            set oenroute->route_list[3]->r_pid = get_proc_id("ORM_RADIOLOGY_OUT")
             go to exit_point
-       ; elseif (cqm_subtype = "RULEORDERS") ;001 height and weight
-       ;     set oenroute->route_list[1]->r_pid = get_proc_id("ORM_HT_WT_OUT")
-       ;     go to exit_point
+        elseif (cqm_subtype = "RULEORDERS") ;height and weight
+            set oenroute->route_list[1]->r_pid = get_proc_id("ORM_HT_WT_OUT")
+            go to exit_point
         elseif (cqm_subtype = "AUDIOLOGY")
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_AUDIOLOGY_OUT")
             go to exit_point
-        elseif (cqm_subtype in ("PHYSCONSULT", "PHYSCHG"))
+        elseif (cqm_subtype in ("PHYSCONSULT", "PHYSCHG", "PALLIATIVE")) ;006
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_CONSULT_OUT")
             go to exit_point
         elseif (cqm_subtype in ("ADMITTO", "BAYESOSUPRES", "COMMUNICATIO"))
@@ -144,17 +159,19 @@ case (message_type)
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_PHILIPS_OUT")
             go to exit_point
         elseif (cqm_subtype in ("ECHO","PEDI ECHO"))
-            set stat = alterlist(oenroute->route_list, 2)
+            set stat = alterlist(oenroute->route_list, 3)
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_PHILIPS_OUT")
             set oenroute->route_list[2]->r_pid = get_proc_id("ORM_TCP_IDX_OUT")
+            set oenroute->route_list[3]->r_pid = get_proc_id("ORM_RADIOLOGY_OUT")
             go to exit_point
         elseif (cqm_subtype = "EKG")
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_MUSE_OUT")
             go to exit_point
         elseif (cqm_subtype = "CARDIOVASCUL")
-            set stat = alterlist(oenroute->route_list, 2)
+            set stat = alterlist(oenroute->route_list, 3)
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_MUSE_OUT")
             set oenroute->route_list[2]->r_pid = get_proc_id("ORM_TCP_IDX_OUT")
+            set oenroute->route_list[3]->r_pid = get_proc_id("ORM_RADIOLOGY_OUT")
             go to exit_point
         elseif  (cqm_subtype in ("EDUTAINMENT", "OFCVIDEOS"))
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_GETWELL_OUT")
@@ -169,16 +186,10 @@ case (message_type)
         elseif (activity_subtype = "BRIDGE")
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_BRIDGE_OUT")
             go to exit_point
-        elseif (cqm_subtype in ("AP", "BB", "MICROBIOLOGY", "GLB")) ;Ignore initial lab order prior to accession number
-            set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
         else
-            set alias_size = oenobj->cerner->person_info->person [1]->alias_count        
-            if (alias_size = 0 or alias_size = 1)   ;if patient identifiers are less than or equal to 1 then message is bogus
-                set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
-            else
-                set oenroute->route_list[1]->r_pid = get_proc_id("ORM_TCP_BAYC_OUT")
-            endif
-    endif ;end cqm_subtype
+            set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
+            go to exit_point
+        endif ;end cqm_subtype
 
     of "ORU":
         declare ver_id = vc with constant(uar_get_code_display(oenobj->cerner->oe_info->message_version_cd))
@@ -215,21 +226,134 @@ case (message_type)
             /* End Quest */
 
             /* MDOC/DOC documents */
+            
             if (cqm_type in ("DOC", "MDOC"))
-                set stat = alterlist(oenroute->route_list,3)
-                set oenroute->route_list[1]->r_pid = get_proc_id("ORU_TCP_HIE_OUT")
-                set oenroute->route_list[2]->r_pid = get_proc_id("ORU_TCP_OPTUM_MDOC_OUT")
-                set oenroute->route_list[3]->r_pid = get_proc_id("ORU_TCP_HEALTHGRID_D_OUT")
-                go to exit_point          
-            endif
+                declare route_list_size = i4 ;005
+                set route_list_size = 0
+               
+                ; Existing Interfaces BEFORE Cerner Model Implemented, to be removed after Model Validation
+                if(oenobj->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->text NOT in ( "Pharmacy"))
+                    set route_list_size = route_list_size + 1 
+                    set stat = alterlist(oenroute->route_list,route_list_size)
+                    set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ORU_TCP_HIE_OUT")
+                endif
 
-            /* Model recommendation to reduce the amount of messages going to the bayc_out interface.
-                By filtering on the activity type of the result, we will reduce the number of outbound messages. */
+                if(oenobj->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->text in ("ED Patient Summary",
+                          "Discharge Summary of Care"))
+                    set route_list_size = route_list_size + 1 
+                    set stat = alterlist(oenroute->route_list,route_list_size)
+                    set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ORU_TCP_HEALTHGRID_D_OUT")
+               endif
+
+               set route_list_size = route_list_size + 1 
+               set stat = alterlist(oenroute->route_list,route_list_size)
+               set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ORU_TCP_OPTUM_MDOC_OUT")
+               ;end 005
+	
+                ;Model Start			
+                /* The following logic are all of the conditions where messages should not go to optum
+                   HNAM_CEREF is for cardiology rebound results and radiology */
+                if (alias_pool_display = "BMGFN" 
+                     or oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->id = ""
+                     or oenobj->RES_ORU_GROUP [1]->OBR [1]->filler_ord_nbr [1]->name_id != "HNAM_CEREF")
+
+                     ;we don't send to optum if any of these 3 conditions is true
+                     execute oencpm_msglog(build("Message not sent to Optum",char(0)))
+                     execute oencpm_msglog(build("alias_pool=",alias_pool_display,char(0)))
+                     execute oencpm_msglog(build("FIN=",
+                     oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->id,char(0)))
+                     execute oencpm_msglog(build("name_id=",
+                     oenobj->RES_ORU_GROUP [1]->OBR [1]->filler_ord_nbr [1]->name_id,char(0)))
+                else
+                    set route_list_size = route_list_size + 1 
+                    set stat = alterlist(oenroute->route_list,route_list_size)
+                    set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ORU_DOCUMENTS_OPTUM_OUT")
+                endif
+
+                if (oenobj->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->text NOT in ("Pharmacy"))
+                    set event_cd = 
+                        get_code_value(trim(oenobj->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->identifier))
+
+                    ;healthgrid documents
+                    set ed_patient_summary = uar_get_code_by("DISPLAYKEY",72,"EDPATIENTSUMMARY")
+                    set disc_summary_care = uar_get_code_by("DISPLAYKEY",72,"DISCHARGESUMMARYOFCARE")
+                    ;hie documents
+                    set history_and_physicals = uar_get_code_by("DISPLAYKEY",72,"HISTORYANDPHYSICALS")
+                    set discharge_summary = uar_get_code_by("DISPLAYKEY",72,"DISCHARGESUMMARY")
+                    set consultation = uar_get_code_by("DISPLAYKEY",72,"CONSULTATION")
+                    set operative_reports = uar_get_code_by("DISPLAYKEY",72,"OPERATIVEREPORTS")
+                    set cardiology_consult = uar_get_code_by("DISPLAYKEY",72,"CARDIOLOGYCONSULTATION")
+                    set wound_consult = uar_get_code_by("DISPLAYKEY",72,"WOUNDCARECONSULTATION")
+                    set oncology_consult = uar_get_code_by("DISPLAYKEY",72,"ONCOLOGYCONSULTATION")
+                    set tele_neuro_consult = uar_get_code_by("DISPLAYKEY",72,"TELENEUROLOGYCONSULTATION")
+                    set ob_procedure_note = uar_get_code_by("DISPLAYKEY",72,"OBPROCEDURENOTE")
+                    set ed_physician_note = uar_get_code_by("DISPLAYKEY",72,"EDPHYSICIANNOTES")
+                    set gi_endo_report = uar_get_code_by("DISPLAYKEY",72,"GIENDOSCOPYREPORTS")
+
+                    ;008
+                    if (event_cd in (history_and_physicals
+                                    ,discharge_summary
+                                    ,consultation
+                                    ,operative_reports
+                                    ,cardiology_consult
+                                    ,wound_consult
+                                    ,oncology_consult
+                                    ,tele_neuro_consult
+                                    ,ob_procedure_note
+                                    ,ed_physician_note
+                                    ,gi_endo_report
+                                    ,ed_patient_summary
+                                    ,disc_summary_care))
+                        execute oencpm_msglog(build("HIE and HealthGrid Documents qualified to go outbound",char(0)))
+                        set route_list_size = route_list_size + 1 
+                        set stat = alterlist(oenroute->route_list,route_list_size)
+                        set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ORU_DOCUMENTS_OUT")
+                        go to exit_point
+                    endif
+                   
+                    set cqmrefnum = get_string_value("cqm_refnum")
+                    execute oencpm_msglog(build("CQM REF NUM:",cqmrefnum,char(0)))
+					
+                    ;sample cqmrefnum - "14719819~4774834~247298"
+                    set oru_contribsys_cd = piece(cqmrefnum, "~",2,"0")
+                    execute oencpm_msglog(build("ORU CONTRIB SYS CD:",oru_contribsys_cd,char(0)))
+					
+                    set oru_contribsys = uar_get_code_display(cnvtreal(oru_contribsys_cd))
+                    execute oencpm_msglog(build("ORU CONTRIB SYS:",oru_contribsys,char(0)))
+
+                    if (oru_contribsys in ("MUSE", "MUSE BOI", "PHILIPS"))
+                        execute oencpm_msglog(build("Cardiology rebound result",char(0)))
+
+                        set route_list_size = route_list_size + 1 
+                        set stat = alterlist(oenroute->route_list,route_list_size)
+                        set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ORU_DOCUMENTS_OUT")
+                        go to exit_point
+                     endif
+                 endif ;end univ_service_id not "Pharmacy"
+            endif ; end cqm_type in ("DOC", "MDOC")
+
+            ;Skipping HealtheIntent FIN
+            if (alias_pool_display = "HI FIN") 
+                set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
+                go to exit_point
+            endif	  
+
+            ;007 SurgiNet notes / discrete result to HealthGrid will no longer go outbound with Lab results
+   
+            if (oenobj->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->text = "zzzFormbuilder Form*")
+                set oenroute->route_list[1]->r_pid = get_proc_id("ORU_DOCUMENTS_OUT") 
+                go to exit_point
+            endif  
+
+     /* Model recommendation to reduce the amount of messages going to the bayc_out interface.
+         By filtering on the activity type of the result, we will reduce the number of outbound messages. */
+
             if (cqm_type in ("AP", "MICRO", "GRP")) ;GRP is BB and GL, and other results
-                set stat = alterlist(oenroute->route_list,3)
+                set stat = alterlist(oenroute->route_list,4)
                 set oenroute->route_list[1]->r_pid = get_proc_id("ORU_TCP_BAYC_OUT")
                 set oenroute->route_list[2]->r_pid = get_proc_id("ORU_TCP_OPTUM_LAB_OUT")
                 set oenroute->route_list[3]->r_pid = get_proc_id("ORU_TCP_BRIDGE_OUT")
+                set oenroute->route_list[4]->r_pid = get_proc_id("ORU_LAB_RESULTS_OUT") ;002
             else 
                 set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
             endif 
@@ -248,14 +372,28 @@ case (message_type)
         
         if (trim(cqm_class) = "PM_ALLERGY" and act_cs = "1478944279")
             set stat = alterlist(oenRoute->route_list,0)
-            ;end allergy suppression
+            ; allergy suppression
         elseif (message_trigger = "A28")
             set oenroute->route_list[1]->r_pid = get_proc_id("ADT_TCPIP_HI_OUT")
         else
             set stat = alterlist(oenroute->route_list, 3)
             set oenroute->route_list[1]->r_pid = get_proc_id("ADT_TCPIP_SOARIAN_OUT")
-            set oenroute->route_list[2]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_01")
-            set oenroute->route_list[3]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_01")
+            ;begin 001
+            set remainder = mod(cnvtreal(oenobj->cerner->person_info->person->person_id), 4)
+                If (remainder=0)
+                    set oenroute->route_list[2]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_01")
+                    set oenroute->route_list[3]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_01")
+                ElseIf (remainder=1)
+                    set oenroute->route_list[2]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_02")
+                    set oenroute->route_list[3]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_02")
+                ElseIf (remainder=2)
+                    set oenroute->route_list[2]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_03")
+                    set oenroute->route_list[3]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_03")
+                Else
+                    set oenroute->route_list[2]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_04")
+                    set oenroute->route_list[3]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_04")
+                Endif
+              ;end 001
       
             /* Public Health Surveillance (PHS) */
             if (message_trigger in ("A01", "A03", "A04", "A08"))
@@ -265,8 +403,15 @@ case (message_type)
         endif ;end PM_ALLERGY
 
     of "BAR":
+        if (message_trigger = "ZM1") ;003
+            set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
+            go to exit_point
+        endif
+
         set alias_pool_display = 
           get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_auth->name_id))
+        
+        execute oencpm_msglog(build("msh=",oenobj->CONTROL_GROUP [1]->MSH [1]->message_type->messg_trigger,char(0)))
 
         if (alias_pool_display = "BayCare FIN")
             set stat = alterlist(oenroute->route_list, 2)
@@ -277,17 +422,17 @@ case (message_type)
         endif
 
     of "RDE":
-        set stat = alterlist(oenroute->route_list, 3)
+        set stat = alterlist(oenroute->route_list, 4)
         set oenroute->route_list[1]->r_pid = get_proc_id("SI_PYXIS_OUTBOUND")
         set oenroute->route_list[2]->r_pid = get_proc_id("RDE_TCP_THERADOC_OUT")
         set oenroute->route_list[3]->r_pid = get_proc_id("RDE_TCP_OUT")
-;        set oenroute->route_list[4]->r_pid = get_proc_id("RDE_RDS_PHARMACY_OUT")
+        set oenroute->route_list[4]->r_pid = get_proc_id("RDE_RDS_PHARMACY_OUT")
 
     of "RDS":
-        set stat = alterlist(oenroute->route_list, 2)
+        set stat = alterlist(oenroute->route_list, 3)
         set oenroute->route_list[1]->r_pid = get_proc_id("RDS_TCPIP_PHARMO_OUT")
         set oenroute->route_list[2]->r_pid = get_proc_id("RDE_TCP_OUT")
-;        set oenroute->route_list[3]->r_pid = get_proc_id("RDE_RDS_PHARMACY_OUT")
+        set oenroute->route_list[3]->r_pid = get_proc_id("RDE_RDS_PHARMACY_OUT")
 
     of "SIU":
         set oenroute->route_list[1]->r_pid = get_proc_id("SIU_TCPIP_SURGINET_OUT")

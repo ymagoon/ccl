@@ -64,7 +64,7 @@
 ;                                       reject exams for radiology           *
 ;     017 09/02/05 Brad Arndt           59277 Added bloodbank                *
 ;     018 11/21/09 Chris Eakes	        Begin Baycare Control LOG            *
-;     019 02/12/14  Hope Kaczmarczyk	Removed ability to suppress from DOC,*
+;     019 02/12/14  Hope Kaczmarczyk	  Removed ability to suppress from DOC,*
 ;                                       MDOC,PowerNotes for IN ERRORS.       *
 ;     020 02/12/14 Hope Kaczmarczyk     Unsupress Endoworks                  *
 ;     021 02/12/14 Hope Kaczmarczyk     Removed ability to supress MDOC      *
@@ -74,8 +74,15 @@
 ;     024 01/21/16 Tony McArtor         Turned on Powerform resulting (v8)   *
 ;     025 02/08/17 Dan Olszewski        Unsupressed Powerforms for           *
 ;                                       zzzFormbuilder (v9)                  *
-;     032 08/28/17 Dan Olszewski	   	Supress Reviewed Lab Results (v10)   *
-;	  033 11/27/19 Yitzhak Magoon		Changes for model and formatting	 *
+;     026 08/28/17 Dan Olszewski	      Supress Reviewed Lab Results (v10)   *
+;	  027 11/27/19 Yitzhak Magoon	        Changes for model and formatting     *
+;	  028 03/25/19 Yitzhak Magoon		      Stop MDOC/DOCs in a Reviewed status  *
+;	  029 04/25/19 Yitzhak Magoon		      Fix unverified and reviewed AP Docs  *
+;	  030 07/08/19 Yitzhak Magoon		      Add suppression logic for DOCS/MDOCS *
+;	  031 07/08/19 Yitzhak Magoon		      Fix issue with AP docs not sending   *
+;										                    outbound	              						 *
+;	  032 07/08/19 Yitzhak Magoon		      Remove time constraint on reviewed   *
+;										                    document filter	          					 *
 ;~DE~*************************************************************************
 ;~END~ ******************  END OF ALL MODCONTROL BLOCKS  *********************
  
@@ -84,8 +91,8 @@ create program ESO_GET_CE_SELECTION
  
 /********************************************************************************************
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- 
 SECTION 1.
+ 
  
 THE FOLLOWING REQUEST RECORD SHOULD BE DEFINED IN TDB.  PERFORM A
 "SHOW ESO_GET_CE_SELECTION" IN TDB TO VERFIY THIS REQUEST STRUCTURE IS IN SYNC
@@ -722,6 +729,8 @@ values fetched in Section 6.
  
 ;;****** Begin BayCare Scripting ******
  
+call echo("<===== Baycare Custom Scripting Begin =====>")
+ 
 ;/* Suppress ORU events passed by the TELETRACKING contributor_system - */
 if (trim(contributor_system_disp) = "TELETRAK")
   set reply->status_data->status = "Z"
@@ -734,48 +743,276 @@ if (trim(contributor_system_disp) = "HXCLIN")
   call echo("HXCLIN ORU PASS THROUGH EVENTS SUPPRESSED")
 endif
  
-/* APReport endorse action event logic */
-if (request->class = "CE" and request->subtype = "MDOC" and request->stype = "AP")
+/* APReport and Micro endorse action event logic */
+if (request->class = "CE" and ((request->subtype = "MDOC" and request->stype = "AP")
+                          or request->subtype = "MICRO"))
+ 
+  call echo ("Document is an AP or Micro document")
+ 
   declare updttask = vc
+  declare verfieddttm = dq8
  
   select into "nl:"
     ce.event_id
   from
     clinical_event ce
-  where ce.event_id = request->event_id
-    and ce.valid_until_dt_tm = cnvtdatetime("31-DEC-2100 00:00:00.00" )
+  where
+    ce.event_id = request->event_id
+    and
+    ce.valid_until_dt_tm = cnvtdatetime("31-DEC-2100 00:00:00.00")
   detail
     updttask = cnvtstring(ce.updt_task)
   with nocounter
  
   if (updttask = "600005")
     set reply->status_data->status = "Z"
-    call echo("ESO_GET_CE_SELECTION Message suppressed - APreport endorse action")
+    call echo("ESO_GET_CE_SELECTION Message suppressed - endorse action")
   endif
+ 
+  go to exit_script
 endif
  
-/* MICRO result endorse action event supression logic */
-if (request->class = "CE" and request->subtype = "MICRO")
-  declare updttask = vc
+;begin 028
+/* CE GRP trigger sends results that are not lab outbound */
+if (request->class = "CE" and request->subtype = "GRP")
+  declare activity_type_cd = f8
+  declare ap = f8 with constant(uar_get_code_by("MEANING",106,"AP"))
+  declare bb = f8 with constant(uar_get_code_by("MEANING",106,"BB"))
+  declare micro = f8 with constant(uar_get_code_by("MEANING",106,"MICROBIOLOGY"))
+  declare gl = f8 with constant(uar_get_code_by("MEANING",106,"GLB"))
+ 
+  declare zzformbuilder = vc with constant(uar_get_code_display(request->event_cd))
+ 
+  call echo ("Document is a CE GRP document")
+  call echo(build("formbuilder=",zzformbuilder))
  
   select into "nl:"
-    ce.event_id
+    o.activity_type_cd
   from
     clinical_event ce
-  where ce.event_id = request->event_id
-    and ce.valid_until_dt_tm = cnvtdatetime("31-DEC-2100 00:00:00.00")
+    , orders o
+  plan ce
+    where ce.event_id = request->event_id
+      and ce.valid_until_dt_tm > cnvtdatetime(curdate,curtime3)
+  join o
+    where o.order_id = ce.order_id
   detail
-    updttask = cnvtstring(ce.updt_task)
+    activity_type_cd = o.activity_type_cd
   with nocounter
  
-  if (updttask = "600005")
-    set reply->status_data->status = "Z"
-    call echo("ESO_GET_CE_SELECTION Message suppressed - micro endorse action")
+  ;curqual is used because there may be (very few) instances where there is no order_id for a result.
+  if (curqual > 0)
+    if (activity_type_cd not in (ap, bb, micro, gl))
+      set reply->status_data->status = "Z"
+      call echo("ESO_GET_CE_SELECTION CE GRP Message suppressed - not a lab result")
+    endif
   endif
-endif
+ 
+  ;zzformbuilder discrete results are surgical notes that are triggered out the CE GRP trigger that need to go outbound
+  if (zzformbuilder = "zzzFormbuilder Form*")
+    set reply->status_data->status = "S"
+    call echo("ESO_GET_CE_SELECTION CE GRP Message unsuppressed - SurgiNet notes / discrete result to HealthGrid")
+  endif
+ 
+  go to exit_script
+endif ;end CE GRP Trigger
+;end 028
+ 
+;begin 029
+/*
+  When a physician CC's a provider when they sign a document, HIM forwards the document to the CC'd provider. A document is going
+  outbound when that forward happens. When the CC'd physician reviews the document, another document is sent outbound. This logic
+  ensures that only the first document that is signed goes outbound. In other words, we are suppressing all reviewed documents.
+ 
+  We are excluding AP from this code because all AP documents that are triggered outbound should go.
+*/
+ 
+if (request->subtype in ("MDOC", "DOC", "POWERFORMS")
+  and request->stype != "AP") ;031
+ 
+  declare review_cd = f8 with constant(uar_get_code_by("MEANING",21,"REVIEW"))
+  declare action_type_cd = f8
+ 
+  call echo ("Document is an MDOC, DOC, or POWERFORM document")
+ 
+  select into "nl:"
+  from
+    clinical_event ce
+    , ce_event_prsnl cep
+  plan ce
+    where ce.event_id = request->event_id
+      and ce.clinical_event_id = (select
+                                    max(ce2.clinical_event_id)
+                                  from
+                                    clinical_event ce2
+                                  where ce2.event_id = request->event_id)
+  join cep
+    where cep.event_id = ce.event_id
+  ;begin 32
+;      and cep.action_type_cd = review_cd
+;      and cep.valid_from_dt_tm > cnvtlookbehind("15,S") ;look back 15 seconds from now for review action type
+  order by
+    cep.valid_from_dt_tm desc
+  detail
+    action_type_cd = cep.action_type_cd
+  with nocounter, maxrec = 1
+ 
+  if (action_type_cd = review_cd)
+    set reply->status_data->status = "Z"
+    call echo("Message suppressed - Suppressing reviewed document")
+    go to exit_script
+  else
+    set action_type_disp = uar_get_code_display(action_type_cd)
+    call echo(build2("Document is in a ", trim(action_type_disp), " status. Executing HIE, Optum, and HG logic."))
+  endif
+  ;end 032
+;end 029
+ 
+;begin 030
+/*
+  Roughly 75% of documents are being skipped because OBX4.1/4.2 do not match documents that should be sent to Healthgrid, Optum or
+  HIE. The following logic will ensure that the documents should go to at least one of the three systems or it will be skipped.
+  This logic was moved from the mod object scripts
+*/
+  set optum = uar_get_code_by("DISPLAYKEY",73,"OPTUM")
+  ;healthgrid
+  set ed_patient_summary = uar_get_code_by("DISPLAYKEY",72,"EDPATIENTSUMMARY")
+  set disc_summary_care = uar_get_code_by("DISPLAYKEY",72,"DISCHARGESUMMARYOFCARE")
+  ;hie
+  set history_and_physicals = uar_get_code_by("DISPLAYKEY",72,"HISTORYANDPHYSICALS")
+  set discharge_summary = uar_get_code_by("DISPLAYKEY",72,"DISCHARGESUMMARY")
+  set consultation = uar_get_code_by("DISPLAYKEY",72,"CONSULTATION")
+  set operative_reports = uar_get_code_by("DISPLAYKEY",72,"OPERATIVEREPORTS")
+  set cardiology_consult = uar_get_code_by("DISPLAYKEY",72,"CARDIOLOGYCONSULTATION")
+  set wound_consult = uar_get_code_by("DISPLAYKEY",72,"WOUNDCARECONSULTATION")
+  set oncology_consult = uar_get_code_by("DISPLAYKEY",72,"ONCOLOGYCONSULTATION")
+  set tele_neuro_consult = uar_get_code_by("DISPLAYKEY",72,"TELENEUROLOGYCONSULTATION")
+  set ob_procedure_note = uar_get_code_by("DISPLAYKEY",72,"OBPROCEDURENOTE")
+  set ed_physician_note = uar_get_code_by("DISPLAYKEY",72,"EDPHYSICIANNOTES")
+  set gi_endo_report = uar_get_code_by("DISPLAYKEY",72,"GIENDOSCOPYREPORTS")
+ 
+  /* The default status is being changed from "S" to "Z" to allow us to immediately send the message outbound when a successful
+	condition is met.*/
+ 
+  set reply->status_data->status = "Z"
+ 
+  call echo("Defaulting reply->status_data->status to 'Z'")
+ 
+  /* The condition for Healthgrid happens first because there is no database hit, thus it is the most performant to list first.
+	If the condition is met we send the message outbound regardless of the Optum and HIE conditions. If the condition is not met,
+	then the script jumps to the Optum condition and then the HIE condition.
+  */
+ 
+  ;Healthgrid
+  if (request->event_cd in (ed_patient_summary, disc_summary_care))
+    set reply->status_data->status = "S"
+    call echo("Message unsuppressed - document is ED Patient Summary or Discharge Summary of Care")
+    go to exit_script ;we are sending to at least Healthgrid
+  endif
+ 
+ 
+  ;Optum
+  select
+    cvo.alias
+  from
+    code_value_outbound cvo
+  where cvo.code_value = request->event_cd
+    and cvo.code_set = 72
+    and cvo.contributor_source_cd = optum
+	and cvo.alias != "DONOTSEND"
+  with nocounter
+ 
+  if (curqual > 0)
+    set reply->status_data->status = "S" ;we are sending to at least Optum
+    call echo("Message unsuppressed - document aliased to go to Optum")
+	go to exit_script
+  endif
+ 
+  ;Reminder: There is an Optum code set Interface rule set to add an alias of DONOTSEND when a CD: value is found.
+ 
+  ;HIE - activity type will determine whether we send to HIE
+  if (request->event_cd in (history_and_physicals
+							,discharge_summary
+							,consultation
+							,operative_reports
+							,cardiology_consult
+							,wound_consult
+							,oncology_consult
+							,tele_neuro_consult
+							,ob_procedure_note
+							,ed_physician_note
+							,gi_endo_report))
+	  set reply->status_data->status = "S" ;we are sending to at least HIE
+	  call echo("Message unsuppressed - document type matches an HIE document type")
+	  go to exit_script
+  else
+    call echo("Document doesn't match an HIE document...checking activity type and subactivity type...")
+ 
+    declare activity_type_cd = f8
+    declare activity_subtype_cd = f8
+    ;sub activity types
+    set cardionohie = uar_get_code_by("DISPLAYKEY",5801,"CARDIONOHIE")
+    set cardionohie2 = uar_get_code_by("DISPLAYKEY",5801,"CARDIOLOGYNOHIE")
+    ;activity types
+    set cardiology_services = uar_get_code_by("DISPLAYKEY",106,"CARDIOLOGYSERVICES")
+    set cardiac_cath_lab = uar_get_code_by("DISPLAYKEY",106,"CARDIACCATHLAB")
+    set cardiac_tx_procedures = uar_get_code_by("DISPLAYKEY",106,"CARDIACTXPROCEDURES")
+    set pedi_cardiology_services = uar_get_code_by("DISPLAYKEY",106,"PEDICARDIOLOGYSERVICES")
+    set boi_cardiology = uar_get_code_by("DISPLAYKEY",106,"BOICARDIOLOGY")
+    set boi_cardiovascular = uar_get_code_by("DISPLAYKEY",106,"BOICARDIOVASCULAR")
+    set op_dx_card = uar_get_code_by("DISPLAYKEY",106,"OPDXCARD")
+    set ambulatory_echo = uar_get_code_by("DISPLAYKEY",106,"AMBULATORYECHO")
+    set cardiovascular = uar_get_code_by("DISPLAYKEY",106,"CARDIOVASCULAR")
+    set ambulatory_cardiovascular = uar_get_code_by("DISPLAYKEY",106,"AMBULATORYCARDIOVASCULAR")
+ 
+	select into "nl:"
+	  o.activity_type_cd
+	  , oc.activity_subtype_cd
+    from
+	  clinical_event ce
+	  , orders o
+	  , order_catalog oc
+	plan ce
+	  where ce.event_id = request->event_id
+	join o
+	  where o.order_id = ce.order_id
+	join oc
+	  where oc.catalog_cd = o.catalog_cd
+	detail
+      activity_type_cd = o.activity_type_cd
+	  activity_subtype_cd = oc.activity_subtype_cd
+	with nocounter
+ 
+	if (activity_subtype_cd in (cardionohie, cardionohie2))
+	  set reply->status_data->status = "Z" ;here for clarity because value is already "Z"
+	  call echo("Message suppressed - subactivity type is either cardionohie or cardionohie2")
+	  go to exit_script
+	endif
+ 
+	if (activity_type_cd in (cardiology_services
+							,cardiac_cath_lab
+							,cardiac_tx_procedures
+							,pedi_cardiology_services
+							,boi_cardiology
+							,boi_cardiovascular
+							,op_dx_card
+							,ambulatory_echo
+							,cardiovascular
+							,ambulatory_cardiovascular
+							))
+	  set reply->status_data->status = "S"
+	  call echo("Message unsuppressed - activity type matches HIE activity type")
+	  go to exit_script
+	else
+	  call echo(build("Message suppressed - activity type of ", value(uar_get_code_display(activity_type_cd)), " is not valid"))
+	endif
+  endif ;end HIE Remember to check Hospital MUSE EKG for rebound results out
+;end 030
+endif ;end DOC/MDOC
+ 
+#exit_script
  
 call echo(concat("ESO_GET_CE_SELECTION STATUS = ",reply->status_data->status))          ;; 009
  
 end
 go
- 

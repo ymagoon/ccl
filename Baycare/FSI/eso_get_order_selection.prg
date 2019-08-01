@@ -1,5 +1,3 @@
- 
- 
 /*~BB~************************************************************************
   *                                                                      *
   *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
@@ -58,35 +56,45 @@
 ;     006 12/02/03 Lance Hoover         Add orig_ord_as_flag logic, remove mod 005
 ;     007 03/16/06 Robert Becho         Changes to correct passivity with
 ;                                       Alternating IV's
-;	  008 11/21/09 Chris Eakes	        Begin Baycare Control LOG
-;     009 11/25/09 Steve Wade	   Changed ENDO to Surgery and added activate add an action type.
-;     010 12/16/09 SW/CE		   Add organization logic around ENDO to only send SJH, SFB & SJN.
-;								   Creating persistent record structure to cache organizations.
-;     011 12/1/11  Rick Q          Added logic to unsupress teletracker orders
-;     012 01/6/12  Rick Q          Modified logic for Echo orders to include Pedi Echo orders
-;     013 03/6/12  Rick Q          v12 Removed "Cardiovascul" from suppression logic for
-;                                  Cardio orders to MUSE
+;	    008 11/21/09 Chris Eakes	        Begin Baycare Control LOG
+;     009 11/25/09 Steve Wade	  	      Changed ENDO to Surgery and added activate add an action type.
+;     010 12/16/09 SW/CE		            Add organization logic around ENDO to only send SJH, SFB & SJN.
+;								                        Creating persistent record structure to cache organizations.
+;     011 12/1/11  Rick Q               Added logic to unsupress teletracker orders
+;     012 01/6/12  Rick Q               Modified logic for Echo orders to include Pedi Echo orders
+;     013 03/6/12  Rick Q               v12 Removed "Cardiovascul" from suppression logic for
+;                                       Cardio orders to MUSE
  
-;     07/09/12 P Hopkins           Added logic to suppress all order updates for encounters that
-;								   have been discharged for over a year.
-;     11/20/13 H. Kaczmarczyk      Added logic to unsuppress Edutainment orders.
-;     06/16/14 H. Kaczmarczyk      Added logic to unsupress activity type "CARDIOLOGY".
-;     02/09/15 H. Kaczmarczyk      Added logic to suppress HealthSouth echo orders.
-;     04/25/16 T. McArtor          v17 Added logic to unsuppress RFC 11407
-;     06/10/16 H. Kaczmarczyk      Added logic for AMB EKG orders.
-;     12/06/16 H. Kaczmarczyk      Added logic to unsuppress EMMI orders with activity type = OFC Videos.
-;     07/27/17 H. Kaczmarczyk      Added logic to unsupress Bridge Breast Milk/Infant Feeding Orders
-;                                  and Lab orders.
-;     08/02/17 S. Parimi		   Updated code value for Invision with Display name.
-;     12/19/17 J.Starke		       Added logic to unsuppress activity type CDF of PALLIATIVE
-;     01/03/18 H. Kaczmarczyk      Added logic to unsuppress SOI Rad orders with activity type CDF of SOIRADIOLOGY
-;     02/02/18 H. Kaczmarczyk      Added logic to unsuppress Audiology orders with activity type CDF of AUDIOLOGY
-;	  11/27/18 Yitzhak Magoon	   Added logic for Model upgrade
+;     014 07/09/12 P Hopkins            Added logic to suppress all order updates for encounters that
+;								   	                    have been discharged for over a year.
+;     015 11/20/13 H. Kaczmarczyk       Added logic to unsuppress Edutainment orders.
+;     016 06/16/14 H. Kaczmarczyk       Added logic to unsupress activity type "CARDIOLOGY".
+;     017 02/09/15 H. Kaczmarczyk       Added logic to suppress HealthSouth echo orders.
+;     018 04/25/16 T. McArtor           v17 Added logic to unsuppress RFC 11407
+;     019 06/10/16 H. Kaczmarczyk       Added logic for AMB EKG orders.
+;     020 12/06/16 H. Kaczmarczyk       Added logic to unsuppress EMMI orders with activity type = OFC Videos.
+;     021 07/27/17 H. Kaczmarczyk       Added logic to unsupress Bridge Breast Milk/Infant Feeding Orders
+;                                       and Lab orders.
+;     022 08/02/17 S. Parimi		        Updated code value for Invision with Display name.
+;     023 12/19/17 J.Starke		          Added logic to unsuppress activity type CDF of PALLIATIVE
+;     024 01/03/18 H. Kaczmarczyk       Added logic to unsuppress SOI Rad orders with activity type CDF of SOIRADIOLOGY
+;     025 02/02/18 H. Kaczmarczyk       Added logic to unsuppress Audiology orders with activity type CDF of AUDIOLOGY
+;	    026 11/27/18 Yitzhak Magoon	      Added logic for Model upgrade
+;     027 12/03/18 H. Kaczmarczyk       Added logic to unsuppress Attend Phys Change orders with act.type CDF of PHYSCHG
+;
+; 	  RFC-
+;
+; 	  028 01/22/19 Yitzhak Magoon	      Suppress orders without records on the order_ingredient table
+;	    029 01/23/19 Yitzhak Magoon	      Moved logic to case statements for readability
+;	    030 01/31/19 Yitzhak Magoon	      Suppress height/weight orders from buc/uc patients
+;	    031 02/13/19 Yitzhak Magoon		    Suppress pharm orders ordered by CONTRIBUTOR_SYSTEM, PYXISRX
+;     032 04/24/19 Yitzhak Magoon 		  Add subroutine for subactivity type
+;     033 06/16/19 Yitzhak Magoon       Remove height/weight logic because it was moved to Discern Expert Rule
 ;***********************************************************************
 ;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ********************
  
-drop program ESO_GET_ORDER_SELECTION go
-create program ESO_GET_ORDER_SELECTION
+drop program eso_get_order_selection go
+create program eso_get_order_selection
  
 /********************************************************************************************
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -195,6 +203,9 @@ declare iAdditiveFreqInd    = i2 with public,noconstant(0) ;DEFINES AN ADDITIVE 
 if ( validate ( reply -> iVersionNbr ) ) ;;007
    set reply -> iVersionNbr = 2 /* DO NOT CHANGE THIS VERSION NBR. ENGINEERING ONLY */ ;;007
 endif
+ 
+ ;begin 032
+;declare activity_subtype_cdm = vc
  
 /********************************************************************************************
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -525,17 +536,6 @@ set to_contributor_system_disp   = uar_get_code_display(request->to_contributor_
 set order_contrib_sys_disp       = uar_get_code_display(request->order_contrib_sys_cd)
 set action_contrib_sys_disp      = uar_get_code_display(request->action_contrib_sys_cd)
  
-;;;;;010
-;declare bayc_org_name_key = vc
-;select into "nl:"
- ;o.org_name_key
-;from organization o
-;where o.organization_id=request->organiztion_id
-;and o.active_ind=1
-;detail
- ;bayc_org_name_key=o.org_name_key
-;with nocounter
- 
 /********************************************************************************************
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
  
@@ -748,32 +748,7 @@ values fetched in Section 6.
  
 ---------------------------------------------------------------------------------------------
 ********************************************************************************************/
-
-
-;suppress obsolete order updates for encounters > 1 year old
-declare obsolete = dq8
  
-select
-  e.disch_dt_tm
-from
-  encounter   e
-where e.encntr_id = request->encntr_id
- 
-detail
-  obsolete = e.disch_dt_tm
-with nocounter
- 
-if (obsolete > 0)
-  if(obsolete <= cnvtdatetime(curdate-365, curtime3))
-    set reply->status_data->status = "Z"
-    call echo(build("disch_date = ",obsolete))
-    go to single_exit
-  else
-	set reply->status_data->status = "S"
-  endif
-endif
- 
-
 ; Task Based Instance                                           ;;006
 if (iContTaskInstance_ind)                                      ;;006
   set reply->status_data->status = "Z"                          ;;006
@@ -840,188 +815,225 @@ if (iAdditiveFreqInd)                                           ;;006
   call echo("Additive Frequency Orders SUPPRESSED")             ;;006
 endif                                                           ;;006
  
-/*****LAB BEGIN*****/    										;;008
+;suppress obsolete order updates for encounters > 1 year old
+declare obsolete = dq8
+ 
+select
+  e.disch_dt_tm
+from
+  encounter   e
+where e.encntr_id = request->encntr_id
+ 
+detail
+  obsolete = e.disch_dt_tm
+with nocounter
+ 
+if (obsolete > 0)
+  if(obsolete <= cnvtdatetime(curdate-365, curtime3))
+    set reply->status_data->status = "Z"
+    call echo(build("disch_date = ",obsolete))
+    go to exit_script
+  else
+	set reply->status_data->status = "S"
+  endif
+endif
+ 
 if (request->failure_ind > 0 )
   set reply->status_data->status = "Z"
   call echo("ESI failure")
 endif
  
-if (dept_order_status_cdm = "LABDISPATCH")
-  if (action_type_cdm = "STATUSCHANGE")
+;begin 029
+case (activity_type_cdm)
+  of value("AP", "BB", "GLB", "MICROBIOLOGY"):
+ 
+  /*
+    When a lab order is placed, the 101/104 order servers will create the order and execute this script. We do not want any lab
+    orders generated by the order servers to go outbound because they do not contain an accession number. We also do not want any
+    status change orders to go outbound to any system.
+ 
+    When the order actually nets (generates an accession number) the netting server sends an SCS_NET ORM accessioning trigger to
+    the FSI servers. This SCS_NET trigger is what we will be sending out to any downstream system (like quest or labcorp) that
+    wants orders.
+ 
+    PKL packing list triggers also do not execute this script. Specialty lab orders and newborn orders going to the state that get
+    put on packing list will still generate a SCS_NET trigger that will get sent to the unknown interface. When the lab puts the
+    orders on a packing list, a SCS_TS_APP PKL trigger gets sent outbound.
+  */
     set reply->status_data->status = "Z"
-    call echo("labdispatch/statuschange combo suppressed")
-  endif
-endif
+    call echo("Order suppressed - Lab orders are sent outbound via the SCS_NET trigger")
  
-if (not (order_status_cdm  in ("ORDERED" ,"CANCELED" ,"COMPLETED")))
-  set reply->status_data->status = "Z"
-  call echo("order status suppressed")
-endif
+  of "PHARMACY":
+    ;begin 028
+    /*
+      This logic will suppress all RDE pharmacy orders that do not contain an RDE group (built by the FSI_ORDER_PHARM script on
+      the load server). All pharmacy orders must have a corresponding row on the order_ingredient tables, otherwise they will be
+      skipped. These orders are already being skipped at the load server because they don't contain an RDE_GROUP. This just
+      moves the logic to the global suppression script.
  
-if (not (dept_order_status_cdm  in ("LABCOLLECTED"
-									, "LABINLAB"
-									, "LABINPROCESS"
-									, "LABPRELIM"
-									, "CANCELED"
-									, "COMPLETED"
-									, "LABDISPATCH"
-									, "LABFINAL"
-									, "LABSTAIN"
-									, "LABSUS"
-									, "LABSCHEDULED")))
-  set  reply->status_data->status = "Z"
-  call echo("DEPT ORDER STATUS SUPPRESSED")
-endif
+      We also want to skip all pharmacy orders where there is no row on the order_product table, but that cannot be done in
+      this script because the orders server writes a row to the order_ingredient table, executes this suppression script, and then
+      writes a row to order_product. Unfortunately, that cannot be done in the ESO_CE_CUSTOM_SELECTION either because the trigger
+      is not available. To be continued...
+    */
+    select into "nl:"
+    from
+      order_ingredient oig
+    plan oig
+      where oig.order_id = request->order_id
+        and oig.action_sequence <= request->action_sequence
+    with nocounter
  
-if (order_status_cdm = "INPROCESS")
-  if (dept_order_status_cdm in ("LABFINAL","LABPRELIM", "LABSTAIN" ,"LABSUS"))
-    set  reply->status_data->status = "S"
-    call echo("ORDER STATUS -> INPROCESS RELEASED")
-  endif
-endif
- 
-if (action_type_cdm in ("MODIFY","ADD ALIAS"))
-  set reply->status_data->status = "Z"
-  call echo("MODIFY AND ADD ALIAS ORDERS SUPPRESSED")
-endif
- 
-if (action_type_cdm in ("ORDER","CANCEL"))
-  if (action_contrib_sys_disp = "HealthSouth")
-   set reply->status_data->status = "Z"
-   call echo("New Order echos suppressed")
-  endif
-endif
-
-if (dept_order_status_cdm = "INPATHOLOGY")
-  if (activity_type_cdm = "AP")
-    set reply->status_data->status = "S"
-    call echo("AP ORDERS ARE NOT SUPPRESSED")
-  endif
-endif
- 
- 
-if (action_type_cdm = "COMPLETE")
-  if (activity_type_cdm = "AP")
-   set reply->status_data->status = "S"
-   call echo("AP COMPLETES ARE NOT SUPPRESSED")
-  endif
-endif
- 
-if (action_type_cdm = "CANCEL" and order_status_cdm = "CANCELED")
-  set reply->status_data->status = "S"
-  call echo("DUPLICATE CHECKING CANCEL SENT OUT")
-endif
- 
-if (action_type_cdm = "ORDER" AND dept_order_status_cdm = "CANCELED")
-  set reply->status_data->status = "Z"
-  call echo("DUPLICATE CHECKING NEW ORDER SUPPRESSED")
-endif
-/*****LAB END*****/
- 
-/*****BEACON PHASE I BEGIN*****/				;008
-if (activity_type_cdm = "PHARMACY")
-  set reply->status_data->status = "S"
-  call echo("RDE NOT SUPPRESSED")
-endif
- 
-if (activity_type_cdm = "RULEORDERS")
-  set reply->status_data->status = "S"
-  call echo("RULE ORDERS UNSUPPRESSED")
-endif
-/*****BEACON PHASE I END*****/
- 
-/*****BEACON PHASE II BEGIN*****/				;008
-if (activity_type_cdm = "DIETARY")
-  set reply->status_data->status = "S"
-  call echo("DIET ORDERS UNSUPPRESSED")
-endif
- 
-if (activity_type_cdm = "TUBEFEEDING")
-  set reply->status_data->status = "Z"
-  call echo("DIET ORDERS SUPPRESSED")
-endif
- 
-/*****EDUTAINMENT BEGIN*****/
- 
-if (activity_type_cdm in ("EDUTAINMENT","OFCVIDEOS"))
-  if (dept_order_status_cdm in ("ORDERED","DISCONTINUED"))
-    set reply->status_data->status = "S"
-    call echo("INPROCESS RELEASED EDUCATION ORDER UNSUPPRESSED")
-  endif
-  
-  if (dept_order_status_cdm = "COMPLETED")
-    set reply->status_data->status = "Z"
-  endif
-endif
- 
-/*****EDUTAINMENT END*****/
- 
-if (activity_type_cdm in ("RADIOLOGY","MRIRADIOLOGY"))
-  set reply->status_data->status = "S"
-  call echo("RAD ORDERS UNSUPPRESSED")
-endif
- 
-if (activity_type_cdm in ("RADIOLOGY","MRIRADIOLOGY"))
-  if (action_type_cdm in ("STATUSCHANGE","MODIFY","COMPLETE"))
-    if (action_contrib_sys_disp = "IDX")
+    if (curqual <= 0)
       set reply->status_data->status = "Z"
-      call echo("RAD status change echos suppressed")
+      call echo("Pharmacy order skipped because no rows on order_ingredient table")
+      go to exit_script
+    else
+      set reply->status_data->status = "S"
+      call echo("RDE NOT SUPPRESSED")
     endif
-  endif
-endif
+    ;end 028
  
-if (action_contrib_sys_disp = "IDX")
-  if (activity_type_cdm in ("ECHO","PEDI ECHO"))
-    set reply->status_data->status = "S"
-    call echo("ECHO and PEDI ECHO ORDER UNSUPPRESSED")
-  endif
-endif
+    ;begin 031
+    select into "nl:"
+    from
+      order_action oa
+      , prsnl p
+    plan oa
+      where oa.order_id = request->order_id
+        and oa.action_type_cd = request->action_type_cd
+    join p
+      where p.person_id = oa.order_provider_id
+        and p.name_last_key = "CONTRIBUTORSYSTEM"
+        and p.name_first_key = "PYXISRX"
+    with nocounter
  
-if (activity_type_cdm = "PHYSCONSULT")
-  if (action_type_cdm in ("ORDER","CANCEL","DISCONTINUE","DELETE"))
+    if (curqual > 0)
+      set reply->status_data->status = "Z"
+      call echo("SUPPRESSING: ORDERING PROVIDER IS CONTRIBUTORSYSTEM, PYXISRX")
+    else
+      set reply->status_data->status = "S"
+      call echo("ORDERING PROVIDER IS NOT CONTRIBUTORSYSTEM, PYXISRX")
+    endif
+    ;end 031
+ 
+  ;begin 030
+  of "RULEORDERS":
+    set reply->status_data->status = "S" ;033
+    call echo("HEIGHT AND WEIGHT ORDER IS UNSUPPRESSED") ;033
+    ;end 030
+ 
+  of "DIETARY":
     set reply->status_data->status = "S"
-    call echo("PHYSICIAN CONSULT ORDER/CANCEL ORDER UNSUPPRESSED")
-  endif
-  
-  if (action_type_cdm in ("COMPLETE","SUSPEND","STATUSCHANGE"))
+    call echo("DIET ORDERS UNSUPPRESSED")
+ 
+  of "TUBEFEEDING":
     set reply->status_data->status = "Z"
-  endif
-endif
+    call echo("DIET ORDERS SUPPRESSED")
  
-if (activity_type_cdm = "ADMITTO")
-  if (action_type_cdm in ("ORDER","CANCEL","DISCONTINUE","DELETE"))
+  of value("EDUTAINMENT","OFCVIDEOS"):
+    if (dept_order_status_cdm in ("ORDERED","DISCONTINUED"))
+      set reply->status_data->status = "S"
+      call echo("INPROCESS RELEASED EDUCATION ORDER UNSUPPRESSED")
+    elseif (dept_order_status_cdm = "COMPLETED")
+      set reply->status_data->status = "Z"
+      call echo("EDUTAINMENT OR OFCVIDEOS ORDER SUPPRESSED")
+    endif
+ 
+  of value("RADIOLOGY","MRIRADIOLOGY"):
     set reply->status_data->status = "S"
-    call echo ("Bed Status order/cancel order unsuppressed" )
-  endif
-  
-  if (action_type_cdm in ("COMPLETE","SUSPEND","STATUSCHANGE"))
-    set reply->status_data->status = "Z"
-  endif
-endif
+    call echo("RAD ORDERS UNSUPPRESSED")
  
+    if (action_type_cdm in ("STATUSCHANGE","MODIFY","COMPLETE"))
+      if (action_contrib_sys_disp = "IDX")
+        set reply->status_data->status = "Z"
+        call echo("RAD status change echos suppressed")
+      endif
+    endif
  
-if (activity_type_cdm in ("ECHO","PEDI ECHO","CARDIOVASCUL","CARDIOLOGY","EKG"))
-  if (action_type_cdm in ("ORDER","CANCEL","DISCONTINUE","DELETE"))
+  of value("ECHO","PEDI ECHO"):
+    if (action_contrib_sys_disp = "IDX")
+      set reply->status_data->status = "S"
+      call echo("ECHO and PEDI ECHO ORDER UNSUPPRESSED")
+    endif
+ 
+  of value("ECHO","PEDI ECHO","CARDIOVASCUL","CARDIOLOGY","EKG"):
+      if (action_type_cdm in ("ORDER","CANCEL","DISCONTINUE","DELETE"))
+        set reply->status_data->status = "S"
+        call echo("Echo and Pedi Echo order/cancel orders unsuppressed")
+      elseif (action_type_cdm in ("COMPLETE","SUSPEND","STATUSCHANGE"))
+        set reply->status_data->status = "Z"
+        call echo("Echo and Pedi Echo complete/suspend/statuschange orders suppressed")
+      endif
+ 
+  of value("PHYSCONSULT","PHYSCHG"):
+    if (action_type_cdm in ("ORDER","CANCEL","DISCONTINUE","DELETE"))
+      set reply->status_data->status = "S"
+      call echo("PHYSICIAN CONSULT ORDER/CANCEL ORDER UNSUPPRESSED")
+    elseif (action_type_cdm in ("COMPLETE","SUSPEND","STATUSCHANGE"))
+      set reply->status_data->status = "Z"
+      call echo("PHYSICIAN CONSULT COMPLETE/SUSPEND/STATUSCHANGE ORDER SUPPRESSED")
+    endif
+ 
+  of "SURGERY":
+    if (action_type_cdm in ("ORDER","CANCEL","ACTIVATE"))
+      set reply->status_data->status = "S"
+      call echo("Surgery ENDO order/cancel order unsuppressed")
+    elseif (action_type_cdm in ("COMPLETE","DISCONTINUE","SUSPEND","DELETE"))
+      set reply->status_data->status = "Z"
+      call echo("Surgery ENDO complete/dc/suspend/delete order suppressed")
+    endif
+ 
+  of "PALLIATIVE":
     set reply->status_data->status = "S"
-    call echo("Echo and Pedi Echo order/cancel orders unsuppressed")
-  endif
-  
-  if (action_type_cdm in ("COMPLETE","SUSPEND","STATUSCHANGE"))
-    set reply->status_data->status = "Z"
-    call echo("Echo and Pedi Echo complete/sc orders unsuppressed")
-  endif
-endif
+    call echo("PALLIATIVE ORDERS UNSUPPRESSED")
  
-if (activity_type_cdm = "SURGERY")
-  if (action_type_cdm in ("ORDER","CANCEL","ACTIVATE"))
+  ;of "SOIRADIOLOGY":
+    ;set reply->status_data->status = "S"
+    ;call echo("PALLIATIVE ORDERS UNSUPPRESSED")
+ 
+  of "AUDIOLOGY":
     set reply->status_data->status = "S"
-    call echo("Surgery ENDO order/cancel order unsuppressed")
-  endif
-  
-  if (action_type_cdm in ("COMPLETE","DISCONTINUE","SUSPEND","DELETE"))
+    call echo("AUDIOLOGY ORDERS UNSUPPRESSED")
+ 
+  of "ASMTTXMONITO":
+    set activity_subtype_cdm = get_subtype_meaning(null) ;032
+ 
+    call echo(build("activity_subtype=",activity_subtype_cdm))
+ 
+    if (activity_subtype_cdm = "BRIDGE")
+      set reply->status_data->status = "S"
+      call echo("BREAST MILK/INFANT FEEDING ORDERS UNSUPPRESSED")
+    else
+      set reply->status_data->status = "Z"
+      call echo("Activity/Diagnostic/etc Orders suppressed")
+    endif
+ 
+  of value("ADMITTO", "BAYESOSUPRES", "COMMUNICATIO"):
+    set activity_subtype_cdm = get_subtype_meaning(null) ;032
+ 
+    call echo(build("activity_subtype=",activity_subtype_cdm)) ;032
+ 
+    if (activity_subtype_cdm = "BEDCTRL")
+      if (action_type_cdm in ("ORDER","CANCEL","DISCONTINUE","DELETE"))
+        set reply->status_data->status = "S"
+        call echo ("Bed Status order/cancel order unsuppressed")
+      elseif (action_type_cdm in ("COMPLETE","SUSPEND","STATUSCHANGE"))
+        set reply->status_data->status = "Z"
+        call echo ("Bed Status COMPLETE/SUSPEND/STATUSCHANGE order suppressed")
+        go to exit_script
+      endif
+    else
+      set reply->status_data->status = "Z"
+      call echo ("ADMITTO, BAYESOSUPRES, and COMMUNICATIO orders without BEDCTRL as subactivity type are suppressed")
+      go to exit_script
+    endif
+  ;if the order's activity type is not listed in the case statement we will suppress it
+  else
     set reply->status_data->status = "Z"
-  endif
-endif
+    call echo ("Order does not qualify for any of the activity types")
+endcase ;end case (activity_type_cdm)
+;end 029
  
 if (action_type_cdm = "UNDO")
   set reply->status_data->status = "Z"
@@ -1033,82 +1045,35 @@ if (order_contrib_sys_disp in ("quest","QUESTAUTH"))
   call echo("Quest orders suppressed")
 endif
  
-/*****Bridge Breast Milk/Infant Feeding Orders w activity_type_cdm = "ASMTTXMONITO"*****/
-if (activity_type_cdm  in ("PTCARE","ASMTTXMONITO","ACTIVITY","RTCARE","DIETCONSULTS", 
-						   "SUPPORT SERV","THERAPEUTIC","CRITICALCARE","DIAGNOSTIC"))
+#exit_script
+ 
+call echo(build("ORG_ID = ", request->organiztion_id))
+call echo(concat("ESO_GET_ORDER_SELECTION STATUS = ",reply->status_data->status))
+ 
+/*************************************
+ Sub-Activity Type SUBROUTINE
+ ************************************/
+;begin 032
+subroutine(get_subtype_meaning(null) = vc)
   declare activity_subtype_cdm = vc
-
+ 
   select into "nl:"
     oc_activity_subtype_cdf = uar_get_code_meaning(oc.activity_subtype_cd)
   from
     orders   o
     , order_catalog   oc
-  plan o 
+  plan o
     where o.order_id = request->order_id
-  join oc 
+  join oc
     where o.catalog_cd = oc.catalog_cd
   detail
     activity_subtype_cdm = oc_activity_subtype_cdf
   with nocounter
  
-  if (activity_subtype_cdm = "BRIDGE")
-    set reply->status_data->status = "S"
-    call echo("BREAST MILK/INFANT FEEDING ORDERS UNSUPPRESSED")
-  else
-    set reply->status_data->status = "Z"
-    call echo("Activity/Diagnostic/etc Orders suppressed")
-  endif
-endif
- 
-if (activity_type_cdm in ("PALLIATIVE"))
-  set reply->status_data->status = "S"
-  call echo("PALLIATIVE ORDERS UNSUPPRESSED")
-endif
- 
-if ( activity_type_cdm in ("SOIRADIOLOGY"))
-  set reply->status_data->status = "S"
-  call echo("PALLIATIVE ORDERS UNSUPPRESSED")
-endif
- 
-if (activity_type_cdm in ("AUDIOLOGY"))
-  set reply->status_data->status = "S"
-  call echo("AUDIOLOGY ORDERS UNSUPPRESSED")
-endif
- 
-if (activity_type_cdm in ("BAYESOSUPRES", "COMMUNICATIO"))
-  declare  alias  =  vc
-  declare con_source_display = f8
-  set con_source_display = uar_get_code_by("DISPLAY",73,"Invision")
- 
-  select
-    cvo.alias
-  from
-    code_value_outbound cvo
-    , orders o
-  plan o 
-    where o.order_id = request->order_id
-  join cvo 
-    where cvo.code_value = o.catalog_cd
-      and cvo.contributor_source_cd = con_source_display
-  detail
-    alias = trim (cvo.alias)
-  with  nocounter
-;using aliases from code set 200 - order catalog
-  if (trim(alias) in ("Isolation", "Discharge Patient", "ADOD"))
-    set reply->status_data->status = "S"
-    call echo("Unsuppressing orderables to be sent to Teletracker")
-  else
-    set reply->status_data->status = "Z"
-    call echo ( "BAYESOSUPRES/COMMUNICATIO Orders suppressed")
-  endif
-endif
- 
-/*****BEACON PHASE II END*****/
- 
-#single_exit
- 
-call echo(build("ORG_ID = ", request->organiztion_id))
-call echo(concat("ESO_GET_ORDER_SELECTION STATUS = ",reply->status_data->status))
+  return(activity_subtype_cdm)
+end
+;end 032
  
 end
 go
+ 
