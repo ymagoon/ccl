@@ -29,17 +29,19 @@ free record data
 record data (
   1 min_result_7_days 		  = vc
   1 min_result_2_days 		  = vc
+  1 min_result_display		  = vc
   1 most_recent_result_7_days = vc
   1 most_recent_time_7_days   = dq8
   1 min_result_dt_tm		  = dq8
   1 all_numeric				  = i2
  
   1 qual[*]
-    2 clinical_event_id = f8
-    2 order_id = f8
-    2 event_id = f8
-    2 event_cd = f8
-    2 result_val = vc
+    2 clinical_event_id 	  = f8
+    2 order_id 				  = f8
+    2 event_id 				  = f8
+    2 event_cd 				  = f8
+    2 result_val			  = vc
+    2 result_val2			  = vc
     2 drawn_dt_tm = dq8
 )
 
@@ -71,7 +73,6 @@ select
   ce.clinical_event_id
   , ce.event_id
   , ce.event_cd
-  , ce.result_val
   ; remove < and > from result if they exist
   , result_val = if (operator(ce.result_val,"REGEXPLIKE","(<|>)"))
   				   substring(2, size(ce.result_val,1) - 1, ce.result_val)
@@ -96,24 +97,31 @@ order by
   result_val
  
 head report
-  cnt = 0
+  stat = alterlist(data->qual, 9)
+  
   data->min_result_7_days = result_val
+  data->min_result_display = ce.result_val
   data->min_result_dt_tm = c.drawn_dt_tm
   data->all_numeric = 1
  
   ;assume most recent result is the first result
   data->most_recent_result_7_days = result_val
   data->most_recent_time_7_days = c.drawn_dt_tm
+  
+  cnt = 0
 detail
   cnt = cnt + 1
- 
-  stat = alterlist(data->qual, cnt)
+  
+  if (size(data->qual,5) > cnt)
+    stat = alterlist(data->qual, cnt + 10)
+  endif
  
   data->qual[cnt].clinical_event_id = ce.clinical_event_id
   data->qual[cnt].event_id = ce.event_id
   data->qual[cnt].order_id = ce.order_id
   data->qual[cnt].event_cd = ce.event_cd
   data->qual[cnt].result_val = result_val
+  data->qual[cnt].result_val2 = ce.result_val
   data->qual[cnt].drawn_dt_tm = c.drawn_dt_tm
  
   ;the detail loops through the rest of the results to find if there are any that are more recent
@@ -121,10 +129,12 @@ detail
     data->most_recent_result_7_days = result_val
     data->most_recent_time_7_days = c.drawn_dt_tm
   endif
+foot report
+  stat = alterlist(data->qual, cnt)
 
 with nocounter
 
-set sz = size(data->qual,5)
+set sz = size(data->qual,5)	
 
 ;first, we need to determine whether the most recent result is an alpha response
 if (not isnumeric(data->most_recent_result_7_days))
@@ -157,7 +167,7 @@ endif
 if (sz < 2)
   call echo(build("There are not enough results to calculate a ratio"))
  
-  set final_result = build(char(34),"N/A|Unable to calculate AKI Risk",char(34))
+  set final_result = build(char(34),"N/A|Unable to calculate AKI Risk sz=",sz,char(34))
   set log_message = "There are not enough results to calculate a ratio"
 
 elseif (data->most_recent_result_7_days >= data->min_result_7_days)
@@ -167,19 +177,20 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
   call echo(build("ratio=",ratio))
  
   if (ratio >= 1.5 and ratio <= 1.9)
-    set final_result = set_final_result("Stage 1", data->min_result_7_days, data->min_result_dt_tm)
+    set final_result = set_final_result("Stage 1", data->min_result_display, data->min_result_dt_tm)
     set log_message = "Result is Stage 1"
-  elseif (ratio >= 2.0 and ratio <= 2.9)
-    set final_result = set_final_result("Stage 2", data->min_result_7_days, data->min_result_dt_tm)
+  elseif (ratio >= 2.0 and ratio <= 2.9)	
+    set final_result = set_final_result("Stage 2", data->min_result_display, data->min_result_dt_tm)
     set log_message = "Result is Stage 2"
   elseif (ratio >= 3.0)
-    set final_result = set_final_result("Stage 3", data->min_result_7_days, data->min_result_dt_tm)
+    set final_result = set_final_result("Stage 3", data->min_result_display, data->min_result_dt_tm)
     set log_message = "Result is Stage 3"
   else
     call echo(build("ratio is <= 1.5 finding minimum result 2 day"))
  
     select into "nl:"
       result_val = data->qual[d1.seq].result_val
+      , result_val2 = data->qual[d1.seq].result_val2
     from
       (dummyt d1 with seq = value(size(data->qual,5)))
     plan d1 where data->qual[d1.seq].drawn_dt_tm >= cnvtlookbehind("2, D")
@@ -187,6 +198,7 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
       result_val
     head report
       data->min_result_2_days = result_val
+      data->min_result_display = result_val2
     with nocounter
  
     call echo(build("min result 2 day found"))
@@ -196,10 +208,10 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
     call echo(build("diff=",diff))
  
     if (diff >= 0.3)
-      set final_result = set_final_result("Stage 1", data->min_result_2_days, data->min_result_dt_tm)
+      set final_result = set_final_result("Stage 1", data->min_result_display, data->min_result_dt_tm)
       set log_message = "Result is Stage 1"
     else
-      set final_result = set_final_result("Negative", data->min_result_2_days, data->min_result_dt_tm)
+      set final_result = set_final_result("Negative", data->min_result_display, data->min_result_dt_tm)
       set log_message = "Result is Negative"
     endif
   endif
