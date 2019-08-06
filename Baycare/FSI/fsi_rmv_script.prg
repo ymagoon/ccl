@@ -26,7 +26,7 @@ record requestin (
     2 script_name = vc
 )
 */
- 
+
 declare appnum = i4 with constant(1241002)
 declare tasknum = i4 with constant(1242004)
 declare reqnum = i4 with constant(1243211)
@@ -60,7 +60,6 @@ for (x = 1 to size(requestin->list_0,5))
 endfor
  
 #exit_script
- 
 end
 go
  
