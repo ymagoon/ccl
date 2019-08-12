@@ -203,7 +203,7 @@ endif
 if (sz < 2)
   call echo(build("There are not enough results to calculate a ratio"))
  
-  set final_result = build(char(34),"N/A|Unable to calculate Suspected AKI",char(34))
+  set final_result = build(char(34),"N/A|Unable to calculate; this is the first serum creatinine (SCr) within 7 days",char(34))
   set log_message = "There are not enough results to calculate a ratio"
 
 elseif (data->most_recent_result_7_days >= data->min_result_7_days)
@@ -253,11 +253,15 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
       set log_message = "Result is Stage 1"
     else
       if (cnvtreal(data->most_recent_result_7_days) >= 1.3)
-        set final_result = build(char(34),
-        "Abnormal Cr|Patient's Creatinine is abnormal. Consider AKI or CKD with clinical consideration.",char(34))
+        set comment = build2("SCr is abnormal, but it does not meet KDIGO criteria for suspected AKI,"
+ 							 ," when compared to baseline SCr. Consider AKI/ATN/CKD with clinical correlation.")
+ 						
+        set final_result = build(char(34), "Abnormal|",comment,char(34))
         set log_message = "AKI is Negative and Pt Creatinine is Abnormal"
       else
-        set final_result = build(char(34),"None|Patient's Creatinine is within normal range.",char(34))
+        set comment = "SCr does not meet KDIGO criteria for suspected AKI, when compared to baseline SCr."
+        
+        set final_result = build(char(34),"None|",comment,char(34))
         set log_message = "AKI is Negative and Pt Creatinine is Normal"
       endif
     endif ;end diff >= 0.3
@@ -284,7 +288,7 @@ set log_misc1 = final_result
   and the collected date/time for that value. The rule parses the final result to post the result and comment.
 */
 subroutine(set_final_result(result = vc, min_result = vc, dt_tm = dq8) = vc)
-  set comment = "Baseline Creatinine value used to calculate suspected AKI is "
+  set comment = "SCr meets KDIGO criteria for suspected AKI. Baseline SCr used was "
   set res = build2(char(34),result,"|",comment,min_result," collected on ",format(dt_tm, "@SHORTDATETIME"),char(34))
  
   return(res)
