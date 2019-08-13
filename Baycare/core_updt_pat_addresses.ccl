@@ -1,0 +1,84 @@
+drop program core_updt_pat_addresses go
+create program core_updt_pat_addresses
+ 
+/*
+inbound record structure from core_read_addresses.prg
+ 
+record requestin
+(
+   1 list_0[*]
+     2 person_id	    	= vc
+)
+*/
+ 
+/*
+  This record structure will store the address_id for each person_id that SHOULD NOT be inactivated. I decided to do it this way
+  instead of storing each address_id for each person_id that SHOULD be inactivated because writing the logic this way is a bit
+  easier.
+*/
+ 
+record data (
+  1 qual[*]
+    2 person_id				= f8
+    2 address_id 			= f8
+    2 beg_effective_dt_tm   = dq8
+)
+ 
+; select the most recent address for each patient and store in the data record structure.
+select
+  a.parent_entity_id
+  , a.beg_effective_dt_tm
+  , a.address_id
+from
+  address   a
+  , (dummyt d1 with seq = size(requestin->list_0,5))
+plan d1
+join a
+  where a.active_ind = 1
+    and a.address_type_cd = value(uar_get_code_by("MEANING",212,"HOME"))
+    and a.parent_entity_name = "PERSON"
+    and a.parent_entity_id = cnvtint(requestin->list_0[d1.seq].person_id) ;person_id's from requestin are string values
+order by
+  a.parent_entity_id
+  , a.beg_effective_dt_tm desc
+ 
+head report
+  pcnt = 0
+  stat = alterlist(data->qual, 100)
+head a.parent_entity_id
+  pcnt = pcnt + 1
+  data->qual[pcnt].person_id  = a.parent_entity_id
+detail
+  if (a.beg_effective_dt_tm > data->qual[pcnt].beg_effective_dt_tm)
+    data->qual[pcnt].address_id = a.address_id
+    data->qual[pcnt].beg_effective_dt_tm = a.beg_effective_dt_tm
+  endif
+foot report
+  stat = alterlist(data->qual, pcnt)
+with nocounter
+ 
+call echorecord(data)
+call echorecord(requestin)
+ 
+update into
+  address a
+  , (dummyt d1 with seq = size(data->qual,5))
+set
+  a.active_ind 				= 0
+  , a.updt_cnt 				= a.updt_cnt + 1
+  , a.updt_id 				= reqinfo->updt_id
+  , a.updt_task 			= reqinfo->updt_task
+  , a.updt_applctx 			= reqinfo->updt_applctx
+  , a.updt_dt_tm 			= cnvtdatetime(curdate,curtime3)
+plan d1
+join a
+  where a.active_ind = 1
+    and a.address_type_cd = value(uar_get_code_by("MEANING",212,"HOME"))
+    and a.parent_entity_name = "PERSON"
+    and a.parent_entity_id = data->qual[d1.seq].person_id
+    and a.address_id != data->qual[d1.seq].address_id
+with nocounter
+ 
+end
+go
+ 
