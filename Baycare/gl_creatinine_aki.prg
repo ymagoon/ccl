@@ -23,7 +23,7 @@ create program gl_creatinine_aki
   of dealing with the PERFORM_RESULT table.
 */
  
-call pause(2)
+;call pause(2)
  
 free record data
 record data (
@@ -33,6 +33,8 @@ record data (
   1 most_recent_result_7_days = vc
   1 most_recent_time_7_days   = dq8
   1 min_result_dt_tm		  = dq8
+  1 ratio					  = f8
+  1 diff					  = f8
   1 all_numeric				  = i2
  
   1 qual[*]
@@ -147,6 +149,8 @@ foot report
 
 with nocounter
 
+call echorecord(data,"gl_creatinine_aki_data",1)
+
 set sz = size(data->qual,5)	
 
 /*
@@ -207,18 +211,18 @@ if (sz < 2)
   set log_message = "There are not enough results to calculate a ratio"
 
 elseif (data->most_recent_result_7_days >= data->min_result_7_days)
-  set ratio = round(cnvtreal(data->most_recent_result_7_days) / cnvtreal(data->min_result_7_days),1)
+  set data->ratio = round(cnvtreal(data->most_recent_result_7_days) / cnvtreal(data->min_result_7_days),1)
  
   call echo(build("most_recent_result_7_days is greater than or equal to min_result_7_days"))
-  call echo(build("ratio=",ratio))
+  call echo(build("ratio=",data->ratio))
  
-  if (ratio >= 1.5 and ratio <= 1.9)
+  if (data->ratio >= 1.5 and data->ratio <= 1.9)
     set final_result = set_final_result("Stage 1", data->min_result_display, data->min_result_dt_tm)
     set log_message = "Result is Stage 1"
-  elseif (ratio >= 2.0 and ratio <= 2.9)	
+  elseif (data->ratio >= 2.0 and data->ratio <= 2.9)	
     set final_result = set_final_result("Stage 2", data->min_result_display, data->min_result_dt_tm)
     set log_message = "Result is Stage 2"
-  elseif (ratio >= 3.0)
+  elseif (data->ratio >= 3.0)
     set final_result = set_final_result("Stage 3", data->min_result_display, data->min_result_dt_tm)
     set log_message = "Result is Stage 3"
   else
@@ -244,15 +248,15 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
  
     call echo(build("min result 2 day found"))
  
-    set diff = round(cnvtreal(data->most_recent_result_7_days) - cnvtreal(data->min_result_2_days),1)
+    set data->diff = round(cnvtreal(data->most_recent_result_7_days) - cnvtreal(data->min_result_2_days),1)
  
-    call echo(build("diff=",diff))
+    call echo(build("diff=",data->diff))
  
-    if (diff >= 0.3)
+    if (data->diff >= 0.3)
       set final_result = set_final_result("Stage 1", data->min_result_display, data->min_result_dt_tm)
       set log_message = "Result is Stage 1"
     else
-      if (cnvtreal(data->most_recent_result_7_days) >= 1.3)
+      if (cnvtreal(data->most_recent_result_7_days) > 1.3)
         set comment = build2("SCr is abnormal, but it does not meet KDIGO criteria for suspected AKI,"
  							 ," when compared to baseline SCr. Consider AKI/ATN/CKD with clinical correlation.")
  						
