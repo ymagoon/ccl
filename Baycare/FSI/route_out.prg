@@ -10,18 +10,20 @@
  *  ---------------------------------------------------------------------------------------------
  *  Mod#   Date          Author                        Description & Requestor Information
  *  001       02/15/19   Magoon, Yitzhak    Make DFT filepath dynamic
- *  002       02/25/19   SParimi            RFC # 18493 Added coding for Resonance additional comservers
- *  003       04/09/19   Magoon, Yitzhak    RFC # 19507 Send ZM1 messages to Unknown queue
+ *  002       02/25/19   SParimi                      RFC # 18493 Added coding for Resonance additional comservers
+ *  003       04/09/19   Magoon, Yitzhak     RFC # 19507 Send ZM1 messages to Unknown queue
  *  004       04/10/19   H Kaczmarczyk      RFC # 19718 Adding PHYSCHG to ORM_TCP_CONSULT_OUT for attending physician change orders
- *  005       04/15/19   S Parimi           RFC # 20020  to Add code to suppress Pharmacy docs from Doseme
- *  006       06/10/19   H Kaczmarczyk      Model Changes Phase 1; ORU changes will be in Phase 2: Go-Live
- *											Added Palliative orders to Consult feed
- *                                          New routes: ORM_RADIOLOGY_OUT, ORM_HT_WT_OUT, RDE_RDS_PHARMACY_OUT
- *                                          Non-RLN Lab orders from ORM_TCP_BAYC_OUT to UNKNOWN_TRANS_DISK_OUT
- *  007       07/08/19   H Kaczmarcz        Model  Phase 2 ORU new routes: oru_documents_out, oru_documents_optum_out,
- *                                          and oru_lab_results_out
+ *  005       04/15/19   S Parimi                    RFC # 20020  to Add code to suppress Pharmacy docs from Doseme
+ *  006       06/10/19   H Kaczmarczyk      Model Changes Phase 1; ORU changes will be in Phase 2: 
+ *                                   Go-Live                     Added Palliative orders to Consult feed
+ *                                                               New routes: ORM_RADIOLOGY_OUT, ORM_HT_WT_OUT, RDE_RDS_PHARMACY_OUT
+ *                                                               Non-RLN Lab orders from ORM_TCP_BAYC_OUT to UNKNOWN_TRANS_DISK_OUT
+ *  007       07/08/19   H Kaczmarcz          Model  Phase 2 ORU new routes: oru_documents_out, oru_documents_optum_out,
+ *                                    Go-Live           and oru_lab_results_out
+ *  008       08/08/19  Yitzhak Magoon   CHG0033763 Change name of document from EDPATIENTSUMMARY to EDSUMMARYTOPATIENTPORTAL  
  *  ---------------------------------------------------------------------------------------------
 */
+
 
 ;load subroutines
 execute op_fsi_common 
@@ -275,7 +277,7 @@ case (message_type)
                         get_code_value(trim(oenobj->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->identifier))
 
                     ;healthgrid documents
-                    set ed_patient_summary = uar_get_code_by("DISPLAYKEY",72,"EDPATIENTSUMMARY")
+                    set ed_patient_summary = uar_get_code_by("DISPLAYKEY",72,"EDSUMMARYTOPATIENTPORTAL")
                     set disc_summary_care = uar_get_code_by("DISPLAYKEY",72,"DISCHARGESUMMARYOFCARE")
                     ;hie documents
                     set history_and_physicals = uar_get_code_by("DISPLAYKEY",72,"HISTORYANDPHYSICALS")

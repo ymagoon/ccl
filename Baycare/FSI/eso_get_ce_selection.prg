@@ -75,14 +75,17 @@
 ;     025 02/08/17 Dan Olszewski        Unsupressed Powerforms for           *
 ;                                       zzzFormbuilder (v9)                  *
 ;     026 08/28/17 Dan Olszewski	      Supress Reviewed Lab Results (v10)   *
-;	  027 11/27/19 Yitzhak Magoon	        Changes for model and formatting     *
-;	  028 03/25/19 Yitzhak Magoon		      Stop MDOC/DOCs in a Reviewed status  *
-;	  029 04/25/19 Yitzhak Magoon		      Fix unverified and reviewed AP Docs  *
-;	  030 07/08/19 Yitzhak Magoon		      Add suppression logic for DOCS/MDOCS *
-;	  031 07/08/19 Yitzhak Magoon		      Fix issue with AP docs not sending   *
+;	    027 11/27/19 Yitzhak Magoon	      Changes for model and formatting     *
+;	    028 03/25/19 Yitzhak Magoon		    Stop MDOC/DOCs in a Reviewed status  *
+;	    029 04/25/19 Yitzhak Magoon		    Fix unverified and reviewed AP Docs  *
+;	    030 07/08/19 Yitzhak Magoon		    Add suppression logic for DOCS/MDOCS *
+;	    031 07/08/19 Yitzhak Magoon		    Fix issue with AP docs not sending   *
 ;										                    outbound	              						 *
 ;	  032 07/08/19 Yitzhak Magoon		      Remove time constraint on reviewed   *
 ;										                    document filter	          					 *
+;   033 08/08/19 Yitzhak Magoon         CHG0033763 Change name of document   *
+;                                       from EDPATIENTSUMMARY to             *
+;                                       EDSUMMARYTOPATIENTPORTAL             *
 ;~DE~*************************************************************************
 ;~END~ ******************  END OF ALL MODCONTROL BLOCKS  *********************
  
@@ -876,7 +879,7 @@ if (request->subtype in ("MDOC", "DOC", "POWERFORMS")
 */
   set optum = uar_get_code_by("DISPLAYKEY",73,"OPTUM")
   ;healthgrid
-  set ed_patient_summary = uar_get_code_by("DISPLAYKEY",72,"EDPATIENTSUMMARY")
+  set ed_patient_summary = uar_get_code_by("DISPLAYKEY",72,"EDSUMMARYTOPATIENTPORTAL") ;003
   set disc_summary_care = uar_get_code_by("DISPLAYKEY",72,"DISCHARGESUMMARYOFCARE")
   ;hie
   set history_and_physicals = uar_get_code_by("DISPLAYKEY",72,"HISTORYANDPHYSICALS")
