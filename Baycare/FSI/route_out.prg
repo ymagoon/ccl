@@ -213,7 +213,7 @@ case (message_type)
             endif
 	  
             /* Stat results to Quest done by Baycare for stat weekend orders */
-                set contributor_system_display = 
+            set contributor_system_display = 
             get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_id_ext->assign_fac_id->name_id))
 	  
             if (contributor_system_display = "QUESTAUTH")
@@ -312,12 +312,6 @@ case (message_type)
                  endif ;end univ_service_id not "Pharmacy"
             endif ; end cqm_type in ("DOC", "MDOC")
 
-            ;Skipping HealtheIntent FIN
-            if (alias_pool_display = "HI FIN") 
-                set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
-                go to exit_point
-            endif	  
-
             ;007 SurgiNet notes / discrete result to HealthGrid will no longer go outbound with Lab results
    
             if (oenobj->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->text = "zzzFormbuilder Form*")
@@ -327,9 +321,8 @@ case (message_type)
 
      /* Model recommendation to reduce the amount of messages going to the bayc_out interface.
          By filtering on the activity type of the result, we will reduce the number of outbound messages. */
-
             if (cqm_type in ("AP", "MICRO", "GRP")) ;GRP is BB and GL, and other results
-                set oenroute->route_list[4]->r_pid = get_proc_id("ORU_LAB_RESULTS_OUT") ;002
+                set oenroute->route_list[1]->r_pid = get_proc_id("ORU_LAB_RESULTS_OUT") ;002
             else 
                 set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
             endif 
