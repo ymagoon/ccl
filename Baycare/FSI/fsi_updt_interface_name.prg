@@ -1,45 +1,43 @@
 /*
  *  ---------------------------------------------------------------------------------------------
- *  Script Name:  fsi_updt_interface_description.prg
- *  Object Name:  fsi_updt_interface_description
+ *  Script Name:  fsi_updt_interface_name.prg
+ *  Object Name:  fsi_updt_interface_name
  *
- *  Description:  Child program exectuted by fsi_read_excel. Updates the descriptions on the
+ *  Description:  Child program exectuted by fsi_read_excel. Updates the names on the
  *			      OEN_PROCINFO table for each record passed in the requestin record structure.
  *
  *  ---------------------------------------------------------------------------------------------
  *  Author:         Yitzhak Magoon
- *  Creation Date:  08/02/2019
+ *  Creation Date:  08/19/2019
  *  ---------------------------------------------------------------------------------------------
  *  Mod#    Date          Author               Description & Requestor Information
- *  0	    08/02/2019    Yitzhak Magoon       Initial Release
+ *  0	    08/19/2019    Yitzhak Magoon       Initial Release
  *
  *
  *  ---------------------------------------------------------------------------------------------
 */
  
-drop program fsi_updt_interface_description go
-create program fsi_updt_interface_description
+drop program fsi_updt_interface_name go
+create program fsi_updt_interface_name
  
 /*
 record requestin (
   1 list_0[*]
-    2 interface = vc
+    2 proc_name = vc
+    2 new_proc_name = vc
     2 interfaceid = vc
-    2 description = vc
-    2 new_description = vc
 )
 */
  
 update from oen_procinfo op
   , (dummyt d with seq = value(size(requestin->list_0,5)))
 set 
-  op.proc_desc = requestin->list_0[d.seq].new_description
+  op.proc_name = requestin->list_0[d.seq].new_proc_name
   , op.updt_applctx = reqinfo->updt_applctx
   , op.updt_cnt = op.updt_cnt + 1
   , op.updt_dt_tm = cnvtdatetime(curdate,curtime3)
   , op.updt_task = reqinfo->updt_task
 plan d
-  ;where requestin->list_0[d.seq].description != requestin->list_0[d.seq].new_description
 join op
   where op.interfaceid = cnvtreal(requestin->list_0[d.seq].interfaceid)
 with nocounter
@@ -48,3 +46,4 @@ commit
  
 end
 go
+ 
