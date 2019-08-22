@@ -211,7 +211,7 @@ if (sz < 2)
   set log_message = "There are not enough results to calculate a ratio"
 
 elseif (data->most_recent_result_7_days >= data->min_result_7_days)
-  set data->ratio = round(cnvtreal(data->most_recent_result_7_days) / cnvtreal(data->min_result_7_days),1)
+  set data->ratio = round(cnvtreal(data->most_recent_result_7_days) / cnvtreal(data->min_result_7_days),2)
  
   call echo(build("most_recent_result_7_days is greater than or equal to min_result_7_days"))
   call echo(build("ratio=",data->ratio))
@@ -248,7 +248,7 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
  
     call echo(build("min result 2 day found"))
  
-    set data->diff = round(cnvtreal(data->most_recent_result_7_days) - cnvtreal(data->min_result_2_days),1)
+    set data->diff = round(cnvtreal(data->most_recent_result_7_days) - cnvtreal(data->min_result_2_days),2)
  
     call echo(build("diff=",data->diff))
  
