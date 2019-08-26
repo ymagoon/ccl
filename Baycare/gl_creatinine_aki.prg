@@ -216,10 +216,10 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
   call echo(build("most_recent_result_7_days is greater than or equal to min_result_7_days"))
   call echo(build("ratio=",data->ratio))
  
-  if (data->ratio >= 1.5 and data->ratio <= 1.9)
+  if (data->ratio >= 1.50 and data->ratio <= 1.99)
     set final_result = set_final_result("Stage 1", data->min_result_display, data->min_result_dt_tm)
     set log_message = "Result is Stage 1"
-  elseif (data->ratio >= 2.0 and data->ratio <= 2.9)	
+  elseif (data->ratio >= 2.0 and data->ratio <= 2.99)	
     set final_result = set_final_result("Stage 2", data->min_result_display, data->min_result_dt_tm)
     set log_message = "Result is Stage 2"
   elseif (data->ratio >= 3.0)
@@ -245,9 +245,9 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
       data->min_result_2_days = result_val
       data->min_result_display = result_val2
     with nocounter
- 
+    
     call echo(build("min result 2 day found"))
- 
+    
     set data->diff = round(cnvtreal(data->most_recent_result_7_days) - cnvtreal(data->min_result_2_days),2)
  
     call echo(build("diff=",data->diff))
