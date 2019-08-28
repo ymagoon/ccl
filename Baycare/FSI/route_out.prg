@@ -137,10 +137,7 @@ case (message_type)
         with nocounter
 
         if (cqm_subtype in ("MRIRADIOLOGY","RADIOLOGY"))
-            set stat = alterlist(oenroute->route_list, 3)
-            set oenroute->route_list[1]->r_pid = get_proc_id("ORM_IDX_OUT")
-            set oenroute->route_list[2]->r_pid = get_proc_id("ORM_TELETRK_RAD_OUT")
-            set oenroute->route_list[3]->r_pid = get_proc_id("ORM_RADIOLOGY_OUT")
+            set oenroute->route_list[1]->r_pid = get_proc_id("ORM_RADIOLOGY_OUT")
             go to exit_point
         elseif (cqm_subtype = "RULEORDERS") ;height and weight
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_HT_WT_OUT")
@@ -161,19 +158,17 @@ case (message_type)
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_PHILIPS_OUT")
             go to exit_point
         elseif (cqm_subtype in ("ECHO","PEDI ECHO"))
-            set stat = alterlist(oenroute->route_list, 3)
+            set stat = alterlist(oenroute->route_list, 2)
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_PHILIPS_OUT")
-            set oenroute->route_list[2]->r_pid = get_proc_id("ORM_IDX_OUT")
-            set oenroute->route_list[3]->r_pid = get_proc_id("ORM_RADIOLOGY_OUT")
+            set oenroute->route_list[2]->r_pid = get_proc_id("ORM_RADIOLOGY_OUT")
             go to exit_point
         elseif (cqm_subtype = "EKG")
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_MUSE_OUT")
             go to exit_point
         elseif (cqm_subtype = "CARDIOVASCUL")
-            set stat = alterlist(oenroute->route_list, 3)
+            set stat = alterlist(oenroute->route_list, 2)
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_MUSE_OUT")
-            set oenroute->route_list[2]->r_pid = get_proc_id("ORM_IDX_OUT")
-            set oenroute->route_list[3]->r_pid = get_proc_id("ORM_RADIOLOGY_OUT")
+            set oenroute->route_list[2]->r_pid = get_proc_id("ORM_RADIOLOGY_OUT")
             go to exit_point
         elseif  (cqm_subtype in ("EDUTAINMENT", "OFCVIDEOS"))
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_GETWELL_EMMI_OUT")
