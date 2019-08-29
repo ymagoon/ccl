@@ -20,7 +20,8 @@
  *                                          Non-RLN Lab orders from ORM_TCP_BAYC_OUT to UNKNOWN_TRANS_DISK_OUT
  *  007       07/08/19   H Kaczmarcz        Model  Phase 2 ORU new routes: oru_documents_out, oru_documents_optum_out,
  *                                          and oru_lab_results_out
- *  008       08/08/19  Yitzhak Magoon      CHG0033763 Change name of document from EDPATIENTSUMMARY to EDSUMMARYTOPATIENTPORTAL  
+ *  008       08/08/19   Yitzhak Magoon     CHG0033763 Change name of document from EDPATIENTSUMMARY to EDSUMMARYTOPATIENTPORTAL  
+ *  009       08/29/19   Yitzhak Magoon     CHG0033869 Remove TCP and TCPIP from interface names, and several other name changes
  *  ---------------------------------------------------------------------------------------------
 */
 
