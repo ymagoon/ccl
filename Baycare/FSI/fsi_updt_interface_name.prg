@@ -29,9 +29,15 @@ record requestin (
 )
 */
  
+call echorecord(requestin)
+ 
 update from oen_procinfo op
   , (dummyt d with seq = value(size(requestin->list_0,5)))
+<<<<<<< Updated upstream
 set 
+=======
+set
+>>>>>>> Stashed changes
   op.proc_name = requestin->list_0[d.seq].new_proc_name
   , op.updt_applctx = reqinfo->updt_applctx
   , op.updt_cnt = op.updt_cnt + 1
