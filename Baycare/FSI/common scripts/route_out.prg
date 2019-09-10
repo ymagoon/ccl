@@ -20,8 +20,8 @@
  *                                          Non-RLN Lab orders from ORM_TCP_BAYC_OUT to UNKNOWN_TRANS_DISK_OUT
  *  007       07/08/19   H Kaczmarcz        Model  Phase 2 ORU new routes: oru_documents_out, oru_documents_optum_out,
  *                                          and oru_lab_results_out
- *  008       08/08/19   Yitzhak Magoon     CHG0033763 Change name of document from EDPATIENTSUMMARY to EDSUMMARYTOPATIENTPORTAL  
- *  009       08/29/19   Yitzhak Magoon     CHG0033869 Remove TCP and TCPIP from interface names, and several other name changes
+ *  008       08/08/19  Yitzhak Magoon      CHG0033763 Change name of document from EDPATIENTSUMMARY to EDSUMMARYTOPATIENTPORTAL  
+*  009        09/06/19  C Markwardt         CHG0034741 Made exit point if an ORU is a DOC/MDOC and doesn't qualify to go to HIE
  *  ---------------------------------------------------------------------------------------------
 */
 
@@ -306,6 +306,9 @@ case (message_type)
                         go to exit_point
                      endif
                  endif ;end univ_service_id not "Pharmacy"
+                 if(route_list_size >0)  ;09 CJM this allows us to exit if the ORU is a DOC/MDOC
+                     go to exit_point
+                 endif
             endif ; end cqm_type in ("DOC", "MDOC")
 
             ;007 SurgiNet notes / discrete result to HealthGrid will no longer go outbound with Lab results
