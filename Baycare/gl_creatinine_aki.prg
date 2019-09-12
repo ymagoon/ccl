@@ -7,7 +7,7 @@
  *				  last 7 days.
  *  ---------------------------------------------------------------------------------------------
  *  Author:     Yitzhak Magoon
- *  Creation Date:  06/19/2019
+ *  Creation Date:  09/12/2019
  *  ---------------------------------------------------------------------------------------------
  *  Mod#   Date      Author           Description & Requestor Information
  *
@@ -17,14 +17,6 @@
 drop program gl_creatinine_aki go
 create program gl_creatinine_aki
 
-/*
-  Our query is hitting the CLINICAL_EVENT table while the rule is firing with the RESULT_EVENT module. There is a timing delay
-  between when the data is written on both tables, so the pause fixes that. The query was written this way to avoid the complexity
-  of dealing with the PERFORM_RESULT table.
-*/
- 
-;call pause(2)
- 
 free record data
 record data (
   1 min_result_7_days 		  = vc
@@ -211,15 +203,15 @@ if (sz < 2)
   set log_message = "There are not enough results to calculate a ratio"
 
 elseif (data->most_recent_result_7_days >= data->min_result_7_days)
-  set data->ratio = round(cnvtreal(data->most_recent_result_7_days) / cnvtreal(data->min_result_7_days),1)
+  set data->ratio = round(cnvtreal(data->most_recent_result_7_days) / cnvtreal(data->min_result_7_days),2)
  
   call echo(build("most_recent_result_7_days is greater than or equal to min_result_7_days"))
   call echo(build("ratio=",data->ratio))
  
-  if (data->ratio >= 1.5 and data->ratio <= 1.9)
+  if (data->ratio >= 1.50 and data->ratio <= 1.99)
     set final_result = set_final_result("Stage 1", data->min_result_display, data->min_result_dt_tm)
     set log_message = "Result is Stage 1"
-  elseif (data->ratio >= 2.0 and data->ratio <= 2.9)	
+  elseif (data->ratio >= 2.0 and data->ratio <= 2.99)	
     set final_result = set_final_result("Stage 2", data->min_result_display, data->min_result_dt_tm)
     set log_message = "Result is Stage 2"
   elseif (data->ratio >= 3.0)
@@ -236,7 +228,7 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
     select into "nl:"
       result_val = data->qual[d1.seq].result_val
       , result_val2 = data->qual[d1.seq].result_val2
-      , min_result_dt_tm = data->qual[d1.seq].drawn_dt_tm
+      , min_result_dt_tm = data->qual[d1.seq ].drawn_dt_tm
     from
       (dummyt d1 with seq = value(size(data->qual,5)))
     plan d1 where data->qual[d1.seq].drawn_dt_tm >= cnvtlookbehind("2, D")
@@ -247,10 +239,10 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
       data->min_result_display = result_val2
       data->min_result_dt_tm = min_result_dt_tm
     with nocounter
- 
+    
     call echo(build("min result 2 day found"))
- 
-    set data->diff = round(cnvtreal(data->most_recent_result_7_days) - cnvtreal(data->min_result_2_days),1)
+    
+    set data->diff = round(cnvtreal(data->most_recent_result_7_days) - cnvtreal(data->min_result_2_days),2)
  
     call echo(build("diff=",data->diff))
  
