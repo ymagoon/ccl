@@ -17,23 +17,23 @@
   *                                                                                   *
   *************************************************************************************/
 /**************************************************************************************
-
+ 
         Source file name:                   mp_common.inc
         Object name:                        n/a
-
+ 
         Product:                            Discern MPages
         Product Team:                       Discern ABU
-
+ 
         Program purpose:                    Utility subroutines for MPages
-
+ 
         Tables read:                        None
-
+ 
         Tables updated:                     None
-
+ 
         Executing from:                     PowerChart
-
+ 
         Special Notes:                      None
-
+ 
 /**************************************************************************************
 	***********************************************************************
 	*                   GENERATED MODIFICATION CONTROL LOG                *
@@ -53,12 +53,12 @@ declare upper_bound_date 		= vc with constant ("31-DEC-2100 23:59:59.99"),protec
 declare codeListCnt				= i4 with noconstant(0), protect
 declare prsnlListCnt			= i4 with noconstant(0), protect
 declare phoneListCnt			= i4 with noconstant(0), protect
-
+ 
 declare code_idx = i4 with noconstant(0), protect
 declare prsnl_idx = i4 with noconstant(0), protect
 declare phone_idx = i4 with noconstant(0), protect
 declare prsnl_cnt = i4 with noconstant(0), protect
-
+ 
 declare MPC_AP_TYPE_CD = f8 with  protect, noconstant(0.0)
 declare MPC_DOC_TYPE_CD = f8 with  protect, noconstant(0.0)
 declare MPC_MDOC_TYPE_CD = f8 with  protect, noconstant(0.0)
@@ -74,7 +74,7 @@ declare MPC_PROCEDURE_TYPE_CD = f8 with  protect, noconstant(0.0)
 declare MPC_GRP_TYPE_CD = f8 with  protect, noconstant(0.0)
 declare MPC_HLATYPING_TYPE_CD = f8 with  protect, noconstant(0.0)
 declare eventClassCdPopulated = i2 with  protect, noconstant(0)
-
+ 
 /* DECLARE SUBROUTINES ***************************************************************************/
 declare AddCodeToList(P1=F8(VAL), P2=VC(REF)) = null with protect
 declare AddPersonnelToList(P1=F8(VAL), P2=VC(REF)) = null with protect
@@ -103,7 +103,7 @@ declare GetEventSetDisplaysFromEventSetCds(P1=VC(REF), P2=VC(REF)) = null with p
 declare DecodeStringParameter(description=VC(VAL)) = VC with protect
 declare URLEncode(json=VC(VAL)) = VC with protect
 declare IsTaskGranted(task_number=i4(VAL)) = i2 with protect
-
+ 
 /* RECORD STRUCTURES *****************************************************************************/
 /* The record structure to pass in phone types should look like the following (in order of preference)
 free record phone_types
@@ -112,7 +112,7 @@ record phone_types(
 		2 phone_cd = f8
 )
 */
-
+ 
 /*
 AddCodeToList(DOUBLE, VC) adds a code value to the code_list record.
 */
@@ -130,7 +130,7 @@ subroutine AddCodeToList(code_value, record_data)
 		endif
 	endif
 end
-
+ 
 /*
 OutputCodeListXML(VC) given a record structure will populate the code list based on the code values added
 to the code list.
@@ -138,25 +138,25 @@ to the code list.
 subroutine OutputCodeList(record_data)
 	call log_message("In OutputCodeList() @deprecated", LOG_LEVEL_DEBUG)
 end
-
+ 
 /*
 AddPersonnelToList(DOUBLE, VC) add a personnel id to the prsnl_list record structure.
 */
 subroutine AddPersonnelToList(prsnl_id, record_data)
 	call AddPersonnelToListWithDate(prsnl_id, record_data, CURRENT_DATE_TIME)
 end
-
+ 
 /*
 AddPersonnelToListByDate(DOUBLE, VC, DQ8) add a personnel id to the prsnl_list record structure
 by their active name at the specific date and time denoted by active_date.
 */
 subroutine AddPersonnelToListWithDate(prsnl_id, record_data, active_date)
 	declare PERSONNEL_CD = f8 with protect, constant(uar_get_code_by("MEANING", 213, "PRSNL"))
-
+ 
  	if(active_date = null or active_date = 0.0)
  		set active_date = CURRENT_DATE_TIME
  	endif
-
+ 
  	if (prsnl_id != 0)
 		if (prsnlListCnt = 0 or
 			locateval(prsnl_idx, 1, prsnlListCnt, prsnl_id, record_data->prsnl[prsnl_idx].id,
@@ -172,7 +172,7 @@ subroutine AddPersonnelToListWithDate(prsnl_id, record_data, active_date)
 		endif
 	endif
 end
-
+ 
 /*
 OutputPersonnelList(VC) based on the record structure will output the personnel list stored on the prsnl table.
 */
@@ -184,7 +184,7 @@ subroutine OutputPersonnelList(report_data)
 	declare filteredCnt = i4 with protect, noconstant(0)
 	declare prsnl_seq = i4 with protect, noconstant(0)
 	declare idx = i4 with protect, noconstant(0)
-
+ 
 	if (prsnlListCnt > 0)
 		select into "nl:"
 		from prsnl p
@@ -248,9 +248,9 @@ subroutine OutputPersonnelList(report_data)
 		foot report
 			stat = alterlist(report_data->prsnl, prsnlListCnt)
 		with nocounter
-
+ 
 		call ERROR_AND_ZERO_CHECK_REC(curqual, "PRSNL", "OutputPersonnelList", 1, 0, report_data)
-
+ 
 		;filter out duplicate names
 	 	if(active_date_ind != 0)
 	 		select into "nl:"
@@ -263,10 +263,10 @@ subroutine OutputPersonnelList(report_data)
 	 			filteredCnt = 0
 	 			idx = size(report_data->prsnl, 5)
 	 			stat = alterlist(report_data->prsnl, idx * 2)
-
+ 
 	 		head end_effective_dt_tm
 	 			donothing = 0
-
+ 
 	 		head prsnl_id
 				idx = idx + 1
 				filteredCnt = filteredCnt + 1
@@ -286,27 +286,27 @@ subroutine OutputPersonnelList(report_data)
 				report_data->prsnl[idx]->provider_name->username = report_data->prsnl[d.seq]->provider_name->username
 				report_data->prsnl[idx]->provider_name->initials = report_data->prsnl[d.seq]->provider_name->initials
 				report_data->prsnl[idx]->provider_name->title = report_data->prsnl[d.seq]->provider_name->title
-
+ 
 	 		foot report
 	 			;resize by newListCnt to filter down the unused elements
 	 			stat = alterlist(report_data->prsnl, idx)
 	 			;resize the list to just show the results that were not filtered
 	 			stat = alterlist(report_data->prsnl, filteredCnt, 0)
 	 		with nocounter
-
+ 
 	 		call ERROR_AND_ZERO_CHECK_REC(curqual, "PRSNL", "FilterPersonnelList", 1, 0, report_data)
 	 	endif
 	endif
-
+ 
 	call log_message(build("Exit OutputPersonnelList(), Elapsed time in seconds:",
 	datetimediff(cnvtdatetime(curdate,curtime3),BEGIN_DATE_TIME, 5)), LOG_LEVEL_DEBUG)
 end
-
+ 
 /*
 AddPhonesToList(DOUBLE, VC) add a personnel id to the phone_list record structure
 */
 subroutine AddPhonesToList(prsnl_id, record_data)
-
+ 
  	if (prsnl_id != 0)
 		if (phoneListCnt = 0 or
 			locateval(phone_idx, 1, phoneListCnt, prsnl_id, record_data->phone_list[prsnl_idx].person_id) <= 0)
@@ -318,10 +318,10 @@ subroutine AddPhonesToList(prsnl_id, record_data)
 			set prsnl_cnt = prsnl_cnt + 1
 		endif
 	endif
-
+ 
 end
-
-
+ 
+ 
 /*
 OutputPhoneList(VC) based on the record structure will output the phone list stored on the phone table.
 */
@@ -334,7 +334,7 @@ subroutine OutputPhoneList(report_data, phone_types)
 	declare idx3 = i4 with protect, noconstant(0)
 	declare phoneCnt = i4 with protect, noconstant(0)
 	declare prsnlIdx = i4 with protect, noconstant(0)
-
+ 
  	;;report_data->phone_list size is greater than 0.  prsnlListCnt is set in AddPhonesToList() in mp_common.inc
 	if (phoneListCnt > 0)
 		select
@@ -363,7 +363,7 @@ subroutine OutputPhoneList(report_data, phone_types)
 				order by ph.parent_entity_id, phone_sorter
 			endif
 		into "nl:"
-
+ 
 		head ph.parent_entity_id
 			phoneCnt = 0
 			prsnlIdx = locateval(idx3, 1, PERSONCNT, ph.parent_entity_id, report_data->phone_list[idx3]->person_id)
@@ -380,20 +380,20 @@ subroutine OutputPhoneList(report_data, phone_types)
 		foot ph.parent_entity_id
 			stat = alterlist(report_data->phone_list[prsnlIdx]->phones, phoneCnt)
 		with nocounter, expand = value(evaluate(floor((PERSONCNT - 1)/30), 0, 0, 1))  ;If more than 30 persons use global temp table.
-
+ 
  		set stat = alterlist(report_data->phone_list, prsnl_cnt)
-
+ 
 		call ERROR_AND_ZERO_CHECK_REC(curqual, "PHONE", "OutputPhoneList", 1, 0, report_data)
 	endif
-
+ 
 	call log_message(build("Exit OutputPhoneList(), Elapsed time in seconds:",
 	datetimediff(cnvtdatetime(curdate,curtime3),BEGIN_DATE_TIME, 5)), LOG_LEVEL_DEBUG)
 end
-
+ 
 subroutine PutStringToFile(sValue)
 	call log_message("In PutStringToFile()", LOG_LEVEL_DEBUG)
 	declare BEGIN_DATE_TIME = dq8 with constant(cnvtdatetime(curdate, curtime3)), private
-
+ 
 	if(validate(_Memory_Reply_String)=1)
 		set _Memory_Reply_String = sValue
 	else
@@ -412,21 +412,21 @@ subroutine PutStringToFile(sValue)
 			1 document_size = i4
 			1 document = gvc
 		)
-
+ 
 		; Set parameters for displaying the file
 		set putRequest->source_dir = $outdev
 		set putRequest->IsBlob = "1"
 		set putRequest->document = sValue
 		set putRequest->document_size = size(putRequest->document)
-
+ 
 		;  Display the file.  This allows XmlCclRequest to receive the output
 		execute eks_put_source with replace("REQUEST",putRequest),replace("REPLY",putReply)
 	endif
-
+ 
 	call log_message(build("Exit PutStringToFile(), Elapsed time in seconds:",
 	datetimediff(cnvtdatetime(curdate,curtime3),BEGIN_DATE_TIME, 5)), LOG_LEVEL_DEBUG)
 end
-
+ 
 /*
  * PutUnboundedStringToFile is a wrapper around the PutStringToFile that will increase the maximum varchar length
  * when the string to be set to _memory_reply_string is too large. PutStringToFileSafe maintains the original
@@ -441,27 +441,27 @@ end
 subroutine PutUnboundedStringToFile(tRec)
 	call log_message("In PutUnboundedStringToFile()", LOG_LEVEL_DEBUG)
 	declare BEGIN_DATE_TIME = dq8 with constant(cnvtdatetime(curdate, curtime3)), private
-
+ 
 	declare curStringLength = i4 with noconstant(textlen(tRec->val))
 	declare newMaxVarLen = i4 with noconstant(0)
 	declare origCurMaxVarLen = i4 with noconstant(0)
-
+ 
 	; Is the string value larger than the maximum varchar length?
 	if (curStringLength > curmaxvarlen)
 		set origCurMaxVarLen = curmaxvarlen
 		set newMaxVarLen = curStringLength + 10000  ; additional just-in-case buffer
-
+ 
 		;; Modify the maxvarlen reserved variable
 		set modify maxvarlen newMaxVarLen
 	endif
-
+ 
 	call PutStringToFile(tRec->val)
-
+ 
 	; If maxvarlen was changed, reset it back to its original value
 	if (newMaxVarLen > 0)
 		set modify maxvarlen origCurMaxVarLen
 	endif
-
+ 
 	call log_message(
 		build(
 			"Exit PutUnboundedStringToFile(), Elapsed time in seconds:",
@@ -469,34 +469,34 @@ subroutine PutUnboundedStringToFile(tRec)
 		), LOG_LEVEL_DEBUG
 	 )
 end
-
-
+ 
+ 
 /*
 PutJSONRecordToFile(VC) puts the current record to the output
 */
 subroutine PutJSONRecordToFile(record_data)
 	call log_message("In PutJSONRecordToFile()", LOG_LEVEL_DEBUG)
 	declare BEGIN_DATE_TIME = dq8 with constant(cnvtdatetime(curdate, curtime3)), private
-
+ 
 	; Temporary record to circumvent maxvarlen limitations using a gvc variable within the record
 	record _tempJson(
 		1 val = gvc
 	)
-
+ 
 	; Place the converted JSON into the unbounded record member
 	set _tempJson->val = cnvtrectojson(record_data)
-
+ 
 	call PutUnboundedStringToFile(_tempJson)
-
+ 
 	call log_message(build("Exit PutJSONRecordToFile(), Elapsed time in seconds:",
 	datetimediff(cnvtdatetime(curdate,curtime3),BEGIN_DATE_TIME, 5)), LOG_LEVEL_DEBUG)
 end
-
+ 
 /*
 GetParameterValues(index, value_rec) get the parameter values passed into the prompt at a given index.  An assumption is
 made that the values are all 'I4's and 'F8's.  The value_rec is also required to look like:
-
-
+ 
+ 
 free record temp_rec
 record temp_rec
 (
@@ -504,17 +504,17 @@ record temp_rec
 	1 qual[*]
 		2 value = f8
 )
-
+ 
 For example of usage of this method, if the following is executed:
 mp_get_allergies "mine", <person_id>, <encntr_id> go
 mp_get_allergies "mine", 1548144, value(1550459, 1550468) go
-
+ 
 The 1st index is the parameter "mine".  The 2nd index is the parameter '1548144' which is the person_id, and the 3rd index is
 the parameter array 'value(1550459, 1550468)'.  To extract all the _cds or _ids from an index you would call the method as
 follows for the current example
-
+ 
 call GetParameterValues(3, temp_rec)
-
+ 
 The outcome of the retrieval of the parameter values is
 >>>Begin EchoRecord VALUE_REC   ;ENCNTR_REC
  1 CNT= I4   {2}
@@ -522,7 +522,7 @@ The outcome of the retrieval of the parameter values is
   2 VALUE=F8   {1550459.0000000000                      }
  1 QUAL[2,2*]
   2 VALUE=F8   {1550468.0000000000                      }
-
+ 
 */
 subroutine GetParameterValues(index, value_rec)
 	declare par = vc with noconstant(""), protect
@@ -532,7 +532,7 @@ subroutine GetParameterValues(index, value_rec)
 	declare cnt2 = i4 with noconstant(0), protect
 	declare param_value = f8 with noconstant(0.0), protect
 	declare param_value_str = vc with noconstant(""), protect
-
+ 
 	SET par = reflect(parameter(index,0))
 	if (validate(debug_ind, 0) = 1)
 		call echo(par)
@@ -584,7 +584,7 @@ subroutine GetParameterValues(index, value_rec)
 		call echorecord(value_rec)
 	endif
 end
-
+ 
 subroutine GetLookbackDateByType(units,flag)
 	declare looback_date = dq8 with noconstant(cnvtdatetime("01-JAN-1800 00:00:00"))
 	if(units != 0)
@@ -598,21 +598,21 @@ subroutine GetLookbackDateByType(units,flag)
 	endif
 	return (looback_date)
 end
-
+ 
 subroutine GetCodeValuesFromCodeset(evt_set_rec, evt_cd_rec)
 	declare csIdx = i4 with noconstant(0)
-
+ 
 	select distinct into "nl:"
 	from v500_event_set_explode vese
 		where expand(csIdx, 1, evt_set_rec->cnt, vese.event_set_cd, evt_set_rec->qual[csIdx].value)
 	detail
 		evt_cd_rec->cnt = evt_cd_rec->cnt + 1
 		stat = alterlist(evt_cd_rec->qual, evt_cd_rec->cnt)
-
+ 
 		evt_cd_rec->qual[evt_cd_rec->cnt].value = vese.event_cd
 	with nocounter
 end
-
+ 
 /*
 	GetEventSetNamesFromEventSetCds
 	params:
@@ -626,20 +626,20 @@ end
 						1 qual[*]
 							2 value = f8
 					)
-
+ 
     Returns:
 		null
-
+ 
 */
-
+ 
 subroutine GetEventSetNamesFromEventSetCds(evt_set_rec, evt_set_name_rec)
   declare index = i4 with protect,noconstant(0)
   declare pos =i4 with protect, noconstant(0)
-
+ 
   select into "nl:"
   from v500_event_set_code v
   where expand(index,1,evt_set_rec->cnt,v.event_set_cd,evt_set_rec->qual[index].value)
-
+ 
   head report
     cnt = 0
     evt_set_name_rec->cnt = evt_set_rec->cnt
@@ -662,9 +662,9 @@ subroutine GetEventSetNamesFromEventSetCds(evt_set_rec, evt_set_name_rec)
     evt_set_name_rec->cnt = cnt
     stat = alterlist(evt_set_name_rec->qual,evt_set_name_rec->cnt)
   with nocounter, expand = value(evaluate(floor((evt_set_rec->cnt-1)/30),0,0,1))
-
+ 
 end
-
+ 
 /*
 	returnViewerType
 	params:
@@ -694,7 +694,7 @@ subroutine returnViewerType(eventClassCd, eventId)
 		 set eventClassCdPopulated = 1
 	endif
 	declare sViewerFlag = vc with protect, noconstant("")
-
+ 
 	case(eventClassCd)
 		of MPC_AP_TYPE_CD:
 			set sViewerFlag = "AP"
@@ -720,7 +720,7 @@ subroutine returnViewerType(eventClassCd, eventId)
 		else
 			set sViewerFlag = "STANDARD"
 	endcase
-
+ 
 	if(eventClassCd = MPC_MDOC_TYPE_CD)
 		select into "nl:"
 			c2.*
@@ -729,20 +729,20 @@ subroutine returnViewerType(eventClassCd, eventId)
 		plan c1 where c1.event_id = eventId
 		join c2 where c1.parent_event_id = c2.event_id
 			and c2.valid_until_dt_tm = cnvtdatetime("31-DEC-2100")
-
+ 
 		head c2.event_id
 			if(c2.event_class_cd = MPC_AP_TYPE_CD)
 				sViewerFlag = "AP"
 			endif
 		with nocounter
 	endif
-
+ 
 	call log_message(build("Exit returnViewerType(), Elapsed time in seconds:",
 	datetimediff(cnvtdatetime(curdate,curtime3),BEGIN_DATE_TIME, 5)), LOG_LEVEL_DEBUG)
-
+ 
 	return(sViewerFlag)
 end
-
+ 
 /**
  * cnvtIsoDtTmToDQ8()
  * Purpose:
@@ -754,15 +754,15 @@ end
 */
 subroutine cnvtIsoDtTmToDQ8(isoDtTmStr)
 	declare convertedDq8 = dq8 with protect, noconstant(0)
-
+ 
 	set convertedDq8 =
 		cnvtdatetimeutc2(substring(1,10,isoDtTmStr),"YYYY-MM-DD",substring(12,8,isoDtTmStr),"HH:MM:SS", 4, CURTIMEZONEDEF)
-
+ 
 	return(convertedDq8)
-
+ 
 end  ;subroutine cnvtIsoDtTmToDQ8
-
-
+ 
+ 
 /**
  * cnvtDQ8ToIsoDtTm()
  * Purpose:
@@ -774,18 +774,18 @@ end  ;subroutine cnvtIsoDtTmToDQ8
 */
 subroutine cnvtDQ8ToIsoDtTm(dq8DtTm)
 	declare convertedIsoDtTm = vc with protect, noconstant("")
-
+ 
 	if(dq8DtTm > 0.0)
 		set convertedIsoDtTm = build(replace(datetimezoneformat(cnvtdatetime(dq8DtTm) ,
 			DATETIMEZONEBYNAME("UTC"),"yyyy-MM-dd HH:mm:ss",curtimezonedef)," ","T",1),"Z")
 	else
 		set convertedIsoDtTm = nullterm(convertedIsoDtTm)
 	endif
-
+ 
 	return(convertedIsoDtTm)
-
+ 
 end  ;subroutine cnvtDQ8ToIsoDtTm
-
+ 
 /**
  *GetOrgSecurityFlag
  *Purpose:
@@ -805,7 +805,7 @@ subroutine GetOrgSecurityFlag(null)
 	with nocounter
 	return (org_security_flag)
 end
-
+ 
 /**
  *GetCompOrgSecurityFlag
  *Purpose:
@@ -825,7 +825,7 @@ subroutine GetCompOrgSecurityFlag(dminfo_name)
 	with nocounter
 	return (org_security_flag)
 end
-
+ 
 /**
  *PopulateAuthorizedOrganizations
  *Purpose:
@@ -858,7 +858,7 @@ subroutine PopulateAuthorizedOrganizations(personId, value_rec)
       if (mod(organization_cnt, 20) = 1)
         stat = alterlist(value_rec->organizations, organization_cnt + 19)
       endif
-
+ 
       value_rec->organizations[organization_cnt].organizationId = por.organization_id
     foot report
 	  value_rec->cnt = organization_cnt
@@ -868,7 +868,7 @@ subroutine PopulateAuthorizedOrganizations(personId, value_rec)
 		call echorecord(value_rec)
 	endif
 end
-
+ 
 /**
  *GetUserLogicalDomain
  *Purpose:
@@ -878,22 +878,22 @@ end
  *  @param {f8} person_id value
 */
 subroutine GetUserLogicalDomain(id)
-
+ 
 	declare returnId = f8 with protect, noconstant(0.0)
-
+ 
 	select into "nl:"
 	from prsnl p
 	where p.person_id = id
-
+ 
 	detail
 		returnId = p.logical_domain_id
-
+ 
 	with nocounter
-
+ 
 	return (returnId)
-
+ 
 end ;GetUserLogicalDomain
-
+ 
 /**
  *GetPersonnelOverride
  *Purpose:
@@ -904,11 +904,11 @@ end ;GetUserLogicalDomain
  */
 subroutine GetPersonnelOverride(ppr_cd)
 	declare override_ind = i2 with protect, noconstant(0)
-
+ 
 	if(ppr_cd <= 0.0)
 		return(0)
 	endif
-
+ 
  	select into "nl:"
   	from code_value_extension cve
   		where cve.code_value = ppr_cd
@@ -918,11 +918,11 @@ subroutine GetPersonnelOverride(ppr_cd)
   	detail
     	override_ind = 1
  	with nocounter
-
+ 
 	return (override_ind)
 end
-
-
+ 
+ 
 /**
  *cclImpersonation
  *Purpose:
@@ -933,15 +933,15 @@ end
 subroutine cclImpersonation(null)
 	call log_message("In cclImpersonation()", LOG_LEVEL_DEBUG)
     declare BEGIN_DATE_TIME = dq8 with constant(cnvtdatetime(curdate, curtime3)), private
-
+ 
 	execute secrtl
 	declare uar_SecSetContext ( hCtx = i4) = i2
 	with image_axp="secrtl",image_aix="libsec.a(libsec.o)",uar="SecSetContext",   persist
-
+ 
 	declare secCntxt = i4 with public
 	declare namelen = i4  with public
 	declare domainNameLen = i4 with public
-
+ 
 	set nameLen = uar_SecGetClientUserNameLen()+1
 	set domainNameLen = uar_SecGetClientDomainNameLen()+2
 	set stat = memalloc(name,1,build("C",nameLen))
@@ -949,11 +949,11 @@ subroutine cclImpersonation(null)
 	set stat = uar_secGetClientUserName(name,nameLen)
 	set stat = uar_secGetClientDomainName(domainName,domainNameLen)
 	set setCntxt = uar_secImpersonate(nullterm(name),nullterm(domainName))
-
+ 
     call log_message(build("Exit cclImpersonation(), Elapsed time in seconds:",
         datetimediff(cnvtdatetime(curdate,curtime3),BEGIN_DATE_TIME, 5)), LOG_LEVEL_DEBUG)
 end ;cclImpersonation
-
+ 
 /*
     GetEventSetDisplaysFromEventSetCds
     params:
@@ -967,19 +967,19 @@ end ;cclImpersonation
                         1 qual[*]
                             2 value = f8
                     )
-
+ 
     Returns:
         null
-
+ 
 */
 subroutine GetEventSetDisplaysFromEventSetCds(evt_set_rec, evt_set_disp_rec)
     declare index = i4 with protect,noconstant(0)
     declare pos = i4 with protect, noconstant(0)
-
+ 
     select into "nl:"
     from v500_event_set_code v
     where expand(index,1,evt_set_rec->cnt,v.event_set_cd,evt_set_rec->qual[index].value)
-
+ 
     head report
       cnt = 0
       evt_set_disp_rec->cnt = evt_set_rec->cnt
@@ -1037,7 +1037,7 @@ subroutine URLEncode(json)
 	set encodedJson = replace(encodedJson, char(34), "%22", 0) ; "
 	return(encodedJson)
 end
-
+ 
 /***********************************************************************************************************************************
 * IsTaskGranted                                                                                                       *
 ***********************************************************************************************************************************/
@@ -1054,16 +1054,16 @@ end
 subroutine IsTaskGranted(task_number)
   call log_message("In IsTaskGranted", LOG_LEVEL_DEBUG)
   declare FNTime = f8 with private, noconstant(curtime3)
-  
+ 
   declare task_granted = i2 with noconstant(0), protect
   ;Checks whether the logged in user position has acces to task or not.
-  
+ 
   select into "nl:"
   from task_access ta, application_group ag
-  plan ta 
+  plan ta
     where ta.task_number = task_number
       and ta.app_group_cd > 0.0
-  join ag 
+  join ag
     where ag.position_cd = reqinfo->position_cd
       and ag.app_group_cd = ta.app_group_cd
       and ag.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
@@ -1073,6 +1073,7 @@ subroutine IsTaskGranted(task_number)
   with nocounter, maxqual(ta, 1)
   ; it is enough that there is at least one entry. We don't want to repetitively set the task_granted flag.
   call log_message(build("Exit IsTaskGranted - ", build2(cnvtint(curtime3 - FNTime)), "0 ms"), LOG_LEVEL_DEBUG)
-  
-  return(task_granted)  
+ 
+  return(task_granted)
 end ; IsTaskGranted
+
