@@ -23,12 +23,14 @@
         Product Team:           HealtheCare Management
         Program purpose:        Identify if a patient is at risk by defining at risk plans and calling hcm_get_at_risk_indicator
                                 to determine if the patient has an at risk health plan
-        Tables read:             None
+        Tables read:            None
         Tables updated:         None
         Executing from:         Custom Discern Module (hcm_check_at_risk_ind)
         Special Notes:          None
         Testing:
-bc_hcm_rule_at_risk "MINE","https://test.record.healtheintent.com/mock_api/populations/ab9176be-4303-4e6c-aa8d-219d31e29d76/people/1" GO ;TEST
+          m30 person_id = 27712528 (demographics 1, patinfo)
+          m30 demographics_test_uri = 
+              "https://test.record.healtheintent.com/mock_api/populations/ab9176be-4303-4e6c-aa8d-219d31e29d76/people/1"
 /**************************************************************************************
 ***********************************************************************************
 *                    GENERATED MODIFICATION CONTROL LOG                           *
@@ -37,10 +39,13 @@ bc_hcm_rule_at_risk "MINE","https://test.record.healtheintent.com/mock_api/popul
 * Mod Date     Engineer             Comment                                       *
 * --- -------- -------------------- ----------------------------------------------*
 * 000 03/22/16 Doyle Timberlake     HICAREDEV-1439: Initial release               *
-* 001 08/27/19 Erin Marston		    Pull beg_iso_dt_tm for plan		              *
-* 002 09/12/19 Yitzhak Magoon		Update rule for efficiency					  *
+* 001 08/27/16 Erin Marston		    Pull beg_iso_dt_tm for plan		              *
+* 002 09/12/19 Yitzhak Magoon		Pull most recent at risk health plan and make *
+*									performance updates         				  *
+* 
 ***********************************************************************************
 *******************************  END OF ALL MODCONTROL BLOCKS  ***********************/
+
 drop program bc_hcm_rule_at_risk go
 create program bc_hcm_rule_at_risk
 prompt
