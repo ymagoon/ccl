@@ -21,7 +21,8 @@
  *  007       07/08/19   H Kaczmarcz        Model  Phase 2 ORU new routes: oru_documents_out, oru_documents_optum_out,
  *                                          and oru_lab_results_out
  *  008       08/08/19  Yitzhak Magoon      CHG0033763 Change name of document from EDPATIENTSUMMARY to EDSUMMARYTOPATIENTPORTAL  
-*  009        09/06/19  C Markwardt         CHG0034741 Made exit point if an ORU is a DOC/MDOC and doesn't qualify to go to HIE
+ *  009       09/06/19  C Markwardt         CHG0034741 Made exit point if an ORU is a DOC/MDOC and doesn't qualify to go to HIE
+ *  010       09/17/19  Yitzhak Magoon      CHG0034933 Remove DFT BMG and UC interfaces
  *  ---------------------------------------------------------------------------------------------
 */
 
@@ -45,17 +46,7 @@ set stat = alterlist(oenroute->route_list, 1) ;default to 1. This is changed to 
 
 case (message_type)
    of "DFT":
-        set intfilenm = get_string_value("interface file name")
-        set amb = build("/cerner/d_",cnvtlower(curdomain),"/chg/amb_p01.dat") ;001
-        set uc = build("/cerner/d_",cnvtlower(curdomain),"/chg/uc_p01.dat") ;001
-	
-        if (intfilenm = amb)
-            set oenroute->route_list[1]->r_pid = get_proc_id("DFT_BMG_OUT")
-        elseif (intfilenm = uc)
-            set oenroute->route_list[1]->r_pid = get_proc_id("DFT_UC_OUT")
-        else
-            set oenroute->route_list[1]->r_pid = get_proc_id("DFT_SOARIAN_OUT")
-        endif
+     set oenroute->route_list[1]->r_pid = get_proc_id("DFT_SOARIAN_OUT") ;010
 	
     of "MFN":
         set oenroute->route_list[1]->r_pid = get_proc_id("MFN_PYXIS_OUT")
