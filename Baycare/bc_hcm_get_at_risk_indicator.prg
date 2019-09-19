@@ -72,7 +72,7 @@ record request
 %i CCLUSERDIR:hcm_get_at_risk_indicator_req.inc
 )
 */
-
+ 
 ;003 swap for custom reply include file
 if (not validate(reply))
 record reply
@@ -96,7 +96,7 @@ record reply
 ;;%i CCLUSERDIR:bc_hcm_get_at_risk_ind_rep.inc
 )
 endif
-
+ 
 FREE RECORD hcm_get_hi_demographics_request
  RECORD hcm_get_hi_demographics_request (
    1 person_id = f8
@@ -239,7 +239,7 @@ if (hcm_get_hi_demographics_reply->status_data->status = "S")
       set hi_plan_ids_cnt = size(hcm_get_hi_demographics_reply->health_plans[hi_benefit_coverages_idx]->plan_identifiers, 5)
       set curr_hi_plan_name = hcm_get_hi_demographics_reply->health_plans[hi_benefit_coverages_idx]->plan_name
       set benefit_coverage_beg_iso_dt_tm = hcm_get_hi_demographics_reply->health_plans[hi_benefit_coverages_idx]->begin_iso_dt_tm  ;003
-
+ 
       for(hi_plan_ids_idx = 1 to hi_plan_ids_cnt)
         set hi_plan_type =
           hcm_get_hi_demographics_reply->health_plans[hi_benefit_coverages_idx]->plan_identifiers[hi_plan_ids_idx]->type
@@ -259,7 +259,7 @@ if (hcm_get_hi_demographics_reply->status_data->status = "S")
  
                   if(hi_plan_type = risk_plan_type and hi_plan_value = risk_plan_value)
                     ; This will ensure we increment reply plan array size only once per every matching plan
-                    
+ 
                     if (plan_added_ind = 0)
                       set matched_at_risk_plan_cnt = matched_at_risk_plan_cnt + 1
                       if (mod(matched_at_risk_plan_cnt, 10) = 1)

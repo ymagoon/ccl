@@ -23,14 +23,12 @@
         Product Team:           HealtheCare Management
         Program purpose:        Identify if a patient is at risk by defining at risk plans and calling hcm_get_at_risk_indicator
                                 to determine if the patient has an at risk health plan
-        Tables read:            None
+        Tables read:             None
         Tables updated:         None
         Executing from:         Custom Discern Module (hcm_check_at_risk_ind)
         Special Notes:          None
         Testing:
-          m30 person_id = 27712528 (demographics 1, patinfo)
-          m30 demographics_test_uri = 
-              "https://test.record.healtheintent.com/mock_api/populations/ab9176be-4303-4e6c-aa8d-219d31e29d76/people/1"
+bc_hcm_rule_at_risk "MINE","https://test.record.healtheintent.com/mock_api/populations/ab9176be-4303-4e6c-aa8d-219d31e29d76/people/1" GO ;TEST
 /**************************************************************************************
 ***********************************************************************************
 *                    GENERATED MODIFICATION CONTROL LOG                           *
@@ -39,13 +37,9 @@
 * Mod Date     Engineer             Comment                                       *
 * --- -------- -------------------- ----------------------------------------------*
 * 000 03/22/16 Doyle Timberlake     HICAREDEV-1439: Initial release               *
-* 001 08/27/16 Erin Marston		    Pull beg_iso_dt_tm for plan		              *
-* 002 09/12/19 Yitzhak Magoon		Pull most recent at risk health plan and make *
-*									performance updates         				  *
-* 
+* 001 08/27/16 Erin Marston		     Pull beg_iso_dt_tm for plan		              *
 ***********************************************************************************
 *******************************  END OF ALL MODCONTROL BLOCKS  ***********************/
-
 drop program bc_hcm_rule_at_risk go
 create program bc_hcm_rule_at_risk
 prompt
@@ -124,7 +118,7 @@ declare cnvtIsoDtTmToDQ8(P1=VC) = DQ8 with protect ;001
 /**************************************************************
 ; Begin Program
 **************************************************************/
-;set link_personid = 27656542 ;001 use ONLY for testing - comment out when executing from rule
+;set link_personid = 27656542 ;001 use ONLY for debugging in DVDev - comment out when executing from rule
  
 set retval = -1
 if (link_personid = 0)
@@ -141,7 +135,13 @@ set hcm_get_at_risk_indicator_req->demographics_test_uri = demographics_test_uri
  
  
 ; Define at risk health plans in hcm_get_at_risk_identifier request
-set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans, 26) ;001 add 2 plans for testing only
+/*************************************************************************************/
+;;001 Use Line A for TESTING ONLY - Use Line B for PRODUCTION
+;;comment out the line not being used
+set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans, 24) ;LINE A for TESTING only, change # for each testing scenario
+;set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans, 23) ;LINE B for PRODUCTION only
+/*************************************************************************************/
+ 
 set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans[1]->plan_identifiers, 1)
 set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans[2]->plan_identifiers, 1)
 set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans[3]->plan_identifiers, 1)
@@ -165,11 +165,16 @@ set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans[20]->plan_ident
 set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans[21]->plan_identifiers, 1)
 set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans[22]->plan_identifiers, 1)
 set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans[23]->plan_identifiers, 1)
-set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans[24]->plan_identifiers, 1)
  
-;Add MOCK Plans for TESTING ONLY - comment out for PROD
+/*************************************************************************************
+;001 Add MOCK Plans for TESTING ONLY - comment out for PROD
+;Testing scenario 2: patient has multiple plans, sends back most recent start date plan (plan B)
+set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans[24]->plan_identifiers, 1)
 set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans[25]->plan_identifiers, 1)
-set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans[26]->plan_identifiers, 1)
+/**/
+;Testing scenario 3: patient has termed plan
+set stat = alterlist(hcm_get_at_risk_indicator_req->health_plans[24]->plan_identifiers, 1)
+/*************************************************************************************/
  
  
 set hcm_get_at_risk_indicator_req->health_plans[1]->plan_name = "*BPP ACO MSSP"
@@ -238,20 +243,26 @@ set hcm_get_at_risk_indicator_req->health_plans[21]->plan_identifiers[1]->value 
 set hcm_get_at_risk_indicator_req->health_plans[22]->plan_name = "*BPP UHC"
 set hcm_get_at_risk_indicator_req->health_plans[22]->plan_identifiers[1]->type = "EDI"
 set hcm_get_at_risk_indicator_req->health_plans[22]->plan_identifiers[1]->value = "10016"
-set hcm_get_at_risk_indicator_req->health_plans[23]->plan_name = "*BPP UHC"
+set hcm_get_at_risk_indicator_req->health_plans[23]->plan_name = "*BPP BayCare Plus"
 set hcm_get_at_risk_indicator_req->health_plans[23]->plan_identifiers[1]->type = "EDI"
-set hcm_get_at_risk_indicator_req->health_plans[23]->plan_identifiers[1]->value = "10017"
-set hcm_get_at_risk_indicator_req->health_plans[24]->plan_name = "*BPP BayCare Plus"
-set hcm_get_at_risk_indicator_req->health_plans[24]->plan_identifiers[1]->type = "EDI"
-set hcm_get_at_risk_indicator_req->health_plans[24]->plan_identifiers[1]->value = "10024"
+set hcm_get_at_risk_indicator_req->health_plans[23]->plan_identifiers[1]->value = "10024"
  
-;Add MOCK Plans for TESTING ONLY - comment out for PROD
-set hcm_get_at_risk_indicator_req->health_plans[25]->plan_name = "Mock Health Plan A"
+/*************************************************************************************
+;001 Add MOCK Plans for TESTING ONLY - comment out for PROD
+;Testing scenario 2: patient has multiple plans, sends back most recent start date plan (plan B)
+set hcm_get_at_risk_indicator_req->health_plans[24]->plan_name = "Mock Health Plan A"
+set hcm_get_at_risk_indicator_req->health_plans[24]->plan_identifiers[1]->type = "HPID"
+set hcm_get_at_risk_indicator_req->health_plans[24]->plan_identifiers[1]->value = "HPVAL1"
+set hcm_get_at_risk_indicator_req->health_plans[25]->plan_name = "Mock Health Plan B"
 set hcm_get_at_risk_indicator_req->health_plans[25]->plan_identifiers[1]->type = "HPID"
-set hcm_get_at_risk_indicator_req->health_plans[25]->plan_identifiers[1]->value = "HPVAL1"
-set hcm_get_at_risk_indicator_req->health_plans[26]->plan_name = "Mock Health Plan B" ;"Mock Payer B"
-set hcm_get_at_risk_indicator_req->health_plans[26]->plan_identifiers[1]->type = "HPID"
-set hcm_get_at_risk_indicator_req->health_plans[26]->plan_identifiers[1]->value = "HPVAL2"
+set hcm_get_at_risk_indicator_req->health_plans[25]->plan_identifiers[1]->value = "HPVAL2"
+/**/
+;Testing scenario 3: patient has termed plan
+set hcm_get_at_risk_indicator_req->health_plans[24]->plan_name = "Mock Health Plan D"
+set hcm_get_at_risk_indicator_req->health_plans[24]->plan_identifiers[1]->type = "HPID"
+set hcm_get_at_risk_indicator_req->health_plans[24]->plan_identifiers[1]->value = "HPVAL4"
+ 
+/*************************************************************************************/
  
 /*001 swap out for custom script and reply
 execute hcm_get_at_risk_indicator with replace("REQUEST", hcm_get_at_risk_indicator_req),
@@ -296,16 +307,15 @@ if (hcm_get_at_risk_indicator_rep->status_data->status = "S")
  
 	endfor ;Loop 1 end
  
-	set string=concat(string, max_plan_name)	;001
+	set string= max_plan_name ;001
 	set retval = 100
-    ;set log_message=concat("Plan Name = ",max_plan_name,"(",max_beg_iso_dt_tm,") with hcm_get_at_risk_indicator_rep: "
-	;						,CNVTRECTOJSON(hcm_get_at_risk_indicator_rep)) ;001
-    ;log_message = cnvtstrng(hcm_get_at_risk_indicator_rep->health_plans[2]->begin_iso_dt_tm) ;"Person has at risk health plan "
-    set log_misc1= string ;001 hcm_get_at_risk_indicator_rep->health_plans[2]->plan_name
-	set log_message=concat("Plan Name = ",max_plan_name," || log_misc1 = ",	log_misc1)
+    set log_misc1= max_plan_name ;001 hcm_get_at_risk_indicator_rep->health_plans[2]->plan_name
+	set log_message=concat("Plan Name = ",max_plan_name," || log_misc1 = ",	log_misc1)	 ;001 CNVTRECTOJSON(hcm_get_at_risk_indicator_rep)
  
   endif
 endif
+ 
+ 
  
 /**
  * cnvtIsoDtTmToDQ8()
@@ -317,18 +327,12 @@ endif
  * @param {vc} isoDtTmStr ISO 8601 formatted string (ie, 2013-10-24T15:08:77Z)
 */
 subroutine cnvtIsoDtTmToDQ8(isoDtTmStr)
-    declare convertedDq8 = dq8 with protect, noconstant(0)
+	declare convertedDq8 = dq8 with protect, noconstant(0)
  
+	set convertedDq8 =
+		cnvtdatetimeutc2(substring(1,10,isoDtTmStr),"YYYY-MM-DD",substring(12,8,isoDtTmStr),"HH:MM:SS", 4, CURTIMEZONEDEF)
  
- 
-    set convertedDq8 =
-        cnvtdatetimeutc2(substring(1,10,isoDtTmStr),"YYYY-MM-DD",substring(12,8,isoDtTmStr),"HH:MM:SS", 4, CURTIMEZONEDEF)
- 
- 
- 
-    return(convertedDq8)
- 
- 
+	return(convertedDq8)
  
 end  ;subroutine cnvtIsoDtTmToDQ8
  
