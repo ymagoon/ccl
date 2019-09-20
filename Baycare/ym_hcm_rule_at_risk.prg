@@ -342,9 +342,23 @@ if (most_recent_result = null and at_risk_ind = 0)
 elseif (most_recent_result = null and at_risk_ind = 1)
   set retval = 100
   set log_message = build2("Patient has a risk plan = ", health_plan_name)
-  set log_misc1 = build(char(34),health_plan_name,char(34))
+  
+  ;if there is more than one active health plan write an ellipsis after the health plan name
+  if (active_hp_cnt > 1)
+    call echo("adding ellipsis to result")
+    set log_misc1 = build(char(34),health_plan_name,"...",char(34))
+  else
+    set log_misc1 = build(char(34),health_plan_name,char(34))
+  endif
+  
   call echo(build2("Patient has a risk plan = ", health_plan_name))
 elseif (most_recent_result != null and at_risk_ind = 1)
+  ;if there is more than one health plan, truncate the result if it contains an ellipsis
+  if (active_hp_cnt > 1)
+    set most_recent_result = replace(most_recent_result,"...","")
+    call echo(build("most recent result after truncation=",most_recent_result))
+  endif
+
   if (most_recent_result = health_plan_name) ;if they are the same, do nothing
     set retval = 0
     set log_message = build2("Patient's health plan has not changed = ", health_plan_name)
@@ -352,7 +366,14 @@ elseif (most_recent_result != null and at_risk_ind = 1)
   else ;if they are different, write the new health plan name to the CE table
     set retval = 100
     set log_message = build2("Patient's health plan has changed old = ", most_recent_result, " new = ", health_plan_name)
-    set log_misc1 = build(char(34),health_plan_name,char(34))
+    
+    ;if there is more than one active health plan write an ellipsis after the health plan name
+    if (active_hp_cnt > 1)
+      set log_misc1 = build(char(34),health_plan_name,"...",char(34))
+    else
+      set log_misc1 = build(char(34),health_plan_name,char(34))
+    endif
+    
     call echo(build2("Patient's health plan has changed old = ", most_recent_result, " new = ", health_plan_name))
   endif
 elseif (most_recent_result != null and at_risk_ind = 0)
