@@ -102,7 +102,7 @@ record demographics_reply (
 /*************************************************************************
 *  Populate at_risk_plans record structure                               *
 *************************************************************************/
-set stat = alterlist(at_risk_plans->health_plans, 26)
+set stat = alterlist(at_risk_plans->health_plans, 24)
 
 set at_risk_plans->health_plans[1]->plan_name = "*BPP ACO MSSP"
 set at_risk_plans->health_plans[1]->plan_identifiers[1]->type = "EDI"
@@ -176,13 +176,6 @@ set at_risk_plans->health_plans[23]->plan_identifiers[1]->value = "H2235001_M"
 set at_risk_plans->health_plans[24]->plan_name = "BayCarePlus Rewards - Medical"
 set at_risk_plans->health_plans[24]->plan_identifiers[1]->type = "EDI"
 set at_risk_plans->health_plans[24]->plan_identifiers[1]->value = "H2235002_M"
-set at_risk_plans->health_plans[25]->plan_name = "BayCarePlus Complete - Pharmacy"
-set at_risk_plans->health_plans[25]->plan_identifiers[1]->type = "EDI"
-set at_risk_plans->health_plans[25]->plan_identifiers[1]->value = "H2235001_R"
-set at_risk_plans->health_plans[26]->plan_name = "BayCarePlus Rewards - Pharmacy"
-set at_risk_plans->health_plans[26]->plan_identifiers[1]->type = "EDI"
-set at_risk_plans->health_plans[26]->plan_identifiers[1]->value = "H2235002_R"
-
 
 ;this makes testing dynamic. We only want to define mock plans if we are not in p30. 
 if (curdomain != "P30")
@@ -307,7 +300,7 @@ execute hcm_get_hi_person_demog with replace("REQUEST", demographics), replace("
 set active_hp_cnt = size(demographics_reply->health_plans, 5)
 
 call echo(build("most_recent_result=",most_recent_result))
-;call echorecord(demographics_reply)
+call echorecord(demographics_reply)
 
 for (idx = 1 to active_hp_cnt)
   set end_iso_dt_tm = demographics_reply->health_plans[idx].end_iso_dt_tm
