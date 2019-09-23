@@ -271,26 +271,51 @@ execute hcm_get_hi_person_demog with replace("REQUEST", demographics), replace("
 /*************************************************************************
 * TESTING                                                                *
 *************************************************************************/
-;if they are not in an at risk plan, do nothing
-;set most_recent_result = "Mock Health Plan B..."
-;set stat = alterlist(demographics_reply->health_plans,0)
 
-;if they are in an at risk plan, write the most recent active plan name to the CE table
+/* 
+  SCENARIO 1: If they are not in an at risk plan and they do not have a plan.
+  If there are no records on CE table for patient, you do not need to set most_recent_result to null
+*/
 ;set most_recent_result = null
-;set demographics_reply->health_plans[1].begin_iso_dt_tm = "2012-12-05T05:00:00Z"
-
-;if there is a recent result and they are in the same health plan
-;set demographics_reply->health_plans[1].begin_iso_dt_tm = "2012-12-05T05:00:00Z"
-
-;if there is a recent result and they are in a different health plan
-;no modification needed Mock A -> B
-
-;if the patient does not have an at risk plan anymore, write an asterisk (*)
 ;set stat = alterlist(demographics_reply->health_plans,0)
 
-;if the patient does not have an at risk plan (* is written to CE), but now does
-;no modification needed Mock * -> B
+/* 
+  SCENARIO 2: Net new patient with a single health plan
+  If there are no records on CE table for patient, you do not need to set most_recent_result to null
+  This is going to take the first health plan on the patient (not necessarily the most recent)
+*/
+;set most_recent_result = null
+;set stat = alterlist(demographics_reply->health_plans,1)
 
+/* 
+  SCENARIO 3: Net new patient with more than one health plan
+  If there are no records on CE table for patient, you do not need to set most_recent_result to null
+*/
+;set most_recent_result = null
+
+/* 
+  SCENARIO 4: Existing patient with more than one health plan (same plan as scenario 3)
+  Nothing needs to be commented out. This scenario should not write anything to CE table. 
+*/
+
+/* 
+  SCENARIO 5: Existing patient with a single health plan
+  This is going to take the first health plan on the patient (not necessarily the most recent)
+*/
+;set stat = alterlist(demographics_reply->health_plans,1)
+
+/* 
+  SCENARIO 6: Existing patient that no longer has a health plan
+  This will write an asterisk to the CE table. 
+*/
+;set stat = alterlist(demographics_reply->health_plans,0)
+
+/* 
+  SCENARIO 7: Existing patient with health plan removed; still no longer has a health plan
+  This scenario will work only if an asterisk is written to the CE table.
+  You can uncomment the first line to force the test to think the most recent result is an asterisk
+  If the most recent result is an asterisk, you do not need to uncomment line #1
+*/
 ;set most_recent_result = "*"
 ;set stat = alterlist(demographics_reply->health_plans,0)
 
@@ -300,7 +325,7 @@ execute hcm_get_hi_person_demog with replace("REQUEST", demographics), replace("
 set active_hp_cnt = size(demographics_reply->health_plans, 5)
 
 call echo(build("most_recent_result=",most_recent_result))
-;call echorecord(demographics_reply)
+call echorecord(demographics_reply)
 
 for (idx = 1 to active_hp_cnt)
   set end_iso_dt_tm = demographics_reply->health_plans[idx].end_iso_dt_tm
@@ -401,5 +426,5 @@ end  ;subroutine cnvtIsoDtTmToDQ8
  
 end
 go
- execute ym_hcm_rule_at_risk 27686542 go
+; execute ym_hcm_rule_at_risk 27686542 go
  
