@@ -269,7 +269,7 @@ endif
 execute hcm_get_hi_person_demog with replace("REQUEST", demographics), replace("REPLY", demographics_reply)
 
 /*************************************************************************
-* TESTING *
+* TESTING                                                                *
 *************************************************************************/
 ;if they are not in an at risk plan, do nothing
 ;set most_recent_result = null
