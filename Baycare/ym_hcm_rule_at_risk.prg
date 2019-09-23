@@ -193,7 +193,7 @@ if (curdomain != "P30")
   set at_risk_plans->health_plans[hp_cnt + 3]->plan_identifiers[1]->value = "HPVAL4"
 endif
 
-call echorecord(at_risk_plans)
+;call echorecord(at_risk_plans)
 
 /*********************** END POPULATING AT_RISK_PLANS *****************************/
 
@@ -272,7 +272,7 @@ execute hcm_get_hi_person_demog with replace("REQUEST", demographics), replace("
 * TESTING                                                                *
 *************************************************************************/
 ;if they are not in an at risk plan, do nothing
-;set most_recent_result = null
+;set most_recent_result = "Mock Health Plan B..."
 ;set stat = alterlist(demographics_reply->health_plans,0)
 
 ;if they are in an at risk plan, write the most recent active plan name to the CE table
@@ -291,7 +291,7 @@ execute hcm_get_hi_person_demog with replace("REQUEST", demographics), replace("
 ;if the patient does not have an at risk plan (* is written to CE), but now does
 ;no modification needed Mock * -> B
 
-;set most_recent_result = "test"
+;set most_recent_result = "*"
 ;set stat = alterlist(demographics_reply->health_plans,0)
 
 /*************************************************************************
@@ -300,7 +300,7 @@ execute hcm_get_hi_person_demog with replace("REQUEST", demographics), replace("
 set active_hp_cnt = size(demographics_reply->health_plans, 5)
 
 call echo(build("most_recent_result=",most_recent_result))
-call echorecord(demographics_reply)
+;call echorecord(demographics_reply)
 
 for (idx = 1 to active_hp_cnt)
   set end_iso_dt_tm = demographics_reply->health_plans[idx].end_iso_dt_tm
@@ -345,13 +345,12 @@ elseif (most_recent_result = null and at_risk_ind = 1)
   
   ;if there is more than one active health plan write an ellipsis after the health plan name
   if (active_hp_cnt > 1)
-    call echo("adding ellipsis to result")
     set log_misc1 = build(char(34),health_plan_name,"...",char(34))
   else
     set log_misc1 = build(char(34),health_plan_name,char(34))
   endif
   
-  call echo(build2("Patient has a risk plan = ", health_plan_name))
+  call echo(build2("Patient has a risk plan = ", log_misc1))
 elseif (most_recent_result != null and at_risk_ind = 1)
   ;if there is more than one health plan, truncate the result if it contains an ellipsis
   if (active_hp_cnt > 1)
@@ -374,7 +373,7 @@ elseif (most_recent_result != null and at_risk_ind = 1)
       set log_misc1 = build(char(34),health_plan_name,char(34))
     endif
     
-    call echo(build2("Patient's health plan has changed old = ", most_recent_result, " new = ", health_plan_name))
+    call echo(build2("Patient's health plan has changed old = ", most_recent_result, " new = ", log_misc1))
   endif
 elseif (most_recent_result != null and at_risk_ind = 0)
 ;if the patient's risk plan was removed and the patient still does not have a risk plan
@@ -402,5 +401,5 @@ end  ;subroutine cnvtIsoDtTmToDQ8
  
 end
 go
-; execute ym_hcm_rule_at_risk 27686542 go
+ execute ym_hcm_rule_at_risk 27686542 go
  
