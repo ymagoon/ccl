@@ -106,7 +106,7 @@ set stat = alterlist(at_risk_plans->health_plans, 24)
  
 set at_risk_plans->health_plans[1]->plan_name = "*BPP ACO MSSP"
 set at_risk_plans->health_plans[1]->plan_identifiers[1]->type = "EDI"
-set at_risk_plans->health_plans[1]->plan_identifiers[1]->value = "004000000000500000009990000000999"
+set at_risk_plans->health_plans[1]->plan_identifiers[1]->value = "10009"
 set at_risk_plans->health_plans[2]->plan_name = "*BPP Aetna Adv"
 set at_risk_plans->health_plans[2]->plan_identifiers[1]->type = "EDI"
 set at_risk_plans->health_plans[2]->plan_identifiers[1]->value = "10021"
@@ -326,7 +326,7 @@ execute hcm_get_hi_person_demog with replace("REQUEST", demographics), replace("
 set active_hp_cnt = size(demographics_reply->health_plans, 5)
  
 call echorecord(demographics_reply)
-
+ 
 call echo(build("most_recent_result=",most_recent_result))
 call echo(build("active_hp_cnt=",active_hp_cnt))
  
@@ -336,22 +336,22 @@ for (idx = 1 to active_hp_cnt)
   else
     set end_iso_dt_tm = demographics_reply->health_plans[idx].end_iso_dt_tm
   endif
-  
-  /* 
+ 
+  /*
     Sometimes there may be dummy data where the end_iso_dt_tm makes the plan look active even though there isn't a plan name
     or any plan identifiers. The code below skips processing of the dummy data using ident_ind variable.
   */
   set ident_ind = 1
-  
+ 
   if (size(demographics_reply->health_plans[idx].plan_identifiers,5) > 1)
     set active_hp_plan_type = demographics_reply->health_plans[idx].plan_identifiers.type
     set active_hp_plan_value = demographics_reply->health_plans[idx].plan_identifiers.value
   else
     set ident_ind = 0
   endif
-  
+ 
   set num = 0
-  
+ 
   call echo(build("*** hp ",idx, " ***"))
   call echo(build("active_hp_plan_type=",active_hp_plan_type))
   call echo(build("active_hp_plan_value=",active_hp_plan_value))
@@ -360,17 +360,17 @@ for (idx = 1 to active_hp_cnt)
   ;only check current health plans that are not dummy data
   if ((end_iso_dt_tm = null or cnvtIsoDtTmToDQ8(end_iso_dt_tm) > cnvtdatetime(curdate,curtime3)) and ident_ind = 1)
     call echo("end_iso_dt_tm is either null or greater than current date time")
-    
+ 
     ;find matching at risk health plans that match active patient health plans
     set pos = locateval(num, 1, risk_hp_cnt, active_hp_plan_value, at_risk_plans->health_plans[num].plan_identifiers.value
     	, active_hp_plan_type, at_risk_plans->health_plans[num].plan_identifiers.type)
-    
+ 
     call echo(build("pos=",pos))
     ;if a match is found
     if (pos > 0)
       set at_risk_ind = 1
       set total_active_hp = total_active_hp + 1
-      
+ 
       ;only save the plan with the most recent begin_iso_dt_tm
       if (cnvtIsoDtTmToDQ8(demographics_reply->health_plans[idx].begin_iso_dt_tm) > cnvtIsoDtTmToDQ8(health_plan_begin_iso_dt_tm))
         set health_plan_name = demographics_reply->health_plans[idx].plan_name
