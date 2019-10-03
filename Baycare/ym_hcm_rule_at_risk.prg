@@ -272,6 +272,18 @@ execute hcm_get_hi_person_demog with replace("REQUEST", demographics), replace("
 * TESTING                                                                *
 *************************************************************************/
 
+set stat = alterlist(demographics_reply->health_plans,1)
+set demographics_reply->health_plans.plan_name = "*BPP Aetna Adv"
+set demographics_reply->health_plans.payer_name = "BPP Aetna"
+set demographics_reply->health_plans.begin_iso_dt_tm = "2019-07-01T04:00:00Z"
+set demographics_reply->health_plans.end_iso_dt_tm = null
+
+set stat = alterlist(demographics_reply->health_plans[1].plan_identifiers,2)
+set demographics_reply->health_plans.plan_identifiers[1].type = "EDI"
+set demographics_reply->health_plans.plan_identifiers[1].value = "10021"
+set demographics_reply->health_plans.plan_identifiers[2].type = "10021"
+set demographics_reply->health_plans.plan_identifiers[2].value = "HEALTHEINTENT"
+
 /* 
   SCENARIO 1: If they are not in an at risk plan and they do not have a plan.
   If there are no records on CE table for patient, you do not need to set most_recent_result to null
@@ -327,18 +339,27 @@ set active_hp_cnt = size(demographics_reply->health_plans, 5)
 call echo(build("most_recent_result=",most_recent_result))
 call echorecord(demographics_reply)
 
+call echo(build("active_hp_cnt=",active_hp_cnt))
+
 for (idx = 1 to active_hp_cnt)
   set end_iso_dt_tm = demographics_reply->health_plans[idx].end_iso_dt_tm
   set active_hp_plan_type = demographics_reply->health_plans[idx].plan_identifiers.type
   set active_hp_plan_value = demographics_reply->health_plans[idx].plan_identifiers.value
+  
+  call echo(build("active_hp_plan_type=",active_hp_plan_type))
+  call echo(build("active_hp_plan_value=",active_hp_plan_value))
+  call echo(build("end_iso_dt_tm=",end_iso_dt_tm))
   set num = 0
   
   ;only check current health plans
   if (end_iso_dt_tm = null or cnvtIsoDtTmToDQ8(end_iso_dt_tm) > cnvtdatetime(curdate,curtime3))
     ;find matching at risk health plans that match active patient health plans
+    call echo("end_iso_dt_tm is either null or greater than current date time")
+    
     set pos = locateval(num, 1, risk_hp_cnt, active_hp_plan_value, at_risk_plans->health_plans[num].plan_identifiers.value
     	, active_hp_plan_type, at_risk_plans->health_plans[num].plan_identifiers.type)
     
+    call echo(build("pos=",pos))
     ;if a match is found
     if (pos > 0)
       set at_risk_ind = 1
@@ -426,5 +447,5 @@ end  ;subroutine cnvtIsoDtTmToDQ8
  
 end
 go
-; execute ym_hcm_rule_at_risk 27686542 go
+ execute ym_hcm_rule_at_risk 27686542 go
  
