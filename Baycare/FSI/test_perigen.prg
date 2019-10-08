@@ -2,9 +2,19 @@ drop program test_perigen go
 create program test_perigen
  
 %include cust_script:baycare_fsi/hl7_msg.inc
- 
+
+call echo("calling add_data_by_id...")
+;call add_data_by_id("PID-3[2].4.1","hello") ;should work
+;call add_data_by_id("PID-3[1].4.1","hello") ;should work
+;call add_data_by_id("PID-3[10].60.1.1","hello") ;shouldn't work
+;call add_data_by_id("PID-3","hello") ;shouldn't work
+;call add_data_by_id("PID-3[1zdasfsd].4.1","hello") ;shouldn't work
+call add_data_by_id("OBX[31]-3.1","hello") ;should work
+;call add_data_by_id("hi","hello") ;shouldn't work
+
+
 set stat = alterlist(message->seg,2)
- 
+
 ;begin MSH
 ;MSH|^~\&|HNAM|CERNER|MPH|BAYCARE|20190930001115||ORM^O01|Q5224403049T7057757319|T|2.3||||||8859/1
 
