@@ -320,38 +320,38 @@ case (message_type)
 
        /*Contributor System (BMG, Soarian, or Millennium) that generated the ADT message. 
        ADT created by Millennium will have a cd: value of 0.*/
-       set contrib_system_cd = get_double_value("contributor_system_cd")
-       set contrib_system_display = uar_get_code_display(contrib_system_cd)
+        set contrib_system_cd = get_double_value("contributor_system_cd")
+        set contrib_system_display = uar_get_code_display(contrib_system_cd)
 
-       /*Begin- Version 2.8 */     
+        /*Begin- Version 2.8 */     
         if (trim(ver_id) = "2.8") 
             /*CPI Fetch for new Millennium Reg patients and new HealtheIntent patients. Note: 
             HI CPI fetch is no longer v2.3 out the ADT_CPI_FETCH_HI_OUT comserver*/
             if (message_trigger = "A28")
-              set oenroute->route_list[1]->r_pid = get_proc_id("ADT_SOARF_OUT")         
-              go to exit_point    
+                set oenroute->route_list[1]->r_pid = get_proc_id("ADT_SOARF_OUT")         
+                go to exit_point    
             endif
 
             /* Send Millennium registrations only to Enterprise and SOARF; do not send BMG and Soarian rebounds. 
             Send discharges on Millennium encounters only. Do not send discharges on BMG and Soarian encounters.*/
             if (contrib_system_display NOT IN("BMG", "SOARIAN"))
-              if (message_trigger = "A03") 
+                if (message_trigger = "A03") 
 
                 /* The PID patient_account_nbr->assign_fac->id is the contributor system that created the encounter. 
                 This field will contain the cd value for BMG, SOARIAN, or it will be NULL if the encounter was 
                 created on Millenium */
-                if (trim(oenobj->PERSON_GROUP [1]->PID->patient_account_nbr->assign_fac->id) > 0)
-                 set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
+                    if (trim(oenobj->PERSON_GROUP [1]->PID->patient_account_nbr->assign_fac->id) > 0)
+                        set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
+                    else
+                        set stat = alterlist(oenroute->route_list, 2)
+                        set oenroute->route_list[1]->r_pid = get_proc_id("ADT_ENTERPRISE_OUT")
+                        set oenroute->route_list[2]->r_pid = get_proc_id("ADT_SOARF_OUT")	
+                    endif 
                 else
-                  set stat = alterlist(oenroute->route_list, 2)
-                  set oenroute->route_list[1]->r_pid = get_proc_id("ADT_ENTERPRISE_OUT")
-                  set oenroute->route_list[2]->r_pid = get_proc_id("ADT_SOARF_OUT")	
-                endif 
-              else
-                  set stat = alterlist(oenroute->route_list, 2)
-                  set oenroute->route_list[1]->r_pid = get_proc_id("ADT_ENTERPRISE_OUT")
-                  set oenroute->route_list[2]->r_pid = get_proc_id("ADT_SOARF_OUT")  
-              endif
+                    set stat = alterlist(oenroute->route_list, 2)
+                    set oenroute->route_list[1]->r_pid = get_proc_id("ADT_ENTERPRISE_OUT")
+                    set oenroute->route_list[2]->r_pid = get_proc_id("ADT_SOARF_OUT")  
+                endif
             endif
 			
             go to exit_point
@@ -363,78 +363,78 @@ case (message_type)
             /* All Allergy A31 messages are v2.3 using "Powerchart Office ADT/A31" trigger for Soarian, BMG, and Millennium  
             registrations. Allergies are not sent to PHS or Resonance*/
             if (trim(cqm_class) = "PM_ALLERGY") 
-              set oenroute->route_list[1]->r_pid = get_proc_id("ADT_SOARIAN_REBOUND_OUT")
-              go to exit_point
+                set oenroute->route_list[1]->r_pid = get_proc_id("ADT_SOARIAN_REBOUND_OUT")
+                go to exit_point
             endif
             /* Send Millennium FirstNet discharges on Soarian encounters only; do not send discharges on BMG and Millennium
             encounters to Soarian. Send all A03s to PHS; do not send to Resonance*/
             if (message_trigger = "A03") 
-              set pt_fin_contrib_sys = get_code_vaule_display
+                set pt_fin_contrib_sys = get_code_vaule_display
               (trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_fac_id->name_id))
-              set pt_class_type =  get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->patient_class))
+                set pt_class_type =  get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->patient_class))
 
               /* contrib_system_display is the system that created the A03 message and the pt_fin_contrib_sys is  
               the contrib system that created the encounter.*/
-              if ((contrib_system_display != "SOARIAN") and (pt_fin_contrib_sys = "SOARIAN") and 
+                if ((contrib_system_display != "SOARIAN") and (pt_fin_contrib_sys = "SOARIAN") and 
                   (pt_class_type = "Emergency"))
-                set stat = alterlist(oenroute->route_list, 2)
-                set oenroute->route_list[1]->r_pid = get_proc_id("ADT_SOARIAN_REBOUND_OUT")
-                set oenroute->route_list[2]->r_pid = get_proc_id("ADT_PHS_OUT")
-              else
-                 set oenroute->route_list[1]->r_pid = get_proc_id("ADT_PHS_OUT")
-              endif
+                    set stat = alterlist(oenroute->route_list, 2)
+                    set oenroute->route_list[1]->r_pid = get_proc_id("ADT_SOARIAN_REBOUND_OUT")
+                    set oenroute->route_list[2]->r_pid = get_proc_id("ADT_PHS_OUT")
+                else
+                    set oenroute->route_list[1]->r_pid = get_proc_id("ADT_PHS_OUT")
+                endif
 			  
-              go to exit_point    
+                go to exit_point    
             endif
-;begin 002
+
             /* v2.3 ADT messages (Soarian, BMG, and Millenium registrations) go to Resonance PIX ADT to OE comchannels and
             Utility servers to only handle the auto enrollment for CommonWell (A01, A04, A08)*/
-             set route_list_size = 1
-             set remainder = mod(cnvtreal(oenobj->cerner->person_info->person->person_id), 4)
-                if (remainder = 0)
-                    set oenroute->route_list[1]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_01")
-                    if (message_trigger in ("A01","A04", "A08"))
-                      set route_list_size = route_list_size + 1 
-                      set stat = alterlist(oenroute->route_list,route_list_size)
-                      set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_01")
-                    endif
-                elseif (remainder = 1)
-                    set oenroute->route_list[1]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_02")
-                    if (message_trigger in ("A01","A04", "A08"))
-                      set route_list_size = route_list_size + 1 
-                      set stat = alterlist(oenroute->route_list,route_list_size)
-                      set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_02")
-                    endif
-                elseif (remainder = 2)
-                    set oenroute->route_list[1]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_03")
-                    if (message_trigger in ("A01","A04", "A08"))
-                      set route_list_size = route_list_size + 1 
-                      set stat = alterlist(oenroute->route_list,route_list_size)
-                      set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_03")
-                    endif
-                else
-                    set oenroute->route_list[1]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_04")
-                    if (message_trigger in ("A01","A04", "A08"))
-                      set route_list_size = route_list_size + 1 
-                      set stat = alterlist(oenroute->route_list,route_list_size)
-                      set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_04")
-                    endif
+            set route_list_size = 1
+            set remainder = mod(cnvtreal(oenobj->cerner->person_info->person->person_id), 4)
+            if (remainder = 0)
+                set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_01")
+                if (message_trigger in ("A01","A04", "A08"))
+                    set route_list_size = route_list_size + 1 
+                    set stat = alterlist(oenroute->route_list,route_list_size)
+                    set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_01")
                 endif
- ;end 002
+            elseif (remainder = 1)
+                set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_02")
+                if (message_trigger in ("A01","A04", "A08"))
+                    set route_list_size = route_list_size + 1 
+                    set stat = alterlist(oenroute->route_list,route_list_size)
+                    set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_02")
+                endif
+            elseif (remainder = 2)
+                set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_03")
+                if (message_trigger in ("A01","A04", "A08"))
+                    set route_list_size = route_list_size + 1 
+                    set stat = alterlist(oenroute->route_list,route_list_size)
+                    set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_03")
+                endif
+            else
+                set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_04")
+                if (message_trigger in ("A01","A04", "A08"))
+                    set route_list_size = route_list_size + 1 
+                    set stat = alterlist(oenroute->route_list,route_list_size)
+                    set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_04")
+                endif
+            endif
+
             /* v2.3 Soarian rebound messages only; we do not send BMG ADT rebounds */
-              if (contrib_system_display = "SOARIAN")
-                 set route_list_size = route_list_size + 1 
-                 set stat = alterlist(oenroute->route_list,route_list_size)
-                 set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ADT_SOARIAN_REBOUND_OUT")
-              endif
+            if (contrib_system_display = "SOARIAN")
+                set route_list_size = route_list_size + 1 
+                set stat = alterlist(oenroute->route_list,route_list_size)
+                set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ADT_SOARIAN_REBOUND_OUT")
+            endif
             /* v2.3 Public Health Surveillance (PHS) ADT messages (Soarian, BMG, and Millenium registrations) */
-              if (message_trigger in ("A01","A04", "A08"))
-                 set route_list_size = route_list_size + 1 
-                 set stat = alterlist(oenroute->route_list,route_list_size)
-                 set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ADT_PHS_OUT")
-              endif
+            if (message_trigger in ("A01","A04", "A08"))
+                set route_list_size = route_list_size + 1 
+                set stat = alterlist(oenroute->route_list,route_list_size)
+                set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ADT_PHS_OUT")
+            endif
 			  
-              go to exit_point    
+            go to exit_point    
         endif         
 /*End- Version 2.3 */ 
 
