@@ -34,9 +34,6 @@
 ;load subroutines
 execute op_fsi_common 
 
-declare cqm_class = c20
-declare message_type = c3
-declare message_trigger = c3
 set cqm_type = get_string_value("cqm_type")
 set cqm_subtype = get_string_value("cqm_subtype")
 set cqm_class = get_string_value("cqm_class")
