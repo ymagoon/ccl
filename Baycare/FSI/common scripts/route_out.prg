@@ -10,55 +10,59 @@
  *  ---------------------------------------------------------------------------------------------
  *  Mod#   Date          Author                        Description & Requestor Information
  *  001       02/15/19   Magoon, Yitzhak    Make DFT filepath dynamic
- *  002       02/25/19   SParimi            RFC # 18493 Added coding for Resonance additional comservers
- *  003       04/09/19   Magoon, Yitzhak    RFC # 19507 Send ZM1 messages to Unknown queue
- *  004       04/10/19   H Kaczmarczyk      RFC # 19718 Adding PHYSCHG to ORM_CONSULT_OUT for attending physician change orders
- *  005       04/15/19   S Parimi           RFC # 20020  to Add code to suppress Pharmacy docs from Doseme
- *  006       06/10/19   H Kaczmarczyk      Model Changes Phase 1; ORU changes will be in Phase 2: Go-Live
- *											Added Palliative orders to Consult feed
- *                                          New routes: ORM_RADIOLOGY_OUT, ORM_HT_WT_OUT, RDE_RDS_PHARMACY_OUT
- *                                          Non-RLN Lab orders from ORM_TCP_BAYC_OUT to UNKNOWN_TRANS_DISK_OUT
- *  007       07/08/19   H Kaczmarcz        Model  Phase 2 ORU new routes: oru_documents_out, oru_documents_optum_out,
- *                                          and oru_lab_results_out
- *  008       08/08/19  Yitzhak Magoon      CHG0033763 Change name of document from EDPATIENTSUMMARY to EDSUMMARYTOPATIENTPORTAL  
- *  009       09/06/19  C Markwardt         CHG0034741 Made exit point if an ORU is a DOC/MDOC and doesn't qualify to go to HIE
- *  010       09/17/19  Yitzhak Magoon      CHG0034933 Remove DFT BMG and UC interfaces
- *  ---------------------------------------------------------------------------------------------
+ *  002       02/25/19   SParimi                      RFC # 18493 Added coding for Resonance additional comservers
+ *  003 	   04/30/19   S Thies                     Adding logic for Enterprise SIU messages to Cloverleaf
+ *  004       05/01/19    H Kaczmarczyk      Changed coding for 2.8.2 version_id to use the same as the one working for ORU
+ *  005      08/07/19     H Kaczmarczyk      Model Changes Phase 1; ORU changes will be in Phase 2: 
+ *                                                               Added Palliative orders to Consult feed
+ *                                                               New routes: ORM_RADIOLOGY_OUT, ORM_HT_WT_OUT, RDE_RDS_PHARMACY_OUT
+ *                                                               Non-RLN Lab orders from ORM_TCP_BAYC_OUT to UNKNOWN_TRANS_DISK
+ *                                                                        Model  Phase 2 ORU new routes: oru_documents_out, 
+ *                                                               oru_documents_optum_out, and oru_lab_results_out
+ *                                                                        Removed old coding and updated comserver names.
+ *  006      08/13/19     H Kaczmarczyk    Added logic  to block Cerner registrations from going out 
+ *                                                               ADT_SOARIAN_REBOUND_OUT and Soarian/BMG rebounds from going out 
+ *                                                               ADT_ENTERPRISE_OUT and ADT_SOARF_OUT
+ * 007     08/13/19     H Kacz                Updated the name of Healthgrid pt summary doc to EDSUMMARYTOPATIENTPORTAL
+ * 008     8/20-22&26/19  H Kacz      Logic for ADT A28 CPI fetch, A31 Allergies, ED A03s. Changes made for v2.8/v2.3.
+ * 009     9/4-5/19      H Kacz              Logic change for ADT Assign Facility for FINS. Changes made for v2.8/v2.3.
+*  010     9/11/19       H Kacz              Logic change for HI A28 CPI fetch to go out as v2.8 on ADT_SOARF_OUT; no longer v2.3.
+*  011    10/2/19        H Kacz              Added more logic for v2.3 A03s for ER  Soarian encounters discharged in FirstNet.
+*  ---------------------------------------------------------------------------------------------
 */
 
 ;load subroutines
 execute op_fsi_common 
 
-declare cqm_type = c15
-declare cqm_subtype = c20
 declare cqm_class = c20
 declare message_type = c3
 declare message_trigger = c3
+set cqm_type = get_string_value("cqm_type")
+set cqm_subtype = get_string_value("cqm_subtype")
+set cqm_class = get_string_value("cqm_class")
 
 set message_type = trim(OENOBJ->CONTROL_GROUP[1]->MSH[1]->MESSAGE_TYPE->MESSG_TYPE)
 set message_trigger = trim(OENOBJ->CONTROL_GROUP[1]->MSH[1]->MESSAGE_TYPE->MESSG_Trigger)
-set cqm_type = get_string_value("cqm_type")
-set cqm_class = get_string_value("cqm_class")
-set cqm_subtype = get_string_value("cqm_subtype")
+set ver_id = uar_get_code_display(oenobj->cerner->oe_info->message_version_cd)
+
+set alias_pool_display =  
+        get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_auth->name_id))
 
 set oenstatus->status = 1
 set stat = alterlist(oenroute->route_list, 1) ;default to 1. This is changed to 2 or 3 later in the program if needed
 
 case (message_type)
-   of "DFT":
-     set oenroute->route_list[1]->r_pid = get_proc_id("DFT_SOARIAN_OUT") ;010
-	
+    of "DFT":
+       set oenroute->route_list[1]->r_pid = get_proc_id("DFT_SOARIAN_OUT")
+        
     of "MFN":
         set oenroute->route_list[1]->r_pid = get_proc_id("MFN_PYXIS_OUT")
 	
-    of "ORM":
+    of "ORM": 
         declare order_id = f8
         set order_id = get_double_value("order_id")
 
-        set alias_pool_display = 
-            get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_id_ext->assign_auth->name_id))
-
-        /* PKL messages are triggered when lab orders are added to a packing list and spec tracking location set to transmit 
+         /* PKL messages are triggered when lab orders are added to a packing list and spec tracking location set to transmit 
            outbound for orders */
         if (cqm_type = "PKL") 
             set location_display = uar_get_code_display(cnvtreal(get_double_value("to_serv_resource")))
@@ -87,17 +91,17 @@ case (message_type)
                 od.oe_field_display_value
             from order_detail od
                 where od.order_id = order_id
-                    and od.oe_field_meaning = "PERFORMLOC"
-            order 
-                od.action_sequence desc
+                     and od.oe_field_meaning=  "PERFORMLOC"
+            order od.action_sequence desc
             detail
                 perf_loc = trim(od.oe_field_display_value)             
             with nocounter, maxrec = 1
 
             execute oencpm_msglog(build("perf_loc:",perf_loc,char(0)))
 
-/* When the specimen is sent to a reference lab it is sent with a requisition. The order message must match the req. 
-   The split_cnt is used at the comserver level for custom grouping logic with the bundler table to ensure this happens. */ 
+            /* When the specimen is sent to a reference lab it is sent with a requisition.  
+            The order message must match the req. The split_cnt is used at the comserver level for  
+            custom grouping logic with the bundler table to ensure this happens. */ 
 
             if (trim(perf_loc) = "BMG Quest Lab")  ;Quest performing location.
                 set oenroute->route_list[1]->r_pid = get_proc_id("ORM_QUEST_OUTPT_OUT")
@@ -128,7 +132,7 @@ case (message_type)
             activity_subtype = oc_activity_subtype_cdf
         with nocounter
 
-        if (cqm_subtype in ("MRIRADIOLOGY","RADIOLOGY"))
+        if (cqm_subtype in ("MRIRADIOLOGY","RADIOLOGY"))     
             set oenroute->route_list[1]->r_pid = get_proc_id("ORM_RADIOLOGY_OUT")
             go to exit_point
         elseif (cqm_subtype = "RULEORDERS") ;height and weight
@@ -180,9 +184,8 @@ case (message_type)
             go to exit_point
         endif ;end cqm_subtype
 
-    of "ORU":
-        declare ver_id = vc with constant(uar_get_code_display(oenobj->cerner->oe_info->message_version_cd))
 
+    of "ORU":
         /* HL7 2.5 for Public Health Surveillance (PHS) and Electronic Lab Results (ELR) */
         if (trim(ver_id) = "2.5")
             if (cqm_subtype in ("GRP","MICRO"))
@@ -191,8 +194,6 @@ case (message_type)
                 set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
             endif
         else ; v2.3
-            set alias_pool_display =  
-        get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_auth->name_id))
 
             if (alias_pool_display = "HI FIN") 
                 set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
@@ -200,26 +201,26 @@ case (message_type)
             endif
 	  
             /* Stat results to Quest done by Baycare for stat weekend orders */
-            set contributor_system_display = 
+                set contributor_system_display = 
             get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_id_ext->assign_fac_id->name_id))
 	  
             if (contributor_system_display = "QUESTAUTH")
-                set oenroute->route_list[1]->r_pid = get_proc_id("ORU_QUEST_OUT")
+                set oenroute->route_list[1]->r_pid = get_proc_id("ORU_QUEST_BCLAB_OUT")
                 go to exit_point
             elseif (contributor_system_display = "quest")
                 if (substring(1,2,oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_id_ext->id) != "TM")
-                    set oenroute->route_list[1]->r_pid = get_proc_id("ORU_QUEST_OUT")
+                    set oenroute->route_list[1]->r_pid = get_proc_id("ORU_QUEST_BCLAB_OUT")
                     go to exit_point         
                 endif
             endif
             /* End Quest */
 
             /* MDOC/DOC documents */
-            
             if (cqm_type in ("DOC", "MDOC"))
-                declare route_list_size = i4 ;005
+                
                 set route_list_size = 0
-		
+	
+                ;Model Start			
                 /* The following logic are all of the conditions where messages should not go to optum
                    HNAM_CEREF is for cardiology rebound results and radiology */
                 if (alias_pool_display = "BMGFN" 
@@ -243,7 +244,7 @@ case (message_type)
                         get_code_value(trim(oenobj->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->identifier))
 
                     ;healthgrid documents
-                    set ed_patient_summary = uar_get_code_by("DISPLAYKEY",72,"EDSUMMARYTOPATIENTPORTAL") ;008
+                    set ed_patient_summary = uar_get_code_by("DISPLAYKEY",72,"EDPATIENTSUMMARY")
                     set disc_summary_care = uar_get_code_by("DISPLAYKEY",72,"DISCHARGESUMMARYOFCARE")
                     ;hie documents
                     set history_and_physicals = uar_get_code_by("DISPLAYKEY",72,"HISTORYANDPHYSICALS")
@@ -297,80 +298,152 @@ case (message_type)
                         go to exit_point
                      endif
                  endif ;end univ_service_id not "Pharmacy"
-                 if(route_list_size >0)  ;09 CJM this allows us to exit if the ORU is a DOC/MDOC
-                     go to exit_point
-                 endif
+               go to exit_point
             endif ; end cqm_type in ("DOC", "MDOC")
 
             ;007 SurgiNet notes / discrete result to HealthGrid will no longer go outbound with Lab results
-   
             if (oenobj->RES_ORU_GROUP [1]->OBR [1]->univ_service_id [1]->text = "zzzFormbuilder Form*")
                 set oenroute->route_list[1]->r_pid = get_proc_id("ORU_DOCUMENTS_OUT") 
                 go to exit_point
             endif  
 
-     /* Model recommendation to reduce the amount of messages going to the bayc_out interface.
-         By filtering on the activity type of the result, we will reduce the number of outbound messages. */
-            if (cqm_type in ("AP", "MICRO", "GRP")) ;GRP is BB and GL, and other results
+            /* Model recommendation to reduce the amount of messages going to the bayc_out interface.
+               By filtering on the activity type of the result, we will reduce the number of outbound 
+               messages. */
+            if (cqm_type in ("AP", "MICRO", "GRP")) ;GRP is BB and GL, and other results               
                 set oenroute->route_list[1]->r_pid = get_proc_id("ORU_LAB_RESULTS_OUT") ;002
             else 
                 set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
             endif 
         endif ; msg_version
 
+
     of "ADT":
-        declare act_cs = vc
+       /* Note: All ADT messages will be sent twice; a v2.8 and a v2,3.*/
 
-        set act_cs = get_string_value("action_contributor_system_cd")
-        set alias_pool_display = 
-          get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_auth->name_id))
+       /*Contributor System (BMG, Soarian, or Millennium) that generated the ADT message. 
+       ADT created by Millennium will have a cd: value of 0.*/
+       set contrib_system_cd = get_double_value("contributor_system_cd")
+       set contrib_system_display = uar_get_code_display(contrib_system_cd)
 
-        /* When migrating to Cerner, an external Legacy EMR upload historical of clinical data was done. 
-            This was needed temporarily needed to prevent allergy messages going outbound. 
-            It can be removed after reg scheg project is complete. */
-        
-        if (trim(cqm_class) = "PM_ALLERGY" and act_cs = "1478944279")
-            set stat = alterlist(oenRoute->route_list,0)
-            ; allergy suppression
-        elseif (message_trigger = "A28")
-            set oenroute->route_list[1]->r_pid = get_proc_id("ADT_CPI_FETCH_HI_OUT")
-        else
-            set stat = alterlist(oenroute->route_list, 3)
-            set oenroute->route_list[1]->r_pid = get_proc_id("ADT_SOARIAN_REBOUND_OUT")
-            ;begin 001
-            set remainder = mod(cnvtreal(oenobj->cerner->person_info->person->person_id), 4)
-
-            if (remainder = 0)
-                set oenroute->route_list[2]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_01")
-                set oenroute->route_list[3]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_01")
-            elseif (remainder = 1)
-                set oenroute->route_list[2]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_02")
-                set oenroute->route_list[3]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_02")
-            elseif (remainder = 2)
-                set oenroute->route_list[2]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_03")
-                set oenroute->route_list[3]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_03")
-            else
-                set oenroute->route_list[2]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_04")
-                set oenroute->route_list[3]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_04")
+       /*Begin- Version 2.8 */     
+        if (trim(ver_id) = "2.8") 
+            /*CPI Fetch for new Millennium Reg patients and new HealtheIntent patients. Note: 
+            HI CPI fetch is no longer v2.3 out the ADT_CPI_FETCH_HI_OUT comserver*/
+            if (message_trigger = "A28")
+              set oenroute->route_list[1]->r_pid = get_proc_id("ADT_SOARF_OUT")         
+              go to exit_point    
             endif
-              ;end 001
-      
-            /* Public Health Surveillance (PHS) */
-            if (message_trigger in ("A01", "A03", "A04", "A08"))
-                set stat = alterlist(oenroute->route_list, 4)
-                set oenroute->route_list[4]->r_pid = get_proc_id("ADT_PHS_OUT")
+
+            /* Send Millennium registrations only to Enterprise and SOARF; do not send BMG and Soarian rebounds. 
+            Send discharges on Millennium encounters only. Do not send discharges on BMG and Soarian encounters.*/
+            if (contrib_system_display NOT IN("BMG", "SOARIAN"))
+              if (message_trigger = "A03") 
+
+                /* The PID patient_account_nbr->assign_fac->id is the contributor system that created the encounter. 
+                This field will contain the cd value for BMG, SOARIAN, or it will be NULL if the encounter was 
+                created on Millenium */
+                if (trim(oenobj->PERSON_GROUP [1]->PID->patient_account_nbr->assign_fac->id) > 0)
+                 set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
+                else
+                  set stat = alterlist(oenroute->route_list, 2)
+                  set oenroute->route_list[1]->r_pid = get_proc_id("ADT_ENTERPRISE_OUT")
+                  set oenroute->route_list[2]->r_pid = get_proc_id("ADT_SOARF_OUT")	
+                endif 
+              else
+                  set stat = alterlist(oenroute->route_list, 2)
+                  set oenroute->route_list[1]->r_pid = get_proc_id("ADT_ENTERPRISE_OUT")
+                  set oenroute->route_list[2]->r_pid = get_proc_id("ADT_SOARF_OUT")  
+              endif
             endif
-        endif ;end PM_ALLERGY
+            go to exit_point
+        endif
+/*End- Version 2.8 */ 
+
+/*Begin- Version 2.3 */ 
+        if (trim(ver_id) = "2.3")  
+            /* All Allergy A31 messages are v2.3 using "Powerchart Office ADT/A31" trigger for Soarian, BMG, and Millennium  
+            registrations. Allergies are not sent to PHS or Resonance*/
+            if (trim(cqm_class) = "PM_ALLERGY") 
+              set oenroute->route_list[1]->r_pid = get_proc_id("ADT_SOARIAN_REBOUND_OUT")
+              go to exit_point
+            endif
+            /* Send Millennium FirstNet discharges on Soarian encounters only; do not send discharges on BMG and Millennium
+            encounters to Soarian. Send all A03s to PHS; do not send to Resonance*/
+            if (message_trigger = "A03") 
+              set pt_fin_contrib_sys = get_code_vaule_display
+              (trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_fac_id->name_id))
+              set pt_class_type =  get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->patient_class))
+
+            /* contrib_system_display is the system that created the A03 message and the pt_fin_contrib_sys is  
+            the contrib system that created the encounter.*/
+              if ((contrib_system_display != "SOARIAN") and (pt_fin_contrib_sys = "SOARIAN") and 
+                  (pt_class_type = "Emergency"))
+                set stat = alterlist(oenroute->route_list, 2)
+                set oenroute->route_list[1]->r_pid = get_proc_id("ADT_SOARIAN_REBOUND_OUT")
+                set oenroute->route_list[2]->r_pid = get_proc_id("ADT_PHS_OUT")
+              else
+                 set oenroute->route_list[1]->r_pid = get_proc_id("ADT_PHS_OUT")
+              endif   
+                go to exit_point    
+            endif
+;begin 002
+            /* v2.3 ADT messages (Soarian, BMG, and Millenium registrations) go to Resonance PIX ADT to OE comchannels and
+            Utility servers to only handle the auto enrollment for CommonWell (A01, A04, A08)*/
+             set route_list_size = 1
+             set remainder = mod(cnvtreal(oenobj->cerner->person_info->person->person_id), 4)
+                if (remainder = 0)
+                    set oenroute->route_list[1]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_01")
+                    if (message_trigger in ("A01","A04", "A08"))
+                      set route_list_size = route_list_size + 1 
+                      set stat = alterlist(oenroute->route_list,route_list_size)
+                      set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_01")
+                    endif
+                elseif (remainder = 1)
+                    set oenroute->route_list[1]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_02")
+                    if (message_trigger in ("A01","A04", "A08"))
+                      set route_list_size = route_list_size + 1 
+                      set stat = alterlist(oenroute->route_list,route_list_size)
+                      set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_02")
+                    endif
+                elseif (remainder = 2)
+                    set oenroute->route_list[1]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_03")
+                    if (message_trigger in ("A01","A04", "A08"))
+                      set route_list_size = route_list_size + 1 
+                      set stat = alterlist(oenroute->route_list,route_list_size)
+                      set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_03")
+                    endif
+                else
+                    set oenroute->route_list[1]->r_pid = get_proc_id("RESONANCE_PIX_ADT_OUT_04")
+                    if (message_trigger in ("A01","A04", "A08"))
+                      set route_list_size = route_list_size + 1 
+                      set stat = alterlist(oenroute->route_list,route_list_size)
+                      set oenroute->route_list[route_list_size]->r_pid = get_proc_id("RESONANCE_UTILITY_OUT_04")
+                    endif
+                endif
+ ;end 002
+            /* v2.3 Soarian rebound messages only; we do not send BMG ADT rebounds */
+              if (contrib_system_display = "SOARIAN")
+                 set route_list_size = route_list_size + 1 
+                 set stat = alterlist(oenroute->route_list,route_list_size)
+                 set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ADT_SOARIAN_REBOUND_OUT")
+              endif
+            /* v2.3 Public Health Surveillance (PHS) ADT messages (Soarian, BMG, and Millenium registrations) */
+              if (message_trigger in ("A01","A04", "A08"))
+                 set route_list_size = route_list_size + 1 
+                 set stat = alterlist(oenroute->route_list,route_list_size)
+                 set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ADT_PHS_OUT")
+              endif
+              go to exit_point    
+        endif         
+/*End- Version 2.3 */ 
 
     of "BAR":
-        if (message_trigger = "ZM1") ;003
+        if (message_trigger = "ZM1") 
             set oenroute->route_list[1]->r_pid = get_proc_id("UNKNOWN_TRANS_DISK_OUT")
             go to exit_point
         endif
 
-        set alias_pool_display = 
-          get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_auth->name_id))
-        
         execute oencpm_msglog(build("msh=",oenobj->CONTROL_GROUP [1]->MSH [1]->message_type->messg_trigger,char(0)))
 
         if (alias_pool_display = "BayCare FIN")
@@ -382,6 +455,7 @@ case (message_type)
         endif
 
     of "RDE":
+        set stat = alterlist(oenroute->route_list, 1)
         set oenroute->route_list[1]->r_pid = get_proc_id("RDE_RDS_PHARMACY_OUT")
 
     of "RDS":
@@ -389,8 +463,12 @@ case (message_type)
         set oenroute->route_list[1]->r_pid = get_proc_id("RDS_PHARMO_OUT")
         set oenroute->route_list[2]->r_pid = get_proc_id("RDE_RDS_PHARMACY_OUT")
 
+    
+
     of "SIU":
+        set stat = alterlist(oenroute->route_list, 2)
         set oenroute->route_list[1]->r_pid = get_proc_id("SIU_SURGINET_OUT")
+        set oenroute->route_list[2]->r_pid = get_proc_id("SIU_ENTERPRISE_OUT") ;003
 
     of "VXU":
         set oenroute->route_list[1]->r_pid = get_proc_id("VXU_HUB_OUT")
