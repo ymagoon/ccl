@@ -353,6 +353,7 @@ case (message_type)
                   set oenroute->route_list[2]->r_pid = get_proc_id("ADT_SOARF_OUT")  
               endif
             endif
+			
             go to exit_point
         endif
 /*End- Version 2.8 */ 
@@ -372,8 +373,8 @@ case (message_type)
               (trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PID [1]->patient_account_nbr->assign_fac_id->name_id))
               set pt_class_type =  get_code_value_display(trim(oenobj->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->patient_class))
 
-            /* contrib_system_display is the system that created the A03 message and the pt_fin_contrib_sys is  
-            the contrib system that created the encounter.*/
+              /* contrib_system_display is the system that created the A03 message and the pt_fin_contrib_sys is  
+              the contrib system that created the encounter.*/
               if ((contrib_system_display != "SOARIAN") and (pt_fin_contrib_sys = "SOARIAN") and 
                   (pt_class_type = "Emergency"))
                 set stat = alterlist(oenroute->route_list, 2)
@@ -381,8 +382,9 @@ case (message_type)
                 set oenroute->route_list[2]->r_pid = get_proc_id("ADT_PHS_OUT")
               else
                  set oenroute->route_list[1]->r_pid = get_proc_id("ADT_PHS_OUT")
-              endif   
-                go to exit_point    
+              endif
+			  
+              go to exit_point    
             endif
 ;begin 002
             /* v2.3 ADT messages (Soarian, BMG, and Millenium registrations) go to Resonance PIX ADT to OE comchannels and
@@ -431,6 +433,7 @@ case (message_type)
                  set stat = alterlist(oenroute->route_list,route_list_size)
                  set oenroute->route_list[route_list_size]->r_pid = get_proc_id("ADT_PHS_OUT")
               endif
+			  
               go to exit_point    
         endif         
 /*End- Version 2.3 */ 
