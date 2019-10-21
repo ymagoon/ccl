@@ -10,7 +10,7 @@
  *  Creation Date:  09/12/2019
  *  ---------------------------------------------------------------------------------------------
  *  Mod#   Date      Author           Description & Requestor Information
- *
+ *  001    10/21/19  Yitzhak Magoon   Prevent invalid results from pulling into query
  *  ---------------------------------------------------------------------------------------------
 */
  
@@ -44,6 +44,17 @@ declare final_result = vc
 declare creatinine_cd = f8 with constant(uar_get_code_by_cki("CKI.CODEVALUE!1317533"))
 declare pc_creat_cd = f8 with constant(uar_get_code_by_cki("CKI.CODEVALUE!1566274"))
 declare pc_creat_istat_cd = f8 with constant(uar_get_code_by("DISPLAYKEY",72,"PCCREATISTAT"))
+
+;begin 001
+declare ptcancelcd = f8 with protect, noconstant(uar_get_code_by("MEANING",8,"CANCELLED"))
+declare ptinerrorspacecd = f8 with protect, noconstant(uar_get_code_by("MEANING",8,"IN ERROR"))
+declare ptinerrnomutcd = f8 with protect, noconstant(uar_get_code_by("MEANING",8,"INERRNOMUT"))
+declare ptinerrnoviewcd = f8 with protect, noconstant(uar_get_code_by("MEANING",8,"INERRNOVIEW"))
+declare ptinerrorcd = f8 with protect, noconstant(uar_get_code_by("MEANING",8,"INERROR"))
+declare ptnotdonecd = f8 with protect, noconstant(uar_get_code_by("MEANING",8,"NOT DONE"))
+declare ptrejectcd = f8 with protect, noconstant(uar_get_code_by("MEANING",8,"REJECTED"))
+declare ptplaceholder = f8 with protect, noconstant(uar_get_code_by("MEANING",53,"PLACEHOLDER"))
+;end 001
 
 /*
   Determine whether the program is called from EKS or from Discern. This allows
@@ -87,6 +98,19 @@ from
 plan ce
   where ce.person_id = in_personid
     and ce.event_cd in (creatinine_cd,pc_creat_cd,pc_creat_istat_cd)
+    ;begin 001
+    and ce.valid_until_dt_tm > cnvtdatetime(curdate,curtime3) 
+    and ce.view_level > 0
+    and ce.publish_flag = 1
+    and ce.result_status_cd not in (ptcancelcd
+    							    , ptinerrorspacecd
+    							    , ptinerrnomutcd
+    							    , ptinerrnoviewcd
+    							    , ptinerrorcd
+    							    , ptnotdonecd
+    							    , ptrejectcd)
+    and ce.event_class_cd != ptplaceholder
+    ;end 001
 join ocr
   where ocr.order_id = ce.order_id
 join c
