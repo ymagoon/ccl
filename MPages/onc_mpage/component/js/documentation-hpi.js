@@ -1,0 +1,16 @@
+function DocumentationHPIComponentStyle(){this.initByNamespace("documentation-hpi");
+}DocumentationHPIComponentStyle.inherits(ComponentStyle);
+function DocumentationHPIComponent(criterion){this.setCriterion(criterion);
+this.setStyles(new DocumentationHPIComponentStyle());
+this.setDocumentationTimerName("MPG.DOCUMENTATION_HPI.O1");
+this.setComponentLoadTimerName("USR:"+this.getDocumentationTimerName()+" - load component");
+this.setComponentRenderTimerName("ENG:"+this.getDocumentationTimerName()+" - render component");
+this.setIncludeLineNumber(true);
+this.setConceptType("HPI");
+this.setConceptCKI("CERNER!FD654C23-C8A6-4393-9955-80D59015EE6F");
+this.setPlaceholderText(i18n.discernabu.documentation_hpi.PLACEDHOLDER_TEXT);
+}DocumentationHPIComponent.inherits(DocumentationBaseComponent);
+DocumentationHPIComponent.prototype.loadFilterMappings=function(){this.addFilterMappingObject("WF_HX_PRESENT_STRUCTURE_DOC",{setFunction:this.setStructuredDocInd,type:"BOOLEAN",field:"FREETEXT_DESC"});
+};
+MP_Util.setObjectDefinitionMapping("WF_HX_PRESENT_ILL",DocumentationHPIComponent);
+MP_Util.setObjectDefinitionMapping("WF_HX_PRESENT_ILL_STRUCT",DocumentationHPIComponent);

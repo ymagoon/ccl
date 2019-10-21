@@ -1,0 +1,18 @@
+CKEDITOR.plugins.add("cernbasicstyles",{requires:"cernbasicstyles_base,cerngetxhtml",beforeInit:function(editor){if(!DYNDOCStrike){CKEDITOR.scriptLoader.load(CKEDITOR.getUrl("plugins/cernbasicstyles/js/strike.js"));
+}},init:function(editor){var order=0;
+var config=editor.config;
+DYNDOCStrike.m_oEditor=editor;
+editor.on("contentDom",function(event){editor.document.on("selectionchange",this.updateCmdStatus);
+editor.document.on("click",this.updateCmdStatus);
+},this);
+editor.on("destroy",this.destroyHandler,this);
+editor.on("instanceReady",this.instanceReadyHandler,this);
+editor.on("afterCommandExec",function(event){if(event.data.name==DDCMD_STRIKE){DYNDOCStrike.onStrikeThrough();
+editor.fire("updateSnapshot");
+}},this);
+},instanceReadyHandler:function(){},destroyHandler:function(){},updateCmdStatus:function(){DDCOMMON.updateToolbarCmdStatus(DYNDOCStrike.m_oEditor);
+DYNDOCStrike.updateStrikeThroughCmdStatus();
+},nothing:null});
+CKEDITOR.on("instanceDestroyed",function(){DYNDOCStrike.m_oEditor=null;
+DYNDOCStrike=null;
+});

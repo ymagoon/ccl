@@ -1,0 +1,20 @@
+function VIEWLINK(mode,appName,personId,encounterId,tab,viewId,viewpointId){var CK_DATA={};
+function addCookieProperty(compId,propName,propValue){var cookie=CK_DATA[compId];
+if(!cookie){cookie={};
+}cookie[propName]=propValue;
+CK_DATA[compId]=cookie;
+}function writeCookie(){var cookieJarJSON=JSON.stringify(CK_DATA);
+document.cookie="CookieJar="+cookieJarJSON+";";
+}function retrieveCookie(){var cookies=document.cookie;
+var match=cookies.match(/CookieJar=({[^;]+})(;|\b|$)/);
+if(match&&match[1]){CK_DATA=JSON.parse(match[1]);
+}}if(viewId&&viewId.length){retrieveCookie();
+addCookieProperty("viewpoint","viewCatMean|"+viewpointId+"|"+Number(personId)+"|"+Number(encounterId),viewId);
+writeCookie();
+if("PCSendMessage" in window.external){window.external.PCSendMessage(1100,{personId:personId,encounterId:encounterId,tab:tab,viewId:viewId,viewpointId:viewpointId});
+}}var params="/PERSONID="+personId+" /ENCNTRID="+encounterId+" /FIRSTTAB=^"+tab+"^";
+APPLINK(mode,appName,params);
+}if("PCRegisterMessage" in window.external){window.external.PCRegisterMessage(1100,"SETVIEW");
+}function SETVIEW(messageId,criteria){var criterion=JSON.parse(m_criterionJSON).CRITERION;
+if(window.m_viewpointJSON&&criteria.viewpointId===JSON.parse(m_viewpointJSON).VP_INFO.VIEWPOINT_NAME_KEY&&criterion.PERSON_ID===Number(criteria.personId)&&criterion.ENCNTRS.length&&criterion.ENCNTRS[0].ENCNTR_ID===Number(criteria.encounterId)){MP_Viewpoint.activateView(criteria.viewId);
+}}

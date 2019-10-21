@@ -1,0 +1,119 @@
+drop program bc_vdo_ExploreMenu_MP go
+create program bc_vdo_ExploreMenu_MP
+
+prompt 
+	"Output to File/Printer/MINE" = "MINE"   ;* Enter or select the printer or file name to send this report to. 
+
+with OUTDEV
+
+
+
+/**************************************************************
+; DVDev DECLARED SUBROUTINES
+**************************************************************/
+
+/**************************************************************
+; DVDev DECLARED VARIABLES
+**************************************************************/
+
+/**************************************************************
+; DVDev Start Coding
+**************************************************************/
+
+Record EMemu
+(	
+	1 iCount = i4
+	1 MasterFolder[*]
+		2 ID = f8
+		2 PARENT_ID = f8
+		2 ITEM_TYPE = C1
+		2 DESC = vc
+		2 ITEM = c30
+		2 CHILD_CNT = i4
+		2 CHILDREC[*]
+			3 CHILD_ID = f8
+			3 CHILD_TYPE = C1
+			3 CHILD_DESC = vc
+			3 CHILD_ITEM = c30	
+			3 CHILDCHILD_CNT = i4
+		
+)
+
+
+;    Your Code Goes Here
+
+
+/* get the top level folder */
+
+select  into "nl:"
+	ID = em.menu_id,  Item = em.item_name, desc = em.item_desc, iType = em.item_type
+	
+from 
+EXPLORER_MENU_SECURITY   ES
+,explorer_menu em
+, explorer_menu child
+
+plan es
+where es.app_group_cd =    1277.00;     83857792.00; ed admin ;  1277.00 ;dba
+
+join em
+where  es.menu_id = em.menu_id and em.item_type = "M" ;folder only
+and em.active_ind =1 ; and em.menu_parent_id = 0 
+
+join child
+where outerjoin(em.menu_id) = child.menu_parent_id
+	  and child.active_ind = outerjoin(1) 
+
+ORDER BY EM.item_desc, child.item_desc
+
+HEAD REPORT
+	cnt = 0
+
+HEAD em.menu_id
+	cnt = cnt + 1
+  	if (mod(cnt, 10) = 1)
+  		stat = alterlist(EMemu->MasterFolder, cnt + 9)
+  	endif
+  	
+  	EMemu->MasterFolder[cnt].ID = em.menu_id
+  	EMemu->MasterFolder[cnt].PARENT_ID = em.menu_parent_id
+	EMemu->MasterFolder[cnt].ITEM = em.item_name
+ 	EMemu->MasterFolder[cnt].DESC = em.item_desc
+ 	EMemu->MasterFolder[cnt].ITEM_TYPE  = em.item_type
+
+	cnt_child = 0
+HEAD child.menu_id
+	cnt_child = cnt_child + 1
+	if (mod(cnt_child, 10) = 1)
+  		stat = alterlist(EMemu->MasterFolder[cnt].CHILDREC, cnt_child + 9)
+  	endif
+  	
+	EMemu->MasterFolder[cnt].CHILDREC[cnt_child].CHILD_ID = child.menu_id
+	EMemu->MasterFolder[cnt].CHILDREC[cnt_child].CHILD_ITEM = child.item_name
+	EMemu->MasterFolder[cnt].CHILDREC[cnt_child].CHILD_DESC = child.item_desc
+	EMemu->MasterFolder[cnt].CHILDREC[cnt_child].CHILD_TYPE = child.item_type
+	
+FOOT EM.menu_id
+	 EMemu->MasterFolder[cnt].CHILD_CNT = cnt_child
+	stat = alterlist(EMemu->MasterFolder[cnt].CHILDREC, cnt_child)
+	
+foot report
+
+	EMemu->iCount = cnt
+	stat = alterlist(EMemu->MasterFolder, EMemu->iCount)
+
+
+
+/**************************************************************
+; DVDev DEFINED SUBROUTINES
+**************************************************************/
+;Set Ememu->MasterFolder[1].test_output  = "Under Construction....Coming Soon... Summer 2012"
+;call echorecord(Ememu)
+;call echojson(Ememu, $OUTDEV)
+
+set _Memory_Reply_String = cnvtrectojson(Ememu)
+
+call echo(_Memory_Reply_String)
+end
+go
+

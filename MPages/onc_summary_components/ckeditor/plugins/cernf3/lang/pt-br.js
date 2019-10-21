@@ -1,0 +1,1 @@
+CKEDITOR.plugins.setLang("cernf3","pt-br",{HotKeyArray:[[114,DDCMD_NEXT_UNDERSCORE],[CKEDITOR.SHIFT+114,DDCMD_PREV_UNDERSCORE]]});

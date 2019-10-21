@@ -1,0 +1,25 @@
+drop program bc_mp_mvs_init_0 go
+create program bc_mp_mvs_init_0
+
+prompt 
+	"Output to File/Printer/MINE" = "MINE"   ;* Enter or select the printer or file name to send this report to.
+	, "USERID" = 0
+	, "PERSONID" = 0
+	, "ENCNTRID" = 0
+	, "OPTIONS" = "" 
+
+with OUTDEV, USERID, PERSONID, ENCNTRID, OPTIONS
+
+record initialize(
+	1 person_id = f8
+	1 encntr_id = f8
+	1 user_id = f8
+)
+
+set initialize->person_id = $PERSONID
+set initialize->encntr_id = $ENCNTRID
+set initialize->user_id = $USERID
+
+call echojson(initialize, $OUTDEV)
+end 
+go

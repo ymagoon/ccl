@@ -1,0 +1,298 @@
+drop program bc_mp_mvs_medhx_10:dba go
+create program bc_mp_mvs_medhx_10:dba
+
+;drop program b119691_mp_mvs_medhx_10:dba go
+;create program b119691_mp_mvs_medhx_10:dba
+/**************************************************************************************************
+              Purpose: Displays the Patient Medical History Information in ED Custom MPage
+     Source File Name: bc_mp_mvs_medhx_10_vX.PRG
+              Analyst: MediView Solutions
+          Application: FirstNet
+  Execution Locations: FirstNet
+            Request #:
+      Translated From:
+        Special Notes:
+**************************************************************************************************/
+/**************************************************************************************************
+  Mod  Date            Engineer                Description
+   --- --------------- ----------------------- ------------------------------------------------
+    1  06/09/2011      MediView Solutions 	    Initial Release
+    3  09/30/2013      DeAnn Capanna           WO# 9999649 - Use new Past Medical History control
+	4  02/23/2017      Roger Harris            Ticket 49787 - Append Past Medical History - Nursing Intake
+	5  05/21/2018      Roger Harris            Ticket 502268 - Add histories
+	6  08/20/2018      Roger Harris            Fix missing histories
+
+
+**************************************************************************************************/
+
+prompt
+	"Output to File/Printer/MINE" = "MINE"   ;* Enter or select the printer or file name to send this report to.
+	, "USERID" = 0
+	, "PERSONID" = 0
+	, "ENCNTRID" = 0
+	, "OPTIONS" = ""
+
+with OUTDEV, USERID, PERSONID, ENCNTRID, OPTIONS
+
+
+RECORD MED_HIST (
+  1 person_id = f8
+  1 encntr_id = f8
+  1 NO_HX		= vc
+  1 TYPE [2]
+    2 HX_TYPE 	= vc
+    2 NAME [*]
+     3 HX_NAME 	= vc
+     3 HX_LINE 	= vc
+)
+
+Set MED_HIST->TYPE [1].HX_TYPE = "PROBLEMS LIST"
+Set MED_HIST->TYPE [2].HX_TYPE = "NURSE DOCUMENTED"
+
+DECLARE  CNTA  	=  I4  WITH  PUBLIC , NOCONSTANT ( 0 )
+
+SELECT  INTO  "nl:"
+   E.PERSON_ID
+FROM  ENCOUNTER  E
+PLAN  E
+ 	WHERE E.ENCNTR_ID = $ENCNTRID
+
+HEAD  REPORT
+	med_hist->person_id = $PERSONID
+	med_hist->encntr_id = $ENCNTRID
+WITH  NOCOUNTER
+
+
+/**************************************************************************************************
+				Select to get details of the medical History
+**************************************************************************************************/
+DECLARE MEDICAL_12033_CV = F8 WITH PUBLIC ,CONSTANT (UAR_GET_CODE_BY ("DISPLAYKEY" ,12033 ,"MEDICAL" ) )
+DECLARE ACTIVE_48_CV = F8 WITH PUBLIC ,CONSTANT (UAR_GET_CODE_BY ("DISPLAYKEY" ,48 ,"ACTIVE" ) )
+DECLARE AUTHVERI_8_CV = F8 WITH PUBLIC ,CONSTANT (UAR_GET_CODE_BY ("DISPLAYKEY" ,8 ,"AUTHVERIFIED") )
+
+SELECT DISTINCT INTO "NL:"
+FROM
+	PROBLEM   P
+	, NOMENCLATURE   N
+	, PROBLEM_ACTION PA
+
+PLAN P
+	WHERE P.person_id = $PERSONID
+	  AND P.active_ind = 1
+	  and P.ACTIVE_STATUS_CD = ACTIVE_48_CV
+	  and P.DATA_STATUS_CD = AUTHVERI_8_CV
+	  AND P.CANCEL_REASON_CD = 0.00
+	  and P.CLASSIFICATION_CD = MEDICAL_12033_CV
+	  AND P.end_effective_dt_tm > CNVTDATETIME(CURDATE, CURTIME3)
+
+JOIN N
+	WHERE N.NOMENCLATURE_ID = OUTERJOIN (P.NOMENCLATURE_ID)
+	  AND N.ACTIVE_IND = OUTERJOIN (1)
+
+JOIN PA
+	WHERE pa.problem_id = outerjoin(p.problem_id)
+
+
+ORDER BY
+	P.ANNOTATED_DISPLAY
+
+HEAD REPORT
+
+	CNTA = 0
+
+	;initialize MED_HIST record structure
+	STAT = ALTERLIST(MED_HIST->TYPE[1].NAME,10)
+
+DETAIL
+
+	CNTA = CNTA + 1
+
+	; add BLANK ROWS the NAME segment if needed
+	STAT = MOD(CNTA,10)
+	IF(STAT = 1 AND CNTA !=1)
+		STAT = ALTERLIST(MED_HIST->TYPE[1]->NAME,CNTA + 10)
+	ENDIF
+
+	; store the data in the NAME segment of the record structure
+	MED_HIST->TYPE[1]->NAME[CNTA]->HX_NAME = trim(P.annotated_display) ;HX_NAME
+
+	MED_HIST->TYPE[1]->NAME[CNTA]->HX_LINE = trim(uar_get_code_display(p.life_cycle_status_cd))
+
+FOOT REPORT
+    If (CNTA > 0)
+    	; remove unused med_hist->TYPE segment ROWS
+    	STAT = ALTERLIST(MED_HIST->TYPE[1].NAME,CNTA)
+    Else
+    	STAT = ALTERLIST(MED_HIST->TYPE[1].NAME, 1)
+        MED_HIST->TYPE[1]->NAME[CNTA]->HX_NAME = "No Problems Documented"
+    EndIf
+WITH NOCOUNTER, SEPARATOR=" ", FORMAT, NullReport
+
+
+;Ticket 49787
+
+/*@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+                                           VARIABLE AND CONSTANTS
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@*/
+Declare num = i4 With Noconstant(0), Public
+
+Declare AUTH_8_CV           = f8 With Protect, Constant(Uar_Get_Code_By("MEANING", 8 ,"AUTH"))
+Declare ALT_8_CV            = f8 With Protect, Constant(Uar_Get_Code_By("MEANING", 8 ,"ALTERED"))
+Declare MOD_8_CV            = f8 With Protect, Constant(Uar_Get_Code_By("MEANING", 8 ,"MODIFIED"))
+
+
+
+
+/* *************************************************************************************************************
+                                               SUBROUTINES
+************************************************************************************************************** */
+
+Declare  get_hist(grid_idx = i2) = null
+
+
+Declare  REMOVE_SUFFIX ( SUFFIX = vc ) =  vc
+
+Subroutine   REMOVE_SUFFIX  ( SUFFIX  )
+
+    Declare  OUTPUT  =  VC
+
+    If (FINDSTRING("Medical History", SUFFIX, 1, 1) > 0)
+        Set  OUTPUT  =  Trim ( Replace ( SUFFIX , "Medical History" , "" , 1 ))
+
+    ElseIf (FINDSTRING("Ped Health Hx", SUFFIX, 1, 1) > 0)
+        Set  OUTPUT  =  Trim ( Replace ( SUFFIX , "Ped Health Hx" , "" , 0 ))
+
+    ElseIf (FINDSTRING("Med Hx", SUFFIX, 1, 1) > 0)
+        Set  OUTPUT  =  Trim ( Replace ( SUFFIX , "Med Hx" , "" , 0 ))
+
+    ElseIf (FINDSTRING("Med History", SUFFIX, 1, 1) > 0)
+        Set  OUTPUT  =  Trim ( Replace ( SUFFIX , "Med History" , "" , 0 ))
+
+    ElseIf (FINDSTRING("Hx", SUFFIX, 1, 1) > 0)
+        Set  OUTPUT  =  Trim ( Replace ( SUFFIX , "Hx" , "" , 0 ))
+
+    ElseIf (FINDSTRING("Self", SUFFIX, 1, 1) > 0)
+        Set  OUTPUT  =  Trim ( Replace ( SUFFIX , "Self" , "" , 0 ))
+
+    Else
+        Set OUTPUT = SUFFIX
+    Endif
+
+    If (Substring(1, 1, OUTPUT) = ",")
+        Set OUTPUT = Substring(2, Size(OUTPUT, 1), OUTPUT)
+    EndIf
+
+    Return ( OUTPUT )
+
+End ;Subroutine
+
+
+/*@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+                                                  RECORD STRUCTURES
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@*/
+
+; This record is created in the include file below
+;;Free Record temp
+;;Record temp (
+;;    1 rec_cnt = i2
+;;    1 g_cnt = i2
+;;    1 hist_grids [*]
+;;        2 grid_title = vc
+;;        2 e_cnt = i2
+;;        2 evnt_codes [*]
+;;            3 evnt_cd = f8
+;;)
+
+
+/*@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+                                                     INITIALIZATION
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@*/
+
+; Populate PMH DTAs
+%i cust_script:bc_pmh_dtas.inc
+
+
+call echorecord(temp)
+;Go To ext_prg
+
+
+/*@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+                                                     DATA COLLECTION
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@*/
+Call echo(build2("Starting DATA COLLECTION: ", FORMAT(CNVTDATETIME(CURDATE, CURTIME3), "@SHORTDATETIME")))
+
+For (x = 1 to temp->g_cnt)
+    If (temp->hist_grids[x].e_cnt > 0)
+        Call get_hist(x)
+    Endif
+EndFor
+
+; Define query subroutine
+Subroutine get_hist(grid_idx)
+    call echo(build2("Getting results for: ", temp->hist_grids[grid_idx].grid_title))
+
+Select Into "NL:"
+
+From
+      (DUMMYT D1 With seq = (temp->hist_grids[grid_idx].e_cnt))
+    , CLINICAL_EVENT CE
+
+Plan D1
+
+Join CE
+    Where CE.EVENT_CD = temp->hist_grids[grid_idx].evnt_codes[D1.seq].evnt_cd
+      And CE.PERSON_ID = $PERSONID
+      And CE.VALID_UNTIL_DT_TM > Cnvtdatetime(Curdate, Curtime3)
+      And CE.VALID_FROM_DT_TM >= Cnvtdatetime("01-JAN-2017")  ; The DTA set has had multiple iterations so only get since 1/1/2017
+      And CE.RESULT_STATUS_CD In (AUTH_8_CV, MOD_8_CV, ALT_8_CV)
+
+Order by CE.EVENT_TITLE_TEXT, CE.PERFORMED_DT_TM Desc
+
+Head Report
+    r_cnt = temp->rec_cnt
+    ;call echo(build2("Rec Count: ", r_cnt))
+    ;call echo(build2("List Size: ", Size(MED_HIST->TYPE[2]->NAME, 5)))
+
+Detail
+    evnt_title = Trim(REMOVE_SUFFIX (CE.EVENT_TITLE_TEXT), 6)
+    rslt_val = Trim(REMOVE_SUFFIX (CE.RESULT_VAL), 6)
+    pos = Locateval(num, 1, Size(MED_HIST->TYPE[2]->NAME, 5)
+                    , evnt_title, MED_HIST->TYPE[2]->NAME[r_cnt].HX_NAME)
+
+    ;call echo(build2("processing Event: ", evnt_title, " value: ", rslt_val, " for pos: ", r_cnt))
+    If (pos = 0)
+        call echo(build2("Event: ", evnt_title, " value: ", rslt_val))
+        r_cnt = r_cnt + 1
+        Call Alterlist(MED_HIST->TYPE[2]->NAME, r_cnt)
+
+        MED_HIST->TYPE[2]->NAME[r_cnt].HX_NAME = evnt_title
+        MED_HIST->TYPE[2]->NAME[r_cnt].HX_LINE = rslt_val
+    EndIf
+
+
+Foot Report
+    temp->rec_cnt = r_cnt
+
+With Nocounter
+End ; Subroutine get_hist
+
+If (temp->rec_cnt = 0)
+    Call Alterlist(MED_HIST->TYPE[2]->NAME, 1)
+    Set MED_HIST->TYPE[2]->NAME[1].HX_NAME = "No PMH Documented"
+EndIf
+
+;call echorecord(med_hist)
+call echojson(med_hist)
+call echojson(med_hist, $OUTDEV)
+
+#exit_prg
+end
+go
