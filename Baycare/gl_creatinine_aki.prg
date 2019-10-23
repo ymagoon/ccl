@@ -2,12 +2,16 @@
  *  ---------------------------------------------------------------------------------------------
  *  Script Name:  gl_creatinine_aki
  *
- *  Description:  Script used by the gl_result_aki rule in an EKS_EXEC_CCL_L template. This script
- *				  returns a result calculated from all creatinine results on a patient within the
- *				  last 7 days.
+ *  Description:  Script used by the GL_RESULT_AKI_SUSPECTED rule in an EKS_EXEC_CCL_L template. 
+ *				  This script returns a result calculated from all creatinine results on a patient 
+ *				  within the last 7 days or within the last two depending on the ratio of the most
+ *                recent result vs the baseline.
  *  ---------------------------------------------------------------------------------------------
  *  Author:     Yitzhak Magoon
+ *  Contact:    ymagoon@gmail.com
  *  Creation Date:  09/12/2019
+ *
+ *  Testing: execute gl_creatinine_aki <person_id> go 
  *  ---------------------------------------------------------------------------------------------
  *  Mod#   Date      Author           Description & Requestor Information
  *  001    10/21/19  Yitzhak Magoon   Prevent invalid results from pulling into query
@@ -21,14 +25,14 @@ free record data
 record data (
   1 min_result_7_days 		  = vc
   1 min_result_2_days 		  = vc
-  1 min_result_display		  = vc
-  1 most_recent_result_7_days = vc
-  1 most_recent_time_7_days   = dq8
   1 min_result_dt_tm		  = dq8
+  1 min_result_display		  = vc
+  1 most_recent_result        = vc
+  1 most_recent_time          = dq8
   1 ratio					  = f8
   1 diff					  = f8
   1 all_numeric				  = i2
- 
+  
   1 qual[*]
     2 clinical_event_id 	  = f8
     2 order_id 				  = f8
@@ -56,12 +60,9 @@ declare ptrejectcd = f8 with protect, noconstant(uar_get_code_by("MEANING",8,"RE
 declare ptplaceholder = f8 with protect, noconstant(uar_get_code_by("MEANING",53,"PLACEHOLDER"))
 ;end 001
 
-/*
-  Determine whether the program is called from EKS or from Discern. This allows
-  you to run the program from Discern to troubleshoot it.
-  
-  execute gl_creatinine_aki 27692887 go 
-*/
+/*******************************************************************
+* Determine whether the program is called from EKS or from Discern *
+*******************************************************************/
 set partype = reflect(parameter(1,0))
 
 if (partype = " ")
@@ -76,9 +77,9 @@ else
   call echo(build2("Script called from CCL, person_id = ", in_personid))
 endif
 
-  
-call echo(build("running select statement..."))
- 
+/*******************************************************************
+* Gather all creatinine results from CE table                      *
+*******************************************************************/
 select
   ce.clinical_event_id
   , ce.event_id
@@ -122,14 +123,19 @@ order by
 head report
   stat = alterlist(data->qual, 9)
   
+  /* 
+    min_result_display exists because results on CE are string and can contain < or > symbols
+    min_result_7_days and min_result_2_days are used for mathematical calculations and 
+    min_result_display is used to display the unformatted result in comments
+   */
   data->min_result_7_days = result_val
   data->min_result_display = ce.result_val
   data->min_result_dt_tm = c.drawn_dt_tm
   data->all_numeric = 1
  
   ;assume most recent result is the first result
-  data->most_recent_result_7_days = result_val
-  data->most_recent_time_7_days = c.drawn_dt_tm
+  data->most_recent_result = result_val
+  data->most_recent_time = c.drawn_dt_tm
   
   cnt = 0
 detail
@@ -148,9 +154,9 @@ detail
   data->qual[cnt].drawn_dt_tm = c.drawn_dt_tm
  
   ;the detail loops through each result to find if there are any that are more recent
-  if (c.drawn_dt_tm > data->most_recent_time_7_days)
-    data->most_recent_result_7_days = result_val
-    data->most_recent_time_7_days = c.drawn_dt_tm
+  if (c.drawn_dt_tm > data->most_recent_time)
+    data->most_recent_result = result_val
+    data->most_recent_time = c.drawn_dt_tm
   endif
   
   /*
@@ -165,8 +171,6 @@ foot report
 
 with nocounter
 
-call echorecord(data,"gl_creatinine_aki_data",1)
-
 set sz = size(data->qual,5)	
 
 /*
@@ -176,7 +180,7 @@ set sz = size(data->qual,5)
   
   If the most recent result is an alpha response, we immediately end the script and result NA
 */
-if (not isnumeric(data->most_recent_result_7_days))
+if (not isnumeric(data->most_recent_result))
   call echo("The most recent result is an alpha response")
   
   set final_result = build(char(34),"N/A|Unable to calculate AKI Risk",char(34))
@@ -204,6 +208,7 @@ elseif (not data->all_numeric)
     endif
   endwhile
   
+  ;reset sz after removing alpha response results
   set sz = size(data->qual,5)
 endif
 
@@ -226,10 +231,10 @@ if (sz < 2)
   set final_result = build(char(34),"N/A|Unable to calculate; this is the first serum creatinine (SCr) within 7 days",char(34))
   set log_message = "There are not enough results to calculate a ratio"
 
-elseif (data->most_recent_result_7_days >= data->min_result_7_days)
-  set data->ratio = round(cnvtreal(data->most_recent_result_7_days) / cnvtreal(data->min_result_7_days),2)
+elseif (data->most_recent_result >= data->min_result_7_days)
+  set data->ratio = round(cnvtreal(data->most_recent_result) / cnvtreal(data->min_result_7_days),2)
  
-  call echo(build("most_recent_result_7_days is greater than or equal to min_result_7_days"))
+  call echo(build("most_recent_result is greater than or equal to min_result_7_days"))
   call echo(build("ratio=",data->ratio))
  
   if (data->ratio >= 1.50 and data->ratio <= 1.99)
@@ -246,7 +251,7 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
     
     /*
       If the ratio of our calculation is <= 1.5 then we need to determine the minimum result from 
-      the previous two days, instead of from the previous seven days, and re-calculation the ratio. 
+      the previous two days, instead of from the previous seven days, and re-calculate the ratio. 
     */
  
     select into "nl:"
@@ -266,7 +271,7 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
     
     call echo(build("min result 2 day found"))
     
-    set data->diff = round(cnvtreal(data->most_recent_result_7_days) - cnvtreal(data->min_result_2_days),2)
+    set data->diff = round(cnvtreal(data->most_recent_result) - cnvtreal(data->min_result_2_days),2)
  
     call echo(build("diff=",data->diff))
  
@@ -274,7 +279,7 @@ elseif (data->most_recent_result_7_days >= data->min_result_7_days)
       set final_result = set_final_result("Stage 1", data->min_result_display, data->min_result_dt_tm)
       set log_message = "Result is Stage 1"
     else
-      if (cnvtreal(data->most_recent_result_7_days) > 1.3)
+      if (cnvtreal(data->most_recent_result) > 1.3)
         set comment = build2("SCr is abnormal, but it does not meet KDIGO criteria for suspected AKI,"
  							 ," when compared to baseline SCr. Consider AKI/ATN/CKD with clinical correlation.")
  						
