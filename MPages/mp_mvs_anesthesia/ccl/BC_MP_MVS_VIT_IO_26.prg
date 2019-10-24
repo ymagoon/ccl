@@ -1,0 +1,180 @@
+drop program bc_mp_mvs_vit_io_26:dba go
+create program bc_mp_mvs_vit_io_26:dba
+/**************************************************************************************************
+              Purpose: Displays the Vitals and I&O
+     Source File Name: bc_mp_mvs_vit_io_26.PRG
+              Analyst: MediView Solutions
+          Application: PowerChart, SurgiNet
+  Execution Locations: 
+            Request #: 
+      Translated From: 
+        Special Notes:
+**************************************************************************************************/
+/**************************************************************************************************
+  Mod  Date            Engineer                Description
+   ---  --------------- ----------------------- ------------------------------------------------
+    1   08/26/2011      MediView Solutions 	    Initial Release
+    2   mm/dd/yyyy      Engineer Name           Initial Release
+	3 	mm/dd/yyyy      FirstName LastName      Comments for first modification
+
+**************************************************************************************************/
+
+prompt 
+	"Output to File/Printer/MINE" = "MINE"   ;* Enter or select the printer or file name to send this report to.
+	, "USERID" = 0
+	, "PERSONID" = 0
+	, "ENCNTRID" = 0
+	, "OPTIONS" = "" 
+
+with OUTDEV, USERID, PERSONID, ENCNTRID, OPTIONS
+
+record vit_io(
+	1 person_id = f8
+	1 encntr_id = f8
+	1 io[1]
+		2  THE_DAY [*]
+			3 date = vc
+			3  THE_SHIFT [*]
+				4  INPUT_AMT  =  F8
+				4  OUTPUT_AMT  =  F8
+				4  DATE_TIME_START  =  DQ8
+				4  DATE_TIME_END  =  DQ8
+		2  INTERVAL [*]
+			3  INTAKE  =  F8
+			3  INTAKE_UNITS  =  VC
+			3  OUTPUT  =  F8
+			3  OUTPUT_UNITS  =  VC
+			3  BALANCE  =  F8
+			3  DATE_TIME_START  =  VC
+			3  DATE_TIME_END  =  VC
+)
+
+DECLARE CONFIRM_4000160_CV = F8  
+	WITH CONSTANT(UAR_GET_CODE_BY("DISPLAYKEY",4000160,"CONFIRMED")), protect
+DECLARE INERROR_8_CV = F8
+	WITH CONSTANT(UAR_GET_CODE_BY("MEANING",8,"INERROR")), PROTECT
+	
+set vit_io->person_id = $PERSONID
+set vit_io->encntr_id = $ENCNTRID
+
+
+SELECT  INTO "NL:"
+FROM DUAL
+HEAD REPORT
+	num_days = 3
+	num_shifts = 3
+	stat = alterlist(vit_io->io[1].THE_DAY, num_days)
+	for (x=1 to size(vit_io->io[1].THE_DAY,5))
+		vit_io->io[1].THE_DAY[x].date = format(cnvtdatetime((curdate-x)+1,070000), "MM/DD/YY;;q")
+		stat = alterlist(vit_io->io[1].THE_DAY[x].THE_SHIFT, num_shifts)
+		for (shift=1 to size(vit_io->io[1].THE_DAY[x].THE_SHIFT,5))
+			case (shift)
+			of 1: vit_io->io[1].THE_DAY[x].THE_SHIFT[shift].DATE_TIME_START = 
+					cnvtdatetime((curdate-x)+1, 070000)
+				  vit_io->io[1].THE_DAY[x].THE_SHIFT[shift].DATE_TIME_END =
+				  	cnvtdatetime((curdate-x)+1, 145959)
+			of 2: vit_io->io[1].THE_DAY[x].THE_SHIFT[shift].DATE_TIME_START = 
+					cnvtdatetime((curdate-x)+1, 150000)
+				  vit_io->io[1].THE_DAY[x].THE_SHIFT[shift].DATE_TIME_END =
+				  	cnvtdatetime((curdate-x)+1, 225959)
+			of 3: vit_io->io[1].THE_DAY[x].THE_SHIFT[shift].DATE_TIME_START = 
+					cnvtdatetime((curdate-x)+1, 230000)
+				  vit_io->io[1].THE_DAY[x].THE_SHIFT[shift].DATE_TIME_END =
+				  	cnvtdatetime((curdate-x)+2, 065959)
+			endcase
+		endfor
+	endfor
+with nocounter
+
+select into 'nl:'
+	cir.io_stat_dt_tm,
+	cir.io_volume,
+	event = uar_get_code_display(ce.event_cd)
+from ce_intake_output_result cir,
+	clinical_event ce
+plan cir
+	where cir.encntr_id = $ENCNTRID
+	and cir.io_end_dt_tm >= cnvtlookbehind("66,H", cnvtdatetime(curdate, curtime3))
+	and cir.valid_until_dt_tm > sysdate
+	and cir.reference_event_id > 0.0
+	and cir.io_status_cd = CONFIRM_4000160_CV
+	and cir.io_type_flag in (1,2)
+join ce
+	where ce.event_id = cir.reference_event_id
+	and ce.valid_until_dt_tm +0 > sysdate
+	and ce.encntr_id +0 = $ENCNTRID
+	and ce.result_status_cd +0 != INERROR_8_CV
+order by cir.io_type_flag, cir.event_id
+head report
+	data_found = 0
+	first_interval = 1
+detail
+	data_found = 1
+	for (dayloop=1 to size(vit_io->io[1].THE_DAY,5))
+		for (shiftloop=1 to size(vit_io->io[1].THE_DAY[dayloop].THE_SHIFT,5))
+			if (cir.io_end_dt_tm >= vit_io->io[1].THE_DAY[dayloop].THE_SHIFT[shiftloop].DATE_TIME_START
+				and cir.io_end_dt_tm <= vit_io->io[1].THE_DAY[dayloop].THE_SHIFT[shiftloop].DATE_TIME_END)
+				if (cir.io_type_flag=1)
+					vit_io->io[1].THE_DAY[dayloop].THE_SHIFT[shiftloop].INPUT_AMT =
+						vit_io->io[1].THE_DAY[dayloop].THE_SHIFT[shiftloop].INPUT_AMT + cir.io_volume
+				elseif (cir.io_type_flag=2)
+					vit_io->io[1].THE_DAY[dayloop].THE_SHIFT[shiftloop].OUTPUT_AMT =
+						vit_io->io[1].THE_DAY[dayloop].THE_SHIFT[shiftloop].OUTPUT_AMT + cir.io_volume
+				endif
+			endif
+		endfor
+	endfor
+
+	if (sysdate < cnvtdatetime(curdate, 0700))
+		if (cir.io_end_dt_tm >= cnvtdatetime((curdate-1),0700)
+			and cir.io_end_dt_tm < cnvtdatetime(curdate, 0700))
+			if (first_interval = 1)
+				stat = alterlist(vit_io->io[1].INTERVAL,1)
+				first_interval = 0
+			endif
+			if (cir.io_type_flag=1)
+				vit_io->io[1].INTERVAL[1].INTAKE = vit_io->io[1].INTERVAL[1].INTAKE + cir.io_volume
+				vit_io->io[1].INTERVAL[1].INTAKE_UNITS = uar_get_code_display(ce.result_units_cd)
+			elseif (cir.io_type_flag=2)
+				vit_io->io[1].INTERVAL[1].OUTPUT = vit_io->io[1].INTERVAL[1].OUTPUT + cir.io_volume
+				vit_io->io[1].INTERVAL[1].OUTPUT_UNITS = uar_get_code_display(ce.result_units_cd)
+			endif
+		endif
+	else
+		if (cir.io_end_dt_tm >= cnvtdatetime(curdate,0700))
+			if (first_interval = 1)
+				stat = alterlist(vit_io->io[1].INTERVAL,1)
+				first_interval = 0
+			endif
+			if (cir.io_type_flag=1)
+				vit_io->io[1].INTERVAL[1].INTAKE = vit_io->io[1].INTERVAL[1].INTAKE + cir.io_volume
+				vit_io->io[1].INTERVAL[1].INTAKE_UNITS = uar_get_code_display(ce.result_units_cd)
+			elseif (cir.io_type_flag=2)
+				vit_io->io[1].INTERVAL[1].OUTPUT = vit_io->io[1].INTERVAL[1].OUTPUT + cir.io_volume
+				vit_io->io[1].INTERVAL[1].OUTPUT_UNITS = uar_get_code_display(ce.result_units_cd)
+			endif
+		endif
+	endif
+foot report
+call echo("foot report")
+	if (first_interval = 1)
+		stat = alterlist(vit_io->io[1].INTERVAL,1)
+	endif
+	vit_io->io[1].INTERVAL[1].BALANCE = vit_io->io[1].INTERVAL[1].INTAKE - vit_io->io[1].INTERVAL[1].OUTPUT
+	if (sysdate < cnvtdatetime(curdate, 0700))
+		vit_io->io[1].INTERVAL[1].DATE_TIME_START = format(cnvtdatetime((curdate-1),0700),"MM/DD/YY HH:MM;;q")
+	else
+		vit_io->io[1].INTERVAL[1].DATE_TIME_START = format(cnvtdatetime(curdate,0700),"MM/DD/YY HH:MM;;q")
+	endif
+	vit_io->io[1].INTERVAL[1].DATE_TIME_END = format(sysdate, "MM/DD/YY HH:MM;;q")
+	
+with nocounter
+
+
+
+
+ 
+call echorecord(vit_io)
+call echojson(vit_io, $OUTDEV)
+end
+go

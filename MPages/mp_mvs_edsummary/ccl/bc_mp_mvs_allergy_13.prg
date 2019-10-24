@@ -1,0 +1,153 @@
+drop program bc_mp_mvs_allergy_13:dba go
+create program bc_mp_mvs_allergy_13:dba
+/**************************************************************************************************
+              Purpose: Displays the Allergies for ED GenView Converstion to an MPage
+     Source File Name: bc_mp_mvs_allergy_13.PRG
+              Analyst: MediView Solutions
+          Application: FirstNet
+  Execution Locations: FirstNet
+            Request #: 
+      Translated From: 
+        Special Notes:
+**************************************************************************************************/
+/**************************************************************************************************
+  Mod  Date            Engineer                Description
+   ---  --------------- ----------------------- ------------------------------------------------
+    1   06/09/2011      MediView Solutions 	    Initial Release
+    2   mm/dd/yyyy      Engineer Name           Initial Release
+	3 	mm/dd/yyyy      FirstName LastName      Comments for first modification
+	4   09/25/2014		DeAnn Capanna			WO# 1047281 - Old Penicillins allergies not showing.
+
+**************************************************************************************************/
+
+prompt 
+	"Output to File/Printer/MINE" = "MINE"   ;* Enter or select the printer or file name to send this report to.
+	, "USERID" = 0
+	, "PERSONID" = 0
+	, "ENCNTRID" = 0
+	, "OPTIONS" = "" 
+
+with OUTDEV, USERID, PERSONID, ENCNTRID, OPTIONS
+
+RECORD  ALLERGY (
+	1 ENCNTR_ID			= f8
+	1 PERSON_ID			= f8
+ 	1 REC_CNT 			= I4
+ 	1 REC [*]
+ 		2 ENC_ID		= F8
+ 		2 FREETEXT	 	= VC
+ 		2 ALLERGY_ID	= F8
+ 		2 ALLERGY_NAME	= VC
+ 		2 ONSET_DATE 	= VC
+ 		
+ 		2 DETAIL_CNT 	= I4
+ 		2 ALLERGY_DETAILS[*]
+	 		3 REACTION	 = VC  	
+)
+
+DECLARE  CANCELED_12025_CV  =  F8 WITH PROTECT, CONSTANT(UAR_GET_CODE_BY("DISPLAYKEY",12025,"CANCELED" ))
+DECLARE DETAIL_COUNTER = I4 WITH PROTECT, NOCONSTANT( 0 )
+
+set allergy->person_id = $PERSONID
+set allergy->encntr_id = $ENCNTRID
+
+SELECT 	INTO 'nl:'
+	
+	A.ENCNTR_ID
+	, A.PERSON_ID
+	, A.ALLERGY_ID			; Sort by 
+	
+	, ALLERGY = N.SOURCE_STRING
+	, REACTION = N2.SOURCE_STRING  ; Sort by 
+	, ONSET_DATE = FORMAT( CNVTDATETIME( A.ONSET_DT_TM), "MM/DD/YYYY ;;D") ; Sort by 
+	, FREETEXT = A.SUBSTANCE_FTDESC
+ 
+FROM  
+	ALLERGY  		A 
+	, NOMENCLATURE  N 
+	, REACTION  	R 
+	, NOMENCLATURE  N2
+ 
+PLAN  A   WHERE A.PERSON_ID = $PERSONID  		; Index 1
+   AND A.ACTIVE_IND + 0 = 1
+   AND A.REACTION_STATUS_CD != CANCELED_12025_CV
+   AND A.BEG_EFFECTIVE_DT_TM + 0 <= CNVTDATETIME(CURDATE,CURTIME3)
+   AND  (A.END_EFFECTIVE_DT_TM + 0 >= CNVTDATETIME(CURDATE,CURTIME3)
+      OR  A.END_EFFECTIVE_DT_TM + 0 = NULL)
+   AND A.cancel_dt_tm + 0 = NULL
+ 
+JOIN N WHERE N.NOMENCLATURE_ID = OUTERJOIN(A.SUBSTANCE_NOM_ID)	; MATCHES ALLERGY WITH CORRECT NOMENCLATURE
+	;AND N.BEG_EFFECTIVE_DT_TM + 0 <= OUTERJOIN(CNVTDATETIME(CURDATE,CURTIME3)) ;dc v13
+	;AND N.END_EFFECTIVE_DT_TM + 0 >= OUTERJOIN(CNVTDATETIME(CURDATE,CURTIME3)) ;dc v13
+	AND N.ACTIVE_IND + 0 = OUTERJOIN(1)
+ 
+JOIN R WHERE R.ALLERGY_ID = OUTERJOIN(A.ALLERGY_ID)			;MATCHES ALLERGY AND REACTION DATA
+   AND R.BEG_EFFECTIVE_DT_TM + 0 <= OUTERJOIN( CNVTDATETIME(CURDATE,CURTIME3))
+   AND R.END_EFFECTIVE_DT_TM + 0 >= OUTERJOIN( CNVTDATETIME(CURDATE,CURTIME3))
+   AND R.ACTIVE_IND + 0 = OUTERJOIN(1)
+ 
+JOIN N2 WHERE N2.NOMENCLATURE_ID = OUTERJOIN(R.REACTION_NOM_ID) ; MATCHES REACTION WITH CORRECT NOMENCLATURE
+	AND N2.BEG_EFFECTIVE_DT_TM + 0 <= OUTERJOIN(CNVTDATETIME(CURDATE,CURTIME3))
+	AND N2.END_EFFECTIVE_DT_TM + 0 >= OUTERJOIN(CNVTDATETIME(CURDATE,CURTIME3))
+	AND N2.ACTIVE_IND + 0 = OUTERJOIN( 1 )
+
+
+ORDER BY
+	 A.ALLERGY_ID
+	, A.ONSET_DT_TM
+	, REACTION
+	
+	 
+HEAD REPORT	
+	; initializing 
+	REC_COUNTER 		= 0 
+	
+HEAD  A.ALLERGY_ID
+	
+	; Record Structure maintenance
+	IF (mod(REC_COUNTER, 10) = 0 )
+		 STAT = ALTERLIST(ALLERGY->REC,REC_COUNTER + 10)
+	ENDIF 
+	
+	REC_COUNTER = REC_COUNTER + 1
+	DETAIL_CNT = 0 
+	
+	; Load Recordset 
+	ALLERGY->REC[ REC_COUNTER ].ALLERGY_ID = A.ALLERGY_ID
+	ALLERGY->REC[ REC_COUNTER ].ALLERGY_NAME = N.SOURCE_STRING 
+	ALLERGY->REC[ REC_COUNTER ].FREETEXT = A.SUBSTANCE_FTDESC  
+	ALLERGY->REC[ REC_COUNTER ].ONSET_DATE = ONSET_DATE
+
+DETAIL	
+
+	; Record Structure maintenance
+	IF (mod(DETAIL_CNT, 10 ) = 0 )
+		STAT = ALTERLIST(ALLERGY->REC[REC_COUNTER].ALLERGY_DETAILS, DETAIL_CNT + 10 )
+	ENDIF
+	
+	DETAIL_CNT = DETAIL_CNT + 1
+	ALLERGY->REC[REC_COUNTER].ALLERGY_DETAILS[DETAIL_CNT].REACTION = N2.SOURCE_STRING
+	IF (r.reaction_ftdesc > "")
+		ALLERGY->REC[REC_COUNTER].ALLERGY_DETAILS[DETAIL_CNT].REACTION = 
+			concat(ALLERGY->REC[REC_COUNTER].ALLERGY_DETAILS[DETAIL_CNT].REACTION, " ", r.reaction_ftdesc)
+	ENDIF
+	
+FOOT A.ALLERGY_ID
+	
+	IF (REC_COUNTER > 0 ) 	
+	STAT = ALTERLIST(ALLERGY->REC[REC_COUNTER].ALLERGY_DETAILS, DETAIL_CNT)
+	ALLERGY->REC[REC_COUNTER ].DETAIL_CNT = DETAIL_CNT
+	ENDIF
+	
+FOOT REPORT
+	
+	; Finalizing Record Set 
+	STAT = ALTERLIST(ALLERGY->REC,REC_COUNTER)
+	ALLERGY->REC_CNT = REC_COUNTER
+
+
+WITH NOCOUNTER
+
+call echojson(allergy, $OUTDEV)
+end
+go

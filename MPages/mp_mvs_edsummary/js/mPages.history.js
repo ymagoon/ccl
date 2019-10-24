@@ -1,0 +1,97 @@
+function History_loadMedicalHistory(spanName)
+{
+	$MP.getJSON("bc_mp_mvs_medhx_10",function(data){
+		var output = "<table class='medical_history_table' style='width:99%;'>";
+		if (data.MED_HIST.TYPE.length == 0){
+			output += "<tr><td colspan='2'>No Medical History Documented</td></tr>";
+		}
+		if (data.MED_HIST.NO_HX != ""){
+			output += "<tr><td colspan='2'>" + HIST.NO_HX + "</td></tr>";
+		}
+		if (data.MED_HIST.TYPE.length > 0){
+			$.each(data.MED_HIST.TYPE, function(idx, med_hx){
+				output += "<tr><td colspan='2' style='font-weight:bolder;'>" + med_hx.HX_TYPE + "</td></tr>";
+				$.each(med_hx.NAME, function(d_idx, med_hx_detail){
+					output += "<tr><td>" + med_hx_detail.HX_NAME + 
+						"</td><td>" + med_hx_detail.HX_LINE + "</td></tr>";
+				});
+			});
+		}
+		output += "</table>";
+		showDataArea(spanName, output, false);
+	},{seeJSON:0});
+}
+function History_loadSurgicalHistory(spanName)
+{
+	$MP.getJSON("bc_mp_mvs_surghx_6", function(data){
+		var output = "<table class='surgical_history_table' style='width:99%;'>";
+		if (data.SURGHX.ACTUAL_SURG_CNT > 0){
+			output += "<tr><td colspan='100%'><strong>Surgeries found in SurgiNet [" + 
+				data.SURGHX.ACTUAL_SURG_CNT + "]</td></tr>";
+			$.each(data.SURGHX.ACTUAL_SURG_LIST, function(idx, surghx){
+				output += "<tr class='data_row'><td>" + surghx.SURG_NAME + 
+					"</td><td>" + surghx.SURG_DT + "</td></tr>";
+			});
+		}else{
+			output += "<tr class='data_row'><td colspan='100%'>No Surgeries Found in SurgiNet</td></tr>";
+		}
+		if (data.SURGHX.ACTUAL_SURG_CNT > 0 || data.SURGHX.REC_CNT > 0){
+			output += "<tr><td colspan='100%'>&nbsp;</td></tr>";
+		}
+		if (data.SURGHX.REC_CNT > 0){
+			output += "<tr><td colspan='100%'><strong>Documented Surgeries [" + 
+				data.SURGHX.REC_CNT + "]</td></tr>";
+			$.each(data.SURGHX.SURG_LIST, function(idx, surghx_grp){
+				output += "<tr style='font-weight:bolder;'><td>" + surghx_grp.SURG_TYPE + "</td></tr>";
+				$.each(surghx_grp.SURGERY, function(idx2, surghx){
+					output += "<tr class='data_row'><td>" + surghx.SURG_NAME +
+						"</td><td>" + surghx.SURG_DT + "</td></tr>";
+				});
+			});
+		}else{
+			output += "<tr class='data_row'><td colspan='100%'>No Surgical History Documented</td></tr>";
+		}
+		output += "</table>";
+		showDataArea(spanName, output, false);
+	},{seeJSON:0});
+}
+function History_loadSocialHistory(spanName)
+{
+	$MP.getJSON("bc_mp_mvs_socialhx_11",function(data){
+		var output = "<table class='social_history_table' style='width:99%;'>";
+		if (data.SOCIALHX.EVENTS.length == 0){
+			output += "<tr><td colspan='2'>No Social History Documented</td></tr>";
+		}
+		if (data.SOCIALHX.EVENTS.length > 0){
+			$.each(data.SOCIALHX.EVENTS, function(idx, social_hx){
+				output += "<tr><td colspan='2'>" + social_hx.EVENT_NAME +
+					" " + social_hx.EVENT_DT_TM + "</td></tr>";
+				$.each(social_hx.RESULT, function(d_idx, social_hx_detail){
+					output += "<tr><td>" + social_hx_detail.RESULT_TAG + 
+						"</td><td>" + social_hx_detail.RESULT_VAL + "</td></tr>";
+				});
+			});
+		}
+		output += "</table>";
+		showDataArea(spanName, output, false);
+	});
+}
+function History_loadVisitHistory(spanName)
+{
+	$MP.getJSON("bc_mp_mvs_visithx_12",function(data){
+		var output = "<table class='visit_history_table' style='width:99%;'>";
+		if (data.VISIT.REC.length > 0){
+			$.each(data.VISIT.REC, function(idx, visit){
+				output += "<tr class='data_row'><td><table style='width:100%;'>" +
+					"<tr class='highlight_row'><td>Fac: " + visit.FACILITY + " Type: " + visit.ENCNTR_TYPE + "</td></tr>" +
+					"<tr><td>Reason: " + visit.REASON_4_VISIT + "</td></tr>" +
+					"<tr><td>FIN: " + visit.FIN_NBR + "</td></tr>" +
+					"<tr><td>Reg: " + visit.REGISTRATION_DT + "</td></tr></table></td></tr>";
+			});
+		}else{
+			output += "<tr><td>No Visit History Found</td></tr>";
+		}
+		output += "</table>";
+		showDataArea(spanName, output, false);
+	});
+}

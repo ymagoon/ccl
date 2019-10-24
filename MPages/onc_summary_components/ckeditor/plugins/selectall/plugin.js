@@ -1,0 +1,16 @@
+(function(){CKEDITOR.plugins.add("selectall",{lang:"af,ar,bg,bn,bs,ca,cs,cy,da,de,el,en,en-au,en-ca,en-gb,eo,es,et,eu,fa,fi,fo,fr,fr-ca,gl,gu,he,hi,hr,hu,is,it,ja,ka,km,ko,ku,lt,lv,mk,mn,ms,nb,nl,no,pl,pt,pt-br,ro,ru,si,sk,sl,sq,sr,sr-latn,sv,th,tr,ug,uk,vi,zh,zh-cn",icons:"selectall",hidpi:true,init:function(editor){editor.addCommand("selectAll",{modes:{wysiwyg:1,source:1},exec:function(editor){var editable=editor.editable();
+if(editable.is("textarea")){var textarea=editable.$;
+if(CKEDITOR.env.ie){textarea.createTextRange().execCommand("SelectAll");
+}else{textarea.selectionStart=0;
+textarea.selectionEnd=textarea.value.length;
+}textarea.focus();
+}else{if(editable.is("body")){editor.document.$.execCommand("SelectAll",false,null);
+}else{var range=editor.createRange();
+range.selectNodeContents(editable);
+range.select();
+}editor.forceNextSelectionCheck();
+editor.selectionChange();
+}},canUndo:false});
+editor.ui.addButton&&editor.ui.addButton("SelectAll",{label:editor.lang.selectall.toolbar,command:"selectAll",toolbar:"selection,10"});
+}});
+})();

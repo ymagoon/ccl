@@ -1,0 +1,197 @@
+drop program bc_mp_mvs_chief_5:DBA go
+create program bc_mp_mvs_chief_5:DBA
+
+/****************************************************************************************************************
+                                             PROGRAM NAME HEADER
+              Purpose:	Get Chief Complaint,Reason for Visit, Admitting,Attending, ED, PCP and ED Arrival time
+              			based on one encounter to be used in ED MPage 
+     Source File Name:	bc_mp_mvs_chief_5.prg
+          Application:	FirstNet
+  Exectuion Locations:	FirstNet ED Custom MPage
+            Request #:	
+      Translated From:	No original Cerner Program 
+        Special Notes:	
+;****************************************************************************************************************
+                                           MODIFICATION CONTROL LOG
+;****************************************************************************************************************
+   Mod  Date            Engineer                Description
+   ---  --------------- ----------------------- ----------------------------------------------------------------
+    1   06/07/2011		Edwin Hartman			Initial Release
+    2   mm/dd/yyyy      Engineer Name     		Comments for first modification
+
+;***************************************************************************************************************/
+
+prompt 
+	"Output to File/Printer/MINE" = "MINE"   ;* Enter or select the printer or file name to send this report to.
+	, "USERID" = 0
+	, "PERSONID" = 0
+	, "ENCNTRID" = 0
+	, "OPTIONS" = "" 
+
+with OUTDEV, USERID, PERSONID, ENCNTRID, OPTIONS
+
+record chief( 
+	1 ENCNTR_ID = F8 
+	1 PERSON_ID = F8
+	1 REASONVISIT = VC
+	1 ED_ARRIVAL = VC
+	1 LOS = VC
+	1 CHIEF_COMPLAINT = VC
+	1 MODEOFARRIVAL	= VC
+	1 PHY_CNT = I4		
+	1 PHYSLIST[*]
+		2 PHYS_TYPE = VC
+		2 PHYS_NAME	= VC
+
+)
+
+
+DECLARE ACTIVE_48_CV = F8 WITH PROTECT, CONSTANT (UAR_GET_CODE_BY("DISPLAY", 48, "Active"))
+DECLARE ADMITDOC_333_CV  = F8 WITH PROTECT, CONSTANT (UAR_GET_CODE_BY("MEANING", 333, "ADMITDOC"))
+DECLARE	ATTENDDOC_333_CV = F8 WITH PROTECT, CONSTANT (UAR_GET_CODE_BY("MEANING", 333, "ATTENDDOC"))
+DECLARE EDPHY_333_CV	= F8 WITH PROTECT, CONSTANT (UAR_GET_CODE_BY("MEANING", 333, "EDPHYSICIAN"))
+DECLARE EDPHYWRONG_333_CV	= F8 WITH PROTECT, CONSTANT (32762925.00 )
+
+DECLARE PCPE_333_CV	= F8 WITH PROTECT, CONSTANT (UAR_GET_CODE_BY("MEANING", 333, "PCPE"))    ; MOD#3
+DECLARE PCP_331_CV	= F8 WITH PROTECT, CONSTANT (UAR_GET_CODE_BY("MEANING", 331, "PCP"))
+DECLARE CHIEFCOMPL_72_CV = F8 WITH PROTECT, CONSTANT (UAR_GET_CODE_BY("description", 72, "Chief Complaint"))
+DECLARE AUTHVERIFIED_8_CV = F8 WITH PROTECT, CONSTANT (UAR_GET_CODE_BY("description", 8, "Auth (Verified)"))
+DECLARE MODEARRIVAL_72_CV = F8 WITH PROTECT, CONSTANT (UAR_GET_CODE_BY("description", 72, "Mode of Arrival"))
+DECLARE MODIFIED_72_VC	= F8 WITH PROTECT, CONSTANT (UAR_GET_CODE_BY("description", 8,"Modified/Amended/Cor"))
+
+SELECT  INTO "NL:"	
+	  E.ENCNTR_ID	
+	, E.PERSON_ID
+	, REASONVISIT = E.REASON_FOR_VISIT   
+	, ED_ARRIVAL = FORMAT (CNVTDATETIME( E.ARRIVE_DT_TM),"MM/DD/YYYY HH:MM;;D")
+	, PHYS_TYPE_NUM = 	IF ( EPR.ENCNTR_PRSNL_R_CD = ADMITDOC_333_CV) 1 
+						ELSEIF ( EPR.ENCNTR_PRSNL_R_CD = ATTENDDOC_333_CV ) 
+							2
+					 	ELSEIF ( EPR.ENCNTR_PRSNL_R_CD IN ( EDPHY_333_CV, EDPHYWRONG_333_CV) )
+					 		3 
+ 						ENDIF 
+				 
+	, EPR.ENCNTR_PRSNL_R_CD		; Sort by this 						
+	, PHYS_TYPE = UAR_GET_CODE_DESCRIPTION(EPR.ENCNTR_PRSNL_R_CD)	
+	, PHYS_NAME = PR.NAME_FULL_FORMATTED
+	
+FROM ENCOUNTER  E
+	, ENCNTR_PRSNL_RELTN EPR_PCP
+	, PRSNL	PR_PCP	
+	, ENCNTR_PRSNL_RELTN EPR 
+	, PRSNL	PR
+	, PERSON_PRSNL_RELTN PPR
+	, PRSNL	PR1 
+
+PLAN E  
+	WHERE E.ENCNTR_ID = $ENCNTRID
+	and e.person_id = $PERSONID
+	AND E.ACTIVE_STATUS_CD = ACTIVE_48_CV 
+	AND E.BEG_EFFECTIVE_DT_TM + 0 <= CNVTDATETIME(CURDATE, CURTIME)
+	AND E.END_EFFECTIVE_DT_TM + 0 >= CNVTDATETIME(CURDATE, CURTIME)
+	AND E.ACTIVE_IND + 0 = 1 
+JOIN EPR 
+	WHERE E.ENCNTR_ID = EPR.ENCNTR_ID
+	AND EPR.ENCNTR_PRSNL_R_CD + 0 IN ( ADMITDOC_333_CV, ATTENDDOC_333_CV, EDPHY_333_CV, EDPHYWRONG_333_CV )						
+	AND EPR.BEG_EFFECTIVE_DT_TM + 0 <= CNVTDATETIME(CURDATE, CURTIME)
+	AND EPR.END_EFFECTIVE_DT_TM + 0 >= CNVTDATETIME(CURDATE, CURTIME)
+	AND EPR.ACTIVE_IND + 0 = 1
+JOIN PR 
+	WHERE EPR.PRSNL_PERSON_ID =  PR.PERSON_ID
+	AND PR.BEG_EFFECTIVE_DT_TM + 0 <= CNVTDATETIME(CURDATE, CURTIME)
+	AND PR.END_EFFECTIVE_DT_TM + 0 >= CNVTDATETIME(CURDATE, CURTIME)
+	AND PR.ACTIVE_IND + 0 = 1
+JOIN EPR_PCP 
+	WHERE outerjoin(E.ENCNTR_ID) = EPR_PCP.ENCNTR_ID
+	AND EPR_PCP.ENCNTR_PRSNL_R_CD + 0 = outerjoin( PCPE_333_CV )						
+	AND EPR_PCP.BEG_EFFECTIVE_DT_TM + 0 <= outerjoin( CNVTDATETIME(CURDATE, CURTIME))
+	AND EPR_PCP.END_EFFECTIVE_DT_TM + 0 >= outerjoin( CNVTDATETIME(CURDATE, CURTIME))
+	AND EPR_PCP.ACTIVE_IND + 0 = outerjoin(1)
+JOIN PR_PCP
+	WHERE outerjoin(EPR_PCP.PRSNL_PERSON_ID) =  PR_PCP.PERSON_ID
+	AND PR_PCP.BEG_EFFECTIVE_DT_TM + 0 <= outerjoin(CNVTDATETIME(CURDATE, CURTIME))
+	AND PR_PCP.END_EFFECTIVE_DT_TM + 0 >= outerjoin(CNVTDATETIME(CURDATE, CURTIME))
+	AND PR_PCP.ACTIVE_IND + 0 = outerjoin(1)
+JOIN PPR 
+	WHERE OUTERJOIN ( E.PERSON_ID ) = PPR.PERSON_ID
+	AND PPR.ACTIVE_IND = OUTERJOIN ( 1 ) 
+	AND PPR.PERSON_PRSNL_R_CD = OUTERJOIN ( PCP_331_CV )
+	AND PPR.BEG_EFFECTIVE_DT_TM + 0 <= OUTERJOIN ( CNVTDATETIME(CURDATE, CURTIME))
+	AND PPR.END_EFFECTIVE_DT_TM + 0 >= OUTERJOIN ( CNVTDATETIME(CURDATE, CURTIME))
+JOIN PR1 
+	WHERE OUTERJOIN ( PPR.PRSNL_PERSON_ID ) = PR1.PERSON_ID
+	AND PR1.BEG_EFFECTIVE_DT_TM + 0 <= OUTERJOIN ( CNVTDATETIME(CURDATE, CURTIME))
+	AND PR1.END_EFFECTIVE_DT_TM + 0 >= OUTERJOIN ( CNVTDATETIME(CURDATE, CURTIME))
+	AND PR1.ACTIVE_IND + 0 = OUTERJOIN ( 1 )
+ORDER BY E.ENCNTR_ID, PHYS_TYPE_NUM, EPR.ENCNTR_PRSNL_R_CD
+HEAD E.ENCNTR_ID 
+	CHIEF->ENCNTR_ID	= E.ENCNTR_ID	
+	CHIEF->PERSON_ID	= E.PERSON_ID	
+	CHIEF->REASONVISIT	= REASONVISIT
+	CHIEF->ED_ARRIVAL	= ED_ARRIVAL
+	IF (DATETIMEDIFF(CNVTDATETIME(CURDATE,CURTIME2), E.ARRIVE_DT_TM) < 1)
+		CHIEF->LOS = format(DATETIMEDIFF(CNVTDATETIME(CURDATE,CURTIME3), E.ARRIVE_DT_TM), "HH hrs MM minutes;;Z" )
+	ELSE
+		CHIEF->LOS = 
+			format(DATETIMEDIFF(CNVTDATETIME(CURDATE,CURTIME3), E.ARRIVE_DT_TM), "DD Days HH hrs MM minutes;;Z" )
+	ENDIF
+	
+	IF (PR1.NAME_FULL_FORMATTED > "" or PR_PCP.name_full_formatted > "")
+		cnt = chief->phy_cnt + 1
+		chief->phy_cnt = cnt
+		stat = alterlist(CHIEF->PHYSLIST, cnt)
+		if (PR_PCP.name_full_formatted > "")
+			CHIEF->PHYSLIST[cnt].PHYS_TYPE = UAR_GET_CODE_DESCRIPTION( EPR_PCP.encntr_prsnl_r_cd )
+			CHIEF->PHYSLIST[cnt].PHYS_NAME = PR_PCP.NAME_FULL_FORMATTED
+		else
+			CHIEF->PHYSLIST[cnt].PHYS_TYPE = UAR_GET_CODE_DESCRIPTION( PPR.PERSON_PRSNL_R_CD )
+			CHIEF->PHYSLIST[cnt].PHYS_NAME = PR1.NAME_FULL_FORMATTED
+		endif
+	ENDIF
+DETAIL
+	cnt2 = chief->phy_cnt + 1
+	chief->phy_cnt = cnt2
+	stat = alterlist(chief->physlist, cnt2)
+	
+	CHIEF->PHYSLIST[cnt2].PHYS_TYPE = UAR_GET_CODE_DESCRIPTION(EPR.ENCNTR_PRSNL_R_CD)
+	CHIEF->PHYSLIST[cnt2].PHYS_NAME = PR.NAME_FULL_FORMATTED
+WITH NOCOUNTER  
+
+
+/*  *  *  *  *  * add Clinical Event Mode of Arrival and Chief Complaint to record structure *  *  *  *  *   */
+SELECT    INTO "NL:"
+	CE.EVENT_CD
+	, MODEOFARRIVAL = IF ( CE.EVENT_CD = MODEARRIVAL_72_CV  )
+						CE.RESULT_VAL 
+					  ENDIF 
+	, CHIEF_COMPLAINT = IF (CE.EVENT_CD = CHIEFCOMPL_72_CV ) 
+			REPLACE (REPLACE (SUBSTRING(1, 1000, CE.RESULT_VAL),  CHAR(13) ," ",0), CHAR(10) ," ",0) 
+						ENDIF 
+FROM 	
+	CLINICAL_EVENT 	CE
+
+PLAN CE 
+	WHERE ce.person_id = chief->person_id
+	AND CE.ENCNTR_ID + 0  		= CHIEF->ENCNTR_ID
+	AND CE.EVENT_CD  			IN (CHIEFCOMPL_72_CV, MODEARRIVAL_72_CV)
+	AND CE.EVENT_END_DT_TM   	<= CNVTDATETIME(CURDATE, CURTIME)
+	AND CE.VALID_UNTIL_DT_TM 	>= CNVTDATETIME(CURDATE, CURTIME)
+	AND CE.RESULT_STATUS_CD + 0 IN ( AUTHVERIFIED_8_CV , MODIFIED_72_VC )
+	AND CE.VALID_FROM_DT_TM + 0 <= CNVTDATETIME(CURDATE, CURTIME)
+	AND CE.VIEW_LEVEL + 0 		= 1 
+	AND CE.AUTHENTIC_FLAG + 0 	= 1
+	AND CE.PUBLISH_FLAG + 0 	= 1
+DETAIL
+	IF (CE.EVENT_CD = MODEARRIVAL_72_CV ) 
+		CHIEF->MODEOFARRIVAL = CE.RESULT_VAL
+	ELSEIF(CE.EVENT_CD = CHIEFCOMPL_72_CV )
+		CHIEF->CHIEF_COMPLAINT = 
+				REPLACE (REPLACE (SUBSTRING(1, 1000, CE.RESULT_VAL),  CHAR(13) ," ",0), CHAR(10) ," ",0)
+	ENDIF 
+WITH NOCOUNTER
+
+call echojson(chief, $OUTDEV)
+
+END GO
+
+

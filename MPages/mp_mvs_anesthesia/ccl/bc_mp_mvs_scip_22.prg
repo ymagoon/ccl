@@ -1,0 +1,158 @@
+drop program bc_mp_mvs_scip_22:dba go
+create program bc_mp_mvs_scip_22:dba
+/**************************************************************************************************
+              Purpose: Displays the SCIP Information
+     Source File Name: bc_mp_mvs_scip_22.PRG
+              Analyst: MediView Solutions
+          Application: PowerChart, SurgiNet
+  Execution Locations: 
+            Request #: 
+      Translated From: 
+        Special Notes:
+**************************************************************************************************/
+/**************************************************************************************************
+  Mod  Date            Engineer                Description
+   ---  --------------- ----------------------- ------------------------------------------------
+    1   08/16/2011      MediView Solutions 	    Initial Release
+    2   mm/dd/yyyy      Engineer Name           Initial Release
+	3 	mm/dd/yyyy      FirstName LastName      Comments for first modification
+
+**************************************************************************************************/
+
+prompt 
+	"Output to File/Printer/MINE" = "MINE"   ;* Enter or select the printer or file name to send this report to.
+	, "USERID" = 0
+	, "PERSONID" = 0
+	, "ENCNTRID" = 0
+	, "OPTIONS" = "" 
+
+with OUTDEV, USERID, PERSONID, ENCNTRID, OPTIONS
+
+record scip(
+	1 person_id = f8
+	1 encntr_id = f8
+	1 pt_location_status = vc
+	1 informed_consent = i1
+	1 site_marked = i1
+	1 antibiotic_given = i1
+	1 npo = i1
+	1 beta_blocker = i1
+	1 vte_prophylaxis_done = i1
+)
+
+declare DATETIMEBETABLOCKERDOCUMENTED_72_CV = f8
+	with constant(uar_get_code_by("DISPLAYKEY",72,"DATETIMEBETABLOCKERDOCUMENTED")),protect
+declare NPOAFTERMIDNIGHT_72_CV = f8
+	with constant(uar_get_code_by("DISPLAYKEY",72,"NPOAFTERMIDNIGHT")),protect
+declare OPERATIVESITEMARKED_72_CV = f8
+	with constant(uar_get_code_by("DISPLAYKEY",72,"OPERATIVESITEMARKED")),protect
+declare PATIENTONBETABLOCKER_72_CV = f8
+	with constant(uar_get_code_by("DISPLAYKEY",72,"PATIENTONBETABLOCKER")),protect
+declare SURGICALPROCEDURALCONSENTSIGNED_72_CV = f8
+	with constant(uar_get_code_by("DISPLAYKEY",72,"SURGICALPROCEDURALCONSENTSIGNED")),protect
+declare VTEPROPHYLAXIS_200_CV = f8
+	with constant(uar_get_code_by("DISPLAYKEY",200,"VTEPROPHYLAXIS")),protect
+	
+DECLARE INERROR_8_CV		= f8 WITH Constant(uar_get_code_by("MEANING",8,"INERROR")),Protect
+DECLARE MODIFIED_8_CV		= f8 WITH Constant(uar_get_code_by("MEANING",8,"MODIFIED")),Protect
+DECLARE AUTH_8_CV      		= f8 WITH Constant(uar_get_code_by("MEANING",8,"AUTH")),Protect
+DECLARE ACTV_48_CV      	= f8 WITH Constant(uar_get_code_by("MEANING",48,"ACTIVE")),Protect
+
+set scip->person_id = $PERSONID
+set scip->encntr_id = $ENCNTRID
+
+select into 'nl:'
+from clinical_event ce
+plan ce
+	where ce.person_id = $PERSONID
+	and ce.encntr_id +0 = $ENCNTRID
+	and ce.event_cd in (DATETIMEBETABLOCKERDOCUMENTED_72_CV,
+						PATIENTONBETABLOCKER_72_CV,
+						NPOAFTERMIDNIGHT_72_CV,
+						OPERATIVESITEMARKED_72_CV,
+						SURGICALPROCEDURALCONSENTSIGNED_72_CV)
+  AND ce.valid_until_dt_tm >= CNVTDATETIME(curdate, curtime3)
+  AND ce.event_end_dt_tm < CNVTDATETIME(curdate,curtime3)
+  AND ce.record_status_cd = ACTV_48_CV 
+  AND ce.result_status_cd +0 IN ( AUTH_8_CV ,MODIFIED_8_CV )
+  AND CNVTUPPER(ce.event_title_text) != "DATE\TIME CORRECTION"
+  and not exists(select ce1.event_id
+  				from clinical_event ce1
+  				where ce1.person_id = ce.person_id
+  				and ce1.encntr_id +0 = ce.encntr_id
+  				and ce1.event_cd = ce.event_cd
+  				and ce1.valid_until_dt_tm >= sysdate
+  				and ce1.record_status_cd = ACTV_48_CV
+  				and ce1.result_status_cd +0 in (AUTH_8_CV, MODIFIED_8_CV)
+  				and cnvtupper(ce1.event_title_text) != "DATE\TIME CORRECTION"
+  				and ce1.event_end_dt_tm > ce.event_end_dt_tm)
+detail
+	if (cnvtupper(ce.result_val) = "YES")
+		case (ce.event_cd)
+			of DATETIMEBETABLOCKERDOCUMENTED_72_CV:
+				scip->beta_blocker = 1
+			of PATIENTONBETABLOCKER_72_CV:
+				scip->beta_blocker = 1
+			of NPOAFTERMIDNIGHT_72_CV:
+				scip->npo = 1
+			of OPERATIVESITEMARKED_72_CV:
+				scip->site_marked = 1
+			of SURGICALPROCEDURALCONSENTSIGNED_72_CV:
+				scip->informed_consent = 1
+		endcase
+	endif
+with nocounter
+
+select into 'nl:'
+from orders o,
+	clinical_event ce
+plan o
+	where o.person_id = $PERSONID
+	and o.encntr_id +0 = $ENCNTRID
+	and o.catalog_cd = VTEPROPHYLAXIS_200_CV
+join ce
+	where ce.order_id = o.order_id
+	and ce.person_id = $PERSONID
+	and ce.encntr_id = $ENCNTRID
+	AND ce.valid_until_dt_tm >= CNVTDATETIME(curdate, curtime3)
+	AND ce.event_end_dt_tm < CNVTDATETIME(curdate,curtime3)
+	AND ce.record_status_cd = ACTV_48_CV 
+	AND ce.result_status_cd +0 IN ( AUTH_8_CV ,MODIFIED_8_CV )
+	AND CNVTUPPER(ce.event_title_text) != "DATE\TIME CORRECTION"
+detail
+	scip->vte_prophylaxis_done = 1
+with nocounter, maxrec=1
+
+select into 'nl:'
+from alt_sel_cat a,
+	alt_sel_list asl,
+	order_catalog_synonym ocs,
+	orders o,
+	clinical_event ce
+plan a
+	where (a.long_description_key_cap = "ANTIMICROBIAL*"
+	or a.long_description_key_cap = "ANTIBIOTIC*"
+	or a.long_description_key_cap = "BETA_LACTAMASE INHIBITORS")
+join asl
+	where asl.alt_sel_category_id = a.alt_sel_category_id
+join ocs
+	where ocs.synonym_id = asl.synonym_id
+join o
+	where o.person_id = $PERSONID
+	and o.encntr_id +0 = $ENCNTRID
+	and o.catalog_cd = ocs.catalog_cd
+join ce
+	where ce.person_id = o.person_id
+	and ce.encntr_id +0 = o.encntr_id
+	and ce.order_id = o.order_id
+	AND ce.valid_until_dt_tm >= CNVTDATETIME(curdate, curtime3)
+	AND ce.event_end_dt_tm < CNVTDATETIME(curdate,curtime3)
+	AND ce.record_status_cd = ACTV_48_CV 
+	AND ce.result_status_cd +0 IN ( AUTH_8_CV ,MODIFIED_8_CV )
+	AND CNVTUPPER(ce.event_title_text) != "DATE\TIME CORRECTION"
+detail
+	scip->antibiotic_given = 1
+with nocounter, maxrec=1
+call echojson(scip, $OUTDEV)
+end
+go

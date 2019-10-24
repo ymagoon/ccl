@@ -1,0 +1,10 @@
+CareManagersPager=(function(){function Pager(total_results,pageSize,pageCallback){var pager=new MPageUI.Pager().setCurrentPageLabelPattern("${currentPage} / ${numberPages}").setPreviousLabel(CareManagers.i18n.PREVIOUS).setNextLabel(CareManagers.i18n.NEXT).setWrap(false).setNumberPages(Math.ceil(total_results/pageSize)).setOnPageChangeCallback(pageCallback);
+pager.pageSize=pageSize;
+pager.update=update;
+pager.numberPages=numberPages;
+return pager;
+}function update(total_results){this.setNumberPages(Math.ceil(total_results/this.pageSize));
+this.setCurrentPage(this.m_currentPage);
+}function numberPages(){return this.m_numberPages;
+}return Pager;
+})();
