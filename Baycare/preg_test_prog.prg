@@ -56,20 +56,20 @@ set request640101->action_tz = 126
 set request640101->classification_cd = 996687
 set request640101->confirmation_tz = 126
  
-set stat = tdbexecute(600005,640001,640101,"REC",request640101,"REC",ReplyOut)
+set stat = tdbexecute(600005,640001,640101,"REC",request640101,"REC",Reply)
  
 ;call echo(build("tdbexecute=",stat))
 ;call echorecord(request640101)
-call echorecord(replyout)
-
+call echorecord(reply)
+ 
 ;call echo("inside test1.prg")
-
+ 
 ;logs to server 58
 set hSys = 0
 set SysStat = 0
 call uar_SysCreateHandle(hSys,SysStat)
 call uar_SysEvent(hSys, 0, "Calling from CCL test1", "{{Script::PFMT_PREGNANCY_TEST}}")
-
+ 
 call uar_SysDestroyHandle(hSys)
  
 end
