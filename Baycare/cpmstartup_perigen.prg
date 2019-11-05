@@ -1,3 +1,23 @@
+/*
+ *  ---------------------------------------------------------------------------------------------
+ *  Script Name:  cpmstartup_perigen
+ *
+ *  Description:  Script used by the ORU_PERIGEN_CCL interface. The script sets trace parameters 
+ *				  and loads aliases from several code sets into a record structure called cache. 
+ *				  This record structure is used throughout the script OP_PERIGEN_ESI which is 
+ *                called by the interface. 
+ *  ---------------------------------------------------------------------------------------------
+ *  Author:     Yitzhak Magoon
+ *  Contact:    ymagoon@gmail.com
+ *  Creation Date:  11/04/2019
+ *
+ *  Testing: turn up logging on on ORU_PERIGEN_CCL and view logs in the msglog
+ *  ---------------------------------------------------------------------------------------------
+ *  Mod#   Date      Author           Description & Requestor Information
+ *  001    11/04/19  Yitzhak Magoon   Initial Release
+ *  ---------------------------------------------------------------------------------------------
+*/
+
 drop program cpmstartup_perigen go
 create program cpmstartup_perigen
 

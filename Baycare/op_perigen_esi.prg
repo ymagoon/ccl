@@ -1,3 +1,24 @@
+/*
+ *  ---------------------------------------------------------------------------------------------
+ *  Script Name:  op_perigen_esi
+ *
+ *  Description:  Script used by the ORU_PERIGEN_CCL interface when HL7 messages are sent to 
+ *				  Cerner. The script parses the message, performs person and encounter match logic
+ *				  to ensure the patient is valid in Cerner and it updates the acuity level of the  
+ *                patient. The message is logged to the ESI_LOG table
+ *  ---------------------------------------------------------------------------------------------
+ *  Author:     Yitzhak Magoon
+ *  Contact:    ymagoon@gmail.com
+ *  Creation Date:  11/04/2019
+ *
+ *  Testing: Use perigen_test.prg or send in HL7 messages from a disk interface and turn up logging
+ *			 Turn up logging on on ORU_PERIGEN_CCL and view logs in the msglog
+ *  ---------------------------------------------------------------------------------------------
+ *  Mod#   Date      Author           Description & Requestor Information
+ *  001    11/04/19  Yitzhak Magoon   Initial Release
+ *  ---------------------------------------------------------------------------------------------
+*/
+
 drop program op_perigen_esi go
 create program op_perigen_esi
  

@@ -1,3 +1,23 @@
+/*
+ *  ---------------------------------------------------------------------------------------------
+ *  Script Name:  perigen_test
+ *
+ *  Description:  Script used to pass an HL7 message into OP_PERIGEN_ESI. All the record structures 
+ *				  are dumped into the listing, so troubleshooting can take place. This script can 
+ *				  be used in p30 because an ESI_LOG record and the update statements to the tables
+ *                will not take place when runing this script. 
+ *  ---------------------------------------------------------------------------------------------
+ *  Author:     Yitzhak Magoon
+ *  Contact:    ymagoon@gmail.com
+ *  Creation Date:  11/04/2019
+ *
+ *  Testing: 
+ *  ---------------------------------------------------------------------------------------------
+ *  Mod#   Date      Author           Description & Requestor Information
+ *  001    11/04/19  Yitzhak Magoon   Initial Release
+ *  ---------------------------------------------------------------------------------------------
+*/
+
 drop program perigen_test go
 create program perigen_test
  
