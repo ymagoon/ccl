@@ -75,27 +75,23 @@ if (validate(cache) != 1)
  
   ;load tracking reference locations
   set acuity_cd = uar_get_code_by("MEANING", 16409, "ACUITY")
- 
+      
   select
-    cv.code_value
-    , cv.code_set
+    cva.code_value
+    , cva.code_set
     , cva.alias
     , tr.tracking_ref_id
     , tr.display
   from
     track_reference tr
-    , code_value cv
     , code_value_alias cva
   plan tr
     where tr.tracking_ref_type_cd = acuity_cd
       and tr.active_ind = 1
-  ;;; todo - CV table can go away once 16589 is aliased
-  join cv
-    where cv.code_value = tr.assoc_code_value
-      and cv.code_set = 16589
   join cva
-    where cva.code_value = outerjoin(cv.code_value)
-      and cva.contributor_source_cd = outerjoin(invision_cd)
+    where cva.code_value = tr.assoc_code_value
+      and cva.contributor_source_cd = invision_cd
+      and cva.code_set = 16589
   head report
     cnt = size(cache->alias,5)
   detail
@@ -106,8 +102,8 @@ if (validate(cache) != 1)
     endif
  
     cache->alias[cnt].alias = cva.alias
-    cache->alias[cnt].code_value = cv.code_value
-    cache->alias[cnt].code_set = cv.code_set
+    cache->alias[cnt].code_value = cva.code_value
+    cache->alias[cnt].code_set = cva.code_set
     cache->alias[cnt].id_nbr = tr.tracking_ref_id
     cache->alias[cnt].display = tr.display
   foot report
