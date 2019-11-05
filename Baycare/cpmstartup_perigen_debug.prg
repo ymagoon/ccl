@@ -18,41 +18,32 @@
  *  ---------------------------------------------------------------------------------------------
 */
 
-drop program cpmstartup_perigen go
-create program cpmstartup_perigen
+drop program cpmstartup_perigen_debug go
+create program cpmstartup_perigen_debug
 
 set trace = callecho
 call echo ("executing cpmstartup_perigen..." )
 execute cpmstartup
 set trace = server
 set trace = callecho
-;call echo ("setting cpmstartup_eso cache parameters..." )
-;SET trace rangecache 350
-;SET trace progcachesize 200
-;SET trace progcache 100
-; CALL echo ("ESO set -> Rangecache set to 350" )
-; CALL echo ("ESO set -> Program cache set to 200" )
-; CALL echo ("ESO set -> Progcachsize set to 100" )
-; CALL echo ("setting cpmstartup_eso trace parameters..." )
-set trace = nocallecho
-set trace = noechoinput
-set trace = noechoinput2
-set trace = noechoprog
-set trace = noechoprogsub
-set trace = noechorecord
-set trace = nomemory
-set trace = nordbdebug
-set trace = nordbbind
-set trace = noshowuar
-set trace = noshowuarpar
-set trace = notest
-set trace = notimer
-set message = noinformation
-set trace = recpersist
+set trace = server
+set trace flush 30
+set trace = memory
+set trace = test
+set trace = echoinput
+set trace = echoinput2
+set trace = echoprog
+set trace = echoprogsub
+set trace = showuar
+
+call echo ("Overriding logging --- Debug Logging Turned On..." )
+set trace = rdbdebug
+set trace = rdbbind
 
 /********************************************************************************************
 * LOAD SERVER CACHE - whenever server is cycled, the cache record structure is re-populated *
 *********************************************************************************************/
+;if (validate(cache) != 1)
 
 /* Initialize the System Event UAR */
 set hSys = 0
@@ -62,6 +53,8 @@ call uar_SysCreateHandle(hSys,SysStat) ;create handle
 
 call uar_SysEvent(hSys, 2, "PeriGenAud", "Begin {{script::cpmstartup_perigen}}")
 call uar_SysEvent(hSys, 2, "PeriGenAud", "Loading Server Cache")
+
+set trace = recpersist
 
 %i cust_script:perigen_load_cache.inc
 

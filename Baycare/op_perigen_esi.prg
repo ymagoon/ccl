@@ -21,11 +21,17 @@
 
 drop program op_perigen_esi go
 create program op_perigen_esi
+
+/* Initialize the System Event UAR */
+set hSys = 0
+set SysStat = 0
+call uar_SysCreateHandle(hSys,SysStat) ;create handle
  
 call log_msg(2, "Begin {{Script::OP_PERIGEN_ESI}}", "PeriGenAud")
 
 call log_msg(2, "Open {{File::PERIGEN_RECORD_STRUCTURES.inc}}", "PeriGenAud")
-%i ccluserdir:perigen_record_structures.inc
+%i cust_script:perigen_record_structures.inc
+%i cust_script:perigen_load_cache.inc
   
 /***********************************************
 * VARIABLE AND SUBROUTINE DECLARATION          *
@@ -63,6 +69,8 @@ declare observation_value = vc
  
 declare acuity_level_id = f8
 declare cur_acuity_level_id = f8
+declare acuity_level_disp = vc
+declare cur_acuity_level_disp = vc
 declare tracking_id = f8
 declare tracking_checkin_id = f8
 declare tracking_ref_id = f8
@@ -300,6 +308,7 @@ set pos = read_cache(16589,observation_value,"ALIAS")
  
 if (pos > 0)
   set acuity_level_id = cache->alias[pos].id_nbr
+  set acuity_level_disp = cache->alias[pos].display
 else
   call log_msg(0, build2("{{Acuity level not found}}{{alias: ", observation_value,"}}"), "PeriGenErr")
   set request1200040->esi_log.error_stat = "ESI_STAT_FAILURE"
@@ -312,6 +321,7 @@ select into "nl:"
   , ti.tracking_id
   , tc.tracking_checkin_id
   , tr.tracking_ref_id
+  , tr.display
 from
   tracking_item ti
   , tracking_checkin tc
@@ -327,6 +337,7 @@ join tr
     and tr.tracking_ref_type_cd = acuity_cd
 detail
   cur_acuity_level_id = tc.acuity_level_id
+  cur_acuity_level_disp = tr.display
   tracking_id = ti.tracking_id
   tracking_checkin_id = tc.tracking_checkin_id
   tracking_ref_id = tr.tracking_ref_id
@@ -376,7 +387,7 @@ call log_msg(2, "End Update Patient Acuity", "PeriGenAud")
 * POPULATE THE ESI_LOG TABLE           *
 ****************************************/
 set request1200040->esi_log.error_stat = "ESI_STAT_SUCCESS"
-set request1200040->esi_log.error_text = build2("Acuity level changed from: ", cur_acuity_level_id, " to ", acuity_level_id)
+set request1200040->esi_log.error_text = build2("Acuity level changed from: ", cur_acuity_level_disp, " to ", acuity_level_disp)
 
 #exit_script
 
@@ -441,17 +452,12 @@ call log_msg(2, build2("tracking_checkin_id => ",tracking_checkin_id), "PeriGenD
 call log_msg(2, build2("tracking_ref_id => ",tracking_ref_id), "PeriGenDbg")
 
 call log_msg(2, "End {{Script::OP_PERIGEN_ESI}}", "PeriGenAud")
+;desroy handle for logging to msglog
+call uar_SysDestroyHandle(hSys)
  
 subroutine log_msg(loglevel, msg, descrip)
   call echo(msg)
-  /* Initialize the System Event UAR */
-  set hSys = 0
-  set SysStat = 0
- 
-  call uar_SysCreateHandle(hSys,SysStat) ;create handle
- 
   call uar_SysEvent(hSys, loglevel, descrip, msg)
-  call uar_SysDestroyHandle(hSys)
 end
  
 subroutine read_cache(val1, val2, type)
