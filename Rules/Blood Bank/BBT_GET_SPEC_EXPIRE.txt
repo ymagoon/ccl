@@ -1,0 +1,1750 @@
+ ;;Solution_Test/script/PathNet -- BB Transfusion/bbt_get_avail_flex_specs/bbt_get_avail_flex_specs.prg Turn on black mode
+
+/*~BB~************************************************************************
+      *                                                                      *
+      *  Copyright Notice:  (c) 1983 Laboratory Information Systems &        *
+      *                              Technology, Inc.                        *
+      *       Revision      (c) 1984-2006 Cerner Corporation                 *
+      *                                                                      *
+      *  Cerner (R) Proprietary Rights Notice:  All rights reserved.         *
+      *  This material contains the valuable properties and trade secrets of *
+      *  Cerner Corporation of Kansas City, Missouri, United States of       *
+      *  America (Cerner), embodying substantial creative efforts and        *
+      *  confidential information, ideas and expressions, no part of which   *
+      *  may be reproduced or transmitted in any form or by any means, or    *
+      *  retained in any storage or retrieval system without the express     *
+      *  written permission of Cerner.                                       *
+      *                                                                      *
+      *  Cerner is a registered mark of Cerner Corporation.                  *
+      *                                                                      *
+  ~BE~***********************************************************************/
+/*****************************************************************************
+ 
+        Source file name:       bbt_get_avail_flex_specs.prg
+        Object name:            bbt_get_avail_flex_specs
+        Request #:              225067
+ 
+        Product:                Blood Bank
+        Product Team:           Blood Bank
+        HNA Version:            500
+        CCL Version:            Rev 8.0
+ 
+        Program purpose:        This script will get all available specimens
+                                using flexible specimen expiration parameters.
+                                This script will be used by the override function
+                                as well as for identifying specimens for system
+                                override.
+ 
+        Tables read:            accession_order_r
+                                bb_spec_expire_ovrd
+                                blood_product
+                                code_value_extension
+                                container
+                                crossmatch
+                                order_serv_res_container
+                                orders
+                                perform_result
+                                person
+                                person_name_hist
+                                product
+                                product_index
+                                product_event
+                                result
+                                service_directory
+                                bb_order_phase
+ 
+        Tables updated:         NONE
+        Executing from:
+ 
+        Special Notes:          NONE
+ 
+;~DB~****************************************************************************************
+;*                      GENERATED MODIFICATION CONTROL LOG                                  *
+;********************************************************************************************
+;*                                                                                          *
+;*Mod Date     Engineer             ITN     Feature      Comment                            *
+;*--- -------- -------------------- ------- ------------ -----------------------------------*
+;*000 08/29/06 Jason Coy            0121149 87470        Initial Release                    *
+;*001 12/27/06 Ronda Zheng          0121149 122069       Declare old_expire_time as f8 to   *
+;*                                                       fix CR 1-915268951                 *
+;*002 07/31/07 Jason Coy            0126084 129012       Update to include order_status_cd, *
+;*                                                       catalog_cd and phase_group_cd in   *
+;*                                                       reply. Also, update to always      *
+;*                                                       return order_id.                   *
+;*003 06/16/08 Sachin Yadav         0131850 167868	     added MaxExpDtTm and Flag          *
+;*004 03/03/09 Kiran Vankadaru      127500  138954       Populating Historic names for persons*
+;                                                        after person combine based on the  *
+;                                                        settings at facility level         *
+;*005 08/07/09 Kiran Vankadaru      139432  213028       Fix for CR# 1-3256290773 - Person  *
+;                                                        Reconcile failing for inbound      *
+;                                                        interface Transactions             *
+;*006 10/16/09 Ronda Zheng          140732  222628       Don't execute the script if PersonList*
+;                                                        is empty.                          *
+;*007 04/21/10 Kiran Vankadaru      144447  251385       Displaying Neonate override specimens whose*
+;                                                        expiration date passed max expiration date *
+;                                                        & improving the performance of the script  *
+;*008 07/09/10 Kiran Vankadaru      145406  258745       Improving the performance of the script    *
+;                                                        during person combine process      *
+;*009 09/17/13 Satish Joshi                 377597       Added the code to read the filter specimen *
+;                                                        by facility.Modified the code to check the *
+;                                                        if the specimens belong to PC location facility *
+;                                                        when the alert_ind request is Y. *
+;*010 10/09/13 Fitsum Abebe                              Filtered out product request orders*
+;*011 01/31/14 Gayatri Samala               386625       fix for CR 1-3910498727 (ability to extend
+;														 expired specimens)
+;*012 03/31/14 Gayatri Samala               397124       fix for CR 1-7701258819 (Multiple Blood bank
+;														 scripts perform poorly when patients have 
+;														 a lot of historical data.)
+;*013 04/15/14 Gayatri Samala         	    401099 	 reading flex preferences only when flex is on
+;~DE~****************************************************************************************
+;~END~ ******************  END OF ALL MODCONTROL BLOCKS  ***********************************************/
+ 
+drop program bbt_get_avail_flex_specs:dba go
+create program bbt_get_avail_flex_specs:dba
+ 
+/*****************************************************************************/
+/* Request record                                                            */
+/*****************************************************************************/
+/*
+record request
+(
+   1 alert_ind            = c1    ; "Y" = processing for an alert, otherwise will return data
+   1 PersonList[*]
+     2 person_id          = f8
+     2 filter_encntr_id   = f8
+     2 encntr_facility_cd = f8    ; Use only when want to calculate by a specific facility (eg. encntr combines).
+   1 facility_cd          = f8
+   1 app_key              = c10   ; pass as "AVAILSPECS", if script is called from Available Specimens
+)
+*/
+ 
+/*****************************************************************************/
+/* Reply record                                                              */
+/*****************************************************************************/
+record reply
+(
+   1 historical_demog_ind              = i2
+   1 PersonList[*]
+     2 alert_flag                      = c1    ; Set when request->alert_ind = 1 ("Y" = avail specimen found)
+     2 person_id                       = f8
+     2 new_sample_dt_tm                = dq8
+     2 name_full_formatted             = c40
+     2 Specimen[*]
+       3 specimen_id                   = f8
+       3 encntr_id                     = f8
+       3 override_id                   = f8
+       3 override_cd                   = f8
+       3 override_disp                 = vc
+       3 override_mean                 = c12
+       3 drawn_dt_tm                   = dq8
+       3 unformatted_accession         = c20
+       3 accession                     = c20
+       3 expire_dt_tm                  = dq8
+       3 flex_on_ind                   = i2      ; 0 = no (not as much info is populated), 1 = yes
+       3 flex_max                      = i4
+       3 flex_days_hrs_mean            = c12
+       3 historical_name               = c40
+       3 encntr_facility_cd            = f8
+       3 testing_facility_cd           = f8
+       3 Orders[*]
+         4 order_id                    = f8
+         4 order_mnemonic              = vc
+         4 status                      = c40    ; Display of orders table dept_status_cd
+         4 Products[*]
+           5 product_nbr_display       = vc
+           5 product_id                = f8
+           5 product_event_id          = f8
+           5 product_type_cd           = f8
+           5 product_type_disp         = vc
+           5 locked_ind                = i2
+           5 crossmatch_expire_dt_tm   = dq8
+           5 updt_applctx              = f8
+         4 order_status_cd             = f8
+         4 order_status_disp           = vc
+         4 order_Status_mean           = c12
+         4 catalog_cd                  = f8
+         4 catalog_disp                = vc
+         4 catalog_mean                = c12
+         4 phase_group_cd              = f8
+         4 phase_group_disp            = vc
+         4 phase_group_mean            = c12
+       3 max_expire_dt_tm 			   = dq8
+       3 max_expire_flag  			   = i2
+       3 is_expired_flag               = i2
+%i cclsource:status_block.inc
+)
+ 
+set reply->status_data.status = "F"
+ 
+/*****************************************************************************/
+/* Temp record structure:                                                    */
+/*    The temp record structure is utilized to collect information as tables */
+/*    are hit. The information collected is either used for qualification of */
+/*    other tables or to be populated in the reply (to prevent the need of   */
+/*    hitting the same table more than once.                                 */
+/*****************************************************************************/
+ 
+free set temp
+ 
+record temp
+(
+   1 PersonList[*]
+     2 person_id                     = f8
+     2 name_full_formatted           = c40
+     2 birth_dt_tm                   = dq8
+     2 Orders[*]
+       3 order_id                    = f8
+       3 encntr_id                   = f8
+       3 encntr_fac_cd               = f8
+       3 order_mnemonic              = vc
+       3 status                      = c40     ; Display of orders table dept_status_cd
+       3 order_status_cd             = f8
+       3 catalog_cd                  = f8
+       3 phase_group_cd              = f8
+       3 accession                   = c20
+       3 ProductEvents[*]
+         4 product_event_id          = f8
+         4 Product
+           5 product_id              = f8
+           5 product_number_disp     = vc
+           5 product_type_cd         = f8
+           5 locked_ind              = i2
+           5 crossmatch_expire_dt_tm = dq8
+           5 updt_applctx            = f8
+       3 Containers[*]
+         4 container_id              = f8
+         4 specimen_id               = f8
+         4 new_spec_expire_dt_tm     = f8
+         4 override_id               = f8
+         4 override_cd               = f8
+         4 drawn_dt_tm               = dq8
+)
+ 
+/*****************************************************************************/
+/* Variable declarations                                                     */
+/*****************************************************************************/
+set modify predeclare
+ 
+declare SCRIPT_NAME                   = c24  with constant("bbt_get_avail_flex_specs")
+ 
+; Error message declarations.
+declare errmsg                        = c132 with protect, noconstant(fillstring(132," "))
+declare error_check                   = i2   with protect, noconstant(error(errmsg,1))
+declare uar_error                     = vc   with protect, noconstant("")
+ 
+declare stat                          = i4   with protect, noconstant(0)
+ 
+; Temp alterlist counts.
+declare temp_person_count             = i4   with protect, noconstant(0)
+declare temp_order_count              = i4   with protect, noconstant(0)
+declare temp_prod_event_count         = i4   with protect, noconstant(0)
+declare temp_container_count          = i4   with protect, noconstant(0)
+ 
+; Reply alterlist counts.
+declare person_count                  = i4   with protect, noconstant(0)
+declare specimen_count                = i4   with protect, noconstant(0)
+declare orders_count                  = i4   with protect, noconstant(0)
+declare products_count                = i4   with protect, noconstant(0)
+declare facility_count                = i4   with protect, noconstant(0)
+ 
+; Expand variables
+declare i_idx                         = i4   with protect, noconstant(0)
+declare j_idx                         = i4   with protect, noconstant(0)
+declare k_idx                         = i4   with protect, noconstant(0)
+declare l_idx                         = i4   with protect, noconstant(0)
+declare x_idx                         = i4   with protect, noconstant(0)
+declare y_idx                         = i4   with protect, noconstant(0)
+declare actualSize                    = i4   with protect, noconstant(0)
+declare expandSize                    = i4   with protect, noconstant(0)
+declare expandTotal                   = i4   with protect, noconstant(0)
+declare expandStart                   = i4   with protect, noconstant(1)
+declare lIdx1                         = i4   with protect, noconstant(0)
+declare lIdx2                         = i4   with protect, noconstant(0)
+declare dcurrent_person_id            = f8   with protect, noconstant(0.0)
+declare lIdx3                         = i4   with protect, noconstant(0)
+ 
+;Slightly < one minute, expressed as a fraction of a day, used for rounding up
+declare dMINUTE                       = f8  with protect, constant(1/1440.0)
+ 
+declare PersonIndexHold               = i4   with protect, noconstant(0)
+declare SpecIndexHold                 = i4   with protect, noconstant(0)
+declare OrdIndexHold                  = i4   with protect, noconstant(0)
+declare TempPersonIdxHold             = i4   with protect, noconstant(0)
+declare FacilityIdxHold               = i4   with protect, noconstant(0)
+ 
+declare CURRENT_DT_TM_HOLD            = q8   with protect, constant(cnvtdatetime(curdate, curtime3))
+declare expDtTm                       = q8   with protect, noconstant(0.0)
+declare maxExpDtTmHold                = q8   with protect, noconstant(0.0)
+declare flexMaxHold                   = i4   with protect, noconstant(0)
+declare flexDaysHrsMeanHold           = c12  with protect, noconstant(fillstring(12, " "))
+declare flexTestingFacCdHold          = f8   with protect, noconstant(0.0)
+declare encntrFacilityCdHold          = f8   with protect, noconstant(0.0)
+declare maxExpDtTm                    = q8   with protect, noconstant(0.0)
+declare maxOrderDrawnDtTm             = q8   with protect, noconstant(0.0)
+ 
+declare SUP_GRP_ORD_TYPE              = i2   with protect, constant(2)
+declare ORD_SET_ORD_TYPE              = i2   with protect, constant(6)
+ 
+; preference variable for flex specimen
+declare SYS_ANTI_OVRD_CDF_MEANING       = c12  with protect, constant("SYS_ANTI")
+declare NEONATE_OVRD_CDF_MEANING        = c12  with protect, constant("NEONATE")
+declare override_meaning                = c12  with protect, noconstant
+; Old style preference variables (not flexible specimen)
+declare old_expire_mean               = c1   with protect, noconstant(fillstring(1, " "))
+declare old_expire_time               = f8   with protect, noconstant(0.0)
+declare old_time_cd                   = f8   with protect, noconstant(0.0)
+ 
+; Activity type code set 106
+declare ACTIVITY_TYPE_CS              = i4   with protect, constant(106)
+ 
+declare BB_ACTIVITY_TYPE_MEAN         = c12  with protect, constant("BB")
+declare bb_activity_type_cd           = f8   with protect, noconstant(0.0)
+ 
+ 
+; Questions code set 1661
+declare QUESTIONS_CS                  = i4   with protect, constant(1661)
+ 
+declare XM_EXP_CALC_QUES_MEAN         = c12  with protect, constant("XM EXP CALC")
+declare xm_exp_calc_ques_cd           = f8   with protect, noconstant(0.0)
+ 
+declare XM_WARN_DYS_QUES_MEAN         = c12  with protect, constant("XM WARN DYS")
+declare xm_warn_dys_ques_cd           = f8   with protect, noconstant(0.0)
+ 
+declare XM_WARN_HRS_QUES_MEAN         = c12  with protect, constant("XM WARN HRS")
+declare xm_warn_hrs_ques_cd           = f8   with protect, noconstant(0.0)
+ 
+ 
+; Valid responses code set 1659
+declare VALID_RESPONSES_CS            = i4   with protect, constant(1659)
+ 
+declare HOURS_VALID_RESP_MEAN         = C12  with protect, constant("H")
+declare hours_valid_resp_cd           = f8   with protect, noconstant(0.0)
+ 
+declare DAYS_VALID_RESP_MEAN          = C12  with protect, constant("D")
+declare days_valid_resp_cd            = f8   with protect, noconstant(0.0)
+ 
+ 
+; Catalog type code set 6000
+declare CATALOG_TYPE_CS               = i4   with protect, constant(6000)
+ 
+declare GEN_LAB_CAT_TYPE_MEAN         = c12  with protect, constant("GENERAL LAB")
+declare gen_lab_cat_type_cd           = f8   with protect, noconstant(0.0)
+ 
+ 
+; Order status code set 6004
+declare ORDER_STATUS_CS               = i4   with protect, constant(6004)
+ 
+; Order statuss (ordered, inprocess and completed).
+declare ORDERED_STATUS_MEAN           = c12  with protect, constant("ORDERED")
+declare ordered_status_cd             = f8   with protect, noconstant(0.0)
+ 
+declare INPROCESS_STATUS_MEAN         = c12  with protect, constant("INPROCESS")
+declare inprocess_status_cd           = f8   with protect, noconstant(0.0)
+ 
+declare COMPLETED_STATUS_MEAN         = c12  with protect, constant("COMPLETED")
+declare completed_status_cd           = f8   with protect, noconstant(0.0)
+ 
+declare FUTURE_STATUS_MEAN            = c12  with protect, constant("FUTURE")
+declare future_status_cd              = f8   with protect, noconstant(0.0)
+ 
+declare UNSCHEDULED_STATUS_MEAN       = c12  with protect, constant("UNSCHEDULED")
+declare unscheduled_status_cd         = f8   with protect, noconstant(0.0)
+ 
+declare PENDING_REV_STATUS_MEAN       = c12  with protect, constant("PENDING REV")
+declare pending_rev_status_cd         = f8   with protect, noconstant(0.0)
+ 
+declare SUSPENDED_STATUS_MEAN         = c12  with protect, constant("SUSPENDED")
+declare suspended_status_cd           = f8   with protect, noconstant(0.0)
+ 
+ 
+; Department order status code set 14281
+declare DEPT_ORDER_STATUS_CS          = i4   with protect, constant(14281)
+ 
+; Department order statuss (in-lab and collected).
+declare INLAB_DEPT_STATUS_MEAN        = c12  with protect, constant("LABINLAB")
+declare inlab_dept_status_cd          = f8   with protect, noconstant(0.0)
+ 
+declare COLLECTED_DEPT_STATUS_MEAN    = c12  with protect, constant("LABCOLLECTED")
+declare collected_dept_status_cd      = f8   with protect, noconstant(0.0)
+ 
+declare LABSCHEDULED_DEPT_STATUS_MEAN = c12  with protect, constant("LABSCHEDULED")
+declare labscheduled_dept_status_cd   = f8   with protect, noconstant(0.0)
+ 
+declare LABDISPATCH_DEPT_STATUS_MEAN  = c12  with protect, constant("LABDISPATCH")
+declare labdispatch_dept_status_cd    = f8   with protect, noconstant(0.0)
+ 
+ 
+; Name type code set 213
+declare NAME_TYPE_CS                  = i4   with protect, constant(213)
+ 
+; Name types (current).
+declare CURRENT_NAME_TYPE_MEAN        = c12  with protect, constant("CURRENT")
+declare current_name_type_cd          = f8   with protect, noconstant(0.0)
+ 
+; Combine Action Code set 327
+declare COMBINE_ACTION_CS             = i4   with protect, constant(327)
+ 
+;Combine Action
+declare COMBINE_ACTION_ADD_MEAN       = c12  with protect, constant("ADD")
+declare dcombine_add_cd               = f8   with protect, noconstant(0.0)
+ 
+;REC_STS Code set 48
+declare REC_STS_CS                    = i4   with protect, constant(48)
+ 
+;Active Status Cd
+declare REC_STS_ACTIVE_MEAN           = c12  with protect, constant("ACTIVE")
+declare dactive_status_cd             = f8   with protect, noconstant(0.0)
+ 
+ 
+; Blood bank inventory states code set 1610
+declare EVENT_TYPE_CS                 = i4   with protect, constant(1610)
+
+;Blood bank orderable processing code set 1635
+declare BB_ORDERABLE_PROC_CS          = i4   with protect, constant(1635)
+
+declare PROD_REQ_ORDER_MEAN           = vc  with protect, constant("PRODUCT ORDR")
+declare prod_req_order_cd             = f8   with protect, noconstant(0.0)
+ 
+; Blood bank inventory states (crossmatched).
+declare CROSSMATCHED_EVENT_TYPE_MEAN  = c12  with protect, constant("3")
+declare crossmatched_event_type_cd    = f8   with protect, noconstant(0.0)
+ 
+declare facility_cd					  = f8   with protect, noconstant(0.0)
+declare filterSpecimenByFacility	  = i2   with protect, noconstant(0)
+declare test_facility_cd           = f8   with protect, noconstant(0.0)
+declare pc_facility_cd                = f8   with protect, noconstant(0.0)
+declare spec_in_facility              = i2   with protect, noconstant(0)
+declare encntr_dsch_dt_tm_exists      = i2   with protect, noconstant(0)
+declare trans_facility_cd             = f8   with protect, noconstant(0.0)
+declare appKeyValue                   = c10  with protect, noconstant(fillstring(10, " "))
+ 
+/*****************************************************************************/
+/* Include any needed files.                                                 */
+/*****************************************************************************/
+%i cclsource:mic_expand_subs.inc
+%i cclsource:BBT_GetBBPreference.inc
+%i cclsource:bbt_calc_flex_expiration.inc
+%i cclsource:bbt_scripts_common.inc
+ 
+/*****************************************************************************/
+/* Retrieve activity type code value.                                        */
+/*****************************************************************************/
+set bb_activity_type_cd = uar_get_code_by("MEANING", ACTIVITY_TYPE_CS, nullterm(BB_ACTIVITY_TYPE_MEAN))
+if (bb_activity_type_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve activity type code with meaning of ", trim(BB_ACTIVITY_TYPE_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+/*****************************************************************************/
+/* Retrieve questions code values.                                           */
+/*****************************************************************************/
+set xm_exp_calc_ques_cd = uar_get_code_by("MEANING", QUESTIONS_CS, nullterm(XM_EXP_CALC_QUES_MEAN))
+if (xm_exp_calc_ques_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve question code with meaning of ", trim(XM_EXP_CALC_QUES_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+set xm_warn_dys_ques_cd = uar_get_code_by("MEANING", QUESTIONS_CS, nullterm(XM_WARN_DYS_QUES_MEAN))
+if (xm_warn_dys_ques_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve question code with meaning of ", trim(XM_WARN_DYS_QUES_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+set xm_warn_hrs_ques_cd = uar_get_code_by("MEANING", QUESTIONS_CS, nullterm(XM_WARN_HRS_QUES_MEAN))
+if (xm_warn_hrs_ques_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve question code with meaning of ", trim(XM_WARN_HRS_QUES_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+/*****************************************************************************/
+/* Retrieve valid responses code values.                                     */
+/*****************************************************************************/
+set hours_valid_resp_cd = uar_get_code_by("MEANING", VALID_RESPONSES_CS, nullterm(HOURS_VALID_RESP_MEAN))
+if (hours_valid_resp_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve valid response with meaning of ", trim(HOURS_VALID_RESP_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+set days_valid_resp_cd = uar_get_code_by("MEANING", VALID_RESPONSES_CS, nullterm(DAYS_VALID_RESP_MEAN))
+if (days_valid_resp_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve valid response with meaning of ", trim(DAYS_VALID_RESP_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+/*****************************************************************************/
+/* Retrieve catalog type code value.                                         */
+/*****************************************************************************/
+set gen_lab_cat_type_cd = uar_get_code_by("MEANING", CATALOG_TYPE_CS, nullterm(GEN_LAB_CAT_TYPE_MEAN))
+if (gen_lab_cat_type_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve catalog type code with meaning of ", trim(GEN_LAB_CAT_TYPE_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+/*****************************************************************************/
+/* Retrieve order status code values.                                        */
+/*****************************************************************************/
+set ordered_status_cd = uar_get_code_by("MEANING", ORDER_STATUS_CS, nullterm(ORDERED_STATUS_MEAN))
+if (ordered_status_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve order status code with meaning of ", trim(ORDERED_STATUS_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+set inprocess_status_cd = uar_get_code_by("MEANING", ORDER_STATUS_CS, nullterm(INPROCESS_STATUS_MEAN))
+if (inprocess_status_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve order status code with meaning of ", trim(INPROCESS_STATUS_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+set completed_status_cd = uar_get_code_by("MEANING", ORDER_STATUS_CS, nullterm(COMPLETED_STATUS_MEAN))
+if (completed_status_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve order status code with meaning of ", trim(COMPLETED_STATUS_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+set future_status_cd = uar_get_code_by("MEANING", ORDER_STATUS_CS, nullterm(FUTURE_STATUS_MEAN))
+if (future_status_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve order status code with meaning of ", trim(FUTURE_STATUS_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+set unscheduled_status_cd = uar_get_code_by("MEANING", ORDER_STATUS_CS, nullterm(UNSCHEDULED_STATUS_MEAN))
+if (unscheduled_status_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve order status code with meaning of ", trim(UNSCHEDULED_STATUS_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+set pending_rev_status_cd = uar_get_code_by("MEANING", ORDER_STATUS_CS, nullterm(PENDING_REV_STATUS_MEAN))
+if (pending_rev_status_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve order status code with meaning of ", trim(PENDING_REV_STATUS_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+set suspended_status_cd = uar_get_code_by("MEANING", ORDER_STATUS_CS, nullterm(SUSPENDED_STATUS_MEAN))
+if (suspended_status_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve order status code with meaning of ", trim(SUSPENDED_STATUS_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+/*****************************************************************************/
+/* Retrieve department order status code values.                             */
+/*****************************************************************************/
+set inlab_dept_status_cd = uar_get_code_by("MEANING", DEPT_ORDER_STATUS_CS, nullterm(INLAB_DEPT_STATUS_MEAN))
+if (inlab_dept_status_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve department order status code with meaning of ", trim(INLAB_DEPT_STATUS_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+set collected_dept_status_cd = uar_get_code_by("MEANING", DEPT_ORDER_STATUS_CS, nullterm(COLLECTED_DEPT_STATUS_MEAN))
+if (collected_dept_status_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve department order status code with meaning of ",
+                           trim(COLLECTED_DEPT_STATUS_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+set labscheduled_dept_status_cd = uar_get_code_by("MEANING", DEPT_ORDER_STATUS_CS, nullterm(LABSCHEDULED_DEPT_STATUS_MEAN))
+if (labscheduled_dept_status_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve department order status code with meaning of ",
+                           trim(LABSCHEDULED_DEPT_STATUS_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+set labdispatch_dept_status_cd = uar_get_code_by("MEANING", DEPT_ORDER_STATUS_CS, nullterm(LABDISPATCH_DEPT_STATUS_MEAN))
+if (labdispatch_dept_status_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve department order status code with meaning of ",
+                           trim(LABDISPATCH_DEPT_STATUS_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+ 
+/*****************************************************************************/
+/* Retrieve code value for current name type                                 */
+/*****************************************************************************/
+set current_name_type_cd = uar_get_code_by("MEANING", NAME_TYPE_CS, nullterm(CURRENT_NAME_TYPE_MEAN))
+if (current_name_type_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve person mgmt config code with meaning of ", trim(CURRENT_NAME_TYPE_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+/*****************************************************************************/
+/* Retrieve code value for crossmatched event type                           */
+/*****************************************************************************/
+set crossmatched_event_type_cd = uar_get_code_by("MEANING", EVENT_TYPE_CS, nullterm(CROSSMATCHED_EVENT_TYPE_MEAN))
+if (crossmatched_event_type_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve event type code with meaning of ", trim(CROSSMATCHED_EVENT_TYPE_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+/*****************************************************************************/
+/* Retrieve code value for combine action add                                */
+/*****************************************************************************/
+set dcombine_add_cd = uar_get_code_by("MEANING", COMBINE_ACTION_CS, nullterm(COMBINE_ACTION_ADD_MEAN))
+if (dcombine_add_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve combine action code with meaning of ", trim(COMBINE_ACTION_ADD_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+/*****************************************************************************/
+/* Retrieve code value for rec_sts active                                */
+/*****************************************************************************/
+set dactive_status_cd = uar_get_code_by("MEANING", REC_STS_CS, nullterm(REC_STS_ACTIVE_MEAN))
+if (dactive_status_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve rec_sts active code with meaning of ", trim(REC_STS_ACTIVE_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+
+/*****************************************************************************/
+/* Retrieve code value for 'Product Order' orderable processing type         */
+/*****************************************************************************/
+set prod_req_order_cd = uar_get_code_by("MEANING", BB_ORDERABLE_PROC_CS, nullterm(PROD_REQ_ORDER_MEAN))
+if (prod_req_order_cd <= 0.0)
+    set uar_error = concat("Failed to retrieve blood bank orderable processing type code with meaning of ", 
+                    trim(PROD_REQ_ORDER_MEAN), ".")
+    call ErrorHandler("F", "uar_get_code_by", uar_error)
+endif
+ 
+/*****************************************************************************/
+/* Determine whether client stores historical records                        */
+/*****************************************************************************/
+set reply->historical_demog_ind = BbtGetHistoricInfoPreference(request->facility_cd)
+ 
+set pc_facility_cd = request->facility_cd
+set test_facility_cd = BbtGetFlexSpecTestingFacility(request->facility_cd)
+/*If the testing facility cd is 0 it is a system level, retain the already set value of the pc_facility_cd.
+If the testing facility cd is > 0, then it is a TFS, set the new value for the pc_facility_cd
+*/
+if (test_facility_cd = -1)
+  	call ErrorHandler("F", "GetFlexSpecimenParams Failed", "Get test facility cd failed.")
+endif
+
+
+if (test_facility_cd > 0)
+set pc_facility_cd = test_facility_cd
+endif
+set filterSpecimenByFacility = BbtGetFlexFilterByFacility(pc_facility_cd)
+ 
+if (validate(request->app_key))
+set appKeyValue = trim(cnvtupper(request->app_key))
+endif
+ 
+/*****************************************************************************/
+/* Retrieve preference answers for old style specimen expiration (not        */
+/* flexible specimen preferences defined in preference manager tool but the  */
+/* preferences defined in preferences tool).                                 */
+/*****************************************************************************/
+; Get the answer to the xm expiration calculation question
+select into "nl:"
+    expire = uar_get_code_meaning(cnvtreal(trim(a.answer)))
+ 
+from answer a
+ 
+where a.question_cd = xm_exp_calc_ques_cd
+  and a.active_ind  = 1
+ 
+head report
+    old_expire_mean = expire
+ 
+with nocounter
+ 
+; Determine which expiration time code value to use.
+if (old_expire_mean = DAYS_VALID_RESP_MEAN)
+    set old_time_cd = xm_warn_dys_ques_cd
+else ;if (old_expire_mean = HOURS_VALID_RESP_MEAN)
+    set old_time_cd = xm_warn_hrs_ques_cd
+endif
+ 
+ 
+; Get the answer to the expiration time question
+select into "nl:"
+    time = cnvtreal(trim(a.answer))
+ 
+from answer a
+ 
+where a.question_cd = old_time_cd
+  and a.active_ind  = 1
+ 
+head report
+    if (old_expire_mean = DAYS_VALID_RESP_MEAN)
+	   	old_expire_time = time
+    else ;(expire_mean = HOURS_VALID_RESP_MEAN)
+        old_expire_time = time/24.0
+    endif
+ 
+with nocounter
+ 
+/*****************************************************************************/
+/* o Obtain person name.                                                     */
+/* o Obtain order information.                                               */
+/*****************************************************************************/
+set expandStart = 1
+set actualSize = size(request->PersonList,5)
+if (actualSize <= 1)
+    set expandSize = 1
+elseif (actualSize <=5)
+    set expandSize = 5
+else
+    set expandSize = 20
+endif
+set expandTotal = ceil(cnvtreal(actualSize)/expandSize)*expandSize
+ 
+;Append all record structure for expand function.
+set stat = alterlist(request->PersonList, expandTotal)
+for (i_idx = actualSize + 1 to expandTotal)
+    set request->PersonList[i_idx].person_id = request->PersonList[actualSize].person_id
+    set request->PersonList[i_idx].filter_encntr_id = request->PersonList[actualSize].filter_encntr_id
+endfor
+ 
+; set orders limit as 6 months (180 days)
+set maxOrderDrawnDtTm = datetimeadd(CURRENT_DT_TM_HOLD, -180)
+set facility_count = 0
+select
+	if (request->PersonList[1].filter_encntr_id > 0.0)
+		plan d   where assign(expandStart, evaluate(d.seq, 1, 1, expandStart + expandSize))
+		join p   where p.person_id = request->PersonList[1]->person_id
+		;plan on person table is qualified with only one person_id from the request, this is because as we won't be sending
+		;multiple person_ids when filter_encntr_id > 0.0 & to take care of performance of the script
+		join e   where expand(x_idx,expandStart, expandStart + expandSize - 1, e.encntr_id, request->PersonList[x_idx].filter_encntr_id)
+		; process orders that are collected within 6 months
+		join o   where o.encntr_id = e.encntr_id and o.current_start_dt_tm >= cnvtdatetime(maxOrderDrawnDtTm)
+                  ;purposely not using person id
+                  and o.catalog_type_cd+0.0  = gen_lab_cat_type_cd
+                  and o.activity_type_cd+0.0 = bb_activity_type_cd
+                  and o.orderable_type_flag != SUP_GRP_ORD_TYPE
+                  and o.orderable_type_flag != ORD_SET_ORD_TYPE
+		join aor where aor.order_id     = o.order_id
+                  and aor.primary_flag = 0
+		join sd  where sd.catalog_cd    = o.catalog_cd
+                 ;filter out product request orders since no specimens would typically be available for such orders.
+                  and sd.bb_processing_cd != prod_req_order_cd
+		join d_bop
+		join bop where bop.order_id = o.order_id
+	ELSE
+		plan d   where assign(expandStart, evaluate(d.seq, 1, 1, expandStart + expandSize))
+		join p   where expand(i_idx,expandStart, expandStart + expandSize - 1, p.person_id,request->PersonList[i_idx].person_id)
+		join e   where e.person_id = p.person_id
+		; process orders that are collected within 6 months
+		join o   where o.person_id = p.person_id and o.current_start_dt_tm >= cnvtdatetime(maxOrderDrawnDtTm)
+                  and o.catalog_type_cd  = gen_lab_cat_type_cd
+                  and o.encntr_id+0.0 = e.encntr_id
+                  and o.activity_type_cd+0.0 = bb_activity_type_cd
+                  and o.orderable_type_flag != SUP_GRP_ORD_TYPE
+                  and o.orderable_type_flag != ORD_SET_ORD_TYPE
+		join aor where aor.order_id     = o.order_id
+                  and aor.primary_flag = 0
+		join sd  where sd.catalog_cd    = o.catalog_cd
+                 ;filter out product request orders since no specimens would typically be available for such orders.
+                  and sd.bb_processing_cd != prod_req_order_cd
+		join d_bop
+		join bop where bop.order_id = o.order_id
+	ENDIF
+ 
+into "nl:"
+    p.*,
+    e.*,
+    o.*,
+    aor.*,
+    sd.*,
+    bop.*,
+    locateStart = expandStart
+ 
+from
+    (dummyt d with seq = value(expandTotal/expandSize)),
+    person             p,
+    encounter          e,
+    orders             o,
+    accession_order_r  aor,
+    service_directory  sd,
+    dummyt             d_bop,
+    bb_order_phase     bop
+ 
+order by
+    p.person_id,
+    e.encntr_id,
+    aor.order_id
+ 
+head report
+    temp_person_count = 0
+    person_count = 0
+ 
+head p.person_id
+    temp_order_count = 0
+    specimen_count = 0
+ 
+head e.encntr_id
+    personListIndexHold = locateval(i_idx, locateStart, locateStart + expandSize - 1,
+                                   p.person_id, request->PersonList[i_idx].person_id)
+ 
+    ; Determine whether we need to use the enctr_facility_cd passed in or the one currently related to the encounter.
+    if (request->PersonList[personListIndexHold].encntr_facility_cd > 0.0)
+        ; encntr_facility_cd  was passed in, use it.
+        encntrFacilityCdHold = request->PersonList[personListIndexHold].encntr_facility_cd
+    else
+        ; encntr_facility_cd was not passed in, use facility currently related to encounter.
+        encntrFacilityCdHold = e.loc_facility_cd
+    endif
+ 
+    ; get the transfusion service facility for a particular encounter location
+    trans_facility_cd = BbtGetFlexSpecTestingFacility(encntrFacilityCdHold)
+ 	FacilityIdxHold = locateval(x_idx, 1, size(FacilityInfo->Facilities, 5), trans_facility_cd,
+  								FacilityInfo->Facilities[x_idx].testing_facility_cd)
+  	if (FacilityIdxHold <= 0)
+  		; transfusion service facility has never been added to the structure.
+    	facility_count = facility_count + 1
+    	if (facility_count > size(FacilityInfo->Facilities,5))
+   			stat = alterlist(FacilityInfo->Facilities, facility_count + 9)
+    	endif
+ 
+ 		FacilityInfo->Facilities[facility_count].testing_facility_cd = trans_facility_cd
+ 		; read flexible specimen parameters set at transfusion service facility using LoadFlexParams()
+    	call GetFlexSpecimenParams (facility_count, encntrFacilityCdHold, 1, appKeyValue)
+    	FacilityIdxHold = facility_count
+  	endif
+ 
+ 	encntr_dsch_dt_tm_exists = 0
+ 	; Determine the maximum number of days specimens can be available for this facility , if flex is on
+ 	if (FacilityInfo->Facilities[FacilityIdxHold].flex_on_ind = 1)
+ 		; if person birth date time exists and if the patient is neonate, set max expiration units with neonate preference value
+ 		if (evaluate(nullind(p.birth_dt_tm), 0, 1, 0) = 1 and
+ 		    datetimediff(CURRENT_DT_TM_HOLD, p.birth_dt_tm) <= FacilityInfo->Facilities[FacilityIdxHold].neonate_age)
+ 			flexSpecMax = FacilityInfo->Facilities[FacilityIdxHold].neonate_age
+ 			; if neonate is discharged, then encntr_dsch_dt_tm_exists will be set to 1
+ 			encntr_dsch_dt_tm_exists = evaluate(nullind(e.disch_dt_tm), 0, 1, 0)
+ 		else
+ 			flexSpecMax = FacilityInfo->Facilities[FacilityIdxHold].max_spec_validity
+    	endif
+	endif
+ 
+    ; Determine if filtering with encounter id, set indicator which will be utilized in head aor.order_id to set temp
+    ; record encntr filter ind.
+    if (request->PersonList[personListIndexHold].filter_encntr_id > 0.0)
+        filterByEncounterInd = 1
+    else
+        filterByEncounterInd = 0
+    endif
+ 
+head aor.order_id
+    if (FacilityInfo->Facilities[FacilityIdxHold].flex_on_ind = 1)
+        ; Flexible specimen is turned ON for this encounters testing facility, check orders status
+        if (((o.order_status_cd in(inprocess_status_cd, completed_status_cd))
+        or ((o.order_status_cd = ordered_status_cd) and (o.dept_status_cd in(inlab_dept_status_cd, collected_dept_status_cd))))
+        and (datetimediff(CURRENT_DT_TM_HOLD, o.current_start_dt_tm) <= flexSpecMax))
+            ; this flag will be 1, only when neonate encounter is discharged,
+	 		; do not consider the orders, if neonate encounter is discharged
+            if (encntr_dsch_dt_tm_exists = 0)
+                ; Send info to temp list for later calculations.
+                ; Populate temp record with person info if doesn't already exist.
+	            TempPersonIdxHold = locateval(x_idx, 1, temp_person_count, p.person_id, temp->PersonList[x_idx].person_id)
+ 
+            if (TempPersonIdxHold <= 0)
+                ; Person has never been added to the temp, add person.
+                temp_person_count = temp_person_count + 1
+ 
+                if (temp_person_count > size(temp->PersonList,5))
+                    stat = alterlist(temp->PersonList, temp_person_count + 9)
+                endif
+ 
+	                ; Load the temp structure with the information from the person table.
+	                temp->PersonList[temp_person_count].name_full_formatted = p.name_full_formatted
+	                temp->PersonList[temp_person_count].person_id           = p.person_id
+	 				temp->PersonList[temp_person_count].birth_dt_tm         = p.birth_dt_tm
+	                TempPersonIdxHold = temp_person_count
+	            endif
+ 
+            temp_order_count = temp_order_count + 1
+ 
+            if (temp_order_count > size(temp->PersonList[TempPersonIdxHold].Orders, 5))
+                stat = alterlist(temp->PersonList[TempPersonIdxHold].Orders, temp_order_count + 9)
+            endif
+ 
+            ; Load the temp structure with the information from the orders table.
+            temp->PersonList[TempPersonIdxHold].Orders[temp_order_count].order_id          = o.order_id
+            temp->PersonList[TempPersonIdxHold].Orders[temp_order_count].order_mnemonic    = o.order_mnemonic
+            temp->PersonList[TempPersonIdxHold].Orders[temp_order_count].encntr_id         = e.encntr_id
+            temp->PersonList[TempPersonIdxHold].Orders[temp_order_count].encntr_fac_cd     = encntrFacilityCdHold
+            temp->PersonList[TempPersonIdxHold].Orders[temp_order_count].status         = uar_get_code_display(o.dept_status_cd)
+            temp->PersonList[TempPersonIdxHold].Orders[temp_order_count].order_status_cd   = o.order_status_cd
+            temp->PersonList[TempPersonIdxHold].Orders[temp_order_count].catalog_cd        = sd.catalog_cd
+            temp->PersonList[TempPersonIdxHold].Orders[temp_order_count].phase_group_cd    = bop.phase_grp_cd
+ 
+	            ; Load the temp structure with the information from the assession_order_r table.
+	            temp->PersonList[TempPersonIdxHold].Orders[temp_order_count].accession      = aor.accession
+	        endif
+        endif
+    else
+        ; Flexible specimen is turned OFF for this encounters testing facility. Make calculations
+        ; now and send info to reply list since we are finished with these at this point.
+ 
+        if (o.order_status_cd in(ordered_status_cd, inprocess_status_cd, completed_status_cd, future_status_cd,
+                                 unscheduled_status_cd, pending_rev_status_cd, suspended_status_cd))
+            if (old_expire_mean = DAYS_VALID_RESP_MEAN)
+            	;The following line sets the time of o.current_start_dt_tm to 235959 and then adds the expire_time to it.
+            	;Time is set to 235959 because when expire_time is by days the product does not expire until the end of the day.
+                expireDtTm = datetimeadd(cnvtdatetime(cnvtdate(o.current_start_dt_tm), 235959), old_expire_time)
+            else ;(old_expire_mean = HOURS_VALID_RESP_MEAN)
+                expireDtTm = datetimeadd(o.current_start_dt_tm, old_expire_time)
+            endif
+ 
+            if (expireDtTm > CURRENT_DT_TM_HOLD)
+                ; Specimen is not expired, determine if person already exists in the reply.
+                PersonIndexHold = locateval(x_idx, 1, person_count, p.person_id, reply->PersonList[x_idx].person_id)
+ 
+                if (PersonIndexHold <= 0)
+                    ; Person has never been added to the reply, add person.
+                    person_count = person_count + 1
+ 
+                    if (person_count > size(reply->PersonList,5))
+                        stat = alterlist(reply->PersonList, person_count + 9)
+                    endif
+ 
+                    reply->PersonList[person_count].name_full_formatted = p.name_full_formatted
+                    reply->PersonList[person_count].person_id           = p.person_id
+ 
+                    PersonIndexHold = person_count
+                endif
+ 
+                ; determine if processing for alert or returning data.
+                if (request->alert_ind = "Y")
+                    ; Processing for alert, set alert flag to yes to indicate avail spec alert should be anabled.
+                    reply->PersonList[PersonIndexHold].alert_flag = "Y"
+ 
+                else ; Not processing for alert, populate information (only information populated in old
+                     ; bbt_get_avail_specimen script must be populated.
+                    specimen_count = specimen_count + 1
+ 
+                    if (specimen_count > size(reply->PersonList[PersonIndexHold].specimen,5))
+                        stat = alterlist(reply->PersonList[PersonIndexHold].specimen, specimen_count + 9)
+                    endif
+ 
+                    reply->PersonList[PersonIndexHold].specimen[specimen_count].drawn_dt_tm = o.current_start_dt_tm
+                    reply->PersonList[PersonIndexHold].specimen[specimen_count].accession   = o.order_mnemonic
+ 
+                    if (o.dept_status_cd in (labscheduled_dept_status_cd, labdispatch_dept_status_cd))
+                        reply->PersonList[PersonIndexHold].specimen[specimen_count].expire_dt_tm = cnvtdatetime("")
+                    else
+                        reply->PersonList[PersonIndexHold].specimen[specimen_count].expire_dt_tm = expireDtTm
+                    endif
+ 
+                    reply->PersonList[PersonIndexHold].specimen[specimen_count].unformatted_accession = aor.accession
+                    reply->PersonList[PersonIndexHold].specimen[specimen_count].accession
+                        = uar_fmt_accession(aor.accession, size(aor.accession,1))
+ 
+                    ; With old style preferences we will always have one order in the reply under each specimen.
+                    stat = alterlist(reply->PersonList[PersonIndexHold].specimen[specimen_count].orders, 1)
+ 
+                    reply->PersonList[PersonIndexHold].specimen[specimen_count].orders[1].order_id = o.order_id
+                    reply->PersonList[PersonIndexHold].specimen[specimen_count].orders[1].order_mnemonic = o.order_mnemonic
+                    reply->PersonList[PersonIndexHold].specimen[specimen_count].orders[1].status
+                        = uar_get_code_display(o.dept_status_cd)
+                    reply->PersonList[PersonIndexHold].Specimen[specimen_count].Orders[1].order_status_cd = o.order_status_cd
+                    reply->PersonList[PersonIndexHold].Specimen[specimen_count].Orders[1].catalog_cd = sd.catalog_cd
+                    reply->PersonList[PersonIndexHold].Specimen[specimen_count].Orders[1].phase_group_cd = bop.phase_grp_cd
+                endif
+            endif
+        endif
+    endif
+ 
+detail
+    row + 0
+ 
+foot aor.order_id
+    row + 0
+ 
+foot e.encntr_id
+    row + 0
+ 
+foot p.person_id
+    if (temp_person_count > 0)
+        stat = alterlist(temp->PersonList[temp_person_count].Orders, temp_order_count)
+    endif
+ 
+    PersonIndexHold = locateval(x_idx, 1, person_count, p.person_id, reply->PersonList[x_idx].person_id)
+ 
+    if (PersonIndexHold > 0)
+        stat = alterlist(reply->PersonList[PersonIndexHold].specimen, specimen_count)
+ 
+        ; Need to ensure alert ind is set correctly for this person. This may get set again later if person also
+        ; has specimens where flex spec is turned on. This is to ensure it is set properly when no flex spec specimens
+        ; exist.
+        if (request->alert_ind = "Y")
+            ; processing for alert, determine if need to set alert flag for person.
+            if (PersonIndexHold > 0)
+                if (reply->PersonList[PersonIndexHold].alert_flag != "Y")
+                    ; Alert flag for person in reply is not "Y", ensure it is set to "N".
+                    reply->PersonList[PersonIndexHold].alert_flag = "N"
+                endif
+            endif
+        endif
+    endif
+ 
+foot report
+    stat = alterlist(temp->PersonList, temp_person_count)
+    stat = alterlist(reply->PersonList, person_count)
+    if (facility_count > 0)
+        stat = alterlist(FacilityInfo->Facilities, facility_count)
+    endif
+ 
+with nocounter, expand=1,
+     outerjoin = d_bop
+ 
+; Check for any CCL errors
+set error_check = error(errmsg,0)
+if (error_check != 0)
+   call ErrorHandler("F", "Select person", errmsg)
+endif
+ 
+set stat = alterlist(request->PersonList, actualSize)
+ 
+; If temp structure is not populated with any items then we have no reason to continue past this point.
+; Any specimens found are utilizing the old style preferences or we found nothing in the previous select.
+if (temp_person_count = 0)
+   go to GET_HISTORIC_NAME
+endif
+ 
+/*****************************************************************************/
+/* o Check product_event table for active crossmatch events and collect      */
+/*   necessary information.                                                  */
+/*   o Obtain product information.                                           */
+/*     o Join to the product_index table to exclude autologous products      */
+/*     o Collect necessary information.                                      */
+/*****************************************************************************/
+if (log_override_ind = 1)
+    call echo("Starting product event")
+    call LOG_MESSAGE("Starting product event", LOG_LEVEL_DEBUG)
+    call echorecord(temp)
+endif
+ 
+select into "nl:"
+    pe.*,
+    prd.*,
+    bp.*,
+    pi.*,
+    c.*
+ 
+from
+    (dummyt d1 with seq = value(size(temp->PersonList, 5))),
+    (dummyt d2 with seq = 1),
+    product_event      pe,
+    product            prd,
+    blood_product      bp,
+    product_index      pi,
+    crossmatch         c
+ 
+plan d1 where maxrec(d2, size(temp->PersonList[d1.seq].Orders, 5))
+ 
+join d2
+ 
+join pe  where pe.order_id = temp->PersonList[d1.seq].Orders[d2.seq].order_id
+           and pe.event_type_cd+0.0 = crossmatched_event_type_cd
+           and pe.active_ind = 1
+ 
+join prd where prd.product_id = pe.product_id
+           and prd.active_ind = 1
+ 
+join bp  where bp.product_id = prd.product_id
+           and bp.active_ind = 1
+ 
+join pi  where pi.product_cd = bp.product_cd
+           and pi.active_ind = 1
+ 
+join c   where c.product_event_id = pe.product_event_id
+           and c.active_ind = 1
+ 
+order by
+    d1.seq,
+    d2.seq,
+    bp.product_id
+ 
+head d1.seq
+    row + 0
+ 
+head d2.seq
+    temp_prod_event_count = 0
+ 
+head bp.product_id
+    ; Only return products that are not autologous.
+    if ((pi.product_cd > 0.0) and (pi.autologous_ind = 0))
+        temp_prod_event_count = temp_prod_event_count + 1
+ 
+        if (temp_prod_event_count > size(temp->PersonList[d1.seq].Orders[d2.seq].ProductEvents,5))
+            stat = alterlist(temp->PersonList[d1.seq].Orders[d2.seq].ProductEvents, temp_prod_event_count + 9)
+        endif
+ 
+        ; Load the temp structure with the information from the product event table.
+        temp->PersonList[d1.seq].Orders[d2.seq].ProductEvents[temp_prod_event_count]
+            .product_event_id = pe.product_event_id
+ 
+        ; Load the temp structure with the information from the product and blood product tables.
+        temp->PersonList[d1.seq].Orders[d2.seq].ProductEvents[temp_prod_event_count].Product
+            .locked_ind = prd.locked_ind
+        temp->PersonList[d1.seq].Orders[d2.seq].ProductEvents[temp_prod_event_count].Product
+            .product_id = prd.product_id
+        temp->PersonList[d1.seq].Orders[d2.seq].ProductEvents[temp_prod_event_count].Product
+            .product_number_disp = concat(trim(bp.supplier_prefix), trim(prd.product_nbr), " ", trim(prd.product_sub_nbr))
+        temp->PersonList[d1.seq].Orders[d2.seq].ProductEvents[temp_prod_event_count].Product
+            .product_type_cd = prd.product_cd
+        temp->PersonList[d1.seq].Orders[d2.seq].ProductEvents[temp_prod_event_count].Product
+            .updt_applctx = prd.updt_applctx
+ 
+        ; Load the temp structure with the information from the crossmatch table.
+        temp->PersonList[d1.seq].Orders[d2.seq].ProductEvents[temp_prod_event_count].Product
+            .crossmatch_expire_dt_tm = c.crossmatch_exp_dt_tm
+    endif
+ 
+detail
+    row + 0
+ 
+foot bp.product_id
+    row + 0
+ 
+foot d2.seq
+    stat = alterlist(temp->PersonList[d1.seq].Orders[d2.seq].ProductEvents, temp_prod_event_count)
+ 
+foot d1.seq
+    row + 0
+ 
+with nocounter
+ 
+; Check for any CCL errors
+set error_check = error(errmsg,0)
+if (error_check != 0)
+   call ErrorHandler("F", "Select product event", errmsg)
+endif
+ 
+/*****************************************************************************/
+/* NOTE: From this point on we are only dealing with flexible specimen. Any  */
+/*       orders/specimens that use the old style preferences have already    */
+/*       added to the reply.                                                 */
+/*                                                                           */
+/* o Obtain container id's for orders that have result/perform_result rows.  */
+/*****************************************************************************/
+if (log_override_ind = 1)
+    call echo("Starting result/perform result")
+    call LOG_MESSAGE("Starting result/perform result", LOG_LEVEL_DEBUG)
+    call echorecord(temp)
+endif
+ 
+select into "nl:"
+    r.*,
+    pr.*
+ 
+from
+    (dummyt d1 with seq = value(size(temp->PersonList, 5))),
+    (dummyt d2 with seq = 1),
+    result             r,
+    perform_result     pr
+ 
+plan d1 where maxrec(d2, size(temp->PersonList[d1.seq].Orders, 5))
+ 
+join d2
+ 
+join r  where r.order_id = temp->PersonList[d1.seq].Orders[d2.seq].order_id
+ 
+join pr where pr.result_id = r.result_id
+          and pr.container_id + 0 > 0.0
+ 
+order by
+    d1.seq,
+    d2.seq,
+    pr.container_id
+ 
+head d1.seq
+    row + 0
+ 
+head d2.seq
+    temp_container_count = 0
+ 
+head pr.container_id
+    temp_container_count = temp_container_count + 1
+ 
+    if (temp_container_count > size(temp->PersonList[d1.seq].Orders[d2.seq].Containers,5))
+        stat = alterlist(temp->PersonList[d1.seq].Orders[d2.seq].Containers, temp_container_count + 9)
+    endif
+ 
+    temp->PersonList[d1.seq].Orders[d2.seq].Containers[temp_container_count].container_id = pr.container_id
+ 
+detail
+    row + 0
+ 
+foot pr.container_id
+    row + 0
+ 
+foot d2.seq
+    stat = alterlist(temp->PersonList[d1.seq].Orders[d2.seq].Containers, temp_container_count)
+ 
+foot d1.seq
+    row + 0
+ 
+with nocounter
+ 
+; Check for any CCL errors
+set error_check = error(errmsg,0)
+if (error_check != 0)
+   call ErrorHandler("F", "Select result", errmsg)
+endif
+ 
+/*****************************************************************************/
+/* o Obtain container id's for orders that do not have result/perform_result */
+/* rows.                                                                     */
+/*****************************************************************************/
+if (log_override_ind = 1)
+    call echo("Starting container")
+    call LOG_MESSAGE("Starting containert", LOG_LEVEL_DEBUG)
+    call echorecord(temp)
+endif
+ 
+select into "nl:"
+    osrc.*
+ 
+from
+    (dummyt d1 with seq = value(size(temp->PersonList, 5))),
+    (dummyt d2 with seq = 1),
+    order_serv_res_container osrc
+ 
+plan d1   where maxrec(d2, size(temp->PersonList[d1.seq].Orders, 5))
+ 
+join d2
+ 
+join osrc where osrc.order_id = temp->PersonList[d1.seq].Orders[d2.seq].order_id
+ 
+order by
+    d1.seq,
+    d2.seq,
+    osrc.container_id
+ 
+head d1.seq
+    row + 0
+ 
+head d2.seq
+    temp_container_count = 0
+ 
+head osrc.container_id
+    if ((size(temp->PersonList[d1.seq].Orders[d2.seq].Containers, 5) = 0)
+    or (temp_container_count > 0))
+        temp_container_count = temp_container_count + 1
+ 
+        if (temp_container_count > size(temp->PersonList[d1.seq].Orders[d2.seq].Containers,5))
+            stat = alterlist(temp->PersonList[d1.seq].Orders[d2.seq].Containers, temp_container_count + 9)
+        endif
+ 
+        temp->PersonList[d1.seq].Orders[d2.seq].Containers[temp_container_count].container_id = osrc.container_id
+    endif
+ 
+detail
+    row + 0
+ 
+foot osrc.container_id
+    row + 0
+ 
+foot d2.seq
+    if (temp_container_count > 0)
+        stat = alterlist(temp->PersonList[d1.seq].Orders[d2.seq].Containers, temp_container_count)
+    endif
+ 
+foot d1.seq
+    row + 0
+ 
+with nocounter
+ 
+; Check for any CCL errors
+set error_check = error(errmsg,0)
+if (error_check != 0)
+   call ErrorHandler("F", "Select order_serv_res_container", errmsg)
+endif
+ 
+/*****************************************************************************/
+/* o Check specimen expire overrides                                         */
+/*****************************************************************************/
+if (log_override_ind = 1)
+    call echo("Starting specimen override")
+    call LOG_MESSAGE("Starting specimen override", LOG_LEVEL_DEBUG)
+    call echorecord(temp)
+endif
+ 
+select into "nl:"
+ 
+from
+    (dummyt d1 with seq = value(size(temp->PersonList, 5))),
+    (dummyt d2 with seq = 1),
+    (dummyt d3 with seq = 1),
+    container           c,
+    bb_spec_expire_ovrd bseo
+ 
+plan d1   where maxrec(d2, size(temp->PersonList[d1.seq].Orders, 5))
+ 
+join d2   where maxrec(d3, size(temp->PersonList[d1.seq].Orders[d2.seq].Containers, 5))
+ 
+join d3
+ 
+join c    where c.container_id = temp->PersonList[d1.seq].Orders[d2.seq].Containers[d3.seq].container_id
+ 
+join bseo where bseo.specimen_id = outerjoin(c.specimen_id)
+            and bseo.active_ind  = outerjoin(1)
+ 
+order by
+    d1.seq,
+    d2.seq,
+    d3.seq,
+    c.container_id
+ 
+detail
+    temp->PersonList[d1.seq].Orders[d2.seq].Containers[d3.seq].specimen_id = c.specimen_id
+    temp->PersonList[d1.seq].Orders[d2.seq].Containers[d3.seq].drawn_dt_tm = c.drawn_dt_tm
+ 
+    if (bseo.specimen_id > 0.0)
+	    temp->PersonList[d1.seq].Orders[d2.seq].Containers[d3.seq].new_spec_expire_dt_tm = bseo.new_spec_expire_dt_tm
+	    temp->PersonList[d1.seq].Orders[d2.seq].Containers[d3.seq].override_id           = bseo.bb_spec_expire_ovrd_id
+	    temp->PersonList[d1.seq].Orders[d2.seq].Containers[d3.seq].override_cd           = bseo.override_reason_cd
+ 
+    endif
+ 
+with nocounter
+ 
+; Check for any CCL errors
+set error_check = error(errmsg,0)
+if (error_check != 0)
+   call ErrorHandler("F", "Select container", errmsg)
+endif
+ 
+/*****************************************************************************/
+/* Populate the reply with specimens that are not expired.                   */
+/*****************************************************************************/
+if (log_override_ind = 1)
+    call echo("Starting populate reply")
+    call LOG_MESSAGE("Starting populate reply", LOG_LEVEL_DEBUG)
+    call echorecord(temp)
+endif
+ 
+set person_count = size(reply->PersonList, 5)
+set flex_param_out->testing_facility_cd = -1
+ 
+for (i_idx = 1 to size(temp->PersonList, 5))
+    ; Determine if person already exists in the reply.
+    set PersonIndexHold = locateval(x_idx, 1, size(reply->PersonList, 5),
+                                    temp->PersonList[i_idx].person_id, reply->PersonList[x_idx].person_id)
+ 
+    if (PersonIndexHold <= 0)
+        ; Person has never been added to the reply, add person.
+        set person_count = person_count + 1
+ 
+        if (person_count > size(reply->PersonList,5))
+            set stat = alterlist(reply->PersonList, person_count + 9)
+        endif
+ 
+        set reply->PersonList[person_count].name_full_formatted = temp->PersonList[i_idx].name_full_formatted
+        set reply->PersonList[person_count].person_id           = temp->PersonList[i_idx].person_id
+ 
+        set PersonIndexHold = person_count
+    endif
+ 
+    set specimen_count = size(reply->PersonList[PersonIndexHold].specimen, 5)
+ 
+    for (j_idx = 1 to size(temp->PersonList[i_idx].Orders, 5))
+ 		set spec_in_facility = 0
+ 		; load flexible specimen params based on transfusion service facility
+ 		set trans_facility_cd = BbtGetFlexSpecTestingFacility(temp->PersonList[i_idx].Orders[j_idx].encntr_fac_cd)
+ 		set FacilityIdxHold = locateval(x_idx, 1, size(FacilityInfo->Facilities, 5), trans_facility_cd,
+  									FacilityInfo->Facilities[x_idx].testing_facility_cd)
+ 
+  		; get the flexible specimen params set at FacilityInfo structure for a particular transfusion service facility
+  		if (FacilityIdxHold > 0)
+  			call GetFlexSpecimenParams(FacilityIdxHold, temp->PersonList[i_idx].Orders[j_idx].encntr_fac_cd, 0, appKeyValue)
+  			; if flex params are retrieved successfully, then update flex_param_out record and peform flex calculations
+  			if (FacilityInfo->Facilities[FacilityIdxHold].load_flex_params = -1)
+  				call ErrorHandler("F", "GetFlexSpecimenParams Failed",
+					                      "GetFlexSpecimenParams returned a failure.")
+  			endif
+  		endif
+ 
+ 		for(k_idx = 1 to size(temp->PersonList[i_idx].Orders[j_idx].Containers, 5))
+            ; Determine if override exists.
+            if (temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].override_id > 0.0)
+                ; Active override exists, determine if specimen is expired.
+                set override_meaning =
+                trim(UAR_GET_CODE_MEANING(temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].override_cd))
+				set expDtTm = temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].new_spec_expire_dt_tm
+                if (override_meaning in (SYS_ANTI_OVRD_CDF_MEANING, NEONATE_OVRD_CDF_MEANING ))
+                	;Specimen has SYS_COMBINE, SYS_ANTI, or NEONATE override, cannot extend specimen expiration.
+                	set flex_max_out->max_expire_dt_tm = expDtTm
+                	if (override_meaning = SYS_ANTI_OVRD_CDF_MEANING)
+                		set flex_max_out->max_expire_flag = nANTI_FLAG
+                	elseif (override_meaning = NEONATE_OVRD_CDF_MEANING)
+                		set	flex_max_out->max_expire_flag = nNEONATE_FLAG
+                endif
+                else
+                	set stat = GetFlexMaxExpirationForPerson(temp->PersonList[i_idx].person_id,
+                                                       0.0,
+                                                       temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].drawn_dt_tm,
+                                                       temp->PersonList[i_idx].Orders[j_idx].encntr_fac_cd)
+                    if(stat = -1)
+					    call ErrorHandler("F", "GetFlexMaxExpirationForPerson Failed",
+					                      "GetFlexMaxExpirationForPerson returned a failure.")
+ 
+					endif
+                endif
+            else
+                ;Override does not exist, calculate specimen expire date to determine if expired.
+                set expDtTm = NULL
+                set expDtTm = GetFlexExpirationForPerson(temp->PersonList[i_idx].person_id,
+                                                0.0,
+                                                temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].drawn_dt_tm,
+                                                temp->PersonList[i_idx].Orders[j_idx].encntr_fac_cd,
+                                                0)
+ 
+ 
+				if(expDtTm = -1)
+				    call ErrorHandler("F","GetFlexExpirationForPerson Failed",
+				                      "GetFlexExpirationForPerson returned a failure.")
+ 
+				endif
+ 
+ 				set stat = GetFlexMaxExpirationForPerson(temp->PersonList[i_idx].person_id,
+                                                       0.0,
+                                                       temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].drawn_dt_tm,
+                                                       temp->PersonList[i_idx].Orders[j_idx].encntr_fac_cd)
+ 
+                if(stat = -1)
+				    call ErrorHandler("F", "GetFlexMaxExpirationForPerson Failed",
+				                      "GetFlexMaxExpirationForPerson returned a failure.")
+				endif
+ 
+            endif
+ 
+            set flexTestingFacCdHold = flex_param_out->testing_facility_cd
+            set flexMaxHold = flex_param_out->max_spec_validity
+            set flexDaysHrsMeanHold = flex_param_out->expiration_unit_type_mean
+ 
+            ; check whether birth date is not null and patient is neonate or not,
+            if (temp->PersonList[i_idx].birth_dt_tm != null and
+                datetimediff(cnvtdatetime(CURRENT_DT_TM_HOLD), temp->PersonList[i_idx].birth_dt_tm)
+                    <= flex_param_out->neonate_age)
+                ; if neonate does not have any transfusions or antibody id or neonate overrides
+            	; calculate max expiration date time using neonate prefernece value
+            	if (flex_max_out->max_expire_flag = nMAX_PARAM_FLAG)
+             		set maxExpDtTm = datetimeadd (cnvtdatetime(cnvtdate(temp->PersonList[i_idx].birth_dt_tm), 235959),
+             								  flex_param_out->neonate_age)
+             	else
+             		set maxExpDtTm = flex_max_out->max_expire_dt_tm
+             	endif
+            else
+            	set maxExpDtTm = flex_max_out->max_expire_dt_tm
+            endif
+ 
+            ; Determine if specimen is active OR specimen is expired, but valid to extend to maximum expiration.
+            if (expDtTm > cnvtdatetime(CURRENT_DT_TM_HOLD) or
+                (FacilityInfo->Facilities[FacilityIdxHold].extend_expired_specimen = 1 and
+                 cnvtdatetime(CURRENT_DT_TM_HOLD) < maxExpDtTm))
+                ; if specimens are qualified, determine if processing for alert.
+                if (request->alert_ind = "Y")
+                    ; Processing for alert, set alert flag to yes to indicate avail spec alert should be enabled.
+                    if (spec_in_facility = 0)
+ 
+	                    if (filterSpecimenByFacility = 1)
+ 
+	                    		set spec_in_facility = BBtCheckSpecimenInFacility(temp->PersonList[i_idx].Orders[j_idx].encntr_fac_cd,
+	                    		flexTestingFacCdHold,pc_facility_cd,filterSpecimenByFacility)
+ 
+	                    		if (spec_in_facility = 1)
+	                    			set reply->PersonList[PersonIndexHold].alert_flag = "Y"
+	                    		endif
+	                    else
+	                    	set reply->PersonList[PersonIndexHold].alert_flag = "Y"
+	                    endif
+	                endif
+ 
+ 
+ 
+                else
+                    ; Not processing for alert, populate entire reply structure.
+                    ; Determine if specimen already exists in the reply.
+                    set SpecIndexHold = locateval(x_idx, 1,
+                                                  size(reply->PersonList[PersonIndexHold].specimen, 5),
+                                                  temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].specimen_id,
+                                                  reply->PersonList[PersonIndexHold].specimen[x_idx].specimen_id)
+ 
+                    if (SpecIndexHold <= 0)
+                        ; Specimen has never been added to the reply, add specimen.
+                        set specimen_count = specimen_count + 1
+ 
+                        if (specimen_count > size(reply->PersonList[PersonIndexHold].specimen,5))
+                            set stat = alterlist(reply->PersonList[PersonIndexHold].specimen, specimen_count + 9)
+                        endif
+ 
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].flex_on_ind
+                            = 1
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].flex_days_hrs_mean
+                            = flexDaysHrsMeanHold
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].flex_max
+                            = flexMaxHold
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].encntr_id
+                            = temp->PersonList[i_idx].Orders[j_idx].encntr_id
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].unformatted_accession
+                            = temp->PersonList[i_idx].Orders[j_idx].accession
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].accession
+                            = uar_fmt_accession(temp->PersonList[i_idx].Orders[j_idx].accession,
+                                                size(temp->PersonList[i_idx].Orders[j_idx].accession,1))
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].drawn_dt_tm
+                            = temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].drawn_dt_tm
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].expire_dt_tm
+                            = expDtTm
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].max_expire_dt_tm
+                            = flex_max_out->max_expire_dt_tm
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].max_expire_flag
+                            = flex_max_out->max_expire_flag
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].override_id
+                            = temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].override_id
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].override_cd
+                            = temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].override_cd
+                        ; Note: override_disp and override_mean are populated manually so that values will be available
+                        ;       for backend scripts calling this script.
+                        set reply->PersonList[PersonIndexHold].Specimen[specimen_count].override_disp
+                            = uar_get_code_display(temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].override_cd)
+                        set reply->PersonList[PersonIndexHold].Specimen[specimen_count].override_mean
+                            = uar_get_code_meaning(temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].override_cd)
+                        set reply->PersonList[PersonIndexHold].specimen[specimen_count].specimen_id
+                            = temp->PersonList[i_idx].Orders[j_idx].Containers[k_idx].specimen_id
+                        set reply->PersonList[PersonIndexHold].Specimen[specimen_count].encntr_facility_cd
+                            = temp->PersonList[i_idx].Orders[j_idx].encntr_fac_cd
+                        set reply->PersonList[PersonIndexHold].Specimen[specimen_count].testing_facility_cd
+                            = flexTestingFacCdHold
+                        ; if specimen is expired, but valid to extend, set expired flag as 1
+ 						if (validate(reply->PersonList[PersonIndexHold].Specimen[specimen_count].is_expired_flag) and
+ 							expDtTm < cnvtdatetime(CURRENT_DT_TM_HOLD))
+ 							set reply->PersonList[PersonIndexHold].Specimen[specimen_count].is_expired_flag = 1
+ 						endif
+                        set SpecIndexHold = specimen_count
+                    endif
+ 
+                    set orders_count = size(reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders, 5)
+                    ; Determine if order has already been added to this specimen item in the reply.
+                    set OrdIndexHold = locateval(x_idx, 1, orders_count,
+                                                temp->PersonList[i_idx].Orders[j_idx].order_id,
+                                                reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders[x_idx].order_id)
+ 
+                    if (OrdIndexHold <= 0)
+                        ; Order has never been added to this specimen item in the reply, add order.
+                        set orders_count = orders_count + 1
+ 
+                        set stat = alterlist(reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders,
+                                             orders_count)
+ 
+                        set reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders[orders_count].order_id
+                            = temp->PersonList[i_idx].Orders[j_idx].order_id
+                        set reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders[orders_count].order_mnemonic
+                            = temp->PersonList[i_idx].Orders[j_idx].order_mnemonic
+                        set reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders[orders_count].status
+                            = temp->PersonList[i_idx].Orders[j_idx].status
+                        set reply->PersonList[PersonIndexHold].Specimen[SpecIndexHold].Orders[orders_count].order_status_cd
+                            = temp->PersonList[i_idx].Orders[j_idx].order_status_cd
+                        set reply->PersonList[PersonIndexHold].Specimen[SpecIndexHold].Orders[orders_count].catalog_cd
+                            = temp->PersonList[i_idx].Orders[j_idx].catalog_cd
+                        set reply->PersonList[PersonIndexHold].Specimen[SpecIndexHold].Orders[orders_count].phase_group_cd
+                            = temp->PersonList[i_idx].Orders[j_idx].phase_group_cd
+                        set OrdIndexHold = orders_count
+                    endif
+ 
+                    ; Add products to reply that are related to order.
+                    set products_count = size(reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].
+                                              orders[OrdIndexHold].products, 5)
+ 
+                    for (l_idx = 1 to size(temp->PersonList[i_idx].Orders[j_idx].ProductEvents, 5))
+                        set products_count = products_count + 1
+ 
+                        if (products_count > size(reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].
+                                                 orders[OrdIndexHold].products, 5))
+                            set stat = alterlist(reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].
+                                                 orders[OrdIndexHold].products, products_count + 9)
+                        endif
+ 
+                        set reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders[OrdIndexHold].
+                            products[products_count].crossmatch_expire_dt_tm
+                            = temp->PersonList[i_idx].Orders[j_idx].ProductEvents[l_idx].Product.crossmatch_expire_dt_tm
+                        set reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders[OrdIndexHold].
+                            products[products_count].locked_ind
+                            = temp->PersonList[i_idx].Orders[j_idx].ProductEvents[l_idx].Product.locked_ind
+                        set reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders[OrdIndexHold].
+                            products[products_count].product_event_id
+                            = temp->PersonList[i_idx].Orders[j_idx].ProductEvents[l_idx].product_event_id
+                        set reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders[OrdIndexHold].
+                            products[products_count].product_id
+                            = temp->PersonList[i_idx].Orders[j_idx].ProductEvents[l_idx].Product.product_id
+                        set reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders[OrdIndexHold].
+                            products[products_count].product_nbr_display
+                            = temp->PersonList[i_idx].Orders[j_idx].ProductEvents[l_idx].Product.product_number_disp
+                        set reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders[OrdIndexHold].
+                            products[products_count].product_type_cd
+                            = temp->PersonList[i_idx].Orders[j_idx].ProductEvents[l_idx].Product.product_type_cd
+                        ; Note: product_type_disp is populated manually so that values will be available
+                        ;       for backend scripts calling this script.
+                        set reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders[OrdIndexHold].
+                            products[products_count].product_type_disp
+                            = uar_get_code_display(temp->PersonList[i_idx].Orders[j_idx].ProductEvents[l_idx].
+                                                   Product.product_type_cd)
+                        set reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].orders[OrdIndexHold].
+                            products[products_count].updt_applctx
+                            = temp->PersonList[i_idx].Orders[j_idx].ProductEvents[l_idx].Product.updt_applctx
+                    endfor
+ 
+                    set stat = alterlist(reply->PersonList[PersonIndexHold].specimen[SpecIndexHold].
+                                         orders[OrdIndexHold].products, products_count)
+                endif
+            endif
+        endfor
+    endfor
+ 
+    set stat = alterlist(reply->PersonList[PersonIndexHold].specimen, specimen_count)
+ 
+    ; Determine if processing for alert.
+    if (request->alert_ind = "Y")
+        ; processing for alert, determine if need to set alert flag for person.
+        if (reply->PersonList[PersonIndexHold].alert_flag != "Y")
+            ; Alert flag for person in reply is not "Y", ensure it is set to "N".
+            set reply->PersonList[PersonIndexHold].alert_flag = "N"
+        endif
+    endif
+endfor
+ 
+set stat = alterlist(reply->PersonList, person_count)
+ 
+/*****************************************************************************/
+/* determine new_sample_dt_tm for each person                                */
+/*****************************************************************************/
+if (request->alert_ind != "Y")
+    set person_count = size(reply->PersonList, 5)
+    for (i_idx = 1 to person_count)
+        set maxExpDtTmHold = 0.0
+ 
+        set specimen_count = size(reply->PersonList[i_idx].specimen, 5)
+        for (j_idx = 1 to specimen_count)
+            ; Determine if current specimen expire date/time is greater than the expire date/time being held.
+            if (reply->PersonList[i_idx].specimen[j_idx].expire_dt_tm > maxExpDtTmHold)
+                ; Current expire date/time is greater, set max expire date/time to current expire date/time.
+                set maxExpDtTmHold = reply->PersonList[i_idx].specimen[j_idx].expire_dt_tm
+            endif
+        endfor
+ 
+        if (maxExpDtTmHold > 0.0)
+            ; set new_sample_dt_tm in reply equal to maximum expire date/time plus one second.
+            set reply->PersonList[i_idx].new_sample_dt_tm = cnvtlookahead("1,S",maxExpDtTmHold)
+        else
+            ; set new sample_dt_tm to current date/time since no maxExpDtTmHold to go by.
+            set reply->PersonList[i_idx].new_sample_dt_tm = CURRENT_DT_TM_HOLD
+        endif
+    endfor
+endif
+ 
+/*****************************************************************************/
+/* Get historical names if history is stored                                 */
+/*****************************************************************************/
+#GET_HISTORIC_NAME
+if (log_override_ind = 1)
+    call echo("Starting popluate historical name")
+    call LOG_MESSAGE("Starting popluate historical name", LOG_LEVEL_DEBUG)
+    call echo(build("historical_demog_ind: ", reply->historical_demog_ind))
+endif
+ 
+if ((reply->historical_demog_ind = 1) and (request->alert_ind != "Y"))
+ 
+   for (y_idx = 1 to size(reply->PersonList, 5))
+      for (lIdx1 = 1 to size(reply->PersonList[y_idx].specimen, 5))
+         for (lIdx2 = 1 to size(reply->PersonList[y_idx]->Specimen[lIdx1]->Orders, 5))
+ 
+            set dcurrent_person_id = reply->PersonList[y_idx]->person_id
+ 
+            select into "nl:"
+                pc.from_person_id
+            from person_combine_det pcd,
+                 person_combine pc
+            plan pcd where pcd.entity_id = reply->PersonList[y_idx]->Specimen[lIdx1]->Orders[lIdx2]->order_id
+                     and pcd.entity_name = "ORDERS"
+            join pc where pc.person_combine_id = pcd.person_combine_id
+                    and pc.active_status_cd = dactive_status_cd
+                    and pc.active_status_dt_tm >= cnvtdatetime(reply->PersonList[y_idx]->Specimen[lIdx1]->drawn_dt_tm)
+                    and pc.active_ind = 1
+ 
+            order by pc.active_status_dt_tm
+ 
+            Head Report
+                 dcurrent_person_id = pc.from_person_id
+            with nocounter
+ 
+            select into "nl:"
+                 pnh.name_full
+            from person_name_hist pnh
+            plan pnh where pnh.person_id = dcurrent_person_id
+                     and pnh.name_type_cd = current_name_type_cd
+                     and pnh.transaction_dt_tm <=
+                       cnvtdatetime(datetimeadd(reply->PersonList[y_idx]->Specimen[lIdx1]->drawn_dt_tm, dMINUTE))
+                     and not exists (select
+                                         pcd.entity_id
+                                     from person_combine_det pcd
+                                     where pcd.entity_id = pnh.person_name_hist_id
+                                           and pcd.entity_name = "PERSON_NAME_HIST"
+                                           and pcd.combine_action_cd = dcombine_add_cd)
+ 
+            order by pnh.transaction_dt_tm desc
+ 
+            Head Report
+    	         reply->PersonList[y_idx]->Specimen[lIdx1]->historical_name = pnh.name_full
+            with nocounter
+         endfor
+      endfor
+   endfor
+ 
+    ; Check for any CCL errors
+    set error_check = error(errmsg,0)
+    if (error_check != 0)
+       call ErrorHandler("F", "Select person_name_hist", errmsg)
+    endif
+endif
+ 
+go to SET_STATUS
+ 
+/*****************************************************************************/
+/* ErrorHandler subroutine                                                   */
+/*****************************************************************************/
+declare ErrorHandler(OperationStatus = c1,
+                     TargetObjectName = c25,
+                     TargetObjectValue = vc) = NULL
+ 
+subroutine ErrorHandler(OperationStatus,
+                        TargetObjectName,
+                        TargetObjectValue)
+   declare error_cnt = i2 with private, noconstant(0)
+ 
+   set error_cnt = size(reply->status_data.subeventstatus, 5)
+   if (error_cnt > 1
+   or (error_cnt = 1 and reply->status_data.subeventstatus[error_cnt].OperationStatus != ""))
+      set error_cnt = error_cnt + 1
+      set stat = alter(reply->status_data.subeventstatus, error_cnt)
+   endif
+ 
+   set reply->status_data.status = "F"
+   set reply->status_data.subeventstatus[error_cnt].OperationName = SCRIPT_NAME
+   set reply->status_data.subeventstatus[error_cnt].OperationStatus = OperationStatus
+   set reply->status_data.subeventstatus[error_cnt].TargetObjectName = TargetObjectName
+   set reply->status_data.subeventstatus[error_cnt].TargetObjectValue = TargetObjectValue
+ 
+   go to EXIT_SCRIPT
+end
+ 
+/*****************************************************************************/
+/* Status set and exit script                                                */
+/*****************************************************************************/
+#SET_STATUS
+if (person_count = 0)
+   set reply->status_data.status = "Z"
+else
+   set reply->status_data.status = "S"
+endif
+ 
+#EXIT_SCRIPT
+ 
+free set temp
+ 
+if (log_override_ind = 1)
+    call echo("End bbt_get_avail_flex_specs script")
+    call LOG_MESSAGE("End bbt_get_avail_flex_specs script", LOG_LEVEL_DEBUG)
+    call echorecord(request)
+endif
+ 
+end
+go
