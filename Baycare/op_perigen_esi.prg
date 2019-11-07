@@ -66,7 +66,9 @@ declare person_id = f8
 declare encntr_id = f8
 declare observation_ident = vc
 declare observation_value = vc
- 
+
+declare queue_id = f8
+declare listener_id = f8
 declare acuity_level_id = f8
 declare cur_acuity_level_id = f8
 declare acuity_level_disp = vc
@@ -98,6 +100,34 @@ execute oen_parse_segments with replace("REQUEST",parse_segments)
 call log_msg(2, "End {{Script::oen_parse_segments}}", "PeriGenAud")
 call log_msg(4,parse_segments->message,"PeriGenDbg")
 call echorecord(saved_seg)
+
+/***************************************
+* GATHER QUEUE_ID FOR TRANSACTION      *
+****************************************/
+set test = oeninfo->pid
+call log_msg(2, build2("test => ",test), "PeriGenDbg")
+
+
+select
+  c.listener_id
+from 
+  cqm_listener_config c 
+where c.listener_alias = "1775"
+  and c.application_name = "OENINTERFACE"
+detail
+  listener_id = c.listener_id
+with nocounter
+
+select intl "nl:"
+from
+  cqm_oeninterface_tr_1 tr1
+where tr1.listener_id = listener_id
+  and tr1.process_status_flag = 10
+  and tr1.process_stop_dt_tm = null
+  and tr1.active_ind = 1
+detail
+  queue_id = tr1.queue_id
+with maxrec = 1, nocounter
 
 /***********************************************
 * EXTRACT DATA FROM PARSED HL7 MESSAGE         *
@@ -450,6 +480,8 @@ call log_msg(2, build2("acuity_level_id => ",acuity_level_id), "PeriGenDbg")
 call log_msg(2, build2("tracking_id => ",tracking_id), "PeriGenDbg")
 call log_msg(2, build2("tracking_checkin_id => ",tracking_checkin_id), "PeriGenDbg")
 call log_msg(2, build2("tracking_ref_id => ",tracking_ref_id), "PeriGenDbg")
+call log_msg(2, build2("listener_id => ",listener_id), "PeriGenDbg")
+call log_msg(2, build2("queue_id => ",queue_id), "PeriGenDbg")
 
 call log_msg(2, "End {{Script::OP_PERIGEN_ESI}}", "PeriGenAud")
 ;desroy handle for logging to msglog
