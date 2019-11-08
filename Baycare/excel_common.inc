@@ -60,7 +60,7 @@ declare stopCell(null)=null
 declare addRow(null)=null
 declare addCell(style=vc)=null
 declare addDateTime(data=f8)=null
-declare addString(data=vc, style= " ")=null
+declare addString(data=vc, style=vc(value, " "))=null
 declare addDouble(data=f8)=null
 declare addInt(data=i4)=null
 declare addFormula(formula=vc,data=vc)=null
