@@ -17,16 +17,8 @@
 ; On OB, modobj is first, then modorig
 ; the whole script is from Cerner (Stony Brook) except the last section--added by J Rachael
 
-declare foundqry=i4
-
 ; Standardl for Pyxis//Robots/Talyst - for QRY msgs only, changing |ETR to |ETO 
 
-set foundqry = findstring("|QRY^Q02|",oen_reply->out_msg,1)
-if (foundqry)
-  set oen_reply->out_msg = concat(replace(oen_request->org_msg, "|ETO","|ETR",0), char(0))
-else
-  set oen_reply->out_msg = concat(oen_request->org_msg, char(0))
-endif
 ; create the Z-segment needed for Packager -- ZRC.     ; SK2402 9/30/05
 
 set zrc_size = size(zrc->string,1)

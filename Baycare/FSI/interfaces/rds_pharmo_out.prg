@@ -27,16 +27,49 @@
  *  ---------------------------------------------------------------------------------------------
 */
 
-/***  4/15/15  T McArtor       Added Facility logic to the ingnore logic exception so it would not get ignored***/
-/**********************************Contributor Source Pyxis************************************************/
-If (oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->assigned_pat_loc->building not in ("SJS", "SFB",
-"St. Anthony's", "SAH","SJN","St. Joseph's Hos","MCS","Mease Countrysi","MDU","Mease Dunedin","BAH","NBY","MPH","Morton Plant",
- "WHH","WHW","SJH","SJW","BRM")) 
-Set OenStatus->Ignore=1
-set oenstatus->ignore_text = build("SKIPPED: PATIENT BUILDING OF "
-, oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->assigned_pat_loc->building, " IS NOT IN LIST")
-;CALL ECHO("Facility Filter")
-go to EXITSCRIPT2
+;load subroutines
+execute op_fsi_common
+
+;variable declarations
+declare cqmsubtype = c15
+
+
+if (oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->assigned_pat_loc->building not in ("SJS", "SFB",
+    "St. Anthony's", "SAH","SJN","St. Joseph's Hos","MCS","Mease Countrysi","MDU","Mease Dunedin",
+    "BAH","NBY","MPH","Morton Plant", "WHH","WHW","SJH","SJW","BRM")) 
+    set oenstatus->ignore = 1
+    set oenstatus->ignore_text = build("SKIPPED: PATIENT BUILDING OF "
+    , oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->assigned_pat_loc->building, " IS NOT IN LIST")
+
+    go to exit_script
+endif
+
+if (oen_reply->RDE_GROUP [1]->ORC->ord_ctrl_rsn_cd->identifier = "Fill List")
+    set oenstatus->ignore = 1
+    set oenstatus->ignore_text = "SKIPPED: ORD_CTRL_RSN_CD IS NOT Fill List"
+    go to exit_script
+endif
+
+if (oen_reply->RDE_GROUP [z]->RXE_GROUP [1]->RXE->disp_amt = "0") 
+    set oenstatus->ignore = 1
+    set oenstatus->ignore_text = "SKIPPED: DISPENSE AMOUNT IS 0"
+endif
+
+;;; todo - see if any of these reasons exist in p30
+set cqmtype = get_string_value_mobj("cqm_type")
+set cqmsubtype = get_string_value_mobj("cqm_subtype")
+set cqmclass = get_string_value_mobj("cqm_class")
+
+if (cqmsubtype = "")
+  execute oencpm_MsgLog build("No Cerner section in message or CQM_SUBTYPE = null.", char(0))
+  Set oenstatus->ignore = 1
+  set oenstatus->ignore_text = "SKIPPED: CQM_SUBTYPE IS NULL"
+  go to exit_script
+elseif (cqmsubtype = "0")
+  execute oencpm_MsgLog build("Cerner section exists, but no CQM_SUBTYPE value.", char(0))
+  Set oenstatus->ignore = 1
+  set oenstatus->ignore_text = "SKIPPED: CQM_SUBTYPE IS 0"
+go to exit_script
 endif
 
 /****7-13-16***********************Start only send cart fills*********************Mod#  19 ******************/
@@ -75,20 +108,6 @@ DETAIL
 WITH NOCOUNTER 
 
 ENDFOR
-/*****************Removing location filter  Mod #20**************************
-;Only send these specific locations to dispense; has to be a fill list and one of the below locs
-IF(oen_reply->RDE_GROUP [1]->ORC->ord_ctrl_rsn_cd->identifier = "Fill List")
-      IF(location_s not in ("AH 1FXA", "AH 3NE", "AH 3NW", "AH 3SE", "AH 3SW", "AH 4FXA", "AH 4NW", "AH 4SE", 
-	"AH 4SW","AH 5E", "AH 5NW", "AH 5SW", "AH 6NW", "AH 6SW", "AH ACU", "AH ADMH", "AH ERH", "AH ERPH", "AH HCL", 
-	"AH ICU","AH PT2A", "AH PT2I", "AH PT3A", "AH PT3I", "AH SIC", "AH SNF", "NB 1STN", "NB 2NDN", "NB 2STN", "NB 3RDN",
-	"NB 3STN","NB AMBN", "NB CMUN", "NB ERHN", "NB ICUN", "NB IVANH", "NB IVTNH", "NB RB1N", "NB RB2N", "NB HBN",
-	"NB WHCHN"))
- 	           Set OenStatus->Ignore=1
-                           set oenstatus->ignore_text = "SKIPPED: DISPENSE LOCATION IS NOT IN LIST"
-                go to EXITSCRIPT2
-      ENDIF
-ENDIF
-*******************/
 
 IF(oen_reply->RDE_GROUP [1]->ORC->ord_ctrl_rsn_cd->identifier = "Fill List")
     IF(dispense_category in ("Med","Chemo-adult-Med", "Chemo-pedi-Med","Investigational-Med", "Med-Specialty",
@@ -96,12 +115,6 @@ IF(oen_reply->RDE_GROUP [1]->ORC->ord_ctrl_rsn_cd->identifier = "Fill List")
 "IV-adult-Continuous-Premix", "IV-adult-Intermittent-Premix","Intermittent Premix","Continuous Premix","Chemo Med"))
        go to EXITSCRIPT3
     ENDIF
-ENDIF
-
-IF(oen_reply->RDE_GROUP [1]->ORC->ord_ctrl_rsn_cd->identifier = "Fill List")
-   Set OenStatus->Ignore=1
-   set oenstatus->ignore_text = "SKIPPED: ORD_CTRL_RSN_CD IS NOT Fill List"
-       go to EXITSCRIPT2
 ENDIF
 
 ;Added for cart fill ignore, skipping fill list ignore logic
@@ -128,13 +141,6 @@ set trace norecpersist
 if(oen_reply->CONTROL_GROUP [1]->MSH [1]->message_type->messg_type="RDS")
 
 
-
-set DIS_cnt = 0
-record DIS_holder
-(
-  1 DIS_array[*]
-    2 FILL_HX_iD = f8
-)
 
 Set  Order_Id = oen_reply->RDE_GROUP [1]->ORC->placer_ord_nbr [1]->entity_id
 Set  Run_Id = oen_reply->RDE_GROUP [1]->ORC->placer_group_nbr->entity_id
@@ -172,104 +178,6 @@ execute oencpm_MsgLog build("NEW SEGMENT",ZRC->string,char(0))
 /* This interface must be triggered as an RDS - need to switch it to an RDE for Talyst */
 set oen_reply->CONTROL_GROUP [1]->MSH [1]->message_type->messg_type ="RDE"
 Set oen_reply->RDE_GROUP [1]->ORC->order_ctrl ="NW"
-
-
-
-
-/* more changes to RXE segment - maybe not neccessary?  script came from NKCMH_MO  */
-/*
-Set oen_reply->RDE_GROUP [1]->ORC->order_quant_timing [1]->interval->time_interval =
-oen_reply->RDE_GROUP [1]->RXE_GROUP [1]->RXE->quant_timing->interval->time_interval
-
-Set oen_reply->RDE_GROUP [1]->ORC->order_quant_timing [1]->interval->frequency =
-oen_reply->RDE_GROUP [1]->RXE_GROUP [1]->RXE->quant_timing->interval->frequency
-
-set oen_reply->RDE_GROUP [1]->ORC->order_quant_timing [1]->duration=
-oen_reply->RDE_GROUP [1]->RXE_GROUP [1]->RXE->quant_timing->duration
-
-declare order_num=F8
-declare desc=VC
-declare ind= I2
-declare V=F8
-declare VU = C40
-
-set order_num=cnvtint(oen_reply->RDE_GROUP [1]->ORC->placer_ord_nbr [1]->entity_id)
-
-select into "nl:"
-o.ORDER_MNEMONIC
-from orders o
-where
-o.order_id=order_num
-detail
-desc = o.ORDER_MNEMONIC
-with nocounter
-
-select into "nl:"
-o.ORDERABLE_TYPE_FLAG
-from orders o
-where
-o.order_id=order_num
-detail
-ind=o.ORDERABLE_TYPE_FLAG
-with nocounter
-
-if(ind=10)
-  Set oen_reply->RDE_GROUP [1]->RXE_GROUP [1]->RXE->give_code->text = desc
-  Set oen_reply->RDE_GROUP [1]->RXE_GROUP [1]->RXE->give_code->identifier = "9999"
-endif
-
-set run_num=cnvtint(oen_reply->RDE_GROUP [1]->ORC->placer_group_nbr->entity_id)
-select into "nl:"
-fpo.volume
-from FILL_PRINT_ORD_HX  fpo
-where fpo.order_id=order_num
-detail
-V=fpo.volume
-with nocounter
-execute oencpm_MsgLog build("STRENGTH->",V,char(0))
-
-select into "nl:"
-fpo.VOLUME_UNIT_S
-from FILL_PRINT_ORD_HX  fpo
-where  fpo.order_id=order_num
-detail
-VU=fpo.VOLUME_UNIT_S
-with nocounter
-
-Set oen_reply->RDE_GROUP [1]->RXE_GROUP [1]->RXE->give_str =  trim(CNVTSTRING(V,15, 4, L),3)
-Set oen_reply->RDE_GROUP [1]->RXE_GROUP [1]->RXE->give_str_units->identifier =VU
-end of the extra scripting that might not be necessary
- */
-
-/* Sending out Dispense Category in RXR-2.1 - requested by StonyBrook - SK2402-1/11/06   */
-/* Added in PROD 1/23/06 */
-
-/* Coding does not work: 
-declare newdispcat = i4
-declare ordid =i4
-set ordid = cnvtint(oen_reply->RDE_GROUP [1]->ORC->placer_ord_nbr [1]->entity_id)
-execute oencpm_msglog build("ordid=", ordid, char(0))
-  select into "nl:"
-  od.dispense_category_cd
-  from order_dispense od
-  where od.order_id = ordid
-detail
-  newdispcat = od.dispense_category_cd
-execute oencpm_msglog build("newdispcat =", newdispcat, char(0))
-
-     declare newdisp = vc
-     select into "nl:"
-     cv.display
-     from code_value cv
-     where cv.code_value = newdispcat
-     detail
-     newdisp = cv.display
-execute oencpm_msglog build("newdisp=", newdisp, char(0))
-
-;;Set oen_reply->RDE_GROUP [1]->RXO_GROUP [1]->RXR_GROUP [1]->RXR [1]->adm_device->text = newdisp
-;;Set oen_reply->RDE_GROUP [1]->RXO_GROUP [1]->RXR_GROUP [1]->RXR [1]->adm_device->identifier =  cnvtstring(newdispcat)
-Set oen_reply->RDE_GROUP [1]->RXE_GROUP [1]->RXR [1]->adm_device->text = newdisp
-Set oen_reply->RDE_GROUP [1]->RXE_GROUP [1]->RXR [1]->adm_device->identifier = cnvtstring(newdispcat)*/
 
 /* Create ZX3 segment-dispense category in ZX3-2 for Cloverleaf filtering/filter by disp. loc/ change disp. amt*/
 
@@ -340,10 +248,7 @@ ENDIF
 
 /*********************************************** Filter zero dose qty***********************************************************/
 
-If (oen_reply->RDE_GROUP [z]->RXE_GROUP [1]->RXE->disp_amt = "0") 
-    set oenstatus->ignore = 1
-    set oenstatus->ignore_text = "SKIPPED: DISPENSE AMOUNT IS 0"
-Endif
+
 
 Set oen_reply->RDE_GROUP [z]->RXE_GROUP [1]->ZX3 [1]->dea_schedule->identifier = "1"
 
@@ -397,10 +302,10 @@ WITH NOCOUNTER, MAXREC=1
 
 
 IF (FORM_TYPE_VAR = 2)
-  Set OenStatus->Ignore=1
+  Set oenstatus->ignore = 1
   set oenstatus->ignore_text = "SKIPPED: FORM TYPE IS 2"
 ELSEIF (FORM_TYPE_VAR = 3)
-  Set OenStatus->Ignore=1
+  Set oenstatus->ignore = 1
   set oenstatus->ignore_text = "SKIPPED: FORM TYPE IS 3"
 ENDIF
 
@@ -412,188 +317,51 @@ endfor
 
 /***************************end of ignore and 4010 logic for cont and int orders**************************************/
 
-
-/**********************************END OF AUTOPHARM SECTION************************************************/
-/***********************************************************************************************************************/
-
-/*** Mod3 - 7/1/10  R Quack - adding logic to call doctor filter script***/
 execute op_doc_filter_gen_outv2
 
-execute oencpm_MsgLog build("Start of PYXIS_MOD_OBJ script", char(0))
-
-;subroutine declarations
-declare get_string_value(string_meaning) = c15
-declare get_long_value(string_meaning) = i4
-
-;variable declarations
-declare cqmsubtype = c15
-
-If (oen_reply->CONTROL_GROUP [1]->MSH [1]->message_type->messg_type="QRY")
-  if (oen_reply->CONTROL_GROUP [1]->MSH [1]->message_type->messg_trigger = "Q02")
-    go to EXITSCRIPT
-  endif
+/* Get the frequency times for non AD-HOC frequencies */
+if (get_long_value_mobj("freq_qualifier") = 16)
+    execute oencpm_msglog("freq_qualifier = 16")
+    go to exit_script
 endif
 
-set cqmtype = get_string_value("cqm_type")
-set cqmsubtype = get_string_value("cqm_subtype")
-set cqmclass = get_string_value("cqm_class")
+;determine the correct frequency and populate the RDE_GROUP and RXE_GROUP with it
+set time_of_day = trim(get_string_value_mobj("freq_time_of_day"))
+set day_of_week = trim(get_string_value_mobj("freq_day_of_week"))
 
-if (cqmsubtype = "")
-  execute oencpm_MsgLog build("No Cerner section in message or CQM_SUBTYPE = null.", char(0))
-  Set OenStatus->Ignore=1
-  set oenstatus->ignore_text = "SKIPPED: CQM_SUBTYPE IS NULL"
-  go to EXITSCRIPT
-elseif (cqmsubtype = "0")
-  execute oencpm_MsgLog build("Cerner section exists, but no CQM_SUBTYPE value.", char(0))
-  Set OenStatus->Ignore=1
-  set oenstatus->ignore_text = "SKIPPED: CQM_SUBTYPE IS 0"
-go to EXITSCRIPT
+declare frequency = vc
+
+;get_string_value returns "0" if the string value is not found and "-1" if there is an error
+if (time_of_day > "" and time_of_day not in ("0","-1"))
+    execute oencpm_msglog("inside time_of_day")
+    set frequency = time_of_day
+elseif (day_of_week > "" and day_of_week not in ("0","-1"))
+    execute oencpm_msglog("inside day_of_week")
+    set frequency = day_of_week
 endif
 
-/* PYXIS wants frequency times for non AD-HOC frequencies */
+execute oencpm_msglog(build("frequency=",frequency))
+    
+;if there is a frequency then assign it to each orc and rxe segment
 
-if ( get_long_value( "freq_qualifier" ) = 16 ) ;; ad hoc frequency - times already in HL7 message
-    go to SKIP_AD_HOC_FREQ
-endif
-;;frequency day of week and time of day
+if (frequency > "")
+    declare rde_idx = i2
+    declare rxe_idx = i2
+    set rde_size = size(oen_reply->rde_group , 5)
+	
+    for (rde_idx = 1 to rde_size)
+        set oen_reply->rde_group[rde_idx]->orc->order_quant_timing[1]->interval->time_interval = frequency ;ORC 7.2
+        set rxe_size = size(oen_reply->rde_group[rde_idx]->rxe_group, 5)
 
-record freq_temp
-(
-        1 time_of_day   = vc
-        1 day_of_week   = vc
-        1 freq_desc     = vc
-)
-
-set freq_temp->time_of_day = trim(get_string_value("freq_time_of_day"))
-set freq_temp->day_of_week = trim(get_string_value("freq_day_of_week"))
-
-;;execute oencpm_msglog build("freq_temp->time_of_day=",freq_temp->time_of_day)
-;;execute oencpm_msglog build("freq_temp->day_of_week=",freq_temp->day_of_week)
-
-if (trim(freq_temp->time_of_day) > "") ;; use time_of_day
-  set freq_temp->freq_desc = freq_temp->time_of_day
-
-elseif (trim(freq_temp->day_of_week) > "") ;; use day_of_week
-  set freq_temp->freq_desc = freq_temp->day_of_week
-endif
-
-;;execute oencpm_msglog build("freq_temp->freq_desc=",freq_temp->freq_desc)
-
-free set rde_size
-free set rxe_size
-
-free set rde_idx
-free set rxe_idx
-
-set rde_size = 0
-set rxe_size = 0
-
-set rde_idx = 0
-set rxe_idx = 0
-
-if (trim(freq_temp->freq_desc) > "")
-  set rde_size = size(oen_reply->rde_group , 5)
-  ;;execute oencpm_msglog build( "rde_size=",rde_size )
-  for (rde_idx = 1 to rde_size)
-    ;; ORC 7.2
-    set oen_reply->rde_group[rde_idx]->orc->order_quant_timing[1]->interval->time_interval = freq_temp->freq_desc
-set rxe_size = size(oen_reply->rde_group[rde_idx]->rxe_group, 5)
-      ;;execute oencpm_msglog build( "rxe_size=",rxe_size )
-      for (rxe_idx = 1 to rxe_size)
-        ;; RXE 1.2
-        set oen_reply->rde_group[rde_idx]->rxe_group[rxe_idx]->rxe->quant_timing->interval->time_interval = freq_temp->freq_desc
-      endfor
-  endfor
-
-endif
-
-free set rde_size
-free set rxe_size
-free set rde_idx
-free set rxe_idx
-
-free set freq_temp
-
-#SKIP_AD_HOC_FREQ
-
-/* PYXIS does not want facility or building in the HL7 message */
-
-/* this has been taken care of by building blank cvo aliases on code set 220
-   for all building and facility codes */
-;;set oen_reply->person_group[ 1 ]->pat_group[ 1 ]->pv1[ 1 ]->assigned_pat_loc->facility_id->name_id = ""
-;;set oen_reply->person_group[ 1 ]->pat_group[ 1 ]->pv1[ 1 ]->assigned_pat_loc->building = ""
-
-
-#EXITSCRIPT
-
-;*********************************
-;** GET_STRING_VALUE subroutine **
-;*********************************
-subroutine get_string_value(string_meaning)
-  declare eso_idx = i4
-  declare list_size = i4
-
-  set eso_idx = 0
-  set list_size = 0
-
-  set stat = (validate(oen_reply->cerner, "nocernerarea"))
-  if (stat = "nocernerarea")
-    return("")
-  else
-    set eso_idx = 0
-   set list_size = 0
-    set list_size = size(oen_reply->cerner->stringList,5)
-
-      if( list_size > 0 )
-        set eso_x = 1
-        for ( eso_x = eso_x to list_size )
-          if(oen_reply->cerner->stringList[eso_x]->strMeaning = string_meaning)
-            set eso_idx = eso_x
-          endif
+        for (rxe_idx = 1 to rxe_size)
+            set oen_reply->rde_group[rde_idx]->rxe_group[rxe_idx]->rxe->quant_timing->interval->time_interval = frequency ;RXE 1.2
         endfor
-      endif
-if( eso_idx > 0 )
-      return( oen_reply->cerner->stringList[eso_idx]->strVal )
-    else
-      return("0")
-    endif
-  endif
-end  ;get_string_value
-
-;*******************************
-;** GET_LONG_VALUE subroutine **
-;*******************************
-subroutine get_long_value(string_meaning)
-  declare eso_idx = i4
-  declare list_size = i4
-
-  set eso_idx = 0
-  set list_size = 0
-
-  set stat = (validate(oen_reply->cerner, "nocernerarea"))
-  if (stat = "nocernerarea")
-    return("")
- else
-    set eso_idx = 0
-    set list_size = 0
-    set list_size = size(oen_reply->cerner->longList,5)
-
-      if( list_size > 0 )
-        set eso_x = 1
-        for ( eso_x = eso_x to list_size )
-          if(oen_reply->cerner->longList[eso_x]->strMeaning = string_meaning)
-            set eso_idx = eso_x
-          endif
-       endfor
-      endif
-
-    if( eso_idx > 0 )
-      return( oen_reply->cerner->longList[eso_idx]->lVal )
-    else
-      return(0)
-    endif
-  endif
-end ;get_long_value
-
-#EXITSCRIPT2
+    endfor
 endif
+;end of setting the frequency
+
+execute oencpm_msglog(build("set frequency=",oen_reply->rde_group[1]->rxe_group[1]->rxe->quant_timing->interval->time_interval))
+
+endif
+
+#exit_script
