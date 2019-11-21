@@ -61,23 +61,6 @@ for (rde_cnt = 1 to size(oen_reply->RDE_GROUP,5))
     endif
 endfor
 
-;;; todo - see if any of these reasons exist in p30
-set cqmtype = get_string_value_mobj("cqm_type")
-set cqmsubtype = get_string_value_mobj("cqm_subtype")
-set cqmclass = get_string_value_mobj("cqm_class")
-
-if (cqmsubtype = "")
-    execute oencpm_MsgLog build("No Cerner section in message or CQM_SUBTYPE = null.", char(0))
-    set oenstatus->ignore = 1
-    set oenstatus->ignore_text = "SKIPPED: CQM_SUBTYPE IS NULL"
-    go to exit_script
-elseif (cqmsubtype = "0")
-    execute oencpm_MsgLog build("Cerner section exists, but no CQM_SUBTYPE value.", char(0))
-    set oenstatus->ignore = 1
-    set oenstatus->ignore_text = "SKIPPED: CQM_SUBTYPE IS 0"
-    go to exit_script
-endif
-
 if(oen_reply->CONTROL_GROUP [1]->MSH [1]->message_type->messg_type = "RDS")
     execute oencpm_MsgLog build("Start of build Z segment", char(0))
 
@@ -97,7 +80,7 @@ if(oen_reply->CONTROL_GROUP [1]->MSH [1]->message_type->messg_type = "RDS")
     execute oencpm_msglog build("NEW FILLDATE ", fill_dt)
     execute oencpm_msglog build("NEW SEGMENT",ZRC->string,char(0))
 
-    /* This interface must be triggered as an RDS - need to switch it to an RDE for Talyst */
+    /* This interface must be triggered as an RDS - need to switch it to an RDE for Pharmogistics */
     set oen_reply->CONTROL_GROUP [1]->MSH [1]->message_type->messg_type = "RDE"
     set oen_reply->RDE_GROUP [1]->ORC->order_ctrl = "NW"
 
@@ -132,9 +115,7 @@ if(oen_reply->CONTROL_GROUP [1]->MSH [1]->message_type->messg_type = "RDS")
         endif ;end fill list logic
 		
         oen_reply->RDE_GROUP [pos]->RXE_GROUP [1]->RXE->disp_amt = cnvtstring(fpoh.charge_qty)
-;        oen_reply->RDE_GROUP [pos]->ORC->order_quant_timing [1]->priority = fpoh.order_priority_s
-;        oen_reply->RDE_GROUP [pos]->RXE_GROUP [1]->RXE->quant_timing->priority = fpoh.order_priority_s
-		
+
         if (oen_reply->RDE_GROUP [1]->RXE_GROUP [1]->RXE->give_dosage_form->identifier = "Premix")
             oen_reply->RDE_GROUP [pos]->RXE_GROUP [1]->RXE->disp_amt = cnvtstring(fpoh.fill_quantity)
         endif
