@@ -53,6 +53,14 @@ if (oen_reply->PERSON_GROUP [1]->PAT_GROUP [1]->PV1 [1]->assigned_pat_loc->build
     go to exit_script
 endif
 
+for (rde_cnt = 1 to size(oen_reply->RDE_GROUP,5))
+    if (oen_reply->RDE_GROUP [rde_cnt]->RXE_GROUP [1]->RXE->disp_amt = "0") 
+        set oenstatus->ignore = 1
+        set oenstatus->ignore_text = "SKIPPED: DISPENSE AMOUNT IS 0"
+        go to exit_script
+    endif
+endfor
+
 ;;; todo - see if any of these reasons exist in p30
 set cqmtype = get_string_value_mobj("cqm_type")
 set cqmsubtype = get_string_value_mobj("cqm_subtype")
@@ -121,21 +129,8 @@ if(oen_reply->CONTROL_GROUP [1]->MSH [1]->message_type->messg_type = "RDS")
                 oenstatus->ignore = 1
                 oenstatus->ignore_text = "SKIPPED: ORD_CTRL_RSN_CD IS NOT Fill List"
             endif
-        else
-            if (fpoh.cur_disp_loc_s not in ("JS Inventory Manager", "SFB Inventory Manager","JN Inventory Manager"
-                , "MC Inventory Manager","MD Inventory Manager","MP Inventory Manager","NB Inventory Manager"
-                , "WW Inventory Manager","JH Inventory Manager","JW Inventory Manager", "BR Inventory Manager"
-                , "AH Inventory Manager","WH Inventory Manager"))
-                oenstatus->ignore = 1
-                oenstatus->ignore_text = "SKIPPED: ORD_CTRL_RSN_CD IS NOT FILL LIST AND DISPLAYLOC IS NOT IN LIST"
-            endif 
         endif ;end fill list logic
-
-        if (oen_reply->RDE_GROUP [pos]->RXE_GROUP [1]->RXE->disp_amt = "0") 
-            oenstatus->ignore = 1
-            oenstatus->ignore_text = "SKIPPED: DISPENSE AMOUNT IS 0"
-        endif
-
+		
         oen_reply->RDE_GROUP [pos]->RXE_GROUP [1]->RXE->disp_amt = cnvtstring(fpoh.charge_qty)
 ;        oen_reply->RDE_GROUP [pos]->ORC->order_quant_timing [1]->priority = fpoh.order_priority_s
 ;        oen_reply->RDE_GROUP [pos]->RXE_GROUP [1]->RXE->quant_timing->priority = fpoh.order_priority_s
@@ -151,6 +146,17 @@ if(oen_reply->CONTROL_GROUP [1]->MSH [1]->message_type->messg_type = "RDS")
         else
             oen_reply->RDE_GROUP [pos]->RXE_GROUP [1]->ZX3 [1]->dea_schedule->text = fpoh.dispense_category_s
         endif
+
+        foot report
+            if (oen_reply->RDE_GROUP [1]->ORC->ord_ctrl_rsn_cd->identifier != "Fill List")
+                if (fpoh.cur_disp_loc_s not in ("JS Inventory Manager", "SFB Inventory Manager","JN Inventory Manager"
+                    , "MC Inventory Manager","MD Inventory Manager","MP Inventory Manager","NB Inventory Manager"
+                    , "WW Inventory Manager","JH Inventory Manager","JW Inventory Manager", "BR Inventory Manager"
+                    , "AH Inventory Manager","WH Inventory Manager"))
+                    oenstatus->ignore = 1
+                    oenstatus->ignore_text = "SKIPPED: ORD_CTRL_RSN_CD IS NOT FILL LIST AND DISPLAYLOC IS NOT IN LIST"
+                endif
+            endif
     with nocounter
 
     execute op_doc_filter_gen_outv2
