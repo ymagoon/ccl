@@ -28,12 +28,16 @@ execute ccl_prompt_api_dataset "autoset"
  
 select
   ems.*
+  , p.name_full_formatted
 from
   eks_module em
   , eks_modulestorage ems
+  , prsnl p
   , dummyt d
 plan em where em.active_flag = "A"
   and em.maint_validation = "PRODUCTION"
+join p
+  where p.person_id = em.updt_id
 join ems where ems.module_name = em.module_name
   and ems.data_type = 1
   and ems.version = (select
