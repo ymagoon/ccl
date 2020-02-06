@@ -6,6 +6,11 @@
  *  Description:  Parent program to read csv files and execute child scripts after loading the
  *				  csv file in memory.
  *
+ *				  kia_dm_dbimport is a standard Cerner script used to read csv files
+ *				  1. The first parameter is the filename and directory
+ *				  2. The second parameter is the name of the script to pass the record structure to
+ *				  3. The third parameter is the max record count
+ *				  4. The final parameter is the start count
  *  ---------------------------------------------------------------------------------------------
  *  Author:         Yitzhak Magoon
  *  Creation Date:  08/02/2019
