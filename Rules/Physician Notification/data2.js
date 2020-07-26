@@ -7,19 +7,19 @@ const list = {
         {
           "display": "Arterial Line Insertion",
           "catalogCd": 4149435,
-          "synonimId": 4149436,
+          "synonymId": 4149436,
           "orderSentences": []
         },
         {
           "display": "Arterial Line Care",
           "catalogCd": 4149429,
-          "synonimId": 4149430,
+          "synonymId": 4149430,
           "orderSentences": []
         },
         {
           "display": "Arterial Line Discontinue",
           "catalogCd": 4149432,
-          "synonimId": 4149433,
+          "synonymId": 4149433,
           "orderSentences": []
         }
       ],
@@ -36,13 +36,13 @@ const list = {
         {
           "display": "Central LineInsertion",
           "catalogCd": 33708007,
-          "synonimId": 33708013,
+          "synonymId": 33708013,
           "orderSentences": []
         },
         {
           "display": "Central Venous Catheter Care",
           "catalogCd": 2780643,
-          "synonimId": 2780644,
+          "synonymId": 2780644,
           "orderSentences": [
             {
               "indication": "Hemodynamically Unstable",
@@ -69,7 +69,7 @@ const list = {
         {
           "display": "Central Venous Catheter Discontinue",
           "catalogCd": 4149440,
-          "synonimId": 4149441,
+          "synonymId": 4149441,
           "orderSentences": []
         }
       ],
@@ -86,7 +86,7 @@ const list = {
         {
           "display": "Urinary Catheter Insertion",
           "catalogCd": 2958525,
-          "synonimId": 2958526,
+          "synonymId": 2958526,
           "orderSentences": [
             {
               "indication": "Acute Urinary Retention",
@@ -133,7 +133,7 @@ const list = {
         {
           "display": "Urinary Catheter Care",
           "catalogCd": 22937729,
-          "synonimId": 22937731,
+          "synonymId": 22937731,
           "orderSentences": [
             {
               "indication": "Acute Urinary Retention",
@@ -180,7 +180,7 @@ const list = {
         {
           "display": "Urinary Catheter Discontinue",
           "catalogCd": 20230936,
-          "synonimId": 20230938,
+          "synonymId": 20230938,
           "orderSentences": []
         }
       ],
@@ -207,7 +207,7 @@ const list = {
       "expiresIn": 0,
       "indicationInd": 0,
       "type": "insert",
-      "curTime": "2020-07-07T03:56:54.000+00:00",
+      "curTime": "2020-07-08T13:13:27.000+00:00",
       "minDiff": 0,
       "hrDiff": 0
     },
@@ -224,7 +224,7 @@ const list = {
       "expiresIn": 0,
       "indicationInd": 0,
       "type": "insert",
-      "curTime": "2020-07-07T03:56:54.000+00:00",
+      "curTime": "2020-07-08T13:13:27.000+00:00",
       "minDiff": 0,
       "hrDiff": 0
     },
@@ -238,12 +238,12 @@ const list = {
       "orderDtTm": "07/01/20 07:06",
       "startDtTm": "07/01/20 07:06",
       "stopDtTm": "07/02/20 07:06",
-      "expiresIn": -8030,
+      "expiresIn": -10026,
       "indicationInd": 0,
       "type": "care",
-      "curTime": "2020-07-07T03:56:54.000+00:00",
-      "minDiff": -8030,
-      "hrDiff": -133
+      "curTime": "2020-07-08T13:13:27.000+00:00",
+      "minDiff": -10026,
+      "hrDiff": -167
     },
     {
       "orderId": 534905485,
@@ -255,12 +255,29 @@ const list = {
       "orderDtTm": "07/01/20 07:06",
       "startDtTm": "07/01/20 07:06",
       "stopDtTm": "07/02/20 07:06",
-      "expiresIn": -6590,
+      "expiresIn": -8586,
       "indicationInd": 0,
       "type": "care",
-      "curTime": "2020-07-07T03:56:54.000+00:00",
-      "minDiff": -6590,
-      "hrDiff": -109
+      "curTime": "2020-07-08T13:13:27.000+00:00",
+      "minDiff": -8586,
+      "hrDiff": -143
+    },
+    {
+      "orderId": 534905222,
+      "orderMnemonic": "Central Venous Catheter Care",
+      "catalogCd": 2780643,
+      "clinDisplay": "07/01/20 7:06:50 PDT Hemodynamically Unstable, 24, hr, Stop date 07/02/20 7:06:50 PDT, Constant order",
+      "orderPhys": "Cerner Test, Nurse Practitioner Cerner",
+      "origOrderDtTm": "2020-07-01T14:06:50.000+00:00",
+      "orderDtTm": "07/01/20 07:06",
+      "startDtTm": "07/01/20 07:06",
+      "stopDtTm": "07/02/20 07:06",
+      "expiresIn": -8586,
+      "indicationInd": 0,
+      "type": "care",
+      "curTime": "2020-07-08T13:13:27.000+00:00",
+      "minDiff": -8586,
+      "hrDiff": -143
     },
     {
       "orderId": 534911619,
@@ -275,7 +292,7 @@ const list = {
       "expiresIn": 0,
       "indicationInd": 0,
       "type": "care",
-      "curTime": "2020-07-07T03:56:54.000+00:00",
+      "curTime": "2020-07-08T13:13:27.000+00:00",
       "minDiff": 0,
       "hrDiff": 0
     }
