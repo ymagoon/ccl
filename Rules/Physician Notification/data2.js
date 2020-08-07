@@ -1,6 +1,8 @@
 const list = {
   "prsnlId": 13964820,
   "relationship": "",
+  "cautiAlert": 1,
+  "clabsiAlert": 1,
   "map": [
     {
       "orders": [
