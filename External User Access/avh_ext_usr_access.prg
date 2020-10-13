@@ -1,3 +1,26 @@
+/*
+ *  ---------------------------------------------------------------------------------------------
+ *  Script Name:  avh_ext_usr_access
+ *
+ *  Description:  Executed by the External User Access mPage.
+ *
+ *				  This program is used by External Users (currently only TeamHealth) to restrict
+ *                access to patients they do not have relationships with.
+ *  ---------------------------------------------------------------------------------------------
+ *  Author:     	Yitzhak Magoon
+ *  Contact:    	yithak.magoon@avhospital.org
+ *  Creation Date:  10/06/2020
+ *
+ *  Testing:
+ *  ---------------------------------------------------------------------------------------------
+ *  Mod#   Date        Author           Description & Requestor Information
+ *  000    10/06/2020  Yitzhak Magoon   Initial Release
+ *  001	   10/13/2020  Yitzhak Magoon	SR 432972088 Midwife relationships have end_effective_dt_tm
+ *                                      being modified. Need to account for this so patients still pull
+ *
+ *  ---------------------------------------------------------------------------------------------
+*/
+
 drop program avh_ext_usr_access go
 create program avh_ext_usr_access
  
@@ -34,6 +57,7 @@ record data (
 set idx 				= 0
 set ext_billing_pos_cd  = uar_get_code_by("DISPLAY_KEY",88,"EXTERNALBILLINGPHYSICIANOFFICE")
 set dba_pos_cd 			= uar_get_code_by("DISPLAY_KEY",88,"DBA")
+set provider_group_cd   = uar_get_code_by("MEANING",19189,"DCPTEAM")
  
 set mrn_cd    			= uar_get_code_by("MEANING",4,"MRN")
 set fin_cd     			= uar_get_code_by("MEANING",319,"FIN NBR")
@@ -45,6 +69,7 @@ set admitting_rel_cd 	= uar_get_code_by("MEANING",333,"ADMITDOC")
 set covering_rel_cd 	= uar_get_code_by("DISPLAY_KEY",333,"COVERINGPHYSICIAN")
 set consulting_rel_cd   = uar_get_code_by("MEANING",333,"CONSULTDOC")
 set pat_account_rel_cd  = uar_get_code_by("DISPLAY_KEY",333,"PATIENTACCOUNTINGREVIEW")
+set midwife_rel_cd      = uar_get_code_by("DISPLAY_KEY",333,"MIDWIFE")
  
 /****************************************
  * FIND USER INFO AND PROVIDER GROUP(S) *
@@ -66,6 +91,7 @@ join pgr
 join pg
   where pg.prsnl_group_id = pgr.prsnl_group_id
     and pg.active_ind = 1
+    and pg.prsnl_group_class_cd = provider_group_cd
     and pg.beg_effective_dt_tm < cnvtdatetime(curdate,curtime3)
     and pg.end_effective_dt_tm > cnvtdatetime(curdate,curtime3)
 order by
@@ -102,6 +128,7 @@ from
 plan pg
   where expand(idx, 1, size(data->pg,5), pg.prsnl_group_id, data->pg[idx].prsnl_group_id)
     and pg.prsnl_group_id > 0
+    and pg.prsnl_group_class_cd = provider_group_cd
     and pg.active_ind = 1
     and pg.beg_effective_dt_tm <= cnvtdatetime(curdate,curtime3)
     and pg.end_effective_dt_tm >= cnvtdatetime(curdate,curtime3)
@@ -145,10 +172,21 @@ from
 plan epr
   where expand(idx, 1, size(data->prsnl,5), epr.prsnl_person_id, data->prsnl[idx].prsnl_id)
     and epr.beg_effective_dt_tm < cnvtdatetime(curdate,curtime3)
-    and epr.end_effective_dt_tm > cnvtdatetime(curdate,curtime3)
-    and (epr.expire_dt_tm = null or epr.expire_dt_tm > cnvtdatetime(curdate - 180, 0)) ; look at records 90 days back
+    ;begin 001
+;    and epr.end_effective_dt_tm > cnvtdatetime(curdate,curtime3) 
+    and ((epr.encntr_prsnl_r_cd in (midwife_rel_cd,covering_rel_cd) 
+      and epr.end_effective_dt_tm > cnvtdatetime(curdate - 90,curtime3)) 
+      or epr.end_effective_dt_tm > cnvtdatetime(curdate,curtime3))
+    ;end 001
+   
+    and (epr.expire_dt_tm = null or epr.expire_dt_tm > cnvtdatetime(curdate - 90, 0)) ; look at records 90 days back
     and epr.active_ind = 1
-    and epr.encntr_prsnl_r_cd in (attending_rel_cd, admitting_rel_cd, covering_rel_cd, consulting_rel_cd, pat_account_rel_cd)
+    and epr.encntr_prsnl_r_cd in (attending_rel_cd
+    							  , admitting_rel_cd
+    							  , covering_rel_cd
+    							  , consulting_rel_cd
+    							  , pat_account_rel_cd
+    							  , midwife_rel_cd)
 join e
   where e.encntr_id = epr.encntr_id
     and e.active_ind = 1
@@ -183,7 +221,13 @@ head e.encntr_id
   data->pat_list[eCnt].name = p.name_full_formatted
   data->pat_list[eCnt].mrn = pa.alias
   data->pat_list[eCnt].fin = ea.alias
-  data->pat_list[eCnt].admit_dt_tm = format(e.arrive_dt_tm,FORMAT_MDY)
+ 
+  if (e.inpatient_admit_dt_tm != null)
+    data->pat_list[eCnt].admit_dt_tm = format(e.inpatient_admit_dt_tm,FORMAT_MDY)
+  else
+    data->pat_list[eCnt].admit_dt_tm = format(e.reg_dt_tm,FORMAT_MDY)
+  endif
+ 
   data->pat_list[eCnt].disch_dt_tm = format(e.disch_dt_tm,FORMAT_MDY)
 foot report
   stat = alterlist(data->pat_list, eCnt)
@@ -198,4 +242,5 @@ call echo(cnvtrectojson(data,9,1))
 end
 go
   execute avh_ext_usr_access "MINE", 14023328.00 go
+ 
  

@@ -49,49 +49,7 @@ record data (
     2 min_diff          	= i2
     2 hr_diff           	= i2
 )
- /*
-record data (
-  1 me				    = f8
-  1 relationship	    = vc
-  1 force_ind		    = i2
- 
-  1 indications[*]
-    2 display 		    = vc
-    2 description 	    = vc
-    2 catalog_cd	    = f8
-    2 order_sentence_id = f8
-    2 type		 	    = vc
-  1 dynamic_label[3]
-    2 exist_ind		    = i2
-    2 create_dt_tm      = f8
-    2 display		    = vc
-  1 map[3]
-    2 insert_ord_cd     = f8
-    2 insert_syn_id	    = f8
-    2 care_ord_cd	    = f8
-    2 care_syn_id	    = f8
-    2 dc_ord_cd         = f8
-    2 dc_syn_id		    = f8
-    2 display 		    = vc
-  1 orders[*]
-    2 order_id 		    = f8
-    2 order_mnemonic    = vc
-    2 catalog_cd        = f8
-    2 clin_display      = vc
-    2 order_phys	    = vc
-    2 orig_order_dt_tm  = dq8
-    2 order_dt_tm       = vc
-    2 start_dt_tm       = vc
-    2 stop_dt_tm        = vc
-    2 expires_in	    = i2
-    2 indication_ind    = i2
-    2 type			    = vc
- 
-    2 cur_time		    = dq8
-    2 min_diff          = i2
-    2 hr_diff           = i2
-)
- 
+
 /****************************************
  * Variable Declaration                 *
  ****************************************/
