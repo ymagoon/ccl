@@ -1,31 +1,7 @@
-  //  let personId = @PATIENTID:{Patient}, encntrId = @ENCOUNTERID:{Patient} , pt = @MISC:{Banner}; // prod
-let personId = 13952764, encntrId = 117531822;
 
-let orders = function() {
-  // let list = @MISC:{Orders}; // prod
-  console.log(list);
-  return {
-    orders    : function(index) {return list.orders[index];},
-    allOrders : function() {return list.orders;},
-    findMapPos : function(catalogCd) {
-      for (let item in list.map) {
-          for (let ord in list.map[item].orders) {
-            let order = list.map[item].orders[ord];
 
-            if (catalogCd === order.catalogCd) return [item, ord]; 
-          }
-      }
-    },
-    getIndications : function(pos) { return list.map[pos[0]].orders[pos[1]].orderSentences },
-    synonymId : function(pos) { return list.map[pos[0]].orders[pos[1]].synonymId },
-    discOrderId : function(pos) { return list.map[pos[0]].orders[2].synonymId },
-    prsnlId        : function() { return list.prsnlId },
-    cautiAlert : function() { return list.cautiAlert },
-    clabsiAlert : function() { return list.clabsiAlert }
-  }
-}();
 
-$(function() {
+//$(function() {
 
   function addSections() {
     let txt = [
@@ -90,7 +66,7 @@ $(function() {
           "<th class='column1'>Order Name/Details</th>",
           // "<th class='radio'><img src='@OPT_FREETEXT_PARAM/anteca/imgs/continue.png' alt='Continue Order' /></th>", // prod
           // "<th class='radio'><img src='@OPT_FREETEXT_PARAM/anteca/imgs/discontinue.png' alt='Discontinue Order' /></th>", // prod
-          "<th class='radio'><img src='imgs/continue.png' alt='Continue Order' /></th>", // test
+          "<th class='radio'><img src='imgs/6954_9.png' alt='Continue Order' /></th>", // test
           "<th class='radio'><img src='imgs/discontinue.png' alt='Discontinue Order' /></th>", // test
           "<th class='column2'>Continue Reason</th>",
           "<th class='column3'>Start</th>",
@@ -111,10 +87,10 @@ $(function() {
             item.orderMnemonic,"</span>",
           "</td>",
           "<td class='radio'>",
-            "<input type='radio' name=order",index," value=continue idx=",index," pos=[",pos,"]>",
+            "<input type='radio' name=order",index," value=continue idx=",index," pos=[",pos,"] class='allOrder-radio'>",
           "</td>",
           "<td class='radio'>",
-            "<input type='radio' name=order",index," value=discontinue idx=",index," pos=[",pos,"]>",
+            "<input type='radio' name=order",index," value=discontinue idx=",index," pos=[",pos,"] class='allOrder-radio'>",
           "</td>",
           "<td>"
         );
@@ -123,7 +99,7 @@ $(function() {
 
         if (indications.length) {
           txt.push(
-            "<select class='indication' name='indication",index,"'idx=",index," pos=[",pos,"]>",
+            "<select class='indication' name='indication",index,"'idx=",index," pos=[",pos,"] class='allInd-drop'>",
               indications, 
             "</select>"
           )
@@ -177,8 +153,8 @@ $(function() {
     headerMsg();
     displayOrders();
     footerDisplay();
-    resetButtons();
-    console.log(list);
+ //   resetButtons();
+ //   console.log(list);
 
     $( "<div id='messageDiv'></div>" ).insertBefore( $( "#bContinue" ) );
   });
@@ -191,7 +167,8 @@ $(function() {
 
       if (e.target.value === 'continue') {
         orders.orders(idx).status = 2;
-
+		$(this).prop("checked", true)
+		
         // show indications
         $(searchStr).css("visibility", "visible");
       } else if (e.target.value === 'discontinue') {
@@ -215,14 +192,21 @@ $(function() {
     // processOrders();
   });
 
+
   function resetButtons() {
-    console.log('inside resetButtons');
-    $('.btn-grp').on('click', '.myButton', function() {
+    //alert('inside resetButtons');
+    
+	//New Code with Tai
+	 $('.allOrder-radio').prop('checked', false); 
+	 $('.allInd-drop').css("visibility", "hidden");	 
+	
+	//YITI'S CODE
+	$('.btn-grp').on('click', '.myButton', function() {
       $(this).addClass('myButton-active').siblings().removeClass('myButton-active').addClass('myButton');
       let index = $(this).attr('idx');
       let tValue = $(this).attr('value');
       let tClass = orders.orders(index).orderId;
-
+	
       // cancel / DC
       if (tValue == 2) {
         orders.orders(index).status = 2;
@@ -236,9 +220,9 @@ $(function() {
         $('#n'+tClass).html(orders.orders(index).orderMnemonic);
         $('#s'+tClass).html(orders.orders(index).startDtTm);
         $('#e'+tClass).html(orders.orders(index).stopDtTm);
-      };
+      }
     });
-
+	
     // ADD MOUSE HOVER DISPLAY ON ORDER VIA JQUERYUI
     $( "[name=ord]" ).tooltip({
       items: "[name=ord]",
@@ -396,4 +380,4 @@ $(function() {
       ];
     return txt.join("");
   }
-}); // end large function
+//}); // end large function
