@@ -66,7 +66,7 @@
           "<th class='column1'>Order Name/Details</th>",
           // "<th class='radio'><img src='@OPT_FREETEXT_PARAM/anteca/imgs/continue.png' alt='Continue Order' /></th>", // prod
           // "<th class='radio'><img src='@OPT_FREETEXT_PARAM/anteca/imgs/discontinue.png' alt='Discontinue Order' /></th>", // prod
-          "<th class='radio'><img src='imgs/6954_9.png' alt='Continue Order' /></th>", // test
+          "<th class='radio'><img src='imgs/continue.png' alt='Continue Order' /></th>", // test
           "<th class='radio'><img src='imgs/discontinue.png' alt='Discontinue Order' /></th>", // test
           "<th class='column2'>Continue Reason</th>",
           "<th class='column3'>Start</th>",
@@ -99,7 +99,7 @@
 
         if (indications.length) {
           txt.push(
-            "<select class='indication' name='indication",index,"'idx=",index," pos=[",pos,"] class='allInd-drop'>",
+            "<select class='indication' name='indication",index,"'idx=",index," pos=[",pos,"]>",
               indications, 
             "</select>"
           )
@@ -198,7 +198,7 @@
     
 	//New Code with Tai
 	 $('.allOrder-radio').prop('checked', false); 
-	 $('.allInd-drop').css("visibility", "hidden");	 
+	 $('.indication').css("visibility", "hidden");	 
 	
 	//YITI'S CODE
 	$('.btn-grp').on('click', '.myButton', function() {
