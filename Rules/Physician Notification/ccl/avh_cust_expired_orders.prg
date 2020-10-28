@@ -34,7 +34,8 @@ record data (
       3 display				= vc
   1 orders[*]
     2 order_id 		    	= f8
-    2 indication_cd			= f8
+    2 order_sentence_id		= f8
+    2 indication_cd 		= f8
     2 order_mnemonic    	= vc
     2 catalog_cd       		= f8
     2 clin_display      	= vc
@@ -433,9 +434,9 @@ if (curqual < 1)
   go to exit_script
 endif
  
-/****************************************
+/********************************************************
  * Determine whether Nurse is Missing Documentation     *
- ****************************************/
+ ********************************************************/
  
 for (idx = 1 to size(data->orders,5))
   if (data->orders[idx].catalog_cd = co_urinary_cath)

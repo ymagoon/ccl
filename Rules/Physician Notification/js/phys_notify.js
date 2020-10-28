@@ -1,8 +1,3 @@
-
-
-
-//$(function() {
-
   function addSections() {
     let txt = [
       "<div id='topDiv'>",
@@ -94,8 +89,8 @@
           "</td>",
           "<td>"
         );
-
-        let indications = displayIndications(pos);
+		
+        let indications = displayIndications(pos, item.indicationCd);
 
         if (indications.length) {
           txt.push(
@@ -126,7 +121,7 @@
     $('.column2').css('width', (Math.max.apply(null,maxLength)+5) + "px");
   } // end displayOrders
 
-  function displayIndications(pos) {
+  function displayIndications(pos, indicationCd) {
     let indications = orders.getIndications(pos);
     let txt = [];
 
@@ -134,7 +129,11 @@
       txt[0] = "<option value=-1>Select a Continue Reason...</option>";
 
       indications.forEach(function(indication, index) {
-        txt.push("<option value=",indication.orderSentenceId,">",indication.indication,"</option>");
+		if (indicationCd === indication.codeValue) {
+		  txt.push("<option value=",indication.orderSentenceId," selected>",indication.indication,"</option>");
+		} else {
+          txt.push("<option value=",indication.orderSentenceId,">",indication.indication,"</option>");
+		}
       });
     }
     return txt.join("");
@@ -191,7 +190,6 @@
     resetButtons();
     // processOrders();
   });
-
 
   function resetButtons() {
     //alert('inside resetButtons');
@@ -380,4 +378,3 @@
       ];
     return txt.join("");
   }
-//}); // end large function
