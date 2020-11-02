@@ -2,7 +2,7 @@
     let txt = [
       "<div id='topDiv'>",
         "<div id='bannerDiv' class='banner'>banner</div>",
-        "<div id='headerDiv' class='header'>header</div>",
+//        "<div id='headerDiv' class='header'>header</div>",
       "</div>",
       "<div id='ordersDiv'>orders</div>",
       "<div id='footerDiv'>footer</div>"];
@@ -59,10 +59,10 @@
       "<thead class = 'header'>",
         "<tr>",
           "<th class='column1'>Order Name/Details</th>",
-          // "<th class='radio'><img src='@OPT_FREETEXT_PARAM/anteca/imgs/continue.png' alt='Continue Order' /></th>", // prod
-          // "<th class='radio'><img src='@OPT_FREETEXT_PARAM/anteca/imgs/discontinue.png' alt='Discontinue Order' /></th>", // prod
-          "<th class='radio'><img src='imgs/continue.png' alt='Continue Order' /></th>", // test
-          "<th class='radio'><img src='imgs/discontinue.png' alt='Discontinue Order' /></th>", // test
+          "<th class='radio'><img src='@OPT_FREETEXT_PARAM/anteca/imgs/continue.png' alt='Continue Order' /></th>", // prod
+          "<th class='radio'><img src='@OPT_FREETEXT_PARAM/anteca/imgs/discontinue.png' alt='Discontinue Order' /></th>", // prod
+          // "<th class='radio'><img src='imgs/continue.png' alt='Continue Order' /></th>", // test
+          // "<th class='radio'><img src='imgs/discontinue.png' alt='Discontinue Order' /></th>", // test
           "<th class='column2'>Continue Reason</th>",
           "<th class='column3'>Start</th>",
           "<th class='column3'>Stop</th>",
@@ -141,15 +141,16 @@
 
   // FOOTER DISPLAY
   function footerDisplay() {
-    $('#footerDiv').html("<input type='button' value='Continue As Ordered' id='bContinue' class='button'>\
-                          &nbsp&nbsp&nbsp&nbsp<input type='button' value='Reset' id='bReset' class='button'>");
+    $('#footerDiv').html("<input type='button' value='Sign' id='bContinue' class='button'>\
+                          &nbsp&nbsp&nbsp&nbsp<input type='button' value='Reset' id='bReset' class='button'>\
+						  &nbsp&nbsp&nbsp&nbsp<input type='button' value='Skip' id='bSkip' class='button'>");
   }
 
   $(document).ready(function(){
     console.log("lets begin");
     addSections();
     bannerBar();
-    headerMsg();
+ //   headerMsg();
     displayOrders();
     footerDisplay();
  //   resetButtons();
@@ -190,37 +191,25 @@
     resetButtons();
     // processOrders();
   });
+  
+  // SKIP BUTTON
+  $(document).on('click', '#bSkip', function () {
+    // closer Discern Alert window
+    CCLEVENT('EVENT_EKS_OK');
+  });
 
   function resetButtons() {
-    //alert('inside resetButtons');
-    
-	//New Code with Tai
-	 $('.allOrder-radio').prop('checked', false); 
-	 $('.indication').css("visibility", "hidden");	 
-	
-	//YITI'S CODE
-	$('.btn-grp').on('click', '.myButton', function() {
-      $(this).addClass('myButton-active').siblings().removeClass('myButton-active').addClass('myButton');
-      let index = $(this).attr('idx');
-      let tValue = $(this).attr('value');
-      let tClass = orders.orders(index).orderId;
-	
-      // cancel / DC
-      if (tValue == 2) {
-        orders.orders(index).status = 2;
-        $('#n'+tClass).html(orders.orders(index).orderMnemonic.strike());
-        $('#s'+tClass).html(orders.orders(index).startDtTm.strike());
-        $('#e'+tClass).html(orders.orders(index).stopDtTm.strike());
-      }
-      // Renew
-      else if (tValue == 1) {
-        orders.orders(index).status = 1;
-        $('#n'+tClass).html(orders.orders(index).orderMnemonic);
-        $('#s'+tClass).html(orders.orders(index).startDtTm);
-        $('#e'+tClass).html(orders.orders(index).stopDtTm);
+    $('.allOrder-radio').prop('checked', false); 
+    $('.indication').css("visibility", "hidden");
+	 
+    orders.allOrders().forEach(function(item, index){
+	  if (item.status > 0) {
+	    orders.orders(index).status = 0
       }
     });
 	
+	$("#messageDiv").html("");
+	 	
     // ADD MOUSE HOVER DISPLAY ON ORDER VIA JQUERYUI
     $( "[name=ord]" ).tooltip({
       items: "[name=ord]",
