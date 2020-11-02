@@ -267,7 +267,7 @@ detail
     data->map[2].dynamic_label.create_dt_tm = c.create_dt_tm
     data->map[2].dynamic_label.display = "Central Venous"
   elseif (c.label_template_id = dl_urinary)
-    if (substring(1,6,c.label_name) != "Condom")
+    if (c.label_name not in ("Condom*", "Purewick*"))
       data->map[3].dynamic_label.exist_ind = 1
       data->map[3].dynamic_label.create_dt_tm = c.create_dt_tm
       data->map[3].dynamic_label.display = "Urinary Catheter"
