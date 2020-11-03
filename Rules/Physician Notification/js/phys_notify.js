@@ -59,10 +59,8 @@
       "<thead class = 'header'>",
         "<tr>",
           "<th class='column1'>Order Name/Details</th>",
-          "<th class='radio'><img src='@OPT_FREETEXT_PARAM/anteca/imgs/continue.png' alt='Continue Order' /></th>", // prod
-          "<th class='radio'><img src='@OPT_FREETEXT_PARAM/anteca/imgs/discontinue.png' alt='Discontinue Order' /></th>", // prod
-          // "<th class='radio'><img src='imgs/continue.png' alt='Continue Order' /></th>", // test
-          // "<th class='radio'><img src='imgs/discontinue.png' alt='Discontinue Order' /></th>", // test
+          "<th><div class='triangle-right'></div></th>",
+		  "<th><div class='square'></div></th>",
           "<th class='column2'>Continue Reason</th>",
           "<th class='column3'>Start</th>",
           "<th class='column3'>Stop</th>",
