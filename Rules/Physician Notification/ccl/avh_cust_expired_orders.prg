@@ -426,11 +426,20 @@ if (curqual > 0 and dc_sz > 0)
       endwhile
     endif
   endfor
+;else
+;  call echo("setting retval = 0")
+;  set retval = 0
+;  set log_message = "No care orders found; or all orders that are active have a corresponding discontinue order"
+;  go to exit_script
 endif
- 
-if (curqual < 1)
+
+if (data->map.dynamic_label.exist_ind = 0 
+	and data->map[2].dynamic_label.exist_ind = 0 
+	and data->map[3].dynamic_label.exist_ind = 0)
+	
   call echo("setting retval = 0")
   set retval = 0
+  set log_message = "No dynamic group found; this rule will only fire if a dynamic group exists on patient"
   go to exit_script
 endif
  
@@ -467,6 +476,7 @@ call echorecord(temp)
 end
 go
  
-execute avh_cust_expired_orders 12968065.00, 116979875 go ;nurseone
+;execute avh_cust_expired_orders 12968065.00, 116979875 go ;nurseone
+execute avh_cust_expired_orders 14127163, 117828018 go
 ;execute avh_cust_expired_orders 13954786.00, 117579795.00 go
 ; 
