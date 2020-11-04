@@ -398,6 +398,7 @@ set dc_sz = size(temp->disc_ords,5)
  2. Find insert/care catalog_cd's in the map
  3. Loop through orders to find insert/care orders placed before discontinue order
  4. Remove orders from data->orders
+ 5. Remove dynamic group indicator
 */
  
 if (curqual > 0 and dc_sz > 0)
@@ -414,6 +415,10 @@ if (curqual > 0 and dc_sz > 0)
           if (data->orders[j].orig_order_dt_tm < temp->disc_ords[i].order_dt_tm)
             call echo(build("Removing index ", j, " from data->orders"))
             set stat = alterlist(data->orders, size(data->orders,5) - 1, j - 1)
+            
+            call echo("Setting dynamic group indicator to 0")
+            set data->map[pos].dynamic_label.exist_ind = 0 
+            
             set j = j - 1
           endif
         endif
@@ -476,7 +481,7 @@ call echorecord(temp)
 end
 go
  
-;execute avh_cust_expired_orders 12968065.00, 116979875 go ;nurseone
-execute avh_cust_expired_orders 14127163, 117828018 go
-;execute avh_cust_expired_orders 13954786.00, 117579795.00 go
+; execute avh_cust_expired_orders 12968065.00, 116979875 go ;nurseone
+; execute avh_cust_expired_orders 14127163, 117828018 go
+execute avh_cust_expired_orders 14127204, 117828048 go ;avhtest, ipten             
 ; 
