@@ -2,7 +2,7 @@
     let txt = [
       "<div id='topDiv'>",
         "<div id='bannerDiv' class='banner'>banner</div>",
-//        "<div id='headerDiv' class='header'>header</div>",
+        "<div id='headerDiv' class='header'>header</div>",
       "</div>",
       "<div id='ordersDiv'>orders</div>",
       "<div id='footerDiv'>footer</div>"];
@@ -38,14 +38,10 @@
     let txt = [];
 
     if (orders.cautiAlert()) {
-      txt.push("Urinary Catheter Care orders exist, <span class='redH'>but it does not appear nurse has documented</span>.")
+      txt.push("Patient has Urinary Catheter documentation <span class='redH'>and is either missing an insert or care order.</span>.")
     }
     if (orders.clabsiAlert()) {
-      txt.push("Venous Catheter Care orders exist, <span class='redH'>but it does not appear nurse has documented</span>.")
-    }
-
-    if (txt.length) {
-      txt.push('Please contact them to document');
+      txt.push("Patient has Venous Catheter Care documentation <span class='redH'>and is missing a crae order.</span>.")
     }
 
     $('#headerDiv').html(txt.join('<br>'));
@@ -148,7 +144,7 @@
     console.log("lets begin");
     addSections();
     bannerBar();
- //   headerMsg();
+    headerMsg();
     displayOrders();
     footerDisplay();
  //   resetButtons();

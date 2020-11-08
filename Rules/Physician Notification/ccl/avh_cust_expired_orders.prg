@@ -452,6 +452,28 @@ endif
  * Determine whether Nurse is Missing Documentation     *
  ********************************************************/
  
+if (data->map[3].dynamic_label.exist_ind = 1)
+  set find_order = 0
+  
+  for (idx = 1 to size(data->orders,5))
+    if (data->orders[idx].catalog_cd = co_urinary_cath)
+      if (data->map[3].dynamic_label.create_dt_tm > data->orders[idx].orig_order_dt_tm)
+        set data->cauti_alert = 1
+      endif
+    endif
+  endfor
+elseif (data->map[2].dynamic_label.exist_ind = 1)
+  set find_order = 0
+
+  for (idx = 1 to size(data->orders,5))
+    if (data->orders[idx].catalog_cd = co_central_venous)
+      if (data->map[2].dynamic_label.create_dt_tm > data->orders[idx].orig_order_dt_tm)
+        set data->clabsi_alert = 1
+      endif
+    endif
+  endfor
+endif
+ /*
 for (idx = 1 to size(data->orders,5))
   if (data->orders[idx].catalog_cd = co_urinary_cath)
     if ((data->map[3].dynamic_label.exist_ind = 1 and data->orders[idx].orig_order_dt_tm > data->map[3].dynamic_label.create_dt_tm)
@@ -466,7 +488,7 @@ for (idx = 1 to size(data->orders,5))
     endif
   endif
 endfor 
- 
+ */
 set retval = 100
 set log_misc1 = cnvtrectojson(data,9,1)
 call echo(cnvtrectojson(data,9,1))
@@ -483,5 +505,5 @@ go
  
 ; execute avh_cust_expired_orders 12968065.00, 116979875 go ;nurseone
 ; execute avh_cust_expired_orders 14127163, 117828018 go
-execute avh_cust_expired_orders 14127204, 117828048 go ;avhtest, ipten             
-; 
+ execute avh_cust_expired_orders 14127204, 117828048 go ;avhtest, ipten             
+; execute avh_cust_expired_orders 14127195, 117828036 go ;avhtest, ipsix              
