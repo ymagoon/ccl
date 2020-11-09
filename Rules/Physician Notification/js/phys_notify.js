@@ -38,10 +38,10 @@
     let txt = [];
 
     if (orders.cautiAlert()) {
-      txt.push("Patient has Urinary Catheter documentation <span class='redH'>and is either missing an insert or care order.</span>.")
+      txt.push("Patient has Urinary Catheter documentation <span class='redH'>and is either missing an insert or care order.</span>")
     }
     if (orders.clabsiAlert()) {
-      txt.push("Patient has Venous Catheter Care documentation <span class='redH'>and is missing a crae order.</span>.")
+      txt.push("Patient has Venous Catheter Care documentation <span class='redH'>and is missing a crae order.</span>")
     }
 
     $('#headerDiv').html(txt.join('<br>'));
@@ -63,7 +63,7 @@
         "</tr>",
       "</thead>",
       "<tr class='order-type'>",
-        "<td colspan=6>Cathether and Line Care Orders</td>",
+        "<td colspan=6>Catheter and Line Care Orders</td>",
       "</td>"];
 
     orders.allOrders().forEach(function(item, index) {
@@ -76,7 +76,7 @@
             item.orderMnemonic,"</span>",
           "</td>",
           "<td class='radio'>",
-            "<input type='radio' name=order",index," value=continue idx=",index," pos=[",pos,"] class='allOrder-radio'>",
+            "<input type='radio' checked='checked' name=order",index," value=continue idx=",index," pos=[",pos,"] class='allOrder-radio'>",
           "</td>",
           "<td class='radio'>",
             "<input type='radio' name=order",index," value=discontinue idx=",index," pos=[",pos,"] class='allOrder-radio'>",
@@ -136,9 +136,10 @@
   // FOOTER DISPLAY
   function footerDisplay() {
     $('#footerDiv').html("<input type='button' value='Sign' id='bContinue' class='button'>\
-                          &nbsp&nbsp&nbsp&nbsp<input type='button' value='Reset' id='bReset' class='button'>\
 						  &nbsp&nbsp&nbsp&nbsp<input type='button' value='Skip' id='bSkip' class='button'>");
   }
+  
+  // old button              &nbsp&nbsp&nbsp&nbsp<input type='button' value='Reset' id='bReset' class='button'>\
 
   $(document).ready(function(){
     console.log("lets begin");
@@ -147,8 +148,6 @@
     headerMsg();
     displayOrders();
     footerDisplay();
- //   resetButtons();
- //   console.log(list);
 
     $( "<div id='messageDiv'></div>" ).insertBefore( $( "#bContinue" ) );
   });
@@ -181,10 +180,10 @@
   });
 
   // RESET BUTTON
-  $(document).on('click', '#bReset', function () {
-    resetButtons();
+  // $(document).on('click', '#bReset', function () {
+  //  resetButtons();
     // processOrders();
-  });
+  // });
   
   // SKIP BUTTON
   $(document).on('click', '#bSkip', function () {
