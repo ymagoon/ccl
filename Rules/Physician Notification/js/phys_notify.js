@@ -103,6 +103,9 @@
             "<td class='column3' id='e",item.orderId,"'>",item.stopDtTm,"</td>",
           "</tr>"
         )
+		
+		// set status = 2, so orders can be placed automatically
+		orders.orders(index).status = 2
       }
     });
 
