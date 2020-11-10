@@ -37,11 +37,14 @@
   function headerMsg() {
     let txt = [];
 
-    if (orders.cautiAlert()) {
-      txt.push("Patient has Urinary Catheter documentation <span class='redH'>and is either missing an insert or care order.</span>")
-    }
-    if (orders.clabsiAlert()) {
-      txt.push("Patient has Venous Catheter Care documentation <span class='redH'>and is missing a crae order.</span>")
+    if (orders.msgFlag() === 1) {
+      txt.push("Patient has Urinary Catheter documentation <span class='redH'>and the care order needs to be continued or discontinued.</span>")
+    } else if (orders.msgFlag() === 2) {
+      txt.push("Patient has Urinary Catheter documentation <span class='redH'>and is missing an insertion order.</span>")
+    } else if (orders.msgFlag() === 3) {
+      txt.push("Patient has Venous Catheter Care documentation <span class='redH'>and the care order needs to be continued or discontinued.</span>")
+    } else if (orders.msgFlag() === 4) {
+      txt.push("Patient has Venous Catheter Care documentation <span class='redH'>and is missing a care order.</span>")
     }
 
     $('#headerDiv').html(txt.join('<br>'));
