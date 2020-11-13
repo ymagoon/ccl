@@ -378,7 +378,7 @@ detail
         data->orders[oCnt].stop_dt_tm = format(od.oe_field_dt_tm_value, "MM/DD/YY HH:MM;;d")
       endif
       
-      if (od.oe_field_id in (28523135, 31159129)) ; Urinary Cath Indication / Central Line Indications
+      if (od.oe_field_id in (28523135, 31159129, 26492559)) ; Urinary Cath / Central Line / Arterial Line Indication
         data->orders[oCnt].indication_cd = od.oe_field_value
       endif
     endif
@@ -389,8 +389,6 @@ foot report
   stat = alterlist(temp->disc_ords,dcCnt)
 with nocounter
  
-set dc_sz = size(temp->disc_ords,5)
- 
 /*
  1. Loop through discontinue orders (if there are any)
  2. Find insert/care catalog_cd's in the map
@@ -398,23 +396,43 @@ set dc_sz = size(temp->disc_ords,5)
  4. Remove orders from data->orders
  5. Remove dynamic group indicator
 */
+
+set dc_sz = size(temp->disc_ords,5)
+
+call echo(build("dc_sz=",dc_sz))
   
 if (curqual > 0 and dc_sz > 0)
   ;loop through all discontinue orders on the patient
   for (i = 1 to dc_sz)
     set pos = locateval(idx, 1, size(data->map,5), temp->disc_ords[i].catalog_cd, data->map[idx].orders[3].catalog_cd)
     
+    call echo(build("i=",i))
+    call echo(build("pos=",pos))
+    
     ;find corresponding insert / care orders matching discontinue order
     if (pos > 0)
       set insert_order = data->map[pos].orders.catalog_cd
       set care_order = data->map[pos].orders[2].catalog_cd
       
+      call echo(build("insert_order=",insert_order))
+      call echo(build("care_order=",care_order))
+      
       ;loop through all order(s), if there are any, and remove any insert / care orders. Also, update dynamic label
       if (size(data->orders,5) > 0)
+        call echo("inside data->orders loop")
+        
         set j = 1
         while (j > 0)
+        
+          call echo(build("j=",j))
           if (data->orders[j].catalog_cd in (insert_order, care_order))
+            call echo("inside data->orders.catalog_cd in insert/care order")
+            call echo(build("order_Dt_tm=",data->orders[j].orig_order_dt_tm))
+            call echo(build("disch_order_Dt_tm=",temp->disc_ords[i].order_dt_tm))
+            call echo(build("catalog_cd=",data->orders[j].catalog_cd))
+            
             if (data->orders[j].orig_order_dt_tm < temp->disc_ords[i].order_dt_tm)
+              call echo("inside data->orders.order_dt_tm < dc order dt tm")
               call echo(build("Removing index ", j, " from data->orders"))
               set stat = alterlist(data->orders, size(data->orders,5) - 1, j - 1)
               
@@ -458,9 +476,7 @@ endif
 /***********************************************************************
  * Set msg header flags and build insert / care orders if missing      *
  ***********************************************************************/
- 
-;set data->map[2].dynamic_label.exist_ind = 1
- 
+;Urinary Cath
 if (data->map[3].dynamic_label.exist_ind = 1)
   set find_order = 0
   
@@ -468,13 +484,18 @@ if (data->map[3].dynamic_label.exist_ind = 1)
     if (data->orders[idx].catalog_cd = co_urinary_cath)
       set find_order = 1
       
-      if (data->map[3].dynamic_label.create_dt_tm > data->orders[idx].orig_order_dt_tm)
+;      if (data->map[3].dynamic_label.create_dt_tm > data->orders[idx].orig_order_dt_tm)
         set data->msg_flag = 1
-      endif
+;      endif
+    endif
+    
+    if (data->orders[idx].catalog_cd = io_urinary_cath)
+      set find_order = 2
+      set data->msg_flag = 1
     endif
   endfor
   
-  if (find_order = 0)
+  if (find_order = 0 or find_order = 1)
     ;build new order
     set pos = size(data->orders,5) + 1
     set stat = alterlist(data->orders, pos)
@@ -488,14 +509,17 @@ if (data->map[3].dynamic_label.exist_ind = 1)
   endif
 endif ;end cauti logic
 
+;Central Venous 
 if (data->map[2].dynamic_label.exist_ind = 1)
   set find_order = 0
 
   for (idx = 1 to size(data->orders,5))
     if (data->orders[idx].catalog_cd = co_central_venous)
-      if (data->map[2].dynamic_label.create_dt_tm > data->orders[idx].orig_order_dt_tm)
+      set find_order = 1
+      
+;      if (data->map[2].dynamic_label.create_dt_tm > data->orders[idx].orig_order_dt_tm)
         set data->msg_flag = 3
-      endif
+;      endif
     endif
   endfor
   
@@ -510,6 +534,34 @@ if (data->map[2].dynamic_label.exist_ind = 1)
     set data->orders[pos].missing_ind = 1
     
     set data->msg_flag = 4
+  endif
+endif ;end clabsi logic
+
+;Arterial
+if (data->map.dynamic_label.exist_ind = 1)
+  set find_order = 0
+
+  for (idx = 1 to size(data->orders,5))
+    if (data->orders[idx].catalog_cd = co_arterial_line)
+      set find_order = 1
+      
+;      if (data->map.dynamic_label.create_dt_tm > data->orders[idx].orig_order_dt_tm)
+        set data->msg_flag = 5
+;      endif
+    endif
+  endfor
+  
+  if (find_order = 0)   
+    ;build new order
+    set pos = size(data->orders,5) + 1
+    set stat = alterlist(data->orders, pos)
+    
+    set data->orders[pos].order_mnemonic = data->map.orders[2].display
+    set data->orders[pos].type = "care"
+    set data->orders[pos].catalog_cd = co_arterial_line
+    set data->orders[pos].missing_ind = 1
+    
+    set data->msg_flag = 6
   endif
 endif ;end clabsi logic
 
@@ -529,7 +581,7 @@ go
 ; execute avh_cust_expired_orders 12968065.00, 116979875 go ;nurseone
 ; execute avh_cust_expired_orders 14127163, 117828018 go
 ; execute avh_cust_expired_orders 14127204, 117828048 go ;avhtest, ipten             
- execute avh_cust_expired_orders 14127195, 117828036 go ;avhtest, ipsix     
-
-;if the urinary cath dynamic label exists, populate the insert order into the rule
-;if the central line dynamic label exists, populate the care order into the rule
+; execute avh_cust_expired_orders 14127195, 117828036 go ;avhtest, ipsix   
+; execute avh_cust_expired_orders 14127245, 117834016 go ; avhtest, nursetraineight
+;execute avh_cust_expired_orders 14127243, 117833977 go ;avhtest, nursetrainsix
+execute avh_cust_expired_orders 14127289,117833980 go ;avhtest, nursetrainseventeen
