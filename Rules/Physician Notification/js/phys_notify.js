@@ -45,6 +45,10 @@
       txt.push("Patient has Central Venous Catheter documentation <span class='redH'>and the care order needs to be continued or discontinued.</span>")
     } else if (orders.msgFlag() === 4) {
       txt.push("Patient has Central Venous Catheter documentation <span class='redH'>and is missing a care order.</span>")
+    } else if (orders.msgFlag() === 5) {
+      txt.push("Patient has Arterial Line documentation <span class='redH'>and the care order needs to be continued or discontinued.</span>")
+    } else if (orders.msgFlag() === 6) {
+      txt.push("Patient has Arterial Line documentation <span class='redH'>and is missing a care order.</span>")
     }
 
     $('#headerDiv').html(txt.join('<br>'));
@@ -119,6 +123,12 @@
       maxLength.push(curLength);
     });
     $('.column2').css('width', (Math.max.apply(null,maxLength)+5) + "px");
+	
+	// ADD MOUSE HOVER DISPLAY ON ORDER VIA JQUERYUI
+    $( "[name=ord]" ).tooltip({
+      items: "[name=ord]",
+      content: function () { return displayTooltip($(this).attr('idx')); }
+    });
   } // end displayOrders
 
   function displayIndications(pos, indicationCd) {
@@ -208,12 +218,6 @@
     });
 	
 	$("#messageDiv").html("");
-	 	
-    // ADD MOUSE HOVER DISPLAY ON ORDER VIA JQUERYUI
-    $( "[name=ord]" ).tooltip({
-      items: "[name=ord]",
-      content: function () { return displayTooltip($(this).attr('idx')); }
-    });
   }
 
   function validateOrders() {
@@ -336,7 +340,7 @@
 
       // place orders 
       javascript:MPAGES_EVENT("ORDERS", value.join("|"));
-
+	  
       // closer Discern Alert window
       CCLEVENT('EVENT_EKS_OK');
     } else {
