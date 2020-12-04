@@ -584,6 +584,7 @@ call echorecord(temp)
 end
 go
  
-;execute avh_cust_expired_orders 14127240, 117834040 go  ;avhtest, nursetrainthree
-
-                              
+;execute avh_mpage_phys_notify 14274774, 118097813  go  ;avhtest, physicianone
+execute avh_mpage_phys_notify    14127204.00,   117828048.00  go  ;avhtest, physicianone
+;select * from person p where p.name_last_key = "AVHTEST" and p.name_first_key = "IPTEN"  
+;select * from encounter e where e.person_id  =     14127204     
