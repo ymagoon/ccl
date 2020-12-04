@@ -1,3 +1,23 @@
+/*
+ *  ---------------------------------------------------------------------------------------------
+ *  Script Name:  avh_cust_expired_orders
+ *
+ *  Description:  Script used by the BCC_PHYS_OC_CUSTOM rule in an EKS_EXEC_CCL_L template. 
+ *				  This script calculate a number of scenarios regarding urinary catheter, central line
+ * 				  and arterial line orders and returns recommended orders that need to be placed or
+ *  			  continued to the front-end. 
+ *  ---------------------------------------------------------------------------------------------
+ *  Author:     Yitzhak Magoon
+ *  Contact:    ymagoon@gmail.com
+ *  Creation Date:  11/18/202020
+ *
+ *  Testing: execute avh_cust_expired_orders <person_id>, <encntr_id> go 
+ *  ---------------------------------------------------------------------------------------------
+ *  Mod#   Date      Author           Description & Requestor Information
+ *  001    11/18/20  Yitzhak Magoon   Init release
+ *  ---------------------------------------------------------------------------------------------
+*/
+
 drop program avh_cust_expired_orders go
 create program avh_cust_expired_orders
  
@@ -390,14 +410,19 @@ foot report
   stat = alterlist(data->orders, oCnt)
   stat = alterlist(temp->disc_ords,dcCnt)
 with nocounter
- 
-/*
- 1. Loop through discontinue orders (if there are any)
- 2. Find insert/care catalog_cd's in the map
- 3. Loop through orders to find insert/care orders placed before discontinue order
- 4. Remove orders from data->orders
- 5. Remove dynamic group indicator
-*/
+
+
+/****************************************
+ * Modify record structure              *
+ ****************************************
+ *
+ * 1. Loop through discontinue orders (if there are any)
+ * 2. Find insert/care catalog_cd's in the map
+ * 3. Loop through orders to find insert/care orders placed before discontinue order
+ * 4. Remove orders from data->orders
+ * 5. Remove dynamic group indicator
+ *
+ ****************************************/
 
 set dc_sz = size(temp->disc_ords,5)
  
@@ -471,7 +496,7 @@ if (data->map[3].dynamic_label.exist_ind = 1)
   set find_order = 0
   
   for (idx = 1 to size(data->orders,5))
-    if (data->orders[idx].catalog_cd = co_urinary_cath)
+    if (data->orders[idx].catalog_cd = co_urinary_cath and find_order != 2)
       set find_order = 1
       set data->urinary_msg_flag = 1
     endif
@@ -566,5 +591,7 @@ go
 ; execute avh_cust_expired_orders 14127245, 117834016 go ; avhtest, nursetraineight
 ;execute avh_cust_expired_orders 14127243, 117833977 go ;avhtest, nursetrainsix
 ;execute avh_cust_expired_orders 14127289,117833980 go ;avhtest, nursetrainseventeen
-execute avh_cust_expired_orders 14127289,117834082 go ;avhtest, nursetrainseventeen
+;execute avh_cust_expired_orders 14127289,117834082 go ;avhtest, nursetrainseventeen
+execute avh_cust_expired_orders 14127240, 117834040 go  ;avhtest, nursetrainthree
+
                               
