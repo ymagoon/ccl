@@ -21,19 +21,22 @@
 drop program avh_mpage_phys_notify go
 create program avh_mpage_phys_notify
  
+free record temp
 record temp (
   1 disc_ords[*]
     2 order_id		   		= f8
     2 catalog_cd 	   		= f8
     2 order_dt_tm	  		= dq8
 )
- 
+
+free record orders
 record orders (
   1 qual[9]
     2 catalog_cd 		    = f8
     2 synonym_id			= f8
 )
- 
+
+free record data
 record data (
   1 prsnl_id		        = f8
   1 arterial_msg_flag		= i2
@@ -44,6 +47,7 @@ record data (
       3 display			    = vc
       3 catalog_cd			= f8
       3 synonym_id			= f8
+      3 active_care_ind		= i2
       3 order_sentences[*]
         4 indication	    = vc
         4 order_sentence_id = f8
@@ -69,8 +73,6 @@ record data (
     2 type			   	 	= vc
  
     2 cur_time		    	= dq8
-    2 min_diff          	= i2
-    2 hr_diff           	= i2
 )
 
 /****************************************
@@ -104,7 +106,15 @@ set do_arterial_line  = uar_get_code_by("DISPLAYKEY",200,"ARTERIALLINEDISCONTINU
 set do_central_venous = uar_get_code_by("DISPLAYKEY",200,"CENTRALVENOUSCATHETERDISCONTINUE")
 set do_urinary_cath   = uar_get_code_by("DISPLAYKEY",200,"URINARYCATHETERDISCONTINUE")
 ;set do_picc = uar_get_code_by("DISPLAYKEY",200,"PERIPHERALIVDISCONTINUE")
- 
+
+;most recent indications if care order is complete
+declare in_arterial_line = f8
+declare in_central_venous = f8
+declare in_urinary_cath = f8
+declare in_arterial_time = dq8
+declare in_central_time = dq8
+declare in_urinary_time = dq8
+
 set admit_phys_cd     = uar_get_code_by("MEANING",333,"ADMITDOC")
 set attend_phys_cd    = uar_get_code_by("MEANING",333,"ATTENDDOC")
  
@@ -329,16 +339,11 @@ order by
 head report
   oCnt = 0
   dcCnt = 0
-  diff_min = datetimediff(od.oe_field_dt_tm_value,cnvtdatetime(curdate,curtime3),4)
 head o.order_id
-  if ((o.catalog_cd in (io_arterial_line
-  				      , io_central_venous
-  				      , io_urinary_cath
-  				      , co_arterial_line
-  				      , co_central_venous
-  				      , co_urinary_cath
-  				      )
-        and o.order_status_cd = ordered_cd
+  call echo(build("catalogCd=",uar_get_code_display(o.catalog_cd)))
+  ;handle insert orders
+  if ((o.catalog_cd in (io_arterial_line, io_central_venous, io_urinary_cath)
+        and o.order_status_cd in (ordered_cd, completed_cd)
       ))
  
     oCnt = oCnt + 1
@@ -364,10 +369,35 @@ head o.order_id
     endif
  
     data->orders[oCnt].cur_time = cnvtdatetime(curdate,curtime3)
-    data->orders[oCnt].min_diff = datetimediff(od.oe_field_dt_tm_value,cnvtdatetime(curdate,curtime3),4)
-    data->orders[oCnt].hr_diff = datetimediff(od.oe_field_dt_tm_value,cnvtdatetime(curdate,curtime3),3)
   endif
+  
+  ;handle care orders
+  if (o.catalog_cd in (co_arterial_line,co_central_venous,co_urinary_cath) and o.order_status_cd in (ordered_cd))
+    call echo('inside care order if statement')
+    
+    
+    oCnt = oCnt + 1
+    
+    call echo(build("oCnt in care order=",oCnt))
  
+    if (oCnt > size(data->orders,5))
+      stat = alterlist(data->orders, oCnt + 10)
+    endif
+ 
+    data->orders[oCnt].order_id = o.order_id
+    data->orders[oCnt].catalog_cd = o.catalog_cd
+    data->orders[oCnt].order_mnemonic = o.hna_order_mnemonic
+    data->orders[oCnt].clin_display = o.clinical_display_line
+    data->orders[oCnt].order_phys = p.name_full_formatted
+    data->orders[oCnt].orig_order_dt_tm = o.orig_order_dt_tm
+    data->orders[oCnt].order_dt_tm = format(o.orig_order_dt_tm, "MM/DD/YY HH:MM;;d")
+    data->orders[oCnt].type = "care"
+    
+    data->orders[oCnt].start_dt_tm = format(o.current_start_dt_tm, "MM/DD/YY HH:MM;;d")
+    data->orders[oCnt].cur_time = cnvtdatetime(curdate,curtime3)
+  endif
+  
+  ;handle discontinue orders
   if (o.catalog_cd in (do_arterial_line, do_central_venous, do_urinary_cath))
     /*
       The map is used to connect the insertion, care, and discontinue orders together. Finding the position of the discontinue
@@ -393,15 +423,57 @@ head o.order_id
       endif
     endif
   endif
+  
+  call echo(build("oCnt from head=",oCnt))
+  ignore = 0 ;if we are ignoring care order, set flag to 1
 detail
   if (oCnt > 0)
     if (o.catalog_cd in (co_arterial_line, co_central_venous, co_urinary_cath))
+      call echo('inside catalog_cd in care order')
+
       if (od.oe_field_meaning = "STOPDTTM")
+        call echo('setting stopdttime in detail secton')
+        
+        
+        min_diff = datetimediff(od.oe_field_dt_tm_value,cnvtdatetime(curdate,curtime3),4)
+        
+        call echo(build("min_diff=",min_diff))
+        
         data->orders[oCnt].stop_dt_tm = format(od.oe_field_dt_tm_value, "MM/DD/YY HH:MM;;d")
+        data->orders[oCnt].expires_in = min_diff
+        
+        ;if the care order that is active, we don't want to display an alert
+        if (min_diff > 720)
+          if (o.catalog_cd = co_arterial_line)
+            data->map.orders[2].active_care_ind = 1
+          elseif (o.catalog_cd = co_central_venous)
+            data->map[2].orders[2].active_care_ind = 1
+          elseif (o.catalog_cd = co_urinary_cath)
+            data->map[3].orders[2].active_care_ind = 1
+          endif
+          
+          ;remove order and reset oCnt
+          oCnt = oCnt - 1
+          stat = alterlist(data->orders, oCnt)
+          ignore = 1
+          
+          call echo(build("ignore=",ignore))
+          call echo(build("oCnt after detail=",oCnt))
+        endif
       endif
       
-      if (od.oe_field_id in (28523135, 31159129, 26492559)) ; Urinary Cath / Central Line / Arterial Line Indication
+      if (od.oe_field_id in (28523135, 31159129, 26492559) and ignore = 0) ; Urinary Cath / Central Line / Arterial Line Indication
+        call echo('inside oe_field_id')
         data->orders[oCnt].indication_cd = od.oe_field_value
+        
+        if (od.oe_field_id = 26492559 and o.orig_order_dt_tm > in_arterial_time)
+          in_arterial_line = od.oe_field_value
+        elseif (od.oe_field_id = 31159129 and o.orig_order_dt_tm > in_central_time)
+          in_central_venous = od.oe_field_value
+        elseif (od.oe_field_id = 28523135 and o.orig_order_dt_tm > in_urinary_time)
+          in_urinary_cath = od.oe_field_value
+        endif        
+        
       endif
     endif
   endif
@@ -411,6 +483,11 @@ foot report
   stat = alterlist(temp->disc_ords,dcCnt)
 with nocounter
 
+call echo(build("in_arterial_line=",in_arterial_line))
+call echo(build("in_central_venous=",in_central_venous))
+call echo(build("in_urinary_cath=",in_urinary_cath))
+
+call echorecord(data)
 
 /****************************************
  * Modify record structure              *
@@ -493,21 +570,54 @@ endif
  ***********************************************************************/
 ;Urinary Cath
 if (data->map[3].dynamic_label.exist_ind = 1)
-  set find_order = 0
+  set find_care_order = 0
+  set find_insert_order = 0
+  declare indication_cd = f8
+  
+  call echo("inside urinary cath dynamic label...")
   
   for (idx = 1 to size(data->orders,5))
-    if (data->orders[idx].catalog_cd = co_urinary_cath and find_order != 2)
-      set find_order = 1
+    call echo(build("idx=",idx))
+    if (data->orders[idx].catalog_cd = co_urinary_cath and data->map[3].orders[2].active_care_ind = 0 and find_insert_order = 0)
+      call echo(build("inside urinary cath care"))
+      
+      if (data->orders[idx].indication_cd > 0)
+        set indication_cd = data->orders[idx].indication_cd
+      endif
+      
+      set find_care_order = 1
       set data->urinary_msg_flag = 1
     endif
     
     if (data->orders[idx].catalog_cd = io_urinary_cath)
-      set find_order = 2
+      call echo(build("inside urinary cath insert"))
+      
+      if (data->orders[idx].indication_cd > 0)
+        set indication_cd = data->orders[idx].indication_cd
+      endif
+      
+      set find_insert_order = 1
       set data->urinary_msg_flag = 1
     endif
   endfor
   
-  if (find_order = 0 or find_order = 1)
+  call echo(build("find_care_order=",find_care_order))
+  call echo(build("find_insert_order=",find_insert_order))
+  
+  if (find_care_order = 0 and find_insert_order = 1)
+    call echo('inside - display care order')
+    ;build new order
+    set pos = size(data->orders,5) + 1
+    set stat = alterlist(data->orders, pos)
+    
+    set data->orders[pos].order_mnemonic = data->map[3].orders[2].display
+    set data->orders[pos].type = "care"
+    set data->orders[pos].catalog_cd = co_urinary_cath
+    set data->orders[pos].indication_cd = indication_cd
+    set data->orders[pos].missing_ind = 1
+    
+    set data->urinary_msg_flag = 1
+  elseif (find_insert_order = 0)
     ;build new order
     set pos = size(data->orders,5) + 1
     set stat = alterlist(data->orders, pos)
@@ -515,9 +625,14 @@ if (data->map[3].dynamic_label.exist_ind = 1)
     set data->orders[pos].order_mnemonic = data->map[3].orders.display
     set data->orders[pos].type = "care"
     set data->orders[pos].catalog_cd = io_urinary_cath
+    set data->orders[pos].indication_cd = in_urinary_cath
     set data->orders[pos].missing_ind = 1
     
-    set data->urinary_msg_flag = 2
+    set data->urinary_msg_flag = 2    
+  endif
+  
+  if (find_insert_order = 1 and data->map[3].orders[2].active_care_ind = 1)
+    set data->map[3].dynamic_label.exist_ind = 0
   endif
 endif ;end cauti logic
 
@@ -525,66 +640,93 @@ endif ;end cauti logic
 if (data->map[2].dynamic_label.exist_ind = 1)
   set find_order = 0
 
-  for (idx = 1 to size(data->orders,5))
-    if (data->orders[idx].catalog_cd = co_central_venous)
-      set find_order = 1
-      set data->central_venous_msg_flag = 1
-    endif
-  endfor
+  if (data->map[2].orders[2].active_care_ind = 0)
+    for (idx = 1 to size(data->orders,5))
+      if (data->orders[idx].catalog_cd = co_central_venous)
+        set find_order = 1
+        set data->central_venous_msg_flag = 1
+      endif
+    endfor
   
-  if (find_order = 0)   
-    ;build new order
-    set pos = size(data->orders,5) + 1
-    set stat = alterlist(data->orders, pos)
+    if (find_order = 0)   
+      ;build new order
+      set pos = size(data->orders,5) + 1
+      set stat = alterlist(data->orders, pos)
     
-    set data->orders[pos].order_mnemonic = data->map[2].orders[2].display
-    set data->orders[pos].type = "care"
-    set data->orders[pos].catalog_cd = co_central_venous
-    set data->orders[pos].missing_ind = 1
+      set data->orders[pos].order_mnemonic = data->map[2].orders[2].display
+      set data->orders[pos].type = "care"
+      set data->orders[pos].catalog_cd = co_central_venous
+      set data->orders[pos].indication_cd = in_central_venous
+      set data->orders[pos].missing_ind = 1
 
-    set data->central_venous_msg_flag = 2
+      set data->central_venous_msg_flag = 2
+    endif
+  else
+    set data->map[2].dynamic_label.exist_ind = 0
   endif
 endif ;end clabsi logic
 
 ;Arterial
 if (data->map.dynamic_label.exist_ind = 1)
   set find_order = 0
-
-  for (idx = 1 to size(data->orders,5))
-    if (data->orders[idx].catalog_cd = co_arterial_line)
-      set find_order = 1
-      set data->arterial_msg_flag = 1
-    endif
-  endfor
   
-  if (find_order = 0)   
-    ;build new order
-    set pos = size(data->orders,5) + 1
-    set stat = alterlist(data->orders, pos)
+  if (data->map.orders[2].active_care_ind = 0)
+    for (idx = 1 to size(data->orders,5))
+      if (data->orders[idx].catalog_cd = co_arterial_line)
+        set find_order = 1
+        set data->arterial_msg_flag = 1
+      endif
+    endfor
+  
+    if (find_order = 0)   
+      ;build new order
+      set pos = size(data->orders,5) + 1
+      set stat = alterlist(data->orders, pos)
     
-    set data->orders[pos].order_mnemonic = data->map.orders[2].display
-    set data->orders[pos].type = "care"
-    set data->orders[pos].catalog_cd = co_arterial_line
-    set data->orders[pos].missing_ind = 1
+      set data->orders[pos].order_mnemonic = data->map.orders[2].display
+      set data->orders[pos].type = "care"
+      set data->orders[pos].catalog_cd = co_arterial_line
+      set data->orders[pos].indication_cd = in_arterial_line
+      set data->orders[pos].missing_ind = 1
 
-    set data->arterial_msg_flag = 2
+      set data->arterial_msg_flag = 2
+    endif
+  else
+    set data->map.dynamic_label.exist_ind = 0
   endif
 endif ;end clabsi logic
 
+if (data->map.dynamic_label.exist_ind = 0 
+	and data->map[2].dynamic_label.exist_ind = 0 
+	and data->map[3].dynamic_label.exist_ind = 0)
+	call echo('inside silly if statement')
+  call echo("setting retval = 0")
+  set retval = 0
+  set log_message = "No dynamic group found; this rule will only fire if a dynamic group exists on patient"
+  go to exit_script
+endif
+
+call echo('setting reval=100')
 set retval = 100
 set log_misc1 = cnvtrectojson(data,9,1)
 call echo(cnvtrectojson(data,9,1))
+
 set log_message = "Ran successfully"
- 
+
 #exit_script
  
 call echorecord(data)
 call echorecord(temp)
+call echorecord(orders)
+
+call echo(build("arterial=",data->map.dynamic_label.exist_ind))
+call echo(build("central=",data->map[2].dynamic_label.exist_ind))
+call echo(build("urinary=",data->map[3].dynamic_label.exist_ind))
  
 end
 go
  
 ;execute avh_mpage_phys_notify 14274774, 118097813  go  ;avhtest, physicianone
-execute avh_mpage_phys_notify    14127204.00,   117828048.00  go  ;avhtest, physicianone
-;select * from person p where p.name_last_key = "AVHTEST" and p.name_first_key = "IPTEN"  
-;select * from encounter e where e.person_id  =     14127204     
+;execute avh_mpage_phys_notify 14274762, 118097789  go ;avhtest, nurseone
+execute avh_mpage_phys_notify 14274778,118097822  go ;avhtest, labone
+
