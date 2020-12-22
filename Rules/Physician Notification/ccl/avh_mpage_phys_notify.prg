@@ -396,7 +396,7 @@ head o.order_id
     data->orders[oCnt].start_dt_tm = format(o.current_start_dt_tm, "MM/DD/YY HH:MM;;d")
     data->orders[oCnt].cur_time = cnvtdatetime(curdate,curtime3)
   endif
-  
+    
   ;handle discontinue orders
   if (o.catalog_cd in (do_arterial_line, do_central_venous, do_urinary_cath))
     /*
@@ -437,6 +437,8 @@ detail
         
         min_diff = datetimediff(od.oe_field_dt_tm_value,cnvtdatetime(curdate,curtime3),4)
         
+        call echo(build(format(od.oe_field_dt_tm_value, "MM/DD/YY HH:MM;;d")))
+        call echo(build(format(cnvtdatetime(curdate,curtime3), "MM/DD/YY HH:MM;;d")))
         call echo(build("min_diff=",min_diff))
         
         data->orders[oCnt].stop_dt_tm = format(od.oe_field_dt_tm_value, "MM/DD/YY HH:MM;;d")
@@ -475,6 +477,16 @@ detail
         endif        
         
       endif
+    endif
+  else
+    if (o.catalog_cd in (co_arterial_line, co_central_venous, co_urinary_cath))
+      if (od.oe_field_id = 26492559 and o.orig_order_dt_tm > in_arterial_time)
+        in_arterial_line = od.oe_field_value
+      elseif (od.oe_field_id = 31159129 and o.orig_order_dt_tm > in_central_time)
+        in_central_venous = od.oe_field_value
+      elseif (od.oe_field_id = 28523135 and o.orig_order_dt_tm > in_urinary_time)
+        in_urinary_cath = od.oe_field_value
+      endif   
     endif
   endif
  
@@ -578,7 +590,7 @@ if (data->map[3].dynamic_label.exist_ind = 1)
   
   for (idx = 1 to size(data->orders,5))
     call echo(build("idx=",idx))
-    if (data->orders[idx].catalog_cd = co_urinary_cath and data->map[3].orders[2].active_care_ind = 0 and find_insert_order = 0)
+    if (data->orders[idx].catalog_cd = co_urinary_cath and data->map[3].orders[2].active_care_ind = 0)
       call echo(build("inside urinary cath care"))
       
       if (data->orders[idx].indication_cd > 0)
@@ -604,7 +616,7 @@ if (data->map[3].dynamic_label.exist_ind = 1)
   call echo(build("find_care_order=",find_care_order))
   call echo(build("find_insert_order=",find_insert_order))
   
-  if (find_care_order = 0 and find_insert_order = 1)
+  if (find_care_order = 0 and find_insert_order = 1 and data->map[3].orders[2].active_care_ind = 0)
     call echo('inside - display care order')
     ;build new order
     set pos = size(data->orders,5) + 1
@@ -633,6 +645,7 @@ if (data->map[3].dynamic_label.exist_ind = 1)
   
   if (find_insert_order = 1 and data->map[3].orders[2].active_care_ind = 1)
     set data->map[3].dynamic_label.exist_ind = 0
+    set data->urinary_msg_flag = 0
   endif
 endif ;end cauti logic
 
@@ -728,5 +741,10 @@ go
  
 ;execute avh_mpage_phys_notify 14274774, 118097813  go  ;avhtest, physicianone
 ;execute avh_mpage_phys_notify 14274762, 118097789  go ;avhtest, nurseone
-execute avh_mpage_phys_notify 14274778,118097822  go ;avhtest, labone
-
+;execute avh_mpage_phys_notify 14274778,118097822  go ;avhtest, labone
+;execute avh_mpage_phys_notify    14320768,  118135804 go ;avhtest, bridgeone 
+;execute avh_mpage_phys_notify    14302762,   118119789 go
+execute avh_mpage_phys_notify    14318763.00,   118133795.00 go
+/*select * from person p where p.name_last_key = "AVHTEST"
+and p.name_first_key = "PAFOUR*"
+select * from encounter e where e.person_id =   14318763.00
